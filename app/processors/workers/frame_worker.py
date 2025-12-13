@@ -2835,7 +2835,7 @@ class FrameWorker(threading.Thread):
                 mask_final_512 = gauss(mask_final_512.type(torch.float32))
                 mask_final_512 = torch.max(mask_final_512, orig_m).clamp(0.0, 1.0)
 
-            # --- CORRECTION: Respect Previous AutoColor Choice ---
+            # --- Respect Previous AutoColor Choice ---
             if parameters.get("AutoColorEnableToggle", False):
                 # AutoColor already applied, keep it as base
                 swap_texture_backup = swap.clone()
@@ -3022,7 +3022,75 @@ class FrameWorker(threading.Thread):
             swap = swap * 255.0
 
         # Second Restorer - After Diff / Texture Transfer and AutoColor
-        # (This block was repeated above, keeping consistency with structure)
+        if (
+            parameters["FaceRestorerEnable2Toggle"]
+            and parameters["FaceRestorerEnable2EndToggle"]
+        ):
+            swap_original2 = swap.clone()
+            swap2 = self.models_processor.apply_facerestorer(
+                swap,
+                parameters["FaceRestorerDetType2Selection"],
+                parameters["FaceRestorerType2Selection"],
+                parameters["FaceRestorerBlend2Slider"],
+                parameters["FaceFidelityWeight2DecimalSlider"],
+                control["DetectorScoreSlider"],
+                kps_ref,
+                slot_id=2,
+            )
+
+            if parameters["FaceRestorerAutoEnable2Toggle"]:
+                original_face_512_autorestore2 = original_face_512.clone()
+                swap_original_autorestore2 = swap_original2.clone()
+                alpha_restorer2 = float(parameters["FaceRestorerBlend2Slider"]) / 100.0
+                adjust_sharpness2 = float(
+                    parameters["FaceRestorerAutoSharpAdjust2Slider"]
+                )
+                scale_factor2 = round(tform.scale, 2)
+                automasktoggle2 = parameters["FaceRestorerAutoMask2EnableToggle"]
+                automaskadjust2 = parameters[
+                    "FaceRestorerAutoSharpMask2AdjustDecimalSlider"
+                ]
+                automaskblur2 = 2  # parameters["FaceRestorerAutoSharpMask2BlurSlider"]
+                restore_mask = mask_forcalc_512.clone()
+
+                alpha_auto2, blur_value2 = self.face_restorer_auto(
+                    original_face_512_autorestore2,
+                    swap_original_autorestore2,
+                    swap2,
+                    alpha_restorer2,
+                    adjust_sharpness2,
+                    scale_factor2,
+                    debug,
+                    restore_mask,
+                    automasktoggle2,
+                    automaskadjust2,
+                    automaskblur2,
+                )
+
+                if blur_value2 > 0:
+                    kernel_size = 2 * blur_value2 + 1  # 3,5,7,...
+                    sigma = blur_value2 * 0.1
+                    gaussian_blur = transforms.GaussianBlur(
+                        kernel_size=kernel_size, sigma=sigma
+                    )
+                    swap = gaussian_blur(swap_original2)
+                    debug_info["Restore2"] = f": {-blur_value2:.2f}"
+                elif isinstance(alpha_auto2, torch.Tensor):
+                    swap = swap2 * alpha_auto2 + swap_original2 * (1 - alpha_auto2)
+                elif alpha_auto2 != 0:
+                    swap = swap2 * alpha_auto2 + swap_original2 * (1 - alpha_auto2)
+                    if debug:
+                        debug_info["Restore2"] = f": {alpha_auto2 * 100:.2f}"
+                else:
+                    swap = swap_original2
+                    if debug:
+                        debug_info["Restore2"] = f": {alpha_auto2 * 100:.2f}"
+            else:
+                alpha_restorer2 = float(parameters["FaceRestorerBlend2Slider"]) / 100.0
+                swap = torch.add(
+                    torch.mul(swap2, alpha_restorer2),
+                    torch.mul(swap_original2, 1 - alpha_restorer2),
+                )
 
         # Third denoiser pass - After restorers
         if control.get("DenoiserAfterRestorersToggle", False):
