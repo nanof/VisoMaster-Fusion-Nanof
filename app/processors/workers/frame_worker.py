@@ -315,14 +315,21 @@ class FrameWorker(threading.Thread):
     ) -> torch.Tensor:
         use_exclusive_path = control.get("UseReferenceExclusivePathToggle", False)
         denoiser_seed_from_slider_val = int(control.get("DenoiserBaseSeedSlider", 1))
+
         denoiser_mode_key = f"DenoiserModeSelection{pass_suffix}"
         denoiser_mode_val = control.get(denoiser_mode_key, "Single Step (Fast)")
+
         ddim_steps_key = f"DenoiserDDIMStepsSlider{pass_suffix}"
         ddim_steps_val = int(control.get(ddim_steps_key, 20))
+
         cfg_scale_key = f"DenoiserCFGScaleDecimalSlider{pass_suffix}"
         cfg_scale_val = float(control.get(cfg_scale_key, 1.0))
+
         single_step_t_key = f"DenoiserSingleStepTimestepSlider{pass_suffix}"
         single_step_t_val = int(control.get(single_step_t_key, 1))
+
+        sharpen_key = f"DenoiserLatentSharpeningDecimalSlider{pass_suffix}"
+        sharpen_val = float(control.get(sharpen_key, 0.0))
 
         if not kv_map:
             if use_exclusive_path:
@@ -341,6 +348,7 @@ class FrameWorker(threading.Thread):
             denoiser_single_step_t=single_step_t_val,
             denoiser_ddim_steps=ddim_steps_val,
             denoiser_cfg_scale=cfg_scale_val,
+            latent_sharpening_strength=sharpen_val,
         )
         return denoised_image
 

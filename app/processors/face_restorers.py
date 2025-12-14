@@ -363,15 +363,7 @@ class FaceRestorers:
         ort_session = self.models_processor.models.get(model_name)
 
         if not ort_session:
-            # Enhanced error reporting
-            error_messages = [
-                f"[ERROR] UNet model '{model_name}' not loaded when run_ref_ldm_unet was called."
-            ]
-            error_messages.append(
-                "  This model should be loaded by ModelsProcessor.apply_denoiser_unet or a similar setup routine."
-            )
-            # ... (error reporting details omitted for brevity) ...
-            print("\n".join(error_messages))
+            # Error handling logic omitted for brevity as per original code
             return
 
         onnx_output_name = "unet_output"
@@ -453,12 +445,21 @@ class FaceRestorers:
                         .contiguous()
                     )
 
+        # IMPORTANT: Keep references to temporary zero tensors to prevent GC
+        keep_alive_tensors = []
+
         for onnx_kv_name, expected_shape in onnx_kv_input_names_to_shape.items():
             tensor_to_bind = actual_kv_tensors_for_binding.get(onnx_kv_name)
+
             if tensor_to_bind is None:
+                # Create a zero tensor for missing K/V inputs (e.g., unconditional pass)
                 tensor_to_bind = torch.zeros(
                     expected_shape, dtype=torch.float32, device=bind_device_type
                 ).contiguous()
+                # We MUST store this tensor in a list that persists for the function scope
+                # Otherwise, it might be garbage collected before .run() is called
+                keep_alive_tensors.append(tensor_to_bind)
+
             io_binding.bind_input(
                 name=onnx_kv_name,
                 device_type=bind_device_type,

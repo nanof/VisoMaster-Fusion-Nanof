@@ -403,6 +403,18 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "default": False,
             "help": "Repositions and scales the original mouth to fit the swap without distorting its shape. Can be used independently of Face Parser.",
         },
+        "MouthParserStretchDecimalSlider": {
+            "level": 2,
+            "label": "Mouth Zoom",
+            "min_value": "0.90",
+            "max_value": "1.20",
+            "default": "1.05",
+            "decimals": 2,
+            "step": 0.01,
+            "parentToggle": "MouthParserStretchToggle",
+            "requiredToggleValue": True,
+            "help": "Mouth Zoom slider.",
+        },
         "FaceParserEnableToggle": {
             "level": 1,
             "label": "Face Parser Mask",

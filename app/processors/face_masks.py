@@ -91,7 +91,9 @@ class FaceMasks:
         labels_512 = out.argmax(dim=1).squeeze(0).to(torch.long)
         return labels_512
 
-    def _create_aligned_mouth_overlay(self, img_orig, labels_orig, labels_swap):
+    def _create_aligned_mouth_overlay(
+        self, img_orig, labels_orig, labels_swap, parameters
+    ):
         """
         STABILIZED ALIGNMENT WITH BLENDING:
         1. Rigid alignment (Scale/Translate) based on width.
@@ -126,7 +128,8 @@ class FaceMasks:
 
         # 5. Calculate Transformations
         # Scale based on Width Ratio + 15% Safety Margin
-        scale_factor = (w_s / (w_o + 1e-6)) * 1.05
+        mouthzoom = parameters.get("MouthParserStretchDecimalSlider", 1.05)
+        scale_factor = (w_s / (w_o + 1e-6)) * mouthzoom
 
         translate_x = cx_s - cx_o
         translate_y = cy_s - cy_o
@@ -169,7 +172,7 @@ class FaceMasks:
 
         # Generate Overlay using the Rigid Alignment logic
         return self._create_aligned_mouth_overlay(
-            original_img, labels_orig, labels_swap
+            original_img, labels_orig, labels_swap, parameters
         )
 
     def process_masks_and_masks(
@@ -232,7 +235,7 @@ class FaceMasks:
         if need_mouth_stretch and labels_orig is not None and labels_swap is not None:
             # Use the new Rigid/Stable Alignment function
             overlay, overlay_mask = self._create_aligned_mouth_overlay(
-                original_face_512, labels_orig, labels_swap
+                original_face_512, labels_orig, labels_swap, parameters
             )
 
             if overlay is not None:
