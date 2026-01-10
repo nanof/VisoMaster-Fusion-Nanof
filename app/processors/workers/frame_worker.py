@@ -2222,9 +2222,14 @@ class FrameWorker(threading.Thread):
             parameters.get("FaceParserEnableToggle", False)
             or (
                 parameters.get("DFLXSegEnableToggle", False)
-                and parameters.get("XSegMouthEnableToggle", False)
-                and parameters.get("DFLXSegSizeSlider", 0)
-                != parameters.get("DFLXSeg2SizeSlider", 0)
+                and (
+                    (
+                        parameters.get("XSegMouthEnableToggle", False)
+                        and parameters.get("DFLXSegSizeSlider", 0)
+                        != parameters.get("DFLXSeg2SizeSlider", 0)
+                    )
+                    or parameters.get("XSegExcludeInnerMouthToggle", False)
+                )
             )
             or (
                 parameters.get("TransferTextureEnableToggle", False)
@@ -2236,6 +2241,7 @@ class FrameWorker(threading.Thread):
 
         FaceParser_mask = None
         mouth_512 = None
+        inner_mouth_protection_512 = None
 
         if need_any_parser:
             out = self.models_processor.process_masks_and_masks(
@@ -2249,6 +2255,7 @@ class FrameWorker(threading.Thread):
 
             texture_exclude_512 = out.get("texture_mask", texture_exclude_512)
             mouth_512 = out.get("mouth", None)
+            inner_mouth_protection_512 = out.get("inner_mouth_protection", None)
 
             # Mask Patching for Mouth Fit
             mouth_overlay_info = out.get("mouth_overlay_info", None)
@@ -2357,6 +2364,7 @@ class FrameWorker(threading.Thread):
         if parameters.get("DFLXSegEnableToggle", False):
             img_xseg_256 = t256_near(original_face_512)
             mouth_256 = None
+            inner_mouth_protection_256 = None
             if (
                 parameters.get("DFLXSegEnableToggle", False)
                 and parameters.get("XSegMouthEnableToggle", False)
@@ -2366,12 +2374,21 @@ class FrameWorker(threading.Thread):
             ):
                 mouth_256 = t256_near(mouth_512.unsqueeze(0))
 
+            if (
+                parameters.get("XSegExcludeInnerMouthToggle", False)
+                and inner_mouth_protection_512 is not None
+            ):
+                inner_mouth_protection_256 = t256_near(
+                    inner_mouth_protection_512.unsqueeze(0)
+                ).squeeze(0)
+
             img_mask_256, mask_forcalc_256, mask_forcalc_dill_256, outpred_noFP_256 = (
                 self.models_processor.apply_dfl_xseg(
                     img_xseg_256,
                     -parameters["DFLXSegSizeSlider"],
                     mouth_256 if mouth_256 is not None else 0,
                     parameters,
+                    inner_mouth_mask=inner_mouth_protection_256,
                 )
             )
 

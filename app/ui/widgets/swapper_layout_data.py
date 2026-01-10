@@ -288,6 +288,14 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "exec_function": control_actions.handle_face_mask_state_change,
             "exec_function_args": ["DFLXSegEnableToggle"],
         },
+        "XSegExcludeInnerMouthToggle": {
+            "level": 2,
+            "label": "Mouth/Lips Protection",
+            "default": False,
+            "parentToggle": "DFLXSegEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Prevents XSeg from masking out the inner mouth area. Fixes artifacts where open mouths are mistaken for obstacles.",
+        },
         "DFLXSegSizeSlider": {
             "level": 2,
             "label": "Size",

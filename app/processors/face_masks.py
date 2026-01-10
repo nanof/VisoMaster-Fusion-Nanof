@@ -241,7 +241,9 @@ class FaceMasks:
 
         # --- Check Requirements ---
         need_mouth_stretch = parameters.get("MouthParserStretchToggle", False)
-
+        need_xseg_mouth_protection = parameters.get(
+            "XSegExcludeInnerMouthToggle", False
+        )
         need_parser = parameters.get("FaceParserEnableToggle", False) or (
             (
                 parameters.get("TransferTextureEnableToggle", False)
@@ -260,7 +262,12 @@ class FaceMasks:
         labels_orig = None
 
         # Determine if we need to run FaceParser
-        if need_parser or need_parser_mouth or need_mouth_stretch:
+        if (
+            need_parser
+            or need_parser_mouth
+            or need_mouth_stretch
+            or need_xseg_mouth_protection
+        ):
             labels_swap = self._faceparser_labels(swap_restorecalc)
 
         # We need Original labels if Parser/MouthStretch/ExcludeMask is active
@@ -291,6 +298,16 @@ class FaceMasks:
                 result["mouth_overlay_info"] = (overlay, overlay_mask)
                 if control.get("CommandLineDebugEnableToggle", False):
                     print("[INFO] Mouth Align: Applied Stable Width Transform.")
+
+        # ---------- 1.5 XSEG MOUTH PROTECTION (NEW) ----------
+        if need_xseg_mouth_protection and labels_swap is not None:
+            # Class 11: Inner Mouth, 12: Upper Lip, 13: Lower Lip
+            # We include lips to ensure XSeg doesn't cut into the lip boundaries.
+            m = self._mask_from_labels_lut(labels_swap, [11, 12, 13])
+            m = self._dilate_binary(m, 2, mode="conv")
+            result["inner_mouth_protection"] = (
+                resize_to_target(m.unsqueeze(0)).clamp(0, 1).squeeze()
+            )
 
         # ---------- 2. MOUTH MASK (Grouped Optimization) ----------
         if need_parser_mouth:
@@ -677,7 +694,7 @@ class FaceMasks:
         else:
             print("[ERROR] FaceParser model not found or failed to load.")
 
-    def apply_dfl_xseg(self, img, amount, mouth, parameters):
+    def apply_dfl_xseg(self, img, amount, mouth, parameters, inner_mouth_mask=None):
         amount2 = -parameters["DFLXSeg2SizeSlider"]
         amount_calc = -parameters["BackgroundParserTextureSlider"]
 
@@ -761,6 +778,13 @@ class FaceMasks:
             outpred[mouth > 0.01] = outpred2[mouth > 0.01]
 
         outpred = torch.reshape(outpred, (1, 256, 256))
+
+        if inner_mouth_mask is not None:
+            # Mouth mask protection
+            outpred = outpred * (1.0 - inner_mouth_mask)
+            if outpred_noFP.dim() == 2:
+                outpred_noFP = outpred_noFP.unsqueeze(0)
+            outpred_noFP = outpred_noFP * (1.0 - inner_mouth_mask)
 
         if parameters["BgExcludeEnableToggle"] and amount_calc != 0:
             if amount_calc > 0:
