@@ -17,17 +17,20 @@ from torchvision.transforms import v2
 
 from app.processors.utils import faceutil
 
+# --- Optional Imports & Fallbacks ---
+
 # KORNIA IMPORT
 try:
     import kornia.color as K
 except ImportError:
-    K = None  # Fallback if Kornia is not installed, can add error handling or power-law
+    K = None  # Fallback if Kornia is not installed
     print(
         "[WARN] Kornia library not found. Color space conversions will use power-law approximation."
     )
 
 from PySide6 import QtCore
 
+# TENSORRT IMPORT
 try:
     import tensorrt as trt
 
@@ -35,6 +38,8 @@ try:
 except ModuleNotFoundError:
     print("[WARN] No TensorRT Found")
     TENSORRT_AVAILABLE = False
+
+# --- Internal Project Imports ---
 
 from app.processors.utils.tensorrt_predictor import TensorRTPredictor
 from app.processors.face_detectors import FaceDetectors
@@ -57,6 +62,8 @@ from app.processors.utils.ref_ldm_kv_embedding import KVExtractor
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
 
+# --- Global Configuration ---
+
 onnxruntime.set_default_logger_severity(4)
 onnxruntime.log_verbosity_level = -1
 lock = threading.Lock()
@@ -65,7 +72,7 @@ SRGB_GAMMA = (
     2.2  # More precise sRGB gamma handling is complex, this is an approximation
 )
 
-# Isolated Process Workers ---
+# --- Isolated Process Workers ---
 # These functions run in a separate process to prevent fatal C++/CUDA
 # crashes (like segmentation faults) from killing the main application.
 
@@ -73,6 +80,7 @@ SRGB_GAMMA = (
 def _build_trt_engine_worker(onnx_path, trt_path, precision, plugin_path, verbose):
     """
     Worker function to be run in an isolated process to build a TRT engine.
+    Ensures that a crash during compilation does not crash the UI.
     """
     try:
         # We must re-import dependencies within the worker process
@@ -108,7 +116,7 @@ def _probe_onnx_model_worker(
     """
     Worker function to be run in an isolated process to "warm up"
     an ONNX model, especially for the TensorRT provider.
-    This triggers the engine cache build.
+    This triggers the engine cache build without freezing the main thread.
     """
     try:
         # Re-import dependencies
@@ -121,7 +129,7 @@ def _probe_onnx_model_worker(
         session_options = onnxruntime.SessionOptions()
         if session_options_dict:
             for key, value in session_options_dict.items():
-                # Use setattr to configure the SessionOptions object from the passed dictionary with 1 single thread for building the engines
+                # Use setattr to configure the SessionOptions object
                 setattr(session_options, key, value)
 
         import torch
@@ -136,7 +144,7 @@ def _probe_onnx_model_worker(
                 providers.append(p)
 
         print(f"[ONNX Prober]: Attempting to load {os.path.basename(model_path)}...")
-        # This line is the one that triggers the build
+        # This line is the one that triggers the build/cache generation
         session = onnxruntime.InferenceSession(
             model_path, sess_options=session_options, providers=providers
         )
@@ -178,6 +186,15 @@ def gamma_decode_srgb_to_linear_rgb(srgb: torch.Tensor, gamma=SRGB_GAMMA):
 
 
 class ModelsProcessor(QtCore.QObject):
+    """
+    Central hub for managing AI models (ONNX, TensorRT, PyTorch).
+    Handles:
+    - Model Loading/Unloading (Thread-safe)
+    - TensorRT Engine compilation and caching
+    - Inference wrapper methods for various tasks (detection, swapping, restoration)
+    - GPU memory management
+    """
+
     processing_complete = QtCore.Signal()
     model_loaded = QtCore.Signal()  # Signal emitted with Onnx InferenceSession
 
@@ -200,11 +217,14 @@ class ModelsProcessor(QtCore.QObject):
         self.kv_extraction_lock = threading.Lock()
         self.device = device
         self.model_lock = threading.RLock()  # Reentrant lock for model access
+
         # A dictionary to hold locks for each TRT model build process.
         # Key: path to the .trt file, Value: threading.Lock object.
         self.trt_build_locks: Dict[str, threading.Lock] = {}
         # A lock to protect the creation of new locks in the dictionary above.
         self.trt_build_lock_creation_lock = threading.Lock()
+
+        # Default TensorRT options
         self.trt_ep_options = {
             "trt_engine_cache_enable": True,
             "trt_engine_cache_path": "tensorrt-engines",
@@ -226,13 +246,14 @@ class ModelsProcessor(QtCore.QObject):
         self.syncvec = torch.empty((1, 1), dtype=torch.float32, device=self.device)
         self.nThreads = 1
 
-        # Initialize models and models_path
+        # Initialize models and models_path dictionaries
         self.models: Dict[str, onnxruntime.InferenceSession] = {}
         self.models_path = {}
         self.models_data = {}
+
         for model_data in models_list:
             model_name, model_path = model_data["model_name"], model_data["local_path"]
-            self.models[model_name] = None  # Model Instance
+            self.models[model_name] = None  # Model Instance placeholder
             self.models_path[model_name] = model_path
             self.models_data[model_name] = {
                 "local_path": model_data["local_path"],
@@ -241,25 +262,22 @@ class ModelsProcessor(QtCore.QObject):
             }
 
         self.dfm_models: Dict[str, DFMModel] = {}
-
-        # Add a flag to bypass the 'KeepModelsAlive' check
         self.force_unload_in_progress = False
 
-        # Initialize TRT dicts *outside* the check
-        # This prevents AttributeError on systems without TensorRT
+        # Initialize TRT dicts
         self.models_trt: Dict[str, Optional[TensorRTPredictor]] = {}
         self.models_trt_path = {}
 
         if TENSORRT_AVAILABLE:
-            # Populate models_trt and models_trt_path
             for model_data in models_trt_list:
                 model_name, model_path = (
                     model_data["model_name"],
                     model_data["local_path"],
                 )
-                self.models_trt[model_name] = None  # Model Instance
+                self.models_trt[model_name] = None
                 self.models_trt_path[model_name] = model_path
 
+        # Initialize Sub-Processors
         self.smart_smoother = faceutil.SmartSmoother()
         self.face_detectors = FaceDetectors(self)
         self.face_landmark_detectors = FaceLandmarkDetectors(self)
@@ -269,6 +287,7 @@ class ModelsProcessor(QtCore.QObject):
         self.frame_enhancers = FrameEnhancers(self)
         self.face_editors = FaceEditors(self)
 
+        # Initialize Mask Latent
         self.lp_mask_crop_latent = faceutil.create_faded_inner_mask(
             size=(64, 64),
             border_thickness=3,
@@ -280,7 +299,7 @@ class ModelsProcessor(QtCore.QObject):
             self.lp_mask_crop_latent, 0
         )  # Shape: [1, 64, 64]
 
-        # Denoiser specific initializations (from VR180 feature, which is correct for the implementation)
+        # Denoiser specific initializations (VR180 feature compatible)
         num_ddpm_timesteps = 1000
         linear_start_val = 0.0015
         linear_end_val = 0.0155
@@ -295,9 +314,11 @@ class ModelsProcessor(QtCore.QObject):
         self.alphas_cumprod_torch = (
             torch.from_numpy(self.alphas_cumprod_np).float().to(self.device)
         )
-        self.vae_scale_factor = 1.0  # Confirmed by user
+        self.vae_scale_factor = 1.0
 
         self.clip_session: list = []
+
+        # --- Face Analysis Constants (ArcFace/Landmarks) ---
         self.arcface_dst = np.array(
             [
                 [38.2946, 51.6963],
@@ -493,9 +514,9 @@ class ModelsProcessor(QtCore.QObject):
                 with open(ctx_file_path, "rb") as f:
                     content = f.read()
 
+                # Look for the engine name embedded in the context file
                 match = re.search(b"TensorrtExecutionProvider_.*?\\.engine", content)
                 if not match:
-                    # print(f"Cache check: Context file '{ctx_file_name}' found, but no engine name inside.")
                     return False
 
                 engine_name = match.group(0).decode("utf-8")
@@ -507,10 +528,8 @@ class ModelsProcessor(QtCore.QObject):
                 if os.path.exists(engine_file_path):
                     return True
                 else:
-                    # print(f"Cache check: Context file '{ctx_file_name}' found, but engine '{engine_name}' is missing.")
                     return False
             else:
-                # print(f"Cache check: No cache context file '{ctx_file_name}' found for {model_name}.")
                 return False
 
         except Exception as e:
@@ -518,6 +537,10 @@ class ModelsProcessor(QtCore.QObject):
             return False
 
     def load_model(self, model_name, session_options=None):
+        """
+        Loads an AI model (ONNX or TRT) with thread safety.
+        Handles checking for existing TensorRT caches and launching the build probe if needed.
+        """
         with self.model_lock:
             # Check both TRT and ONNX caches first.
             if self.provider_name == "TensorRT-Engine" and self.models_trt.get(
@@ -555,8 +578,6 @@ class ModelsProcessor(QtCore.QObject):
                         print(
                             f"[WARN] Failed to load/build TRT engine for '{model_name}'. Falling back to ONNX Runtime."
                         )
-                # else:
-                # print(f"[INFO] No dedicated TRT engine for '{model_name}'. Using ONNX Runtime.")
 
             build_was_triggered = False
             is_tensorrt_load = any(
@@ -578,7 +599,7 @@ class ModelsProcessor(QtCore.QObject):
                         )
 
                         try:
-                            # We emit signals to ask the main GUI thread to do it for us.
+                            # We emit signals to ask the main GUI thread to show the dialog.
                             dialog_title = "Building TensorRT Cache"
                             dialog_text = (
                                 f"Building TensorRT engine cache for:\n"
@@ -587,7 +608,8 @@ class ModelsProcessor(QtCore.QObject):
                                 f"The application will continue once finished."
                             )
 
-                            # The trt engine build worker process use this SessionOptions to use only 1 thread for building engines
+                            # The trt engine build worker process use this SessionOptions
+                            # to use only 1 thread for building engines
                             sess_options_dict = {"intra_op_num_threads": 1}
 
                             # Ask the main thread to show the dialog
@@ -655,7 +677,6 @@ class ModelsProcessor(QtCore.QObject):
 
                         except Exception:
                             # Ask the main thread to hide the dialog on failure
-                            # (The final 'finally' will also catch this, but this is safer)
                             self.hide_build_dialog.emit()
 
                             print(f"[ERROR] Isolated probe failed for {model_name}.")
@@ -669,18 +690,17 @@ class ModelsProcessor(QtCore.QObject):
                             return None  # Abort the load
 
             # Now, proceed with the *actual* load in the main thread.
-            # This part is now covered by the dialog, thanks to your change.
             try:
                 if session_options is None:
                     model_instance = onnxruntime.InferenceSession(
                         self.models_path[model_name],
-                        providers=self.providers,  # Use the correct 'providers'
+                        providers=self.providers,
                     )
                 else:
                     model_instance = onnxruntime.InferenceSession(
                         self.models_path[model_name],
                         sess_options=session_options,
-                        providers=self.providers,  # Use the correct 'providers'
+                        providers=self.providers,
                     )
 
                 # This ensures the CUDA context is synchronized after a new TRT
@@ -698,11 +718,13 @@ class ModelsProcessor(QtCore.QObject):
                         )
                         self.models_pending_build.add(model_name)
 
-                # Race condition check
+                # Race condition check: Did another thread load it while we were building?
                 if self.models.get(model_name):
                     del model_instance
                     gc.collect()
-                    print(f"[INFO] Unloaded model: {model_name} already in memory")
+                    print(
+                        f"[INFO] Skipped loading: {model_name} is already loaded in memory."
+                    )
                     return self.models.get(model_name)
 
                 self.models[model_name] = model_instance
@@ -742,12 +764,6 @@ class ModelsProcessor(QtCore.QObject):
         """
         Checks if a model is pending its first-run lazy build.
         If it is, it clears the flag and returns True.
-
-        Args:
-            model_name: The name of the model to check.
-
-        Returns:
-            True if the model *was* pending a build, False otherwise.
         """
         if model_name in self.models_pending_build:
             print(
@@ -758,8 +774,9 @@ class ModelsProcessor(QtCore.QObject):
         return False
 
     def load_dfm_model(self, dfm_model):
+        """Loads a DeepFaceLab model instance."""
         with self.model_lock:
-            if self.dfm_models.get(dfm_model):  # Simplified check
+            if self.dfm_models.get(dfm_model):
                 return self.dfm_models[dfm_model]
 
             self.main_window.model_loading_signal.emit()
@@ -779,15 +796,14 @@ class ModelsProcessor(QtCore.QObject):
                     self.providers,
                     self.device,
                 )
-            except Exception:  # Changed bare 'except:' to 'except Exception as e:'
+            except Exception:
                 print(f"[ERROR] Failed to load DFM model {dfm_model}.")
                 traceback.print_exc()
                 self.dfm_models[dfm_model] = None
             finally:
-                # Emit signal *after* try/except is resolved
                 self.main_window.model_loaded_signal.emit()
 
-            return self.dfm_models.get(dfm_model)  # Use .get() for safety
+            return self.dfm_models.get(dfm_model)
 
     def load_model_trt(
         self,
@@ -796,15 +812,12 @@ class ModelsProcessor(QtCore.QObject):
         precision="fp16",
         debug=False,
     ):
+        """Loads or builds a dedicated TensorRT Engine (.trt file)."""
         # Use the main model_lock to make the entire load process atomic
         with self.model_lock:
             # Check *again* inside the lock, in case another thread loaded it
-            # while this thread was waiting for the lock.
             if self.models_trt.get(model_name):
                 return self.models_trt[model_name]
-
-            # If we're here, the model is not loaded and we have the lock.
-            # Proceed with loading.
 
             model_instance = None
             onnx_path = self.models_path[model_name]
@@ -876,8 +889,6 @@ class ModelsProcessor(QtCore.QObject):
                 print(f"[ERROR] Failed to build or load TensorRT model {model_name}.")
                 traceback.print_exc()
                 model_instance = None
-
-                # Ensure we store 'None' on failure so we don't retry
                 self.models_trt[model_name] = None
             finally:
                 self.hide_build_dialog.emit()
@@ -885,18 +896,21 @@ class ModelsProcessor(QtCore.QObject):
             return model_instance
 
     def delete_models(self):
+        """Unloads all ONNX models."""
         model_names_to_unload = list(self.models.keys())
         for model_name in model_names_to_unload:
             self.unload_model(model_name)
         self.clip_session = []
 
     def delete_models_trt(self):
+        """Unloads all TensorRT Engine models."""
         if TENSORRT_AVAILABLE:
             model_names_to_unload = list(self.models_trt.keys())
             for model_name in model_names_to_unload:
                 self.unload_model(model_name)
 
     def delete_models_dfm(self):
+        """Unloads all DFM models."""
         model_names_to_unload = list(self.dfm_models.keys())
         for model_name in model_names_to_unload:
             self.unload_dfm_model(model_name)
@@ -906,7 +920,6 @@ class ModelsProcessor(QtCore.QObject):
         # Check if unloading should be skipped
         if not self.force_unload_in_progress:
             if self.main_window.control.get("KeepModelsAliveToggle", False):
-                # print(f"[Info] KeepModelsAlive: Skipping unload for {model_name_to_unload}") # Optional debug
                 return  # Skip unloading
         with self.model_lock:
             if (
@@ -926,7 +939,6 @@ class ModelsProcessor(QtCore.QObject):
         # Check if unloading should be skipped
         if not self.force_unload_in_progress:
             if self.main_window.control.get("KeepModelsAliveToggle", False):
-                # print(f"[Info] KeepModelsAlive: Skipping unload for {model_name_to_unload}") # Optional debug
                 return  # Skip unloading
         with self.model_lock:
             unloaded = False
@@ -947,8 +959,6 @@ class ModelsProcessor(QtCore.QObject):
             if (
                 TENSORRT_AVAILABLE
                 and model_name_to_unload
-                # Check if key exists, not if value is not None
-                # This handles the case where it's already unloaded (value is None)
                 and model_name_to_unload in self.models_trt
             ):
                 # Get the model instance *before* setting to None
@@ -965,14 +975,9 @@ class ModelsProcessor(QtCore.QObject):
                 self.models_trt[model_name_to_unload] = None
 
             if unloaded:
-                # This block is now guaranteed to run after an unload.
-                # print(f"Successfully unloaded model: {model_name_to_unload}")
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-            else:
-                # This is normal if the model wasn't loaded in the first place.
-                pass
 
     def showModelLoadingProgressBar(self):
         self.main_window.model_load_dialog.show()
@@ -1049,7 +1054,7 @@ class ModelsProcessor(QtCore.QObject):
             self.frame_enhancers.unload_models()
             self.face_editors.unload_models()
 
-            # Unload any remaining models in the main dictionaries (as a fallback)
+            # Unload any remaining models in the main dictionaries
             self.delete_models()
             self.delete_models_dfm()
             self.delete_models_trt()
@@ -1060,7 +1065,6 @@ class ModelsProcessor(QtCore.QObject):
                 del self.clip_session
                 self.clip_session = []
         finally:
-            # Always reset the flag, even if an error occurs
             self.force_unload_in_progress = False
 
         # Finally, clear caches
@@ -1071,17 +1075,15 @@ class ModelsProcessor(QtCore.QObject):
 
         print("[INFO] GPU Memory Cleared.")
 
+    # --- KV Extractor (Thread-Safe Loading) ---
+
     def get_kv_map_for_face(
         self, input_face_image_pil: "Image.Image"
     ) -> Dict[str, Dict[str, torch.Tensor]]:
         """
-        (Thread-unsafe) Loads the KV Extractor, extracts K/V maps, and unloads.
+        Loads the KV Extractor, extracts K/V maps, and unloads.
         The caller MUST wrap this function in the 'kv_extraction_lock'.
-
-        Args:
-            input_face_image_pil: A 512x512 PIL Image.
         """
-
         kv_map = {}
         try:
             # 1. Load the extractor
@@ -1110,12 +1112,10 @@ class ModelsProcessor(QtCore.QObject):
 
     def ensure_kv_extractor_loaded(self):
         # This lock is critical to prevent a race condition where multiple
-        # FrameWorkers might try to load the KV Extractor simultaneously
-        # at the beginning of a video processing segment.
+        # FrameWorkers might try to load the KV Extractor simultaneously.
         with self.model_lock:
-            # Check *again* inside the lock (double-checked locking pattern)
             if self.kv_extractor is not None:
-                return  # Already loaded by another thread while this one was waiting
+                return  # Already loaded
 
             try:
                 print("[INFO] Loading KV Extractor...")
@@ -1152,7 +1152,7 @@ class ModelsProcessor(QtCore.QObject):
                     print(
                         "[ERROR] ReF-LDM model files not found even after download attempt. Cannot load KV Extractor."
                     )
-                    return  # Return early if files are missing
+                    return
 
                 self.kv_extractor = KVExtractor(
                     model_config_path=config_path,
@@ -1168,7 +1168,7 @@ class ModelsProcessor(QtCore.QObject):
 
     def ensure_denoiser_models_loaded(self):
         """Loads the UNet and VAE models if they are not already loaded."""
-        with self.model_lock:  # Ensure thread safety
+        with self.model_lock:
             unet_model_name = self.main_window.fixed_unet_model_name
             vae_encoder_name = "RefLDMVAEEncoder"
             vae_decoder_name = "RefLDMVAEDecoder"
@@ -1184,12 +1184,11 @@ class ModelsProcessor(QtCore.QObject):
 
     def unload_denoiser_models(self):
         """Unloads the UNet and VAE models."""
-        with self.model_lock:  # Ensure thread safety
+        with self.model_lock:
             print("[INFO] Unloading denoiser models (UNet, VAEs)...")
             self.unload_model(self.main_window.fixed_unet_model_name)
             self.unload_model("RefLDMVAEEncoder")
             self.unload_model("RefLDMVAEDecoder")
-            # print("Denoiser models unloaded.")
 
     def unload_kv_extractor(self):
         """Unloads the KVExtractor model and clears associated memory."""
@@ -1201,7 +1200,8 @@ class ModelsProcessor(QtCore.QObject):
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-                # print("KV Extractor unloaded.")
+
+    # --- Wrapper Unloaders ---
 
     def unload_face_detector_models(self):
         with self.model_lock:
@@ -1227,14 +1227,15 @@ class ModelsProcessor(QtCore.QObject):
         with self.model_lock:
             self.face_restorers.unload_models()
 
+    # --- Static Math Helpers ---
+
     @staticmethod
     def print_tensor_stats(tensor: torch.Tensor, name: str, enabled: bool = True):
         if not enabled:
             return
         if isinstance(tensor, torch.Tensor):
-            # Cast to float for mean and std calculation if tensor is uint8
             if tensor.dtype == torch.uint8:
-                tensor_float = tensor.float() / 255.0  # Normalize for meaningful stats
+                tensor_float = tensor.float() / 255.0
                 print(
                     f"DEBUG DENOISER STATS for {name}: shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}, min={tensor.min().item():.4f}, max={tensor.max().item():.4f}, mean={tensor_float.mean().item():.4f}, std={tensor_float.std().item():.4f} (stats on [0,1] float)"
                 )
@@ -1276,7 +1277,7 @@ class ModelsProcessor(QtCore.QObject):
             betas = torch.linspace(
                 linear_start, linear_end, n_timestep, dtype=torch.float64
             )
-        elif schedule == "sqrt":  # Not used by ref-ldm
+        elif schedule == "sqrt":
             betas = (
                 torch.linspace(
                     linear_start, linear_end, n_timestep, dtype=torch.float64
@@ -1297,18 +1298,14 @@ class ModelsProcessor(QtCore.QObject):
         if ddim_discr_method == "uniform":
             c = num_ddpm_timesteps // num_ddim_timesteps
             if c == 0:
-                c = 1  # Avoid division by zero or c=0 for small num_ddpm_timesteps
+                c = 1
             ddim_timesteps = np.asarray(list(range(0, num_ddpm_timesteps, c)))
         elif ddim_discr_method == "uniform_trailing":
             c = num_ddpm_timesteps // num_ddim_timesteps
             if c == 0:
                 c = 1
-            ddim_timesteps = (
-                np.arange(num_ddpm_timesteps, 0, -c).astype(int)[::-1] - 2
-            )  # Match LDM util
-            ddim_timesteps = np.clip(
-                ddim_timesteps, 0, num_ddpm_timesteps - 1
-            )  # Ensure valid range
+            ddim_timesteps = np.arange(num_ddpm_timesteps, 0, -c).astype(int)[::-1] - 2
+            ddim_timesteps = np.clip(ddim_timesteps, 0, num_ddpm_timesteps - 1)
         elif ddim_discr_method == "quad":
             ddim_timesteps = (
                 (np.linspace(0, np.sqrt(num_ddpm_timesteps * 0.8), num_ddim_timesteps))
@@ -1344,24 +1341,26 @@ class ModelsProcessor(QtCore.QObject):
         sigmas = np.nan_to_num(sigmas, nan=0.0)
         return sigmas, _alphas, _alphas_prev
 
+    # --- Processing Wrappers ---
+
     def apply_vgg_mask_simple(
         self,
         swapped_face: torch.Tensor,  # [3,512,512] uint8
         original_face: torch.Tensor,  # [3,512,512] uint8
         swap_mask_128: torch.Tensor,  # [1,128,128] float mask (0..1)
-        center_pct: float,  # 0..100, z.B. parameters['VGGMaskThresholdSlider']
-        softness_pct: float,  # 0..100, z.B. parameters['VGGMaskSoftnessSlider']
+        center_pct: float,  # 0..100, e.g. parameters['VGGMaskThresholdSlider']
+        softness_pct: float,  # 0..100, e.g. parameters['VGGMaskSoftnessSlider']
         feature_layer: str = "combo_relu3_3_relu3_1",
-        mode: str = "smooth",  # 'smooth' (smoothstep) oder 'linear'
+        mode: str = "smooth",  # 'smooth' (smoothstep) or 'linear'
     ):
         """
-        Liefert:
-          mask_vgg: [1,512,512] float 0..1 (weiche Diff-Maske)
-          diff_norm_texture: [1,128,128] float 0..1 (normalisierte Roh-Diff in 128er Auflösung)
+        Returns:
+          mask_vgg: [1,512,512] float 0..1 (soft difference mask)
+          diff_norm_texture: [1,128,128] float 0..1 (normalized raw difference in 128 resolution)
         """
-        # 1) Roh-Diff per bestehender ONNX-Pipeline in 128x128 holen (ohne Mapping):
-        #    Wir nutzen apply_perceptual_diff_onnx mit „Durchreich“-Modus (ExcludeVGGMaskEnableToggle=False),
-        #    und ignorieren die komplexen Threshold-Parameter (werden unten ersetzt).
+        # 1) Get raw difference via existing ONNX pipeline in 128x128 (without mapping).
+        #    We use apply_perceptual_diff_onnx in pass-through mode (ExcludeVGGMaskEnableToggle=False),
+        #    and ignore the complex threshold parameters (they are replaced below).
         dummy_lower = 0.0
         dummy_upper = 1.0
         dummy_upper_v = 1.0
@@ -1382,25 +1381,25 @@ class ModelsProcessor(QtCore.QObject):
         # diff_norm_128: [1,128,128] in [0..1]
         d = diff_mapped_128.squeeze(0)  # [128,128]
 
-        # 2) Two-slider-Mapping -> untere/obere Schwelle aus (center,softness)
+        # 2) Two-slider-Mapping -> lower/upper threshold derived from (center, softness)
         center = float(center_pct) / 100.0  # 0..1
         softness = float(softness_pct) / 100.0  # 0..1
 
-        # Breite des Übergangsbandes (angenehme Praxis-Werte):
-        #  - Mindestbreite 0.04, Maxbreite 0.40 (gefühlt gut kontrollierbar)
+        # Width of the transition band (practical values):
+        #  - Min width 0.04, Max width 0.40
         band = 0.04 + 0.36 * softness
         lo = max(0.0, center - band * 0.5)
         hi = min(1.0, center + band * 0.5)
 
-        # 3) Kurvenform
+        # 3) Curve Shape
         x = (d - lo) / max(1e-6, (hi - lo))
         x = x.clamp(0.0, 1.0)
         if mode == "smooth":
             # Smoothstep
             x = x * x * (3.0 - 2.0 * x)
-        # else: 'linear' -> x bleibt linear
+        # else: 'linear' -> x remains linear
 
-        # 4) Auf 512x512 hochskalieren (bilinear) – du arbeitest später meist in 512
+        # 4) Upscale to 512x512 (bilinear)
         x_512 = torch.nn.functional.interpolate(
             x.unsqueeze(0).unsqueeze(0),
             size=(512, 512),
@@ -1408,7 +1407,7 @@ class ModelsProcessor(QtCore.QObject):
             align_corners=True,
         ).squeeze(0)
 
-        return x_512.clamp(0, 1), diff_norm_128  # ([1,512,512], [1,128,128])
+        return x_512.clamp(0, 1), diff_norm_128
 
     def run_detect(
         self,
@@ -1422,10 +1421,9 @@ class ModelsProcessor(QtCore.QObject):
         landmark_score=0.5,
         from_points=False,
         rotation_angles=None,
-        **kwargs,  # Ajout de kwargs pour passer des options comme use_mean_eyes
+        **kwargs,
     ):
         rotation_angles = rotation_angles or [0]
-        # On passe **kwargs à la fonction suivante
         return self.face_detectors.run_detect(
             img,
             detect_mode,
@@ -1605,7 +1603,7 @@ class ModelsProcessor(QtCore.QObject):
         fidelity_weight,
         detect_score,
         target_kps,
-        slot_id: int = 1,  # ADD slot_id here
+        slot_id: int = 1,
     ):
         return self.face_restorers.apply_facerestorer(
             swapped_face_upscaled,
@@ -1762,6 +1760,11 @@ class ModelsProcessor(QtCore.QObject):
         base_seed: int = 220,
         latent_sharpening_strength: float = 0.0,
     ) -> torch.Tensor:
+        """
+        Runs the Diffusion-based Denoiser/Restorer (ReF-LDM).
+        Supports 'Single Step' (Fast) and 'Full Restore' (DDIM) modes.
+        Also handles pixel sharpening and histogram matching for color consistency.
+        """
         # --- CONFIGURATION ---
         ENABLE_PIXEL_SHARPENING = latent_sharpening_strength > 0.0
         PIXEL_SHARPEN_STRENGTH = latent_sharpening_strength
@@ -1936,16 +1939,16 @@ class ModelsProcessor(QtCore.QObject):
                 with torch.cuda.stream(torch.cuda.current_stream()):
                     num_ddpm_timesteps = self.alphas_cumprod_np.shape[0]
                     _ddim_raw_ddpm_timesteps_np = ModelsProcessor.make_ddim_timesteps(
-                        "uniform",
-                        denoiser_ddim_steps,
-                        num_ddpm_timesteps,
+                        ddim_discr_method="uniform",
+                        num_ddim_timesteps=denoiser_ddim_steps,
+                        num_ddpm_timesteps=num_ddpm_timesteps,
                         verbose=DEBUG_DENOISER,
                     )
                     _ddim_sigmas_np, _ddim_alphas_np, _ddim_alphas_prev_np = (
                         ModelsProcessor.make_ddim_sampling_parameters(
-                            self.alphas_cumprod_np,
-                            _ddim_raw_ddpm_timesteps_np,
-                            denoiser_ddim_eta,
+                            alphacums=self.alphas_cumprod_np,
+                            ddim_timesteps=_ddim_raw_ddpm_timesteps_np,
+                            eta=denoiser_ddim_eta,
                             verbose=DEBUG_DENOISER,
                         )
                     )

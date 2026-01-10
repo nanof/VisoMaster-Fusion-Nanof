@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING
 
 import torch
+import threading
 import numpy as np
 from torchvision.transforms import v2
 from skimage import transform as trans
@@ -18,7 +19,7 @@ class FrameEdits:
 
     This class handles the 'LivePortrait' pipeline, including:
     - Motion Extraction (Pose, Expression)
-    - Temporal Smoothing (SmartSmoother)
+    - Temporal Smoothing (SmartSmoother & OneEuroFilter)
     - Feature Retargeting (Eyes, Lips)
     - Image Warping and Pasting
     """
@@ -26,8 +27,9 @@ class FrameEdits:
     def __init__(self, models_processor: "ModelsProcessor"):
         """
         Initializes the FrameEdits class.
+
         Args:
-            models_processor: Reference to the central model manager.
+            models_processor: Reference to the central model manager (provides models & device).
         """
         self.models_processor = models_processor
 
@@ -35,14 +37,68 @@ class FrameEdits:
         self.t256_face = None
         self.interpolation_expression_faceeditor_back = None
 
+        # SHARED STATE INITIALIZATION
+        with self.models_processor.model_lock:
+            if not hasattr(self.models_processor, "shared_smoothing_states"):
+                self.models_processor.shared_smoothing_states = {
+                    # Use of sequential wrapper
+                    "target_smoother": faceutil.SequentialSmartSmoother(),
+                    "driving_smoother": faceutil.SequentialSmartSmoother(),
+                    "eyes_ratio_filter": faceutil.OneEuroFilter(
+                        min_cutoff=1.0, beta=1.2
+                    ),
+                    "lip_ratio_filter": faceutil.OneEuroFilter(
+                        min_cutoff=0.8, beta=1.0
+                    ),
+                    "eyes_lock": threading.Lock(),
+                    "lips_lock": threading.Lock(),
+                    "last_global_frame": -1,
+                }
+
+    def _get_shared_state(self):
+        return getattr(self.models_processor, "shared_smoothing_states", None)
+
     def reset_temporal_state(self):
+        state = self._get_shared_state()
+        if state:
+            state["driving_smoother"].reset()
+            state["target_smoother"].reset()
+            with state["eyes_lock"]:
+                state["eyes_ratio_filter"].reset()
+            with state["lips_lock"]:
+                state["lip_ratio_filter"].reset()
+            state["last_global_frame"] = -1
+
+    def check_and_update_temporal_gap(self, frame_number: int):
         """
-        Resets the smoothing filters.
-        Must be called on video seek, scene change, or single-image processing
-        to prevent 'ghosting' from previous motion history.
+        Intelligent Reset Logic for Async Processing.
+        Detects if we jumped too far (Scene Cut) or went backward (Seek).
         """
-        if hasattr(self.models_processor, "smart_smoother"):
-            self.models_processor.smart_smoother.reset()
+        state = self._get_shared_state()
+        if not state:
+            return
+
+        last_frame = state["last_global_frame"]
+
+        # Heuristic: If we jumped more than 30 frames forward or went backward, treat as new scene.
+        # This handles scene cuts or user seeking in the timeline.
+        GAP_THRESHOLD = 30
+
+        if last_frame != -1:
+            if (
+                abs(frame_number - last_frame) > GAP_THRESHOLD
+                or frame_number < last_frame - 5
+            ):
+                # Force resynchronization of the sequencer
+                # We do not print to console in production to avoid log spamming
+                state["driving_smoother"].set_next_frame_index(frame_number)
+                state["target_smoother"].set_next_frame_index(frame_number)
+                state["last_global_frame"] = frame_number
+                return
+
+        # Update high-water mark only if we moved forward naturally
+        if frame_number > state["last_global_frame"]:
+            state["last_global_frame"] = frame_number
 
     def set_transforms(self, t256_face, interpolation_expression_faceeditor_back):
         """
@@ -55,22 +111,33 @@ class FrameEdits:
         )
 
     def apply_face_expression_restorer(
-        self, driving: torch.Tensor, target: torch.Tensor, parameters: dict
+        self,
+        driving: torch.Tensor,
+        target: torch.Tensor,
+        parameters: dict,
+        frame_number: int = -1,
     ) -> torch.Tensor:
         """
         Restores the expression of the face using the LivePortrait model pipeline.
 
         Features:
-        - Fixed Relative Mode: Removed aggressive boost that caused geometric distortions.
-        - Fixed Shape Mismatch: Correctly slices the neutral reference tensor.
-        - Zero-Translation: Prevents floating.
-        - Component-Based Processing: Independent calculation for Eyes, Lips, Brows/Face.
-        - UI Update: Added explicit controls for 'General' facial features (Brows/Cheeks).
-        - Micro-Expression Boost: Enhances subtle movements (blinks, lip sync) in relative mode.
-        - Shape Stability: Excludes contour indices from General restoration to prevent face widening/thinning.
-        - Fix: Restored Eye Normalization logic.
+        - Target Smoothing to reduce global jitter.
+        - Ratio Smoothing (Eyes/Lips) to reduce high-frequency jitter on cilia/mouth.
+        - Smart Dynamic Boost for Micro-Expressions: Amplifies subtle motions while
+          protecting strong expressions from distortion.
+
+        Args:
+            driving: The original face tensor (source of expression).
+            target: The swapped face tensor (destination of expression).
+            parameters: Dictionary containing UI parameters.
+
+        Returns:
+            torch.Tensor: The expression-restored face image.
         """
         # 1. SETUP THE ASYNCHRONOUS CONTEXT
+        if frame_number >= 0:
+            self.check_and_update_temporal_gap(frame_number)
+
         current_stream = torch.cuda.current_stream()
 
         with torch.cuda.stream(current_stream):
@@ -79,13 +146,19 @@ class FrameEdits:
             use_smoothing = parameters.get(
                 "FaceExpressionTemporalSmoothingToggle", True
             )
+            state = self._get_shared_state()
+            # Sanitized Mode Selection
+            mode_raw = parameters.get("FaceExpressionModeSelection", "Advanced")
+            mode = mode_raw.strip() if isinstance(mode_raw, str) else "Advanced"
 
-            # PARAMETER: Micro-Expression Strength (Formerly Boost)
+            # PARAMETER: Micro-Expression Strength
+            # 1.0 = Realistic Transfer. < 1.0 = Dampened. > 1.0 = Boosted.
             micro_expression_boost = parameters.get(
                 "FaceExpressionMicroExpressionBoostDecimalSlider", 0.50
             )
 
             # --- 1. DRIVING FACE PROCESSING ---
+            # Detect landmarks on the driving face
             _, driving_lmk_crop, _ = self.models_processor.run_detect_landmark(
                 driving,
                 bbox=np.array([0, 0, 512, 512]),
@@ -95,9 +168,6 @@ class FrameEdits:
                 from_points=False,
                 use_mean_eyes=use_mean_eyes,
             )
-
-            if driving_lmk_crop is not None and len(driving_lmk_crop) > 0:
-                driving_lmk_crop = faceutil.repair_mouth_inversion_203(driving_lmk_crop)
 
             interp_mode = (
                 self.interpolation_expression_faceeditor_back
@@ -112,6 +182,7 @@ class FrameEdits:
                     antialias=False,
                 )
 
+            # Warp driving face
             driving_face_512, _, _ = faceutil.warp_face_by_face_landmark_x(
                 driving,
                 driving_lmk_crop,
@@ -125,38 +196,58 @@ class FrameEdits:
 
             driving_face_256 = self.t256_face(driving_face_512)
 
+            # Calculate Raw Ratios (Eyes/Lips openness)
             c_d_eyes_lst = faceutil.calc_eye_close_ratio(driving_lmk_crop[None])
             c_d_lip_lst = faceutil.calc_lip_close_ratio(driving_lmk_crop[None])
 
+            # Apply Smoothing to Ratios (Crucial for eyelashes and lip stability)
+            if use_smoothing:
+                # Manual Lock for simple filters
+                with state["eyes_lock"]:
+                    c_d_eyes_lst = state["eyes_ratio_filter"](
+                        c_d_eyes_lst, t=frame_number
+                    )
+                with state["lips_lock"]:
+                    c_d_lip_lst = state["lip_ratio_filter"](c_d_lip_lst, t=frame_number)
+
+            # Extract Motion from Driving Face
             x_d_i_info = self.models_processor.lp_motion_extractor(
                 driving_face_256, "Human-Face"
             )
 
+            # --- SEQUENTIAL SMOOTHING BLOCK (DRIVING) ---
             if use_smoothing:
-                smoother = self.models_processor.smart_smoother
-                (
-                    x_d_i_info["pitch"],
-                    x_d_i_info["yaw"],
-                    x_d_i_info["roll"],
-                    x_d_i_info["t"],
-                    x_d_i_info["scale"],
-                ) = smoother.smooth_pose(
-                    x_d_i_info["pitch"],
-                    x_d_i_info["yaw"],
-                    x_d_i_info["roll"],
-                    x_d_i_info["t"],
-                    x_d_i_info["scale"],
+
+                def smooth_driving_logic(smoother, info, t_idx):
+                    (
+                        info["pitch"],
+                        info["yaw"],
+                        info["roll"],
+                        info["t"],
+                        info["scale"],
+                    ) = smoother.smooth_pose(
+                        info["pitch"],
+                        info["yaw"],
+                        info["roll"],
+                        info["t"],
+                        info["scale"],
+                        frame_t=t_idx,
+                    )
+                    info["exp"] = smoother.smooth_expression(info["exp"], frame_t=t_idx)
+                    return info
+
+                # Thread waits his turn here
+                x_d_i_info = state["driving_smoother"].process_ordered(
+                    frame_number, smooth_driving_logic, x_d_i_info, frame_number
                 )
-                x_d_i_info["exp"] = smoother.smooth_expression(x_d_i_info["exp"])
 
                 pose_damping = 0.8
                 x_d_i_info["pitch"] *= pose_damping
                 x_d_i_info["yaw"] *= pose_damping
                 x_d_i_info["roll"] *= pose_damping
 
-            # --- 2. TARGET FACE PROCESSING ---
+            # --- 2. TARGET FACE ---
             target = target.clamp(0, 255).type(torch.uint8)
-
             _, source_lmk, _ = self.models_processor.run_detect_landmark(
                 target,
                 bbox=np.array([0, 0, 512, 512]),
@@ -177,12 +268,37 @@ class FrameEdits:
                 ),
                 interpolation=interp_mode,
             )
-
             target_face_256 = self.t256_face(target_face_512)
-
             x_s_info = self.models_processor.lp_motion_extractor(
                 target_face_256, "Human-Face"
             )
+
+            # --- SEQUENTIAL SMOOTHING BLOCK (TARGET) ---
+            if use_smoothing:
+
+                def smooth_target_logic(smoother, info, t_idx):
+                    (
+                        info["pitch"],
+                        info["yaw"],
+                        info["roll"],
+                        info["t"],
+                        info["scale"],
+                    ) = smoother.smooth_pose(
+                        info["pitch"],
+                        info["yaw"],
+                        info["roll"],
+                        info["t"],
+                        info["scale"],
+                        frame_t=t_idx,
+                    )
+                    info["exp"] = smoother.smooth_expression(info["exp"], frame_t=t_idx)
+                    return info
+
+                x_s_info = state["target_smoother"].process_ordered(
+                    frame_number, smooth_target_logic, x_s_info, frame_number
+                )
+
+            # Prepare Target Features
             x_c_s = x_s_info["kp"]
             R_s = faceutil.get_rotation_matrix(
                 x_s_info["pitch"], x_s_info["yaw"], x_s_info["roll"]
@@ -200,17 +316,11 @@ class FrameEdits:
             )
             default_delta_exp = default_delta_raw[..., :-2].reshape(x_s.shape[0], 21, 3)
 
-            # Indices
-            eye_indices = [11, 13, 15, 16, 18]
-            lip_indices = [6, 12, 14, 17, 19, 20]
-            brow_indices = [1, 2]
-            contour_indices = [0, 3, 4, 5, 8, 9]
-
-            all_indices = set(range(21))
-            reserved_indices = set(
-                eye_indices + lip_indices + brow_indices + contour_indices
-            )
-            face_indices = list(all_indices - reserved_indices)
+            # --- INDICES DEFINITION ---
+            # Integrated Logic: Brows -> Eyes, Jaw -> Lips
+            # Excluding 'face' (cheeks/nose) to preserve identity shape.
+            eye_indices = [1, 2, 11, 13, 15, 16, 18]
+            lip_indices = [3, 6, 12, 14, 17, 19, 20]
 
             # Anchor
             R_anchor = R_s
@@ -218,87 +328,141 @@ class FrameEdits:
             t_anchor[..., 2].fill_(0)
             scale_anchor = x_s_info["scale"]
 
-            mode = parameters.get("FaceExpressionModeSelection", "Advanced")
-
-            # Load Lip Array
+            # Load Lip Array (Neutral reference for lips)
             lp_lip_array = torch.from_numpy(self.models_processor.lp_lip_array).to(
                 dtype=torch.float32, device=self.models_processor.device
             )
 
+            # --- SHARED HELPER FUNCTION ---
+            def get_component_motion(
+                indices,
+                driving_exp,
+                multiplier,
+                extra_delta=0,
+                is_relative=False,
+                neutral_ref=None,
+                use_boost=False,
+            ):
+                """
+                Helper to calculate motion with 'Smart Dynamic Boost'.
+                Args:
+                    use_boost: If True, applies the Micro-Expression Logic.
+                """
+                delta_local = x_s_info["exp"].clone()
+
+                # [CALIBRATION] Internal Attenuation
+                # Raw LivePortrait transfer at 1.0 is often topologically exaggerated (Joker effect).
+                # We apply a base attenuation of 0.6 so that UI Slider 1.0 feels "Natural".
+                calibration_factor = 0.60
+
+                if is_relative:
+                    # Relative Motion Calculation
+                    ref = neutral_ref if neutral_ref is not None else 0
+                    if isinstance(ref, torch.Tensor) and ref.shape[-2] == 21:
+                        ref_part = ref[..., indices, :]
+                    else:
+                        ref_part = ref
+
+                    # Calculate the raw difference (motion intent)
+                    raw_diff = driving_exp[:, indices, :] - ref_part
+
+                    # Apply Calibration immediately to the raw difference
+                    raw_diff = raw_diff * calibration_factor
+
+                    # --- SMART DYNAMIC BOOST ---
+                    # Logic: If boost > 1.0, only enhance small signals (micro-expressions).
+                    # Large signals are kept closer to 1.0 to avoid distortion.
+                    boost_val = micro_expression_boost if use_boost else 1.0
+
+                    if use_boost and boost_val > 1.0:
+                        magnitude = torch.abs(raw_diff)
+                        decay = torch.exp(-10.0 * magnitude)
+                        dynamic_scale = 1.0 + (boost_val - 1.0) * decay
+                        diff = raw_diff * dynamic_scale
+                    else:
+                        diff = raw_diff * boost_val
+
+                    delta_local[:, indices, :] = x_s_info["exp"][:, indices, :] + diff
+                else:
+                    # Absolute Motion (Rarely used, but dampened for safety)
+                    # We blend the driving exp with the source exp to dampen it.
+                    target_exp = driving_exp[:, indices, :]
+                    current_exp = x_s_info["exp"][:, indices, :]
+
+                    # Linear Interpolation towards target based on calibration
+                    delta_local[:, indices, :] = (
+                        current_exp * (1 - calibration_factor)
+                        + target_exp * calibration_factor
+                    )
+
+                # Projection & Refinement
+                x_proj = scale_anchor * (x_c_s @ R_anchor + delta_local) + t_anchor
+                raw_delta = self.models_processor.lp_stitch(
+                    x_s, x_proj, face_editor_type
+                )
+                refinement_exp = raw_delta[..., :-2].reshape(x_s.shape[0], 21, 3)
+
+                x_target = x_proj + (refinement_exp - default_delta_exp) + extra_delta
+                return (x_target - x_s) * multiplier
+
+            accumulated_motion = torch.zeros_like(x_s)
+
+            # --- MODE PROCESSING ---
             if mode == "Simple":
+                # SIMPLE MODE: Explicitly enabled features, ignoring Advanced Toggles
                 driving_multiplier = parameters.get(
                     "FaceExpressionFriendlyFactorDecimalSlider", 1.0
                 )
+
+                # Logic: "all" means Eyes+Lips. "Face" is ignored in UI logic.
                 animation_region = parameters.get(
                     "FaceExpressionAnimationRegionSelection", "all"
                 )
-                if animation_region == "all":
-                    animation_region = "eyes,lips,brows,face"
+                if not animation_region:
+                    animation_region = "all"
 
+                has_eyes = "eyes" in animation_region or "all" in animation_region
+                has_lips = "lips" in animation_region or "all" in animation_region
+
+                # Lip Normalization Logic (Optional)
                 flag_normalize_lip = parameters.get(
                     "FaceExpressionNormalizeLipsEnableToggle", True
                 )
                 lip_normalize_threshold = parameters.get(
                     "FaceExpressionNormalizeLipsThresholdDecimalSlider", 0.03
                 )
-
-                lip_delta_norm = 0
+                lips_retarget_delta = 0
                 if flag_normalize_lip and source_lmk is not None:
+                    # Use Smoothed Ratios
                     c_d_lip_before = [0.0]
                     combined_lip_ratio = faceutil.calc_combined_lip_ratio(
                         c_d_lip_before, source_lmk, device=self.models_processor.device
                     )
                     if combined_lip_ratio[0][0] >= lip_normalize_threshold:
-                        lip_delta_norm = self.models_processor.lp_retarget_lip(
+                        lips_retarget_delta = self.models_processor.lp_retarget_lip(
                             x_s, combined_lip_ratio
                         )
 
-                components_map = {
-                    "eyes": eye_indices,
-                    "lips": lip_indices,
-                    "brows": brow_indices,
-                    "face": face_indices,
-                }
+                # Execute logic (Relative for Eyes, Relative for Lips in Simple Mode)
+                if has_eyes:
+                    accumulated_motion += get_component_motion(
+                        eye_indices,
+                        x_d_i_info["exp"],
+                        driving_multiplier,
+                        is_relative=True,
+                        use_boost=False,
+                    )
 
-                accumulated_motion = torch.zeros_like(x_s)
-
-                for comp_name, comp_indices in components_map.items():
-                    if comp_name in animation_region:
-                        delta_comp = x_s_info["exp"].clone()
-
-                        if comp_name == "lips":
-                            delta_comp[:, comp_indices, :] = (
-                                x_s_info["exp"] + (x_d_i_info["exp"] - lp_lip_array)
-                            )[:, comp_indices, :]
-                        else:
-                            delta_comp[:, comp_indices, :] = x_d_i_info["exp"][
-                                :, comp_indices, :
-                            ]
-
-                        # Projection & Stitching
-                        x_comp_proj = (
-                            scale_anchor * (x_c_s @ R_anchor + delta_comp) + t_anchor
-                        )
-                        raw_delta_comp = self.models_processor.lp_stitch(
-                            x_s, x_comp_proj, face_editor_type
-                        )
-
-                        # Zero-Translation Logic
-                        refinement_exp = raw_delta_comp[..., :-2].reshape(
-                            x_s.shape[0], 21, 3
-                        )
-                        x_target_comp = x_comp_proj + (
-                            refinement_exp - default_delta_exp
-                        )
-
-                        if comp_name == "lips" and isinstance(
-                            lip_delta_norm, torch.Tensor
-                        ):
-                            x_target_comp += lip_delta_norm
-
-                        accumulated_motion += x_target_comp - x_s
-
-                x_d_i_new = x_s + (accumulated_motion * driving_multiplier)
+                if has_lips:
+                    accumulated_motion += get_component_motion(
+                        lip_indices,
+                        x_d_i_info["exp"],
+                        driving_multiplier,
+                        extra_delta=lips_retarget_delta,
+                        is_relative=True,
+                        neutral_ref=lp_lip_array,
+                        use_boost=False,
+                    )
 
             else:
                 # ADVANCED MODE
@@ -308,24 +472,15 @@ class FrameEdits:
                 driving_multiplier_lips = parameters.get(
                     "FaceExpressionFriendlyFactorLipsDecimalSlider", 1.0
                 )
-                driving_multiplier_gen = parameters.get(
-                    "FaceExpressionFriendlyFactorGeneralDecimalSlider", 1.0
-                )
 
                 flag_activate_eyes = parameters.get("FaceExpressionEyesToggle", False)
                 flag_activate_lips = parameters.get("FaceExpressionLipsToggle", False)
-                flag_activate_general = parameters.get(
-                    "FaceExpressionGeneralToggle", False
-                )
 
                 flag_relative_eyes = parameters.get(
                     "FaceExpressionRelativeEyesToggle", False
                 )
                 flag_relative_lips = parameters.get(
                     "FaceExpressionRelativeLipsToggle", False
-                )
-                flag_relative_general = parameters.get(
-                    "FaceExpressionRelativeGeneralToggle", False
                 )
 
                 # --- Normalization Config ---
@@ -340,9 +495,9 @@ class FrameEdits:
                 )
                 combined_eyes_ratio_normalize = None
 
-                # --- RESTORED LOGIC: Calculate Normalized Eye Ratio ---
+                # Calculate Normalized Eye Ratio using SMOOTHED list
                 if flag_normalize_eyes and source_lmk is not None:
-                    c_d_eyes_normalize = c_d_eyes_lst
+                    c_d_eyes_normalize = c_d_eyes_lst  # Already smoothed above
                     eyes_ratio = np.array([c_d_eyes_normalize[0][0]], dtype=np.float32)
                     eyes_ratio_normalize = max(eyes_ratio, 0.10)
                     eyes_ratio_l = min(c_d_eyes_normalize[0][0], eyes_normalize_max)
@@ -368,49 +523,6 @@ class FrameEdits:
                             )
                         )
 
-                # Helper to calculate full motion vector
-                def get_component_motion(
-                    indices,
-                    driving_exp,
-                    multiplier,
-                    extra_delta=0,
-                    is_relative=False,
-                    neutral_ref=None,
-                    use_boost=False,
-                ):
-                    delta_local = x_s_info["exp"].clone()
-
-                    if is_relative:
-                        # RELATIVE
-                        ref = neutral_ref if neutral_ref is not None else 0
-                        if isinstance(ref, torch.Tensor) and ref.shape[-2] == 21:
-                            ref_part = ref[..., indices, :]
-                        else:
-                            ref_part = ref
-
-                        boost_factor = micro_expression_boost if use_boost else 1.0
-                        diff = (driving_exp[:, indices, :] - ref_part) * boost_factor
-                        delta_local[:, indices, :] = (
-                            x_s_info["exp"][:, indices, :] + diff
-                        )
-                    else:
-                        # ABSOLUTE
-                        delta_local[:, indices, :] = driving_exp[:, indices, :]
-
-                    # Projection & Refinement
-                    x_proj = scale_anchor * (x_c_s @ R_anchor + delta_local) + t_anchor
-                    raw_delta = self.models_processor.lp_stitch(
-                        x_s, x_proj, face_editor_type
-                    )
-                    refinement_exp = raw_delta[..., :-2].reshape(x_s.shape[0], 21, 3)
-
-                    x_target = (
-                        x_proj + (refinement_exp - default_delta_exp) + extra_delta
-                    )
-                    return (x_target - x_s) * multiplier
-
-                accumulated_motion = torch.zeros_like(x_s)
-
                 if flag_activate_eyes:
                     eyes_retarget_delta = 0
                     if parameters.get(
@@ -421,13 +533,13 @@ class FrameEdits:
                             1.0,
                         )
 
-                        # --- RESTORED LOGIC: Choose between Raw or Normalized Ratio ---
                         if (
                             flag_normalize_eyes
                             and combined_eyes_ratio_normalize is not None
                         ):
                             target_eye_ratio = combined_eyes_ratio_normalize
                         else:
+                            # Use Smoothed Ratios
                             target_eye_ratio = faceutil.calc_combined_eye_ratio(
                                 c_d_eyes_lst,
                                 source_lmk,
@@ -457,6 +569,7 @@ class FrameEdits:
                             "FaceExpressionRetargetingLipsMultiplierBothDecimalSlider",
                             1.0,
                         )
+                        # Use Smoothed Ratios
                         c_d_lip = faceutil.calc_combined_lip_ratio(
                             c_d_lip_lst, source_lmk, device=self.models_processor.device
                         )
@@ -474,20 +587,9 @@ class FrameEdits:
                         use_boost=True,
                     )
 
-                if flag_activate_general:
-                    gen_indices = brow_indices + face_indices
-                    accumulated_motion += get_component_motion(
-                        gen_indices,
-                        x_d_i_info["exp"],
-                        driving_multiplier_gen,
-                        is_relative=flag_relative_general,
-                        neutral_ref=0,
-                        use_boost=False,
-                    )
-
-                x_d_i_new = x_s + accumulated_motion
-
             # --- 5. GENERATE FINAL IMAGE ---
+            x_d_i_new = x_s + accumulated_motion
+
             out = self.models_processor.lp_warp_decode(
                 f_s, x_s, x_d_i_new, face_editor_type
             )
@@ -501,7 +603,7 @@ class FrameEdits:
             out = faceutil.pad_image_by_size(out, dsize)
             out = v2.functional.affine(
                 out,
-                t.rotation * 57.2958,
+                t.rotation * 57.2958,  # Convert radians to degrees
                 translate=(t.translation[0], t.translation[1]),
                 scale=t.scale,
                 shear=(0.0, 0.0),
@@ -524,6 +626,15 @@ class FrameEdits:
         """
         Applies Face Editor manipulations (Pose, Gaze, Expression) to the face via manual sliders.
         Optimized: Removed explicit CPU/GPU sync.
+
+        Args:
+            img: The original image/frame.
+            swap_restorecalc: The reference face for detection (usually detection happens earlier).
+            parameters: Global parameters dictionary.
+            control: UI control dictionary.
+
+        Returns:
+            torch.Tensor: The manipulated face image.
         """
 
         use_mean_eyes = parameters.get("LandmarkMeanEyesToggle", False)
@@ -596,51 +707,56 @@ class FrameEdits:
                 )
                 x_s_user = faceutil.transform_keypoint(x_s_info)
 
-                # Apply Manual Sliders
+                # --- Create Tensors from Manual Sliders ---
+                device = self.models_processor.device
+
+                # Position
                 mov_x = torch.tensor(parameters["XAxisMovementDecimalSlider"]).to(
-                    self.models_processor.device
+                    device
                 )
                 mov_y = torch.tensor(parameters["YAxisMovementDecimalSlider"]).to(
-                    self.models_processor.device
+                    device
                 )
                 mov_z = torch.tensor(parameters["ZAxisMovementDecimalSlider"]).to(
-                    self.models_processor.device
+                    device
                 )
+
+                # Eyes/Gaze
                 eyeball_direction_x = torch.tensor(
                     parameters["EyeGazeHorizontalDecimalSlider"]
-                ).to(self.models_processor.device)
+                ).to(device)
                 eyeball_direction_y = torch.tensor(
                     parameters["EyeGazeVerticalDecimalSlider"]
-                ).to(self.models_processor.device)
-                smile = torch.tensor(parameters["MouthSmileDecimalSlider"]).to(
-                    self.models_processor.device
-                )
-                wink = torch.tensor(parameters["EyeWinkDecimalSlider"]).to(
-                    self.models_processor.device
-                )
+                ).to(device)
+                wink = torch.tensor(parameters["EyeWinkDecimalSlider"]).to(device)
                 eyebrow = torch.tensor(parameters["EyeBrowsDirectionDecimalSlider"]).to(
-                    self.models_processor.device
+                    device
                 )
+
+                # Mouth
+                smile = torch.tensor(parameters["MouthSmileDecimalSlider"]).to(device)
                 lip_variation_zero = torch.tensor(
                     parameters["MouthPoutingDecimalSlider"]
-                ).to(self.models_processor.device)
+                ).to(device)
                 lip_variation_one = torch.tensor(
                     parameters["MouthPursingDecimalSlider"]
-                ).to(self.models_processor.device)
+                ).to(device)
                 lip_variation_two = torch.tensor(
                     parameters["MouthGrinDecimalSlider"]
-                ).to(self.models_processor.device)
+                ).to(device)
                 lip_variation_three = torch.tensor(
                     parameters["LipsCloseOpenSlider"]
-                ).to(self.models_processor.device)
+                ).to(device)
 
                 x_c_s = x_s_info["kp"]
                 delta_new = x_s_info["exp"]
                 scale_new = x_s_info["scale"]
                 t_new = x_s_info["t"]
+
+                # Calculate New Rotation Matrix
                 R_d_new = (R_d_user @ R_s_user.permute(0, 2, 1)) @ R_s_user
 
-                # Apply modifications
+                # --- Apply Modifications to Expression Delta ---
                 if eyeball_direction_x != 0 or eyeball_direction_y != 0:
                     delta_new = faceutil.update_delta_new_eyeball_direction(
                         eyeball_direction_x, eyeball_direction_y, delta_new
@@ -672,10 +788,11 @@ class FrameEdits:
                 if mov_y != 0:
                     delta_new = faceutil.update_delta_new_mov_y(mov_y, delta_new)
 
+                # Calculate final driving keypoints
                 x_d_new = mov_z * scale_new * (x_c_s @ R_d_new + delta_new) + t_new
                 eyes_delta, lip_delta = None, None
 
-                # Retargeting Sliders
+                # --- Retargeting Sliders (Opening/Closing) ---
                 input_eye_ratio = max(
                     min(
                         init_source_eye_ratio
@@ -716,12 +833,14 @@ class FrameEdits:
                         parameters["FaceEditorTypeSelection"],
                     )
 
+                # Add retargeting deltas to the main motion
                 x_d_new = (
                     x_d_new
                     + (eyes_delta if eyes_delta is not None else 0)
                     + (lip_delta if lip_delta is not None else 0)
                 )
 
+                # Optional Stitching
                 flag_stitching_retargeting_input: bool = kwargs.get(
                     "flag_stitching_retargeting_input", True
                 )
@@ -730,13 +849,14 @@ class FrameEdits:
                         x_s_user, x_d_new, parameters["FaceEditorTypeSelection"]
                     )
 
+                # Generate Image
                 out = self.models_processor.lp_warp_decode(
                     f_s_user, x_s_user, x_d_new, parameters["FaceEditorTypeSelection"]
                 )
                 out = torch.squeeze(out)
                 out = out.clamp_(0, 1)
 
-            # --- POST-PROCESSING ---
+            # --- POST-PROCESSING (Paste Back) ---
             t = trans.SimilarityTransform()
             t.params[0:2] = M_c2o
             dsize = (img.shape[1], img.shape[2])
@@ -767,6 +887,15 @@ class FrameEdits:
     ) -> torch.Tensor:
         """
         Applies digital makeup to the face using face parser masks.
+
+        Args:
+            img: The original image tensor.
+            kps: Keypoints of the face.
+            parameters: Global parameters dictionary.
+            control: Control settings dictionary.
+
+        Returns:
+            torch.Tensor: Image with makeup applied.
         """
         use_mean_eyes = parameters.get("LandmarkMeanEyesToggle", False)
 
@@ -806,8 +935,10 @@ class FrameEdits:
             out, mask_out = self.models_processor.apply_face_makeup(
                 original_face_512, parameters
             )
+
+            # Apply strict 1 check (kept for non-regression / future toggle)
             if 1:
-                # Gaussian blur for soft blending
+                # Gaussian blur for soft blending of the crop mask
                 gauss = v2.GaussianBlur(kernel_size=5 * 2 + 1, sigma=(5 + 1) * 0.2)
                 out = torch.clamp(torch.div(out, 255.0), 0, 1).type(torch.float32)
                 mask_crop = gauss(self.models_processor.lp_mask_crop)

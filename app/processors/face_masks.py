@@ -17,25 +17,35 @@ _VGG_STD = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
 
 
 class FaceMasks:
+    """
+    Manages mask generation and manipulation for face swapping.
+    Handles FaceParser, Occluder, XSeg, CLIP, and VGG-based differencing.
+    """
+
     def __init__(self, models_processor: "ModelsProcessor"):
         self.models_processor = models_processor
+        # Caches for morphological operations to avoid re-allocating tensors
         self._morph_kernels: Dict[tuple, torch.Tensor] = {}
         self._kernel_cache: Dict[str, torch.Tensor] = {}
         self._meshgrid_cache: Dict[tuple, tuple[torch.Tensor, torch.Tensor]] = {}
         self._blur_cache: Dict[tuple, transforms.GaussianBlur] = {}
+
         self.clip_model_loaded = False
         self.active_models: set[str] = set()
 
     def unload_models(self):
-        """Unloads all models managed by this class."""
+        """Unloads all models managed by this class via the processor."""
         with self.models_processor.model_lock:
             for model_name in list(self.active_models):
                 self.models_processor.unload_model(model_name)
             self.active_models.clear()
 
+    # --- Inference Helpers ---
+
     def _faceparser_labels(self, img_uint8_3x512x512: torch.Tensor) -> torch.Tensor:
         """
-        Runs FaceParser on 512x512 input and returns NATIVE 512x512 labels.
+        Runs FaceParser on a 512x512 input.
+        Returns: NATIVE 512x512 label tensor (Long).
         """
         model_name = "FaceParser"
         ort_session = self.models_processor.models.get(model_name)
@@ -43,15 +53,17 @@ class FaceMasks:
             ort_session = self.models_processor.load_model(model_name)
 
         if not ort_session:
+            # Fallback empty labels
             return torch.zeros(
                 (512, 512), dtype=torch.long, device=img_uint8_3x512x512.device
             )
 
-        # Preprocessing
+        # Preprocessing: [0..255] -> [0..1] -> Normalize
         x = img_uint8_3x512x512.float().div(255.0)
         x = v2.functional.normalize(x, (0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
         x = x.unsqueeze(0).contiguous()
 
+        # Binding I/O
         out = torch.empty((1, 19, 512, 512), device=self.models_processor.device)
         io = ort_session.io_binding()
         io.bind_input(
@@ -71,6 +83,7 @@ class FaceMasks:
             out.data_ptr(),
         )
 
+        # Handle Lazy TensorRT Build
         is_lazy_build = self.models_processor.check_and_clear_pending_build(model_name)
         if is_lazy_build:
             self.models_processor.show_build_dialog.emit(
@@ -88,53 +101,75 @@ class FaceMasks:
             if is_lazy_build:
                 self.models_processor.hide_build_dialog.emit()
 
+        # Argmax to get class indices: (1, 19, 512, 512) -> (512, 512)
         labels_512 = out.argmax(dim=1).squeeze(0).to(torch.long)
         return labels_512
 
+    # --- Mouth Processing Logic ---
+
     def _create_aligned_mouth_overlay(
-        self, img_orig, labels_orig, labels_swap, parameters
-    ):
+        self,
+        img_orig: torch.Tensor,
+        labels_orig: torch.Tensor,
+        labels_swap: torch.Tensor,
+        parameters: dict,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """
-        STABILIZED ALIGNMENT WITH BLENDING:
-        1. Rigid alignment (Scale/Translate) based on width.
-        2. Soft edges on the mask to prevent contour artifacts.
+        Creates an aligned mouth overlay from the original image to the swap image using rigid alignment (Affine).
+
+        Improvements:
+        - Uses morphological closing to fill gaps in the parser mask.
+        - Robust centroid calculation.
+        - Dynamic scaling based on width ratio.
+
+        Args:
+            img_orig: Source image tensor (C, H, W).
+            labels_orig: FaceParser labels for source (H, W).
+            labels_swap: FaceParser labels for destination (H, W).
+            parameters: Dictionary of UI parameters.
+
+        Returns:
+            (overlay, overlay_mask): The warped mouth image and its alpha mask.
         """
         # 1. Define Regions
-        mouth_classes = (labels_orig == 11) | (labels_orig == 12) | (labels_orig == 13)
-        if mouth_classes.sum() == 0:
-            return None, None
-
+        # Class 11: Inner Mouth, 12: Upper Lip, 13: Lower Lip
+        mouth_classes_orig = (
+            (labels_orig == 11) | (labels_orig == 12) | (labels_orig == 13)
+        )
         mouth_classes_swap = (
             (labels_swap == 11) | (labels_swap == 12) | (labels_swap == 13)
         )
-        if mouth_classes_swap.sum() == 0:
+
+        # Safety check
+        if mouth_classes_orig.sum() == 0 or mouth_classes_swap.sum() == 0:
             return None, None
 
-        hole_mask = labels_swap == 11
+        # 2. Define the "Hole" Mask (Inner Mouth to replace)
+        hole_mask = (labels_swap == 11).float()
         if hole_mask.sum() == 0:
             return None, None
 
-        # 2. Get Coordinates
-        y_o, x_o = torch.where(mouth_classes)
+        # 3. Get Coordinates for alignment
+        y_o, x_o = torch.where(mouth_classes_orig)
         y_s, x_s = torch.where(mouth_classes_swap)
 
-        # 3. Calculate Centroids
+        # Calculate Centroids
         cy_o, cx_o = y_o.float().mean(), x_o.float().mean()
         cy_s, cx_s = y_s.float().mean(), x_s.float().mean()
 
-        # 4. Calculate Widths
+        # Calculate Widths
         w_o = (x_o.max() - x_o.min()).float()
         w_s = (x_s.max() - x_s.min()).float()
 
-        # 5. Calculate Transformations
-        # Scale based on Width Ratio + 15% Safety Margin
+        # 4. Calculate Transformations
+        # Scale based on Width Ratio + User adjusted margin (default 1.05)
         mouthzoom = parameters.get("MouthParserStretchDecimalSlider", 1.05)
         scale_factor = (w_s / (w_o + 1e-6)) * mouthzoom
 
         translate_x = cx_s - cx_o
         translate_y = cy_s - cy_o
 
-        # 6. Apply Affine Transform
+        # 5. Apply Affine Transform to the Image
         overlay = v2.functional.affine(
             img_orig,
             angle=0,
@@ -145,12 +180,11 @@ class FaceMasks:
             center=[cx_o.item(), cy_o.item()],
         )
 
-        # 7. Create Mask with Soft Edges
-        # Convert boolean mask to float
-        overlay_mask = hole_mask.float()
+        # 6. Mask Post-Processing
+        # Morphological closing to fill small holes (e.g. undetected teeth)
+        overlay_mask = self._dilate_binary(hole_mask, 2, mode="conv")
 
-        # Apply slight blur to edges to fix "cutting contours" artifacts
-        # We unsqueeze to [1, H, W] for the transform, then squeeze back
+        # Apply slight blur to edges for soft blending
         overlay_mask = v2.functional.gaussian_blur(
             overlay_mask.unsqueeze(0), kernel_size=5, sigma=1.5
         ).squeeze(0)
@@ -162,18 +196,17 @@ class FaceMasks:
         Public helper to retrieve just the mouth overlay.
         Used by FrameWorker to inject the mouth BEFORE the Face Restorer runs.
         """
-        # Check requirements
         if not parameters.get("MouthParserStretchToggle", False):
             return None
 
-        # Run inference
         labels_swap = self._faceparser_labels(swap_img)
         labels_orig = self._faceparser_labels(original_img)
 
-        # Generate Overlay using the Rigid Alignment logic
         return self._create_aligned_mouth_overlay(
             original_img, labels_orig, labels_swap, parameters
         )
+
+    # --- Main Mask Processing Pipeline ---
 
     def process_masks_and_masks(
         self,
@@ -182,6 +215,18 @@ class FaceMasks:
         parameters: dict,
         control: dict,
     ) -> dict:
+        """
+        Generates all necessary masks (FaceParser, Mouth, Texture) based on settings.
+
+        Args:
+            swap_restorecalc: The swapped/restored face tensor.
+            original_face_512: The original face tensor.
+            parameters: Global parameters.
+            control: UI controls.
+
+        Returns:
+            Dictionary containing the generated masks.
+        """
         device = self.models_processor.device
         mode = control.get("DilatationTypeSelection", "conv")
         result = {"swap_formask": swap_restorecalc}
@@ -195,7 +240,6 @@ class FaceMasks:
         )
 
         # --- Check Requirements ---
-        # Mouth stretch is now an independent trigger
         need_mouth_stretch = parameters.get("MouthParserStretchToggle", False)
 
         need_parser = parameters.get("FaceParserEnableToggle", False) or (
@@ -215,11 +259,11 @@ class FaceMasks:
         labels_swap = None
         labels_orig = None
 
-        # We need labels if Parser is ON, OR MouthStretch is ON, OR XSegMouth is ON
+        # Determine if we need to run FaceParser
         if need_parser or need_parser_mouth or need_mouth_stretch:
             labels_swap = self._faceparser_labels(swap_restorecalc)
 
-        # We need Original labels if (Parser ON OR MouthStretch ON)
+        # We need Original labels if Parser/MouthStretch/ExcludeMask is active
         should_get_orig_labels = need_mouth_stretch or (
             need_parser
             and (
@@ -231,9 +275,8 @@ class FaceMasks:
         if should_get_orig_labels:
             labels_orig = self._faceparser_labels(original_face_512)
 
-        # ---------- MOUTH FIT & ALIGN LOGIC ----------
+        # ---------- 1. MOUTH FIT & ALIGN LOGIC ----------
         if need_mouth_stretch and labels_orig is not None and labels_swap is not None:
-            # Use the new Rigid/Stable Alignment function
             overlay, overlay_mask = self._create_aligned_mouth_overlay(
                 original_face_512, labels_orig, labels_swap, parameters
             )
@@ -249,7 +292,7 @@ class FaceMasks:
                 if control.get("CommandLineDebugEnableToggle", False):
                     print("[INFO] Mouth Align: Applied Stable Width Transform.")
 
-        # ---------- MOUTH (Grouped Optimization) ----------
+        # ---------- 2. MOUTH MASK (Grouped Optimization) ----------
         if need_parser_mouth:
             mouth = torch.zeros((512, 512), device=device, dtype=torch.float32)
             mouth_groups = {}
@@ -273,7 +316,7 @@ class FaceMasks:
 
             result["mouth"] = resize_to_target(mouth.unsqueeze(0)).clamp(0, 1).squeeze()
 
-        # ---------- FACEPARSER MASK (Grouped Optimization) ----------
+        # ---------- 3. FACEPARSER MASK (Grouped Optimization) ----------
         if parameters.get("FaceParserEnableToggle", False):
             fp = torch.zeros((512, 512), device=device, dtype=torch.float32)
             fp_groups = {}
@@ -331,7 +374,7 @@ class FaceMasks:
                 ).clamp(0, 1)
             result["FaceParser_mask"] = mask_final
 
-        # ---------- TEXTURE / DIFFERENCING EXCLUDE ----------
+        # ---------- 4. TEXTURE / DIFFERENCING EXCLUDE ----------
         if (
             parameters.get("TransferTextureEnableToggle", False)
             or parameters.get("DifferencingEnableToggle", False)
@@ -407,6 +450,8 @@ class FaceMasks:
 
         return result
 
+    # --- Morphological Helpers ---
+
     def _get_circle_kernel(self, r: int, device: str) -> torch.Tensor:
         key = (int(r), str(device))
         k = self._morph_kernels.get(key)
@@ -426,6 +471,7 @@ class FaceMasks:
     def _dilate_binary(
         self, m: torch.Tensor, r: int, mode: str = "conv"
     ) -> torch.Tensor:
+        """Applies dilation (r > 0) or erosion (r < 0) to a binary mask."""
         if r == 0:
             return m
         squeeze_back = False
@@ -457,24 +503,60 @@ class FaceMasks:
     def _mask_from_labels_lut(
         self, labels: torch.Tensor, classes: list[int]
     ) -> torch.Tensor:
+        """Fast binary mask generation from labels using a Lookup Table."""
         lut = torch.zeros(19, device=labels.device, dtype=torch.float32)
         if classes:
             lut[torch.tensor(classes, device=labels.device, dtype=torch.long)] = 1.0
         return lut[labels]
 
-    def apply_occlusion(self, img, amount):
+    # --- Occluder & XSeg ---
+
+    def apply_occlusion(self, img, amount, parameters=None, original_face_512=None):
+        """
+        Runs the Occluder model to mask out obstacles (hands, microphones, etc.).
+        Includes logic to protect the inner mouth (tongue/teeth) from being occluded.
+        """
         img = torch.div(img, 255)
         img = torch.unsqueeze(img, 0).contiguous()
+
+        # Output initialisation
         outpred = torch.ones(
             (256, 256), dtype=torch.float32, device=self.models_processor.device
         ).contiguous()
 
-        self.models_processor.run_occluder(img, outpred)
+        self.run_occluder(img, outpred)
 
         outpred = torch.squeeze(outpred)
+        # Binarize: True(1) = Face, False(0) = Occlusion
         outpred = outpred > 0
         outpred = torch.unsqueeze(outpred, 0).type(torch.float32)
 
+        # --- TONGUE PRIORITY LOGIC ---
+        # Ensures that objects inside the mouth (tongue, smoke) are not masked out
+        # if the user enabled "OccluderTonguePriority".
+        protected_mouth_region = None
+
+        if (
+            parameters is not None
+            and parameters.get("OccluderTonguePriorityToggle", False)
+            and original_face_512 is not None
+        ):
+            # 1. Get FaceParser labels for original face
+            labels = self._faceparser_labels(original_face_512)
+
+            # 2. Extract Inner Mouth (Class 11)
+            mouth_mask = self._mask_from_labels_lut(labels, [11])
+
+            # 3. Resize to 256x256 to match occluder
+            mouth_mask_input = mouth_mask.unsqueeze(0).unsqueeze(0)
+            mouth_mask_256 = F.interpolate(
+                mouth_mask_input, size=(256, 256), mode="nearest"
+            ).squeeze(0)
+
+            # 4. Identify "Obstacle in Mouth"
+            protected_mouth_region = (outpred < 0.5) * (mouth_mask_256 > 0.5)
+
+        # Standard Morphology (Size Slider)
         if amount > 0:
             if "3x3" not in self._kernel_cache:
                 self._kernel_cache["3x3"] = torch.ones(
@@ -506,6 +588,12 @@ class FaceMasks:
             outpred = torch.add(outpred, 1)
 
         outpred = torch.reshape(outpred, (1, 256, 256))
+
+        # --- RESTORE PROTECTED REGION ---
+        if protected_mouth_region is not None:
+            # Explicit float cast to avoid boolean subtraction error
+            outpred = outpred * (1.0 - protected_mouth_region.float())
+
         return outpred
 
     def run_occluder(self, image, output):
@@ -551,6 +639,43 @@ class FaceMasks:
         finally:
             if is_lazy_build:
                 self.models_processor.hide_build_dialog.emit()
+
+    def run_faceparser(self, img, out):
+        """
+        Robust runner for FaceParser that bypasses generic run_onnx
+        to avoid 'features' NodeArg error.
+        """
+        model_key = "FaceParser"
+
+        # 1. Try TensorRT Execution first (Preferred)
+        if hasattr(self.models_processor, "models_trt"):
+            trt_model = self.models_processor.models_trt.get(model_key)
+            if trt_model is not None:
+                trt_model.run(img, out)
+                return
+
+        # 2. Try ONNX Runtime Execution
+        session = self.models_processor.models.get(model_key)
+
+        if session is None:
+            session = self.models_processor.load_model(model_key)
+
+        if session is not None:
+            try:
+                output_names = [x.name for x in session.get_outputs()]
+                input_name = session.get_inputs()[0].name
+
+                if img.is_cuda:
+                    img_np = img.cpu().numpy()
+                else:
+                    img_np = img.numpy()
+
+                result = session.run(output_names, {input_name: img_np})[0]
+                out.copy_(torch.from_numpy(result))
+            except Exception as e:
+                print(f"[ERROR] run_faceparser (ONNX) failed: {e}")
+        else:
+            print("[ERROR] FaceParser model not found or failed to load.")
 
     def apply_dfl_xseg(self, img, amount, mouth, parameters):
         amount2 = -parameters["DFLXSeg2SizeSlider"]
@@ -801,6 +926,8 @@ class FaceMasks:
 
         return clip_mask.unsqueeze(0)
 
+    # --- Restoration Helpers (Eyes/Mouth) ---
+
     def soft_oval_mask(
         self, height, width, center, radius_x, radius_y, feather_radius=None
     ):
@@ -969,6 +1096,8 @@ class FaceMasks:
 
         return img_swap
 
+    # --- Difference & Perceptual Loss ---
+
     def apply_fake_diff(
         self,
         swapped_face,
@@ -980,6 +1109,10 @@ class FaceMasks:
         middle_value,
         parameters,
     ):
+        """
+        Calculates a fake difference map based on pixel-wise absolute difference.
+        Used for VGG mask emulation when VGG is disabled.
+        """
         diff = torch.abs(swapped_face - original_face)
 
         sample = diff.reshape(-1)
@@ -1028,6 +1161,10 @@ class FaceMasks:
         feature_layer,
         ExcludeVGGMaskEnableToggle,
     ):
+        """
+        Calculates perceptual difference using VGG features (ONNX).
+        Returns both the mapped mask and the raw normalized difference texture.
+        """
         feature_shapes = {
             "combo_relu3_3_relu3_1": (1, 512, 128, 128),
         }

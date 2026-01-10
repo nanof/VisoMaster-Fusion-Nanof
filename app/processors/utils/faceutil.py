@@ -1,6 +1,7 @@
 import math
 from math import sin, cos, acos, degrees, floor, ceil
 import threading
+import time
 
 import numpy as np
 import cv2
@@ -74,7 +75,34 @@ src5 = np.array(
     dtype=np.float32,
 )
 
-src = np.array([src1, src2, src3, src4, src5])
+# ^^^ Pitch Up (Tête en arrière)
+# Les yeux descendent légèrement, le nez remonte (plus proche des yeux), la bouche remonte
+src6 = np.array(
+    [
+        [39.730, 55.000],  # LE (Shifted Down)
+        [72.270, 55.000],  # RE (Shifted Down)
+        [56.000, 64.000],  # Nose (Shifted Up/Closer to eyes)
+        [42.463, 78.000],  # LM (Shifted Up)
+        [69.537, 78.000],  # RM (Shifted Up)
+    ],
+    dtype=np.float32,
+)
+
+# vvv Pitch Down (Tête en avant)
+# Les yeux remontent, le nez descend (s'éloigne des yeux), la bouche descend
+src7 = np.array(
+    [
+        [39.730, 45.000],  # LE (Shifted Up)
+        [72.270, 45.000],  # RE (Shifted Up)
+        [56.000, 75.000],  # Nose (Shifted Down/Further from eyes)
+        [42.463, 95.000],  # LM (Shifted Down)
+        [69.537, 95.000],  # RM (Shifted Down)
+    ],
+    dtype=np.float32,
+)
+
+# Ajout des nouveaux gabarits src6 et src7 à la liste
+src = np.array([src1, src2, src3, src4, src5, src6, src7])
 src_map = {112: src, 224: src * 2}
 
 arcface_src = np.array(
@@ -423,14 +451,14 @@ def get_arcface_template(image_size=112, mode="arcface112"):
 # lmk is prediction; src is template
 def estimate_norm_arcface_template(lmk, src=arcface_src):
     assert lmk.shape == (5, 2)
-    tform = trans.SimilarityTransform()
     lmk_tran = np.insert(lmk, 2, values=np.ones(5), axis=1)
     min_M = []
     min_index = []
     min_error = float("inf")
 
     for i in np.arange(src.shape[0]):
-        tform.estimate(lmk, src[i])
+        # CHANGE: Use from_estimate instead of instance.estimate
+        tform = trans.SimilarityTransform.from_estimate(lmk, src[i])
         M = tform.params[0:2, :]
         results = np.dot(M, lmk_tran.T)
         results = results.T
@@ -447,7 +475,6 @@ def estimate_norm_arcface_template(lmk, src=arcface_src):
 # lmk is prediction; src is template
 def estimate_norm(lmk, image_size=112, mode="arcface112"):
     assert lmk.shape == (5, 2)
-    tform = trans.SimilarityTransform()
     lmk_tran = np.insert(lmk, 2, values=np.ones(5), axis=1)
     min_M = []
     min_index = []
@@ -464,7 +491,8 @@ def estimate_norm(lmk, image_size=112, mode="arcface112"):
         src = float(image_size) / 112.0 * src_map[112]
 
     for i in np.arange(src.shape[0]):
-        tform.estimate(lmk, src[i])
+        # CHANGE: Use from_estimate instead of instance.estimate
+        tform = trans.SimilarityTransform.from_estimate(lmk, src[i])
         M = tform.params[0:2, :]
         results = np.dot(M, lmk_tran.T)
         results = results.T
@@ -498,13 +526,13 @@ def warp_face_by_bounding_box(img, bboxes, image_size=112):
     ).astype(np.float32)
 
     # Find transform
-    tform = trans.SimilarityTransform()
-    tform.estimate(source_points, target_points)
+    # CHANGE: Use from_estimate instead of instance.estimate
+    tform = trans.SimilarityTransform.from_estimate(source_points, target_points)
 
     # Transform
     img = v2.functional.affine(
         img,
-        tform.rotation,
+        tform.rotation * 57.2958,
         (tform.translation[0], tform.translation[1]),
         tform.scale,
         0,
@@ -904,10 +932,11 @@ def detect_img_color(img):
 
 def get_face_orientation(face_size, lmk):
     assert lmk.shape == (5, 2)
-    tform = trans.SimilarityTransform()
+    # CHANGE: Use from_estimate instead of instance.estimate
     src = np.squeeze(arcface_src, axis=0)
     src = float(face_size) / 112.0 * src
-    tform.estimate(lmk, src)
+
+    tform = trans.SimilarityTransform.from_estimate(lmk, src)
 
     angle_deg_to_front = np.rad2deg(tform.rotation)
 
@@ -3014,53 +3043,60 @@ class OneEuroFilter:
         self.x_prev = None
         self.dx_prev = None
         self.t_prev = None
-        self.lock = threading.Lock()  # <--- Thread lock for parallel access
 
     def __call__(self, x, t=None):
-        with self.lock:  # <--- Protect state update
-            if t is None:
-                if self.t_prev is None:
-                    t = 0
-                else:
-                    t = self.t_prev + 1.0 / self.freq
-
-            # Determine format (numpy or tensor)
-            is_tensor = torch.is_tensor(x)
-            device = x.device if is_tensor else None
-
-            if is_tensor:
-                x_np = x.detach().cpu().numpy()
+        """
+        Args:
+            x: Value to filter.
+            t: Timestamp or Frame Number (critical for async out-of-order execution).
+        """
+        if t is None:
+            if self.t_prev is None:
+                t = 0
             else:
-                x_np = x
+                t = self.t_prev + 1.0 / self.freq
 
-            if self.x_prev is None:
-                self.x_prev = x_np
-                self.dx_prev = np.zeros_like(x_np)
-                self.t_prev = t
-                return x
+        # Determine format (numpy or tensor)
+        is_tensor = torch.is_tensor(x)
+        device = x.device if is_tensor else None
 
-            dt = t - self.t_prev
-            # Prevent division by zero or negative time deltas in async environments
-            if dt <= 0:
-                return x if not is_tensor else torch.from_numpy(x_np).to(device)
+        if is_tensor:
+            x_np = x.detach().cpu().numpy()
+        else:
+            x_np = x
 
+        # Initialize state if first run
+        if self.x_prev is None:
+            self.x_prev = x_np
+            self.dx_prev = np.zeros_like(x_np)
             self.t_prev = t
+            return x
 
-            # Compute smoothing factor
-            dx = (x_np - self.x_prev) / dt
-            edx = self.exponential_smoothing(dx, self.dx_prev, dt, self.d_cutoff)
+        # Calculate dt based on explicit timestamp
+        dt = t - self.t_prev
 
-            # Use beta to adjust cutoff based on speed (jitter reduction vs responsiveness)
-            cutoff = self.min_cutoff + self.beta * np.abs(edx)
-            x_filtered = self.exponential_smoothing(x_np, self.x_prev, dt, cutoff)
+        # ASYNC SAFETY:
+        if dt <= 0:
+            return x if not is_tensor else torch.from_numpy(x_np).to(device)
 
-            self.x_prev = x_filtered
-            self.dx_prev = edx
+        # Normal forward progression
+        self.t_prev = t
 
-            # Return in original format
-            if is_tensor:
-                return torch.from_numpy(x_filtered).to(device)
-            return x_filtered
+        # Compute smoothing factor
+        dx = (x_np - self.x_prev) / dt
+        edx = self.exponential_smoothing(dx, self.dx_prev, dt, self.d_cutoff)
+
+        # Use beta to adjust cutoff based on speed (jitter reduction vs responsiveness)
+        cutoff = self.min_cutoff + self.beta * np.abs(edx)
+        x_filtered = self.exponential_smoothing(x_np, self.x_prev, dt, cutoff)
+
+        self.x_prev = x_filtered
+        self.dx_prev = edx
+
+        # Return in original format
+        if is_tensor:
+            return torch.from_numpy(x_filtered).to(device)
+        return x_filtered
 
     def exponential_smoothing(self, x, x_prev, dt, cutoff):
         tau = 1.0 / (2 * np.pi * cutoff)
@@ -3068,34 +3104,28 @@ class OneEuroFilter:
         return alpha * x + (1 - alpha) * x_prev
 
     def reset(self):
-        with self.lock:
-            self.x_prev = None
-            self.dx_prev = None
-            self.t_prev = None
+        self.x_prev = None
+        self.dx_prev = None
+        self.t_prev = None
 
 
 class SmartSmoother:
     """
-    Manages multiple OneEuroFilters for different facial features with optimized parameters.
-    This class is designed to be shared across threads.
+    Manages multiple OneEuroFilters for different facial features.
+    Updated for Async/Thread-Safe operations by passing 't' (frame number).
     """
 
     def __init__(self):
         # Configuration for specific features
-        # High Beta = Reactive (Eyes/Blink)
-        # Low Beta = Smooth (Head Pose)
         self.filters = {
-            "pitch": OneEuroFilter(min_cutoff=0.01, beta=0.1),  # Very smooth
-            "yaw": OneEuroFilter(min_cutoff=0.01, beta=0.1),
-            "roll": OneEuroFilter(min_cutoff=0.01, beta=0.1),
-            "t": OneEuroFilter(min_cutoff=0.01, beta=0.1),
-            "scale": OneEuroFilter(min_cutoff=0.01, beta=0.1),
-            # Expression is split into parts later, but this main filter handles the bulk
-            "exp_eyes": OneEuroFilter(min_cutoff=1.0, beta=15.0),  # Fast for blinks
-            "exp_mouth": OneEuroFilter(
-                min_cutoff=0.5, beta=0.5
-            ),  # Smooth for speech/noise
-            "exp_base": OneEuroFilter(min_cutoff=1.0, beta=2.0),  # General expression
+            "pitch": OneEuroFilter(min_cutoff=1.0, beta=0.8),
+            "yaw": OneEuroFilter(min_cutoff=1.0, beta=0.8),
+            "roll": OneEuroFilter(min_cutoff=1.0, beta=0.8),
+            "t": OneEuroFilter(min_cutoff=0.2, beta=0.2),
+            "scale": OneEuroFilter(min_cutoff=0.2, beta=0.2),
+            "exp_eyes": OneEuroFilter(min_cutoff=1.0, beta=1.5),
+            "exp_mouth": OneEuroFilter(min_cutoff=0.8, beta=1.2),
+            "exp_base": OneEuroFilter(min_cutoff=0.5, beta=0.5),
         }
 
     def reset(self):
@@ -3103,76 +3133,109 @@ class SmartSmoother:
         for key in self.filters:
             self.filters[key].reset()
 
-    def smooth_pose(self, pitch, yaw, roll, t, scale):
-        """Smooths rigid head motion."""
-        s_pitch = self.filters["pitch"](pitch)
-        s_yaw = self.filters["yaw"](yaw)
-        s_roll = self.filters["roll"](roll)
-        s_t = self.filters["t"](t)
-        s_scale = self.filters["scale"](scale)
+    def smooth_pose(self, pitch, yaw, roll, t, scale, frame_t=None):
+        """
+        Smooths rigid head motion.
+        Args:
+            frame_t: Explicit timestamp/frame number.
+        """
+        s_pitch = self.filters["pitch"](pitch, t=frame_t)
+        s_yaw = self.filters["yaw"](yaw, t=frame_t)
+        s_roll = self.filters["roll"](roll, t=frame_t)
+        s_t = self.filters["t"](t, t=frame_t)
+        s_scale = self.filters["scale"](scale, t=frame_t)
         return s_pitch, s_yaw, s_roll, s_t, s_scale
 
-    def smooth_expression(self, exp_tensor):
+    def smooth_expression(self, exp_tensor, frame_t=None):
         """
         Applies differentiated smoothing to the expression tensor.
-        Indices reference standard LivePortrait/FaceVerse expression mapping.
+        Args:
+            frame_t: Explicit timestamp/frame number.
         """
-        # Ensure tensor is CPU numpy for slicing/filtering, handling logic inside filters
-        # Indices:
-        # Eyes: 11, 13, 15, 16, 18
-        # Lips: 6, 12, 14, 17, 19, 20
+        # 1. Base Smoothing
+        exp_smooth = self.filters["exp_base"](exp_tensor, t=frame_t)
 
-        # 1. Base Smoothing (General features)
-        exp_smooth = self.filters["exp_base"](exp_tensor)
-
-        # If input is tensor, we might need to be careful about in-place ops on the result
-        # The filter returns the same type as input.
-
-        # 2. Targeted Smoothing (We run the filters, but we only inject the result into specific indices)
-        # Note: running the filter on the *whole* tensor for specific parts is inefficient but keeps logic simple.
-        # Ideally, we filter sliced data.
-
-        # Efficient approach: Extract parts, filter parts, re-inject.
-
-        # Eyes Slice
-        eye_indices = [11, 13, 15, 16, 18]
+        # 2. Targeted Smoothing (Injection)
+        eye_indices = [1, 2, 11, 13, 15, 16, 18]
         eyes_vals = exp_tensor[:, eye_indices, :]
-        eyes_smooth = self.filters["exp_eyes"](eyes_vals)
+        eyes_smooth = self.filters["exp_eyes"](eyes_vals, t=frame_t)
         exp_smooth[:, eye_indices, :] = eyes_smooth
 
-        # Mouth Slice
-        mouth_indices = [6, 12, 14, 17, 19, 20]
+        mouth_indices = [3, 6, 12, 14, 17, 19, 20]
         mouth_vals = exp_tensor[:, mouth_indices, :]
-        mouth_smooth = self.filters["exp_mouth"](mouth_vals)
+        mouth_smooth = self.filters["exp_mouth"](mouth_vals, t=frame_t)
         exp_smooth[:, mouth_indices, :] = mouth_smooth
 
         return exp_smooth
 
 
-def repair_mouth_inversion_203(landmarks):
+class SequentialSmartSmoother:
     """
-    Checks if inner lips are inverted (Lower lip above Upper lip) usually caused by occlusion (mic/food).
-    If inverted, it forces a minimal separation.
-    Based on standard 68-point topology mapped within 203.
+    Thread-Safe Wrapper that forces sequential execution of smoothing logic
+    even if called from asynchronous threads.
     """
 
-    up_idx = 100  # Approx center upper inner
-    lo_idx = 105  # Approx center lower inner
+    def __init__(self):
+        self.smoother = SmartSmoother()
+        self.next_expected_frame = 0
+        self.lock = threading.Lock()
+        self.condition = threading.Condition(self.lock)
+        self.last_activity = time.time()
 
-    # Sécurité simple : vérifier si le point central bas est au-dessus du point central haut
-    # (Y axis vers le bas en image coords)
-    if lo_idx < len(landmarks) and up_idx < len(landmarks):
-        y_up = landmarks[up_idx][1]
-        y_lo = landmarks[lo_idx][1]
+    def reset(self):
+        with self.lock:
+            self.smoother.reset()
+            self.next_expected_frame = 0
+            self.condition.notify_all()  # Release waiting threads
 
-        if y_lo < y_up:  # Inversion détectée
-            # On force une séparation minimale ou on moyenne
-            mid = (y_up + y_lo) / 2
-            separation = 2.0  # pixels
-            landmarks[up_idx][1] = mid - separation
-            landmarks[lo_idx][1] = mid + separation
+    def set_next_frame_index(self, idx):
+        """Force jump to a frame index (e.g. after Seek or Scene Cut)"""
+        with self.lock:
+            self.next_expected_frame = idx
+            self.smoother.reset()  # Cut creates discontinuity, so we reset filters
+            self.condition.notify_all()
 
-    return landmarks
+    def process_ordered(self, frame_number, func, *args, **kwargs):
+        """
+        Executes 'func' only when it's frame_number's turn.
+        Blocks the calling thread until previous frames are processed or timeout occurs.
+        """
+        with self.condition:
+            # 1. Wait Phase
+            # We wait if the current frame is 'in the future' relative to the sequence
+            while frame_number > self.next_expected_frame:
+                # Timeout safety: If frame N-1 takes too long (or is dropped), we skip it.
+                # Wait 0.01s at a time. Total 0.5s timeout.
+                self.condition.wait(timeout=0.02)
+
+                # Check for deadlock/dropped frames
+                if time.time() - self.last_activity > 0.5:
+                    # Assume dropped frame, advance counter to current
+                    self.next_expected_frame = frame_number
+                    break
+
+                # If we were woken up but it's still not our turn, loop again.
+
+            # 2. Execution Phase
+            # Even if we are "late" (frame_number < next_expected_frame), we execute
+            # (best effort) but we don't update the sequence counter heavily.
+
+            try:
+                result = func(self.smoother, *args, **kwargs)
+            except Exception as e:
+                print(f"Smoothing Error: {e}")
+                result = None  # Handle gracefully
+
+            # 3. Advancement Phase
+            if frame_number == self.next_expected_frame:
+                self.next_expected_frame += 1
+                self.last_activity = time.time()
+                self.condition.notify_all()  # Wake up the thread waiting for N+1
+
+            # If frame_number < next_expected_frame, it's a late frame.
+            # We just return the result (which might use slightly future state, but better than nothing).
+
+            return result
 
 
 def calc_face_yaw_pitch(kps):

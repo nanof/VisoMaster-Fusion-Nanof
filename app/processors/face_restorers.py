@@ -138,9 +138,11 @@ class FaceRestorers:
             if not isinstance(dst, np.ndarray) or len(dst) == 0:
                 return swapped_face_upscaled
 
-            tform = trans.SimilarityTransform()
             try:
-                tform.estimate(dst, self.models_processor.FFHQ_kps)
+                # Use from_estimate constructor instead of .estimate()
+                tform = trans.SimilarityTransform.from_estimate(
+                    dst, self.models_processor.FFHQ_kps
+                )
             except Exception:
                 return swapped_face_upscaled
             # Transform, scale, and normalize

@@ -124,28 +124,46 @@ class FaceSwappers:
         return self.run_recognize_direct(img, kps, similarity_type, arcface_model)
 
     def recognize(self, arcface_model, img, face_kps, similarity_type):
+        """
+        Generates the face embedding using the specified ArcFace model and alignment strategy.
+
+        Args:
+            arcface_model (str): Name of the model to use.
+            img (torch.Tensor): Input image tensor (CHW).
+            face_kps (np.ndarray): 5 facial landmarks.
+            similarity_type (str): Alignment strategy ('Optimal', 'Pearl', 'Opal').
+
+        Returns:
+            tuple: (embedding numpy array, cropped_face tensor HWC)
+        """
         ort_session = self.models_processor.models.get(arcface_model)
         if not ort_session:
             # This is a safety check; run_recognize_direct should prevent this.
             return None, None
 
+        # --- ALIGNMENT STRATEGIES ---
         if similarity_type == "Optimal":
-            # Find transform & Transform
+            # Mode 1: Optimal (Multi-Template)
+            # Leverages faceutil to check against 5 different templates (Front, Left, Right, Profiles).
+            # This provides the best alignment for faces at steep angles (profiles), improving embedding accuracy.
             img, _ = faceutil.warp_face_by_face_landmark_5(
                 img,
                 face_kps,
                 mode="arcfacemap",
                 interpolation=v2.InterpolationMode.BILINEAR,
             )
+
         elif similarity_type == "Pearl":
-            # Find transform
+            # Mode 2: Pearl (Wide Context)
+            # Uses a shifted center and wider crop (128x128) then resizes to 112x112.
+            # This captures more of the forehead and chin, useful when the detector is too tight.
             dst = self.models_processor.arcface_dst.copy()
-            dst[:, 0] += 8.0
+            dst[:, 0] += 8.0  # Shift X center to accommodate wider crop
 
-            tform = trans.SimilarityTransform()
-            tform.estimate(face_kps, dst)
+            # Use from_estimate to find the transform matrix
+            tform = trans.SimilarityTransform.from_estimate(face_kps, dst)
 
-            # Transform
+            # Apply affine transform to get 128x128 crop
             img = v2.functional.affine(
                 img,
                 tform.rotation * 57.2958,
@@ -154,16 +172,19 @@ class FaceSwappers:
                 0,
                 center=(0, 0),
             )
+            # Crop at 128 then resize to standard 112
             img = v2.functional.crop(img, 0, 0, 128, 128)
-            img = v2.Resize(
-                (112, 112), interpolation=v2.InterpolationMode.BILINEAR, antialias=False
-            )(img)
-        else:
-            # Find transform
-            tform = trans.SimilarityTransform()
-            tform.estimate(face_kps, self.models_processor.arcface_dst)
+            img = self.resize_112(img)
 
-            # Transform
+        else:
+            # Mode 3: Opal (Standard / Default)
+            # Standard ArcFace frontal alignment.
+            # Efficient and accurate for most frontal/semi-frontal faces.
+            tform = trans.SimilarityTransform.from_estimate(
+                face_kps, self.models_processor.arcface_dst
+            )
+
+            # Transform and crop directly to 112x112
             img = v2.functional.affine(
                 img,
                 tform.rotation * 57.2958,
@@ -174,12 +195,14 @@ class FaceSwappers:
             )
             img = v2.functional.crop(img, 0, 0, 112, 112)
 
+        # --- NORMALIZATION & PRE-PROCESSING ---
         if arcface_model == "Inswapper128ArcFace":
             cropped_image = img.permute(1, 2, 0).clone()
             if img.dtype == torch.uint8:
-                img = img.to(torch.float32)  # Convert to float32 if uint8
+                img = img.to(torch.float32)
             img = torch.sub(img, 127.5)
             img = torch.div(img, 127.5)
+
         elif arcface_model == "SimSwapArcFace":
             cropped_image = img.permute(1, 2, 0).clone()
             if img.dtype == torch.uint8:
@@ -187,16 +210,22 @@ class FaceSwappers:
             img = v2.functional.normalize(
                 img, (0.485, 0.456, 0.406), (0.229, 0.224, 0.225), inplace=False
             )
+
         else:
-            cropped_image = img.permute(1, 2, 0).clone()  # 112,112,3
+            # GhostArcFace, CSCSArcFace, etc.
+            cropped_image = img.permute(
+                1, 2, 0
+            ).clone()  # Store for display/debug (H,W,3)
             if img.dtype == torch.uint8:
-                img = img.to(torch.float32)  # Convert to float32 if uint8
-            # Normalize
+                img = img.to(torch.float32)
+            # Standard -1 to 1 normalization
             img = torch.div(img, 127.5)
             img = torch.sub(img, 1)
 
-        # Prepare data and find model parameters
+        # --- INFERENCE ---
+        # Prepare data (N, C, H, W)
         img = torch.unsqueeze(img, 0).contiguous()
+
         input_name = ort_session.get_inputs()[0].name
         output_names = [o.name for o in ort_session.get_outputs()]
 
@@ -213,15 +242,17 @@ class FaceSwappers:
         for name in output_names:
             io_binding.bind_output(name, self.models_processor.device)
 
-        # Run the model with lazy build handling
+        # Run the model with lazy build handling (TensorRT safety)
         self._run_model_with_lazy_build_check(arcface_model, ort_session, io_binding)
 
-        # Return embedding
+        # Return embedding (flattened) and the cropped image for visualization
         return np.array(io_binding.copy_outputs_to_cpu()).flatten(), cropped_image
 
     def preprocess_image_cscs(self, img, face_kps):
-        tform = trans.SimilarityTransform()
-        tform.estimate(face_kps, self.models_processor.FFHQ_kps)
+        # Use from_estimate
+        tform = trans.SimilarityTransform.from_estimate(
+            face_kps, self.models_processor.FFHQ_kps
+        )
 
         temp = v2.functional.affine(
             img,

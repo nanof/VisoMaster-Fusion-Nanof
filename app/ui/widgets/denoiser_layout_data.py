@@ -18,7 +18,7 @@ DENOISER_LAYOUT_DATA: Any = {
             "widget_type": "ParameterSlider",
             "label": "Base Seed",
             "control_name": "DenoiserBaseSeedSlider",
-            "min_value": "1",
+            "min_value": "0",
             "max_value": "999",
             "default": "220",
             "step": 1,
