@@ -166,7 +166,7 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
         },
         "BordermaskEnableToggle": {
             "level": 1,
-            "label": "Border mask options",
+            "label": "Border Mask",
             "default": False,
             "help": "A rectangle with adjustable bottom, left, right, top, and sides that masks the swapped face result back into the original image.",
         },

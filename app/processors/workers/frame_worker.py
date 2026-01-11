@@ -1835,6 +1835,9 @@ class FrameWorker(threading.Thread):
         )
         border_mask = torch.unsqueeze(border_mask, 0)
 
+        if not parameters.get("BordermaskEnableToggle", False):
+            return border_mask, border_mask.clone()
+
         top = parameters["BorderTopSlider"]
         left = parameters["BorderLeftSlider"]
         right = 128 - parameters["BorderRightSlider"]
@@ -2699,8 +2702,10 @@ class FrameWorker(threading.Thread):
                     mask_vgg_512 = torch.where(
                         mask_vgg_512 >= upper_thresh, upper_thresh, mask_vgg_512
                     )
+                    mask_final_512 = torch.max(mask_vgg_512, (1 - feature_mask))
+                else:
+                    mask_final_512 = (1 - feature_mask)
 
-                mask_final_512 = torch.max(mask_vgg_512, (1 - feature_mask))
                 mask_final_512 = torch.max(mask_final_512, 1 - calc_mask_dill).clamp(
                     0.0, 1.0
                 )

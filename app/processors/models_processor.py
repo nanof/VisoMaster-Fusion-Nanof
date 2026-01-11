@@ -233,6 +233,7 @@ class ModelsProcessor(QtCore.QObject):
             "trt_dump_ep_context_model": True,
             "trt_ep_context_file_path": "tensorrt-engines",
             "trt_layer_norm_fp32_fallback": True,
+            "trt_max_workspace_size": 8589934592,
             "trt_builder_optimization_level": 5,
         }
         # A set to keep track of models that have been loaded but
