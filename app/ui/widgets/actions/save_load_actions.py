@@ -352,9 +352,12 @@ def load_saved_workspace(
                 # Set assigned input face buttons
                 assigned_input_faces: list = target_face_data["assigned_input_faces"]
                 for assigned_input_face_id in assigned_input_faces:
-                    main_window.target_faces[face_id].assigned_input_faces[
-                        assigned_input_face_id
-                    ] = main_window.input_faces[assigned_input_face_id].embedding_store
+                    if assigned_input_face_id in main_window.input_faces:
+                        main_window.target_faces[face_id].assigned_input_faces[
+                            assigned_input_face_id
+                        ] = main_window.input_faces[assigned_input_face_id].embedding_store
+                    else:
+                        print(f"[WARN] Input face {assigned_input_face_id} missing from session. Skipping assignment.")
 
                 # Set assigned input embedding (Input face + merged embeddings)
                 assigned_input_embedding = {

@@ -1026,6 +1026,10 @@ class VideoProcessor(QObject):
         self.preroll_timer.stop()
         self.stop_live_sound()
 
+        # Face tracker defaults
+        self.main_window.models_processor.face_detectors.tracker = None
+        self.main_window.models_processor.face_detectors.track_history = {}
+
         # 3a. Release the capture object.
         print("[INFO] Releasing media capture to unblock feeder thread...")
         if self.media_capture:

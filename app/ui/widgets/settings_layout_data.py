@@ -275,6 +275,14 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "default": "RetinaFace",
             "help": "Select the face detection model to use for detecting faces in the input image or video.",
         },
+        "FaceTrackingEnableToggle": {
+            "level": 1,
+            "label": "Enable Face Tracking (ByteTrack)",
+            "default": False,
+            "help": "Uses ByteTrack to maintain face identities across frames. Improves stability during occlusions and allows lower detection thresholds.",
+            "exec_function": control_actions.handle_face_detector_tracking_reset, # Added reset helper
+            "exec_function_args": [],
+        },
         "DetectorScoreSlider": {
             "level": 1,
             "label": "Detect Score",

@@ -1325,12 +1325,13 @@ class FrameWorker(threading.Thread):
         ):
             dst = faceutil.get_arcface_template(image_size=512, mode="arcface128")
             dst = np.squeeze(dst)
-            tform = trans.SimilarityTransform.from_estimate(kps_5, dst)
+            # Use instance initialization + .estimate() for older skimage versions
+            tform = trans.SimilarityTransform()
+            tform.estimate(kps_5, dst)
         elif swapper_model == "CSCS":
-            dst = faceutil.get_arcface_template(image_size=512, mode="arcfacemap")
-            tform = trans.SimilarityTransform.from_estimate(
-                kps_5, self.models_processor.FFHQ_kps
-            )
+            # Use instance initialization + .estimate() for older skimage versions
+            tform = trans.SimilarityTransform()
+            tform.estimate(kps_5, self.models_processor.FFHQ_kps)
         else:
             tform = trans.SimilarityTransform()
             dst = faceutil.get_arcface_template(image_size=512, mode="arcfacemap")

@@ -10,6 +10,10 @@ if TYPE_CHECKING:
 
 from app.processors.utils import faceutil
 
+try:
+    from app.processors.external.yolox.tracker.byte_tracker import BYTETracker
+except ImportError:
+    BYTETracker = None 
 
 class FaceDetectors:
     """
@@ -30,6 +34,11 @@ class FaceDetectors:
         self.models_processor = models_processor
         self.center_cache: Dict[tuple, np.ndarray] = {}
         self.current_detector_model = None
+
+        # Tracking State
+        self.tracker = None
+        self.track_history = {} # {track_id: {'cum_score': float, 'last_seen': int}}
+        self.lambda_s = 0.3 # Smoothing factor for cumulative scores
 
         # This map links a detector name (from the UI) to its model file and processing function.
         self.detector_map: Dict[str, Dict[str, Any]] = {
@@ -426,96 +435,204 @@ class FaceDetectors:
         )
 
     def run_detect(
-        self,
-        img,
-        detect_mode="RetinaFace",
-        max_num=1,
-        score=0.5,
-        input_size=(512, 512),
-        use_landmark_detection=False,
-        landmark_detect_mode="203",
-        landmark_score=0.5,
-        from_points=False,
-        rotation_angles=None,
-        previous_detections=None,  # <--- NEW ARGUMENT
-        **kwargs,
-    ):
-        """
-        Main dispatcher for running face detection. Selects and runs the appropriate model.
-        Supports tracking via 'previous_detections'.
-        """
+            self,
+            img,
+            detect_mode="RetinaFace",
+            max_num=1,
+            score=0.5,
+            input_size=(512, 512),
+            use_landmark_detection=False,
+            landmark_detect_mode="203",
+            landmark_score=0.5,
+            from_points=False,
+            rotation_angles=None,
+            previous_detections=None,
+            **kwargs,
+        ):
+            """
+            Main dispatcher for running face detection. Selects and runs the appropriate model.
+            Supports tracking via 'previous_detections'.
+            """
+            control = self.models_processor.main_window.control
+            use_bytetrack = control.get("FaceTrackingEnableToggle", False)
 
-        # --- TRACKING ATTEMPT ---
-        # If we have previous faces and tracking is requested (via implicit logic or kwargs)
-        if previous_detections is not None and len(previous_detections) > 0:
-            # Try to track
-            t_det, t_kpss, t_scores = self.track_faces(
-                img,
-                previous_detections,
-                landmark_score=landmark_score,
-                landmark_detect_mode=landmark_detect_mode,
-                **kwargs,
-            )
+            # TRACKING ATTEMPT (Simple Fallback)
+            # If we have previous faces and tracking is requested (via implicit logic or kwargs)
+            # We skip this if ByteTrack is enabled to prioritize the advanced tracker
+            if not use_bytetrack and previous_detections is not None and len(previous_detections) > 0:
+                # Try to track
+                t_det, t_kpss, t_scores = self.track_faces(
+                    img,
+                    previous_detections,
+                    landmark_score=landmark_score,
+                    landmark_detect_mode=landmark_detect_mode,
+                    **kwargs,
+                )
 
-            # If tracking succeeded (returns are not None), skip heavy detection
-            if t_det is not None:
-                # Optionally refine landmarks (if the user wants detailed landmarks)
-                if use_landmark_detection:
-                    return self._refine_landmarks(
-                        img,
-                        t_det,
-                        t_kpss,
-                        t_scores,
-                        use_landmark_detection,
-                        landmark_detect_mode,
-                        landmark_score,
-                        from_points,
-                        **kwargs,
-                    )
-                return t_det, t_kpss, t_scores
+                # If tracking succeeded (returns are not None), skip heavy detection
+                if t_det is not None:
+                    # Optionally refine landmarks (if the user wants detailed landmarks)
+                    if use_landmark_detection:
+                        return self._refine_landmarks(
+                            img,
+                            t_det,
+                            t_kpss,
+                            t_scores,
+                            use_landmark_detection,
+                            landmark_detect_mode,
+                            landmark_score,
+                            from_points,
+                            **kwargs,
+                        )
+                    return t_det, t_kpss, t_scores
 
-        # --- FULL DETECTION FALLBACK ---
-        # If no previous detections or tracking failed, run the heavy model
-        detector = self.detector_map.get(detect_mode)
-        if not detector:
-            return [], [], []
+            # FULL DETECTION FALLBACK
+            # If no previous detections or tracking failed, run the heavy model
+            detector = self.detector_map.get(detect_mode)
+            if not detector:
+                return [], [], []
 
-        model_name = detector["model_name"]
-        if self.current_detector_model and self.current_detector_model != model_name:
-            self.models_processor.unload_model(self.current_detector_model)
-        self.current_detector_model = model_name
+            model_name = detector["model_name"]
+            if self.current_detector_model and self.current_detector_model != model_name:
+                self.models_processor.unload_model(self.current_detector_model)
+            self.current_detector_model = model_name
 
-        if not self.models_processor.models.get(model_name):
-            self.models_processor.models[model_name] = self.models_processor.load_model(
-                model_name
-            )
+            if not self.models_processor.models.get(model_name):
+                self.models_processor.models[model_name] = self.models_processor.load_model(
+                    model_name
+                )
 
-        ort_session = self.models_processor.models.get(model_name)
-        if not ort_session:
-            print(
-                f"[ERROR] {model_name} model failed to load or is not available. Skipping detection."
-            )
-            return [], [], []
+            ort_session = self.models_processor.models.get(model_name)
+            if not ort_session:
+                print(
+                    f"[ERROR] {model_name} model failed to load or is not available. Skipping detection."
+                )
+                return [], [], []
 
-        detection_function = detector["function"]
+            detection_function = detector["function"]
 
-        args = {
-            "img": img,
-            "max_num": max_num,
-            "score": score,
-            "use_landmark_detection": use_landmark_detection,
-            "landmark_detect_mode": landmark_detect_mode,
-            "landmark_score": landmark_score,
-            "from_points": from_points,
-            "rotation_angles": rotation_angles or [0],
-            "ort_session": ort_session,
-        }
-        args.update(kwargs)
+            # Strategy: Use a lower detection threshold if ByteTrack is enabled to increase recall.
+            # The tracker will then filter out non-persistent false positives.
+            effective_score = 0.3 if use_bytetrack else score
 
-        if detect_mode in ["RetinaFace", "SCRFD"]:
-            args["input_size"] = input_size
+            args = {
+                "img": img,
+                "max_num": max_num,
+                "score": effective_score,
+                "use_landmark_detection": use_landmark_detection,
+                "landmark_detect_mode": landmark_detect_mode,
+                "landmark_score": landmark_score,
+                "from_points": from_points,
+                "rotation_angles": rotation_angles or [0],
+                "ort_session": ort_session,
+            }
+            args.update(kwargs)
 
-        return detection_function(**args)
+            if detect_mode in ["RetinaFace", "SCRFD"]:
+                args["input_size"] = input_size
+
+            # Run the detector
+            det, kpss_5, kpss = detection_function(**args)
+
+            # ByteTrack Advanced Tracking
+            if use_bytetrack:
+                from app.processors.external.yolox.tracker.byte_tracker import BYTETracker
+
+                if self.tracker is None:
+                    # Initialize ByteTrack default parameters
+                    class TrackerArgs:
+                        track_thresh = 0.4
+                        track_buffer = 30
+                        match_thresh = 0.8
+                        mot20 = False
+                    self.tracker = BYTETracker(TrackerArgs())
+
+                # Prepare detections for ByteTrack [x1, y1, x2, y2, score]
+                if len(det) > 0:
+                    # Detector already filtered by effective_score; use high dummy for persistence
+                    tracker_input = np.column_stack([det, np.full(len(det), 0.9)])
+                    online_targets = self.tracker.update(tracker_input, img.shape[1:3], img.shape[1:3])
+                else:
+                    online_targets = self.tracker.update(np.empty((0, 5)), img.shape[1:3], img.shape[1:3])
+
+                tracked_det = []
+                tracked_kpss_5 = []
+                tracked_kpss_all = []
+                tracked_scores = []
+
+                for t in online_targets:
+                    tlwh = t.tlwh
+                    tid = t.track_id
+                    # Convert back to [x1, y1, x2, y2]
+                    t_bbox = np.array([tlwh[0], tlwh[1], tlwh[0] + tlwh[2], tlwh[1] + tlwh[3]])
+                    
+                    # Match landmarks from current detections back to the tracked object via IoU
+                    best_iou = 0
+                    match_idx = -1
+                    for i, d in enumerate(det):
+                        xA, yA = max(t_bbox[0], d[0]), max(t_bbox[1], d[1])
+                        xB, yB = min(t_bbox[2], d[2]), min(t_bbox[3], d[3])
+                        interArea = max(0, xB - xA) * max(0, yB - yA)
+                        if interArea > 0:
+                            bAArea = (t_bbox[2] - t_bbox[0]) * (t_bbox[3] - t_bbox[1])
+                            bBArea = (d[2] - d[0]) * (d[3] - d[1])
+                            iou = interArea / float(bAArea + bBArea - interArea)
+                            if iou > best_iou:
+                                best_iou = iou
+                                match_idx = i
+
+                    if match_idx != -1:
+                        # Update Cumulative Similarity Score for UI stability
+                        if tid in self.track_history:
+                            prev_score = self.track_history[tid]['cum_score']
+                            cum_score = self.lambda_s * t.score + (1 - self.lambda_s) * prev_score
+                        else:
+                            cum_score = t.score
+
+                        self.track_history[tid] = {'cum_score': cum_score}
+
+                        tracked_det.append(t_bbox)
+                        tracked_kpss_5.append(kpss_5[match_idx])
+                        tracked_kpss_all.append(kpss[match_idx])
+                        tracked_scores.append(cum_score)
+
+                # Ensure numerical types for math operations
+                if tracked_det:
+                    det = np.array(tracked_det, dtype=np.float32)
+                    kpss_5 = np.array(tracked_kpss_5, dtype=np.float32)
+                    # Dense landmarks 'kpss' can remain object if shapes vary, 
+                    # but refine_landmarks logic handles it
+                    kpss = np.array(tracked_kpss_all, dtype=object)
+                    score_values = np.array(tracked_scores, dtype=np.float32)
+                else:
+                    det, kpss_5, kpss, score_values = np.empty((0,4)), np.empty((0,5,2)), [], np.array([])
+
+            # Optionally refine landmarks (if the user wants detailed landmarks)
+            if use_landmark_detection and len(det) > 0:
+                # If we just tracked, use current track scores, otherwise use detector scores
+                current_scores = score_values if use_bytetrack else np.full(len(det), 0.9)
+                
+                return self._refine_landmarks(
+                    img,
+                    det,
+                    kpss_5,
+                    current_scores,
+                    use_landmark_detection,
+                    landmark_detect_mode,
+                    landmark_score,
+                    from_points,
+                    **kwargs,
+                )
+
+            return det, kpss_5, kpss
+
+    def _calculate_iou(self, boxA, boxB):
+        xA = max(boxA[0], boxB[0]); yA = max(boxA[1], boxB[1])
+        xB = min(boxA[2], boxB[2]); yB = min(boxA[3], boxB[3])
+        interArea = max(0, xB - xA) * max(0, yB - yA)
+        boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
+        boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
+        return interArea / float(boxAArea + boxBArea - interArea)
 
     def detect_retinaface(self, **kwargs):
         """Runs the RetinaFace detection pipeline."""
