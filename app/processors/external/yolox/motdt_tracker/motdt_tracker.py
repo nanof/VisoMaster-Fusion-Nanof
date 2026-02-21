@@ -207,7 +207,7 @@ class OnlineTracker(object):
         # post process detections
         output_results = output_results.cpu().numpy()
         confidences = output_results[:, 4] * output_results[:, 5]
-        
+
         bboxes = output_results[:, :4]  # x1y1x2y2
         img_h, img_w = img_info[0], img_info[1]
         scale = min(img_size[0] / float(img_h), img_size[1] / float(img_w))
@@ -346,7 +346,7 @@ class OnlineTracker(object):
         output_stracks = output_tracked_stracks
 
         return output_stracks
-    
+
     @staticmethod
     def _xyxy_to_tlwh_array(bbox_xyxy):
         if isinstance(bbox_xyxy, np.ndarray):

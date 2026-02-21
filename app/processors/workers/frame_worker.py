@@ -444,6 +444,16 @@ class FrameWorker(threading.Thread):
                 )
             )
         ) or edit_button_is_checked_global:
+            source_kps = None
+            if target_face_button and target_face_button.assigned_input_faces:
+                first_input_id = list(target_face_button.assigned_input_faces.keys())[0]
+                store = target_face_button.assigned_input_faces[first_input_id]
+                if "kps_5" in store:
+                    source_kps = store["kps_5"]
+
+            kps_5_on_crop_param = keypoints_adjustments(
+                kps_5_on_crop_param, parameters_for_face, source_kps=source_kps
+            )
             try:
                 (
                     swapped_face_512_torch_rgb_uint8,
@@ -1066,6 +1076,22 @@ class FrameWorker(threading.Thread):
                         ):
                             target_face.calculate_assigned_input_embedding()
 
+                        # --- [MODIFICATION] MORPHING: Branche Swap Only Best Match ---
+                        source_kps = None
+                        if target_face and target_face.assigned_input_faces:
+                            first_input_id = list(
+                                target_face.assigned_input_faces.keys()
+                            )[0]
+                            store = target_face.assigned_input_faces[first_input_id]
+                            if "kps_5" in store:
+                                source_kps = store["kps_5"]
+
+                        # On applique l'ajustement sur best_fface
+                        best_fface["kps_5"] = keypoints_adjustments(
+                            best_fface["kps_5"], params, source_kps=source_kps
+                        )
+                        # -------------------------------------------------------------
+
                         s_e = None
                         arcface_model = self.models_processor.get_arcface_model(
                             params["SwapModelSelection"]
@@ -1132,7 +1158,23 @@ class FrameWorker(threading.Thread):
                         ):
                             best_target.calculate_assigned_input_embedding()
 
-                        fface["kps_5"] = keypoints_adjustments(fface["kps_5"], params)
+                        # --- [MODIFICATION CORRIGÉE] MORPHING: Branche Swap All Matches ---
+                        source_kps = None
+                        if best_target and best_target.assigned_input_faces:
+                            # On prend la géométrie de la première image assignée
+                            first_input_id = list(
+                                best_target.assigned_input_faces.keys()
+                            )[0]
+                            store = best_target.assigned_input_faces[first_input_id]
+                            if "kps_5" in store:
+                                source_kps = store["kps_5"]
+
+                        # Application des ajustements et du nouveau Auto-Shape Match (Morphing)
+                        fface["kps_5"] = keypoints_adjustments(
+                            fface["kps_5"], params, source_kps=source_kps
+                        )
+                        # ------------------------------------------------------------------
+
                         arcface_model = self.models_processor.get_arcface_model(
                             params["SwapModelSelection"]
                         )
@@ -1326,12 +1368,20 @@ class FrameWorker(threading.Thread):
             dst = faceutil.get_arcface_template(image_size=512, mode="arcface128")
             dst = np.squeeze(dst)
             # Use instance initialization + .estimate() for older skimage versions
-            tform = trans.SimilarityTransform()
-            tform.estimate(kps_5, dst)
+            if hasattr(trans.SimilarityTransform, "from_estimate"):
+                tform = trans.SimilarityTransform.from_estimate(kps_5, dst)
+            else:
+                tform = trans.SimilarityTransform()
+                tform.estimate(kps_5, dst)
         elif swapper_model == "CSCS":
             # Use instance initialization + .estimate() for older skimage versions
-            tform = trans.SimilarityTransform()
-            tform.estimate(kps_5, self.models_processor.FFHQ_kps)
+            if hasattr(trans.SimilarityTransform, "from_estimate"):
+                tform = trans.SimilarityTransform.from_estimate(
+                    kps_5, self.models_processor.FFHQ_kps
+                )
+            else:
+                tform = trans.SimilarityTransform()
+                tform.estimate(kps_5, self.models_processor.FFHQ_kps)
         else:
             tform = trans.SimilarityTransform()
             dst = faceutil.get_arcface_template(image_size=512, mode="arcfacemap")
@@ -2107,9 +2157,6 @@ class FrameWorker(threading.Thread):
 
         swap = torch.clamp(swap, 0.0, 255.0)
 
-        # Track changes on Original Face for geometry sync
-        original_face_processed = original_face_512.clone()
-
         # --- FACE EDITING (Beginning) ---
         # Expression Restorer beginning
         if (
@@ -2117,6 +2164,8 @@ class FrameWorker(threading.Thread):
             and (
                 parameters["FaceExpressionLipsToggle"]
                 or parameters["FaceExpressionEyesToggle"]
+                or parameters["FaceExpressionBrowsToggle"]
+                or parameters["FaceExpressionGeneralToggle"]
                 or parameters.get("FaceExpressionModeSelection", "Advanced") == "Simple"
             )
             and parameters["FaceExpressionBeforeTypeSelection"] == "Beginning"
@@ -2124,13 +2173,6 @@ class FrameWorker(threading.Thread):
             swap = self.frame_edits.apply_face_expression_restorer(
                 original_face_512,
                 swap,
-                cast(dict, parameters),
-                frame_number=self.frame_number,
-            )
-
-            original_face_processed = self.frame_edits.apply_face_expression_restorer(
-                original_face_512,
-                original_face_processed,
                 cast(dict, parameters),
                 frame_number=self.frame_number,
             )
@@ -2145,23 +2187,11 @@ class FrameWorker(threading.Thread):
             swap = swap * editor_mask + original_face_512 * (1 - editor_mask)
             swap = self.frame_edits.swap_edit_face_core(swap, swap, parameters, control)
 
-            original_face_processed = (
-                original_face_processed * editor_mask
-                + original_face_512 * (1 - editor_mask)
-            )
-            original_face_processed = self.frame_edits.swap_edit_face_core(
-                original_face_processed, original_face_processed, parameters, control
-            )
-
-        # First Denoiser pass - Before Restorers
-        if control.get("DenoiserUNetEnableBeforeRestorersToggle", False):
-            swap = self._apply_denoiser_pass(swap, control, "Before", kv_map)
-
         # --- MOUTH FIT & ALIGN (PRE-RESTORER) ---
         mouth_overlay_pkg_pre = None
         if hasattr(self.models_processor, "face_masks"):
             mouth_overlay_pkg_pre = self.models_processor.face_masks.get_mouth_overlay(
-                swap, original_face_processed, parameters
+                swap, original_face_512, parameters
             )
 
         if mouth_overlay_pkg_pre is not None:
@@ -2176,6 +2206,10 @@ class FrameWorker(threading.Thread):
                     )(overlay_mask.unsqueeze(0)).squeeze(0)
 
                 swap = swap * (1.0 - overlay_mask) + overlay_rgb * overlay_mask
+
+        # First Denoiser pass - Before Restorers
+        if control.get("DenoiserUNetEnableBeforeRestorersToggle", False):
+            swap = self._apply_denoiser_pass(swap, control, "Before", kv_map)
 
         # --- RESTORATION 1 ---
         swap_original = swap.clone()
@@ -2492,6 +2526,8 @@ class FrameWorker(threading.Thread):
             and (
                 parameters["FaceExpressionLipsToggle"]
                 or parameters["FaceExpressionEyesToggle"]
+                or parameters["FaceExpressionBrowsToggle"]
+                or parameters["FaceExpressionGeneralToggle"]
                 or parameters.get("FaceExpressionModeSelection", "Advanced") == "Simple"
             )
             and parameters["FaceExpressionBeforeTypeSelection"]
@@ -2600,6 +2636,8 @@ class FrameWorker(threading.Thread):
             and (
                 parameters["FaceExpressionLipsToggle"]
                 or parameters["FaceExpressionEyesToggle"]
+                or parameters["FaceExpressionBrowsToggle"]
+                or parameters["FaceExpressionGeneralToggle"]
                 or parameters.get("FaceExpressionModeSelection", "Advanced") == "Simple"
             )
             and parameters["FaceExpressionBeforeTypeSelection"]
@@ -2705,7 +2743,7 @@ class FrameWorker(threading.Thread):
                     )
                     mask_final_512 = torch.max(mask_vgg_512, (1 - feature_mask))
                 else:
-                    mask_final_512 = (1 - feature_mask)
+                    mask_final_512 = 1 - feature_mask
 
                 mask_final_512 = torch.max(mask_final_512, 1 - calc_mask_dill).clamp(
                     0.0, 1.0

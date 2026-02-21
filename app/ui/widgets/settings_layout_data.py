@@ -280,7 +280,7 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "label": "Enable Face Tracking (ByteTrack)",
             "default": False,
             "help": "Uses ByteTrack to maintain face identities across frames. Improves stability during occlusions and allows lower detection thresholds.",
-            "exec_function": control_actions.handle_face_detector_tracking_reset, # Added reset helper
+            "exec_function": control_actions.handle_face_detector_tracking_reset,  # Added reset helper
             "exec_function_args": [],
         },
         "DetectorScoreSlider": {

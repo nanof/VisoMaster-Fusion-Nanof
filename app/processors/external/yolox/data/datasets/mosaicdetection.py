@@ -124,12 +124,12 @@ class MosaicDetection(Dataset):
                 np.clip(mosaic_labels[:, 2], 0, 2 * input_w, out=mosaic_labels[:, 2])
                 np.clip(mosaic_labels[:, 3], 0, 2 * input_h, out=mosaic_labels[:, 3])
                 '''
-                
+
                 mosaic_labels = mosaic_labels[mosaic_labels[:, 0] < 2 * input_w]
                 mosaic_labels = mosaic_labels[mosaic_labels[:, 2] > 0]
                 mosaic_labels = mosaic_labels[mosaic_labels[:, 1] < 2 * input_h]
                 mosaic_labels = mosaic_labels[mosaic_labels[:, 3] > 0]
-                
+
             #augment_hsv(mosaic_img)
             mosaic_img, mosaic_labels = random_perspective(
                 mosaic_img,
@@ -147,7 +147,7 @@ class MosaicDetection(Dataset):
             # -----------------------------------------------------------------
             if self.enable_mixup and not len(mosaic_labels) == 0:
                 mosaic_img, mosaic_labels = self.mixup(mosaic_img, mosaic_labels, self.input_dim)
-            
+
             mix_img, padded_labels = self.preproc(mosaic_img, mosaic_labels, self.input_dim)
             img_info = (mix_img.shape[1], mix_img.shape[0])
 

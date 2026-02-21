@@ -815,13 +815,37 @@ def tensor_to_pil(tensor: torch.Tensor) -> Image.Image:
     return Image.fromarray(tensor)
 
 
-def keypoints_adjustments(kps_5: np.ndarray, parameters: dict) -> np.ndarray:
-    """
-    Applies manual adjustments (scale, position) to the 5 facial keypoints.
-    """
+def keypoints_adjustments(
+    kps_5: np.ndarray, parameters: dict, source_kps: np.ndarray = None
+) -> np.ndarray:
     kps_5_adj = kps_5.copy()
-    # Change the ref points
-    if parameters["FaceAdjEnableToggle"]:
+
+    if (
+        parameters.get("FaceKeypointsReplaceEnableToggle", False)
+        and source_kps is not None
+    ):
+        morph_amount = parameters.get("FaceKeypointsReplaceDecimalSlider", 0.0)
+
+        if morph_amount > 0.0:
+            try:
+                if hasattr(trans.SimilarityTransform, "from_estimate"):
+                    tform = trans.SimilarityTransform.from_estimate(
+                        source_kps, kps_5_adj
+                    )
+                else:
+                    tform = trans.SimilarityTransform()
+                    tform.estimate(source_kps, kps_5_adj)
+
+                source_kps_aligned = tform(source_kps)
+
+                kps_5_adj = (
+                    kps_5_adj + morph_amount * (source_kps_aligned - kps_5_adj)
+                ).astype(np.float32)
+
+            except Exception as e:
+                print(f"[WARNING] Face Keypoints Morphing bypassed: {e}")
+
+    if parameters.get("FaceAdjEnableToggle", False):
         kps_5_adj[:, 0] += parameters["KpsXSlider"]
         kps_5_adj[:, 1] += parameters["KpsYSlider"]
         kps_5_adj[:, 0] -= 255
@@ -831,8 +855,7 @@ def keypoints_adjustments(kps_5: np.ndarray, parameters: dict) -> np.ndarray:
         kps_5_adj[:, 1] *= 1 + parameters["KpsScaleSlider"] / 100.0
         kps_5_adj[:, 1] += 255
 
-    # Face Landmarks
-    if parameters["LandmarksPositionAdjEnableToggle"]:
+    if parameters.get("LandmarksPositionAdjEnableToggle", False):
         kps_5_adj[0][0] += parameters["EyeLeftXAmountSlider"]
         kps_5_adj[0][1] += parameters["EyeLeftYAmountSlider"]
         kps_5_adj[1][0] += parameters["EyeRightXAmountSlider"]
@@ -843,6 +866,7 @@ def keypoints_adjustments(kps_5: np.ndarray, parameters: dict) -> np.ndarray:
         kps_5_adj[3][1] += parameters["MouthLeftYAmountSlider"]
         kps_5_adj[4][0] += parameters["MouthRightXAmountSlider"]
         kps_5_adj[4][1] += parameters["MouthRightYAmountSlider"]
+
     return kps_5_adj
 
 

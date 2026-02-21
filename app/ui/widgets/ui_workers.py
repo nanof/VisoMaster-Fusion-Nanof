@@ -66,6 +66,9 @@ class TargetMediaLoaderWorker(qtc.QThread):
 
         i = 0
         media_files = video_files + image_files
+        # Sorting the list
+        media_files.sort(key=lambda x: os.path.basename(str(x)).lower())
+
         for media_file in media_files:
             if not self._running:  # Check if the thread is still running
                 break
@@ -92,6 +95,9 @@ class TargetMediaLoaderWorker(qtc.QThread):
             self.main_window.targetVideosList, True
         )
         media_files = files_list
+        # Sorting the list
+        media_files.sort(key=lambda x: os.path.basename(str(x)).lower())
+
         i = 0
         for media_file_path in media_files:
             if not self._running:  # Check if the thread is still running
@@ -265,7 +271,8 @@ class InputFacesLoaderWorker(qtc.QThread):
                 )
 
                 embedding_store: Dict[str, numpy.ndarray] = {
-                    selected_recognition_model: face_emb
+                    selected_recognition_model: face_emb,
+                    "kps_5": face_kps,
                 }
 
                 if not self.face_ids:

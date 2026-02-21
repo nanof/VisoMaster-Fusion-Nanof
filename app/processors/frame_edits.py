@@ -157,6 +157,9 @@ class FrameEdits:
                 "FaceExpressionMicroExpressionBoostDecimalSlider", 0.50
             )
 
+            # PARAMETER: Neutral Expression Factor (Anti-Surenchère)
+            neutral_factor = parameters.get("FaceExpressionNeutralDecimalSlider", 1.0)
+
             # --- 1. DRIVING FACE PROCESSING ---
             # Detect landmarks on the driving face
             _, driving_lmk_crop, _ = self.models_processor.run_detect_landmark(
@@ -317,10 +320,33 @@ class FrameEdits:
             default_delta_exp = default_delta_raw[..., :-2].reshape(x_s.shape[0], 21, 3)
 
             # --- INDICES DEFINITION ---
-            # Integrated Logic: Brows -> Eyes, Jaw -> Lips
-            # Excluding 'face' (cheeks/nose) to preserve identity shape.
-            eye_indices = [1, 2, 11, 13, 15, 16, 18]
-            lip_indices = [3, 6, 12, 14, 17, 19, 20]
+            # IMPORTANT: LivePortrait uses *implicit* keypoints learned by the AI.
+            # They don't have perfect 1:1 anatomical definitions, but empirical
+            # testing reveals their primary influence areas:
+
+            brow_indices = [1, 2]  # Eyebrows (elevation, frowning)
+            eye_indices = [11, 13, 15, 16, 18]  # Eyes (blinking, gaze direction)
+            lip_indices = [3, 6, 12, 14, 17, 19, 20]  # Mouth (lips, smiling, opening)
+
+            # --- Granular breakdown of "General" structural indices ---
+            nose_indices = [5]  # Nose tip and bridge
+            jaw_indices = [7]  # Lower jaw / chin (critical for talking)
+            cheek_indices = [0, 4]  # Lower cheeks (squish when smiling)
+            contour_indices = [8, 9]  # Side face contours / Jawline
+            head_top_indices = [10]  # Upper forehead / head stability
+
+            # Recombining them into a customizable General list.
+            general_indices = []
+            if parameters.get("FaceExpressionGeneralNoseToggle", True):
+                general_indices.extend(nose_indices)
+            if parameters.get("FaceExpressionGeneralJawToggle", True):
+                general_indices.extend(jaw_indices)
+            if parameters.get("FaceExpressionGeneralCheekToggle", True):
+                general_indices.extend(cheek_indices)
+            if parameters.get("FaceExpressionGeneralContourToggle", True):
+                general_indices.extend(contour_indices)
+            if parameters.get("FaceExpressionGeneralHeadToggle", True):
+                general_indices.extend(head_top_indices)
 
             # Anchor
             R_anchor = R_s
@@ -344,7 +370,7 @@ class FrameEdits:
                 use_boost=False,
             ):
                 """
-                Helper to calculate motion with 'Smart Dynamic Boost'.
+                Helper to calculate motion with 'Smart Dynamic Boost' and 'Neutral Factor'.
                 Args:
                     use_boost: If True, applies the Micro-Expression Logic.
                 """
@@ -353,7 +379,7 @@ class FrameEdits:
                 # [CALIBRATION] Internal Attenuation
                 # Raw LivePortrait transfer at 1.0 is often topologically exaggerated (Joker effect).
                 # We apply a base attenuation of 0.6 so that UI Slider 1.0 feels "Natural".
-                calibration_factor = 0.60
+                calibration_factor = 1.0
 
                 if is_relative:
                     # Relative Motion Calculation
@@ -382,17 +408,23 @@ class FrameEdits:
                     else:
                         diff = raw_diff * boost_val
 
+                    # --- NEUTRAL FACTOR (Anti-Surenchère) ---
+                    # Scales down the final added expression based on user slider
+                    # If neutral_factor is 0, diff becomes 0 (no LivePortrait motion added)
+                    diff = diff * neutral_factor
+
                     delta_local[:, indices, :] = x_s_info["exp"][:, indices, :] + diff
                 else:
                     # Absolute Motion (Rarely used, but dampened for safety)
-                    # We blend the driving exp with the source exp to dampen it.
                     target_exp = driving_exp[:, indices, :]
                     current_exp = x_s_info["exp"][:, indices, :]
 
-                    # Linear Interpolation towards target based on calibration
+                    # Linear Interpolation towards target based on calibration AND neutral factor
+                    final_calibration = calibration_factor * neutral_factor
+
                     delta_local[:, indices, :] = (
-                        current_exp * (1 - calibration_factor)
-                        + target_exp * calibration_factor
+                        current_exp * (1 - final_calibration)
+                        + target_exp * final_calibration
                     )
 
                 # Projection & Refinement
@@ -472,15 +504,31 @@ class FrameEdits:
                 driving_multiplier_lips = parameters.get(
                     "FaceExpressionFriendlyFactorLipsDecimalSlider", 1.0
                 )
+                driving_multiplier_brows = parameters.get(
+                    "FaceExpressionFriendlyFactorBrowsDecimalSlider", 1.0
+                )
+                driving_multiplier_general = parameters.get(
+                    "FaceExpressionFriendlyFactorGeneralDecimalSlider", 1.0
+                )
 
                 flag_activate_eyes = parameters.get("FaceExpressionEyesToggle", False)
                 flag_activate_lips = parameters.get("FaceExpressionLipsToggle", False)
+                flag_activate_brows = parameters.get("FaceExpressionBrowsToggle", False)
+                flag_activate_general = parameters.get(
+                    "FaceExpressionGeneralToggle", False
+                )
 
                 flag_relative_eyes = parameters.get(
                     "FaceExpressionRelativeEyesToggle", False
                 )
                 flag_relative_lips = parameters.get(
                     "FaceExpressionRelativeLipsToggle", False
+                )
+                flag_relative_brows = parameters.get(
+                    "FaceExpressionRelativeBrowsToggle", False
+                )
+                flag_relative_general = parameters.get(
+                    "FaceExpressionRelativeGeneralToggle", False
                 )
 
                 # --- Normalization Config ---
@@ -584,6 +632,26 @@ class FrameEdits:
                         extra_delta=lips_retarget_delta,
                         is_relative=flag_relative_lips,
                         neutral_ref=lp_lip_array,
+                        use_boost=True,
+                    )
+
+                if flag_activate_brows:
+                    accumulated_motion += get_component_motion(
+                        brow_indices,
+                        x_d_i_info["exp"],
+                        driving_multiplier_brows,
+                        is_relative=flag_relative_brows,
+                        neutral_ref=0,
+                        use_boost=True,
+                    )
+
+                if flag_activate_general and len(general_indices) > 0:
+                    accumulated_motion += get_component_motion(
+                        general_indices,
+                        x_d_i_info["exp"],
+                        driving_multiplier_general,
+                        is_relative=flag_relative_general,
+                        neutral_ref=0,
                         use_boost=True,
                     )
 

@@ -13,11 +13,13 @@ from app.ui.widgets.actions import common_actions as common_widget_actions
 #    The first two parameters should be the MainWindow object and the new value of the control
 #'''
 
+
 def handle_face_detector_tracking_reset(main_window: "MainWindow", value):
     """Resets the tracker instance when tracking is toggled or media changes."""
     main_window.models_processor.face_detectors.tracker = None
     main_window.models_processor.face_detectors.track_history = {}
     common_widget_actions.refresh_frame(main_window)
+
 
 def change_execution_provider(main_window: "MainWindow", new_provider):
     main_window.video_processor.stop_processing()
