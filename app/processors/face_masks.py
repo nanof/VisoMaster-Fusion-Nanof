@@ -116,34 +116,56 @@ class FaceMasks:
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """
         Creates an aligned mouth overlay from the original image to the swap image.
+        
+        HYBRID ANATOMICAL VERSION: 
+        - Scale & X-Center: Based on full mouth width (stable commissures).
+        - Y-Center: Anchored strictly to the Upper Lip to prevent jaw-drop sliding.
+        - Mask: Strictly limited to the Inner Mouth (Class 11) to prevent lip bleeding.
         """
-        # 1. Define strictly the Inner Mouth (Hole/Teeth/Tongue)
-        inner_orig = labels_orig == 11
-        inner_swap = labels_swap == 11
+        # 1. Define Regions
+        mouth_orig = (labels_orig == 11) | (labels_orig == 12) | (labels_orig == 13)
+        mouth_swap = (labels_swap == 11) | (labels_swap == 12) | (labels_swap == 13)
 
-        # Safety check: If either image has no open mouth, we abort.
+        inner_orig = (labels_orig == 11)
+        inner_swap = (labels_swap == 11)
+
+        upper_lip_orig = (labels_orig == 12)
+        upper_lip_swap = (labels_swap == 12)
+
+        # Safety: We need inner cavities to have teeth to copy and a hole to fill
         if inner_orig.sum() == 0 or inner_swap.sum() == 0:
             return None, None
 
-        # 2. Extract Coordinates for the inner cavities
-        y_o, x_o = torch.where(inner_orig)
-        y_s, x_s = torch.where(inner_swap)
+        # 2. Extract Width and X-Center based on FULL MOUTH (Stable horizontal scaling)
+        _, x_o_full = torch.where(mouth_orig)
+        _, x_s_full = torch.where(mouth_swap)
+        
+        w_o = (x_o_full.max() - x_o_full.min()).float()
+        w_s = (x_s_full.max() - x_s_full.min()).float()
 
-        # 3. Calculate Centers of the cavities (Bounding Box Center for stability)
-        cx_o = (x_o.max() + x_o.min()) / 2.0
-        cy_o = (y_o.max() + y_o.min()) / 2.0
-        cx_s = (x_s.max() + x_s.min()) / 2.0
-        cy_s = (y_s.max() + y_s.min()) / 2.0
-
-        # 4. Calculate Widths of the cavities for scaling
-        w_o = (x_o.max() - x_o.min()).float()
-        w_s = (x_s.max() - x_s.min()).float()
         if w_o <= 0.0 or w_s <= 0.0:
             return None, None
 
-        # 5. Apply Transformations
+        cx_o = (x_o_full.max() + x_o_full.min()) / 2.0
+        cx_s = (x_s_full.max() + x_s_full.min()) / 2.0
+
+        # 3. Extract Y-Center based on UPPER LIP (Rigid anatomical anchor)
+        if upper_lip_orig.sum() > 0 and upper_lip_swap.sum() > 0:
+            y_o_upper, _ = torch.where(upper_lip_orig)
+            y_s_upper, _ = torch.where(upper_lip_swap)
+            cy_o = y_o_upper.float().mean()
+            cy_s = y_s_upper.float().mean()
+        else:
+            # Fallback if upper lip parser fails
+            y_o_full, _ = torch.where(mouth_orig)
+            y_s_full, _ = torch.where(mouth_swap)
+            cy_o = y_o_full.float().mean()
+            cy_s = y_s_full.float().mean()
+
+        # 4. Apply Transformations
         mouthzoom = parameters.get("MouthParserStretchDecimalSlider", 1.05)
-        scale_factor = (w_s / (w_o + 1e-6)) * mouthzoom
+        scale_factor = (w_s / w_o) * mouthzoom
+
         if scale_factor <= 0.0:
             return None, None
 
@@ -160,14 +182,13 @@ class FaceMasks:
             center=[cx_o.item(), cy_o.item()],
         )
 
-        # 6. Mask Processing
-        # The mask is purely the Swap's inner cavity.
+        # 5. Mask Processing (STRICTLY Inner Cavity)
         overlay_mask = inner_swap.float()
-
+        
         # Dilate 1 pixel to catch the anti-aliasing edge of the parser
         overlay_mask = self._dilate_binary(overlay_mask, 1, mode="conv")
 
-        # Soft blur for seamless integration with the inner edge of the lips
+        # Soft blur for seamless integration with the inner edge of the swap's lips
         overlay_mask = v2.functional.gaussian_blur(
             overlay_mask.unsqueeze(0), kernel_size=5, sigma=1.5
         ).squeeze(0)
