@@ -458,14 +458,17 @@ def estimate_norm_arcface_template(lmk, src=arcface_src):
 
     for i in np.arange(src.shape[0]):
         # Use instance-based estimate for compatibility
-        tform = trans.SimilarityTransform()
-        tform.estimate(lmk, src[i])
+        if hasattr(trans.SimilarityTransform, "from_estimate"):
+            tform = trans.SimilarityTransform.from_estimate(lmk, src[i])
+        else:
+            tform = trans.SimilarityTransform()
+            tform.estimate(lmk, src[i])
         M = tform.params[0:2, :]
-        
+
         # results is (2, 5), we need it to be (5, 2) to match src[i]
         results = np.dot(M, lmk_tran.T)
-        results = results.T 
-        
+        results = results.T
+
         error = np.sum(np.sqrt(np.sum((results - src[i]) ** 2, axis=1)))
         if error < min_error:
             min_error = error
@@ -495,14 +498,17 @@ def estimate_norm(lmk, image_size=112, mode="arcface112"):
 
     for i in np.arange(src.shape[0]):
         # Use instance-based estimate for compatibility
-        tform = trans.SimilarityTransform()
-        tform.estimate(lmk, src[i])
+        if hasattr(trans.SimilarityTransform, "from_estimate"):
+            tform = trans.SimilarityTransform.from_estimate(lmk, src[i])
+        else:
+            tform = trans.SimilarityTransform()
+            tform.estimate(lmk, src[i])
         M = tform.params[0:2, :]
-        
+
         # results is (2, 5), we need it to be (5, 2) to match src[i]
         results = np.dot(M, lmk_tran.T)
         results = results.T
-        
+
         error = np.sum(np.sqrt(np.sum((results - src[i]) ** 2, axis=1)))
         if error < min_error:
             min_error = error
@@ -942,8 +948,11 @@ def get_face_orientation(face_size, lmk):
     src = float(face_size) / 112.0 * src
 
     # Use instance-based estimate for compatibility
-    tform = trans.SimilarityTransform()
-    tform.estimate(lmk, src)
+    if hasattr(trans.SimilarityTransform, "from_estimate"):
+        tform = trans.SimilarityTransform.from_estimate(lmk, src)
+    else:
+        tform = trans.SimilarityTransform()
+        tform.estimate(lmk, src)
 
     angle_deg_to_front = np.rad2deg(tform.rotation)
 

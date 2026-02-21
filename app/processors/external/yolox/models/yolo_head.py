@@ -304,7 +304,7 @@ class YOLOXHead(nn.Module):
                 gt_bboxes_per_image = labels[batch_idx, :num_gt, 1:5]
                 gt_classes = labels[batch_idx, :num_gt, 0]
                 bboxes_preds_per_image = bbox_preds[batch_idx]
-                
+
                 try:
                     (
                         gt_matched_classes,
@@ -361,8 +361,8 @@ class YOLOXHead(nn.Module):
                         imgs,
                         "cpu",
                     )
-                
-                
+
+
                 torch.cuda.empty_cache()
                 num_fg += num_fg_img
 

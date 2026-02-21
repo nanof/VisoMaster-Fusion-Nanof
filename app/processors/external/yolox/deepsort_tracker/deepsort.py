@@ -172,7 +172,7 @@ class DeepSort(object):
         # post process detections
         output_results = output_results.cpu().numpy()
         confidences = output_results[:, 4] * output_results[:, 5]
-        
+
         bboxes = output_results[:, :4]  # x1y1x2y2
         img_h, img_w = img_info[0], img_info[1]
         scale = min(img_size[0] / float(img_h), img_size[1] / float(img_w))
@@ -225,7 +225,7 @@ class DeepSort(object):
         bbox_tlwh[:, 0] = bbox_xywh[:, 0] - bbox_xywh[:, 2] / 2.
         bbox_tlwh[:, 1] = bbox_xywh[:, 1] - bbox_xywh[:, 3] / 2.
         return bbox_tlwh
-    
+
     @staticmethod
     def _xyxy_to_tlwh_array(bbox_xyxy):
         if isinstance(bbox_xyxy, np.ndarray):

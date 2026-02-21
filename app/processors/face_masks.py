@@ -115,64 +115,44 @@ class FaceMasks:
         parameters: dict,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """
-        Creates an aligned mouth overlay from the original image to the swap image using rigid alignment (Affine).
-
-        Improvements:
-        - Uses morphological closing to fill gaps in the parser mask.
-        - Robust centroid calculation.
-        - Dynamic scaling based on width ratio.
-
-        Args:
-            img_orig: Source image tensor (C, H, W).
-            labels_orig: FaceParser labels for source (H, W).
-            labels_swap: FaceParser labels for destination (H, W).
-            parameters: Dictionary of UI parameters.
-
-        Returns:
-            (overlay, overlay_mask): The warped mouth image and its alpha mask.
+        Creates an aligned mouth overlay from the original image to the swap image.
         """
-        # 1. Define Regions
-        # Class 11: Inner Mouth, 12: Upper Lip, 13: Lower Lip
-        mouth_classes_orig = (
-            (labels_orig == 11) | (labels_orig == 12) | (labels_orig == 13)
-        )
-        mouth_classes_swap = (
-            (labels_swap == 11) | (labels_swap == 12) | (labels_swap == 13)
-        )
+        # 1. Define strictly the Inner Mouth (Hole/Teeth/Tongue)
+        inner_orig = labels_orig == 11
+        inner_swap = labels_swap == 11
 
-        # Safety check
-        if mouth_classes_orig.sum() == 0 or mouth_classes_swap.sum() == 0:
+        # Safety check: If either image has no open mouth, we abort.
+        if inner_orig.sum() == 0 or inner_swap.sum() == 0:
             return None, None
 
-        # 2. Define the "Hole" Mask (Inner Mouth to replace)
-        hole_mask = (labels_swap == 11).float()
-        if hole_mask.sum() == 0:
-            return None, None
+        # 2. Extract Coordinates for the inner cavities
+        y_o, x_o = torch.where(inner_orig)
+        y_s, x_s = torch.where(inner_swap)
 
-        # 3. Get Coordinates for alignment
-        y_o, x_o = torch.where(mouth_classes_orig)
-        y_s, x_s = torch.where(mouth_classes_swap)
+        # 3. Calculate Centers of the cavities (Bounding Box Center for stability)
+        cx_o = (x_o.max() + x_o.min()) / 2.0
+        cy_o = (y_o.max() + y_o.min()) / 2.0
+        cx_s = (x_s.max() + x_s.min()) / 2.0
+        cy_s = (y_s.max() + y_s.min()) / 2.0
 
-        # Calculate Centroids
-        cy_o, cx_o = y_o.float().mean(), x_o.float().mean()
-        cy_s, cx_s = y_s.float().mean(), x_s.float().mean()
-
-        # Calculate Widths
+        # 4. Calculate Widths of the cavities for scaling
         w_o = (x_o.max() - x_o.min()).float()
         w_s = (x_s.max() - x_s.min()).float()
+        if w_o <= 0.0 or w_s <= 0.0:
+            return None, None
 
-        # 4. Calculate Transformations
-        # Scale based on Width Ratio + User adjusted margin (default 1.05)
+        # 5. Apply Transformations
         mouthzoom = parameters.get("MouthParserStretchDecimalSlider", 1.05)
         scale_factor = (w_s / (w_o + 1e-6)) * mouthzoom
+        if scale_factor <= 0.0:
+            return None, None
 
         translate_x = cx_s - cx_o
         translate_y = cy_s - cy_o
 
-        # 5. Apply Affine Transform to the Image
         overlay = v2.functional.affine(
             img_orig,
-            angle=0,
+            angle=0.0,
             translate=[translate_x.item(), translate_y.item()],
             scale=scale_factor.item(),
             shear=[0.0, 0.0],
@@ -180,11 +160,14 @@ class FaceMasks:
             center=[cx_o.item(), cy_o.item()],
         )
 
-        # 6. Mask Post-Processing
-        # Morphological closing to fill small holes (e.g. undetected teeth)
-        overlay_mask = self._dilate_binary(hole_mask, 2, mode="conv")
+        # 6. Mask Processing
+        # The mask is purely the Swap's inner cavity.
+        overlay_mask = inner_swap.float()
 
-        # Apply slight blur to edges for soft blending
+        # Dilate 1 pixel to catch the anti-aliasing edge of the parser
+        overlay_mask = self._dilate_binary(overlay_mask, 1, mode="conv")
+
+        # Soft blur for seamless integration with the inner edge of the lips
         overlay_mask = v2.functional.gaussian_blur(
             overlay_mask.unsqueeze(0), kernel_size=5, sigma=1.5
         ).squeeze(0)

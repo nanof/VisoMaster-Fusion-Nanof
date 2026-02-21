@@ -124,7 +124,7 @@ class MOTEvaluator:
             x = torch.ones(1, 3, test_size[0], test_size[1]).cuda()
             model(x)
             model = model_trt
-            
+
         tracker = BYTETracker(self.args)
         ori_thresh = self.args.track_thresh
         for cur_iter, (imgs, _, info_imgs, ids) in enumerate(
@@ -153,7 +153,7 @@ class MOTEvaluator:
                     self.args.track_thresh = 0.67
                 else:
                     self.args.track_thresh = ori_thresh
-                
+
                 if video_name == 'MOT20-06' or video_name == 'MOT20-08':
                     self.args.track_thresh = 0.3
                 else:
@@ -180,7 +180,7 @@ class MOTEvaluator:
                     outputs = decoder(outputs, dtype=outputs.type())
 
                 outputs = postprocess(outputs, self.num_classes, self.confthre, self.nmsthre)
-            
+
                 if is_time_record:
                     infer_end = time_synchronized()
                     inference_time += infer_end - start
@@ -208,7 +208,7 @@ class MOTEvaluator:
             if is_time_record:
                 track_end = time_synchronized()
                 track_time += track_end - infer_end
-            
+
             if cur_iter == len(self.dataloader) - 1:
                 result_filename = os.path.join(result_folder, '{}.txt'.format(video_names[video_id]))
                 write_results(result_filename, results)
@@ -271,9 +271,9 @@ class MOTEvaluator:
             x = torch.ones(1, 3, test_size[0], test_size[1]).cuda()
             model(x)
             model = model_trt
-            
+
         tracker = Sort(self.args.track_thresh)
-        
+
         for cur_iter, (imgs, _, info_imgs, ids) in enumerate(
             progress_bar(self.dataloader)
         ):
@@ -305,7 +305,7 @@ class MOTEvaluator:
                     outputs = decoder(outputs, dtype=outputs.type())
 
                 outputs = postprocess(outputs, self.num_classes, self.confthre, self.nmsthre)
-            
+
                 if is_time_record:
                     infer_end = time_synchronized()
                     inference_time += infer_end - start
@@ -330,7 +330,7 @@ class MOTEvaluator:
             if is_time_record:
                 track_end = time_synchronized()
                 track_time += track_end - infer_end
-            
+
             if cur_iter == len(self.dataloader) - 1:
                 result_filename = os.path.join(result_folder, '{}.txt'.format(video_names[video_id]))
                 write_results_no_score(result_filename, results)
@@ -394,9 +394,9 @@ class MOTEvaluator:
             x = torch.ones(1, 3, test_size[0], test_size[1]).cuda()
             model(x)
             model = model_trt
-            
+
         tracker = DeepSort(model_folder, min_confidence=self.args.track_thresh)
-        
+
         for cur_iter, (imgs, _, info_imgs, ids) in enumerate(
             progress_bar(self.dataloader)
         ):
@@ -428,7 +428,7 @@ class MOTEvaluator:
                     outputs = decoder(outputs, dtype=outputs.type())
 
                 outputs = postprocess(outputs, self.num_classes, self.confthre, self.nmsthre)
-            
+
                 if is_time_record:
                     infer_end = time_synchronized()
                     inference_time += infer_end - start
@@ -453,7 +453,7 @@ class MOTEvaluator:
             if is_time_record:
                 track_end = time_synchronized()
                 track_time += track_end - infer_end
-            
+
             if cur_iter == len(self.dataloader) - 1:
                 result_filename = os.path.join(result_folder, '{}.txt'.format(video_names[video_id]))
                 write_results_no_score(result_filename, results)
@@ -517,7 +517,7 @@ class MOTEvaluator:
             x = torch.ones(1, 3, test_size[0], test_size[1]).cuda()
             model(x)
             model = model_trt
-            
+
         tracker = OnlineTracker(model_folder, min_cls_score=self.args.track_thresh)
         for cur_iter, (imgs, _, info_imgs, ids) in enumerate(
             progress_bar(self.dataloader)
@@ -550,7 +550,7 @@ class MOTEvaluator:
                     outputs = decoder(outputs, dtype=outputs.type())
 
                 outputs = postprocess(outputs, self.num_classes, self.confthre, self.nmsthre)
-            
+
                 if is_time_record:
                     infer_end = time_synchronized()
                     inference_time += infer_end - start
@@ -577,7 +577,7 @@ class MOTEvaluator:
             if is_time_record:
                 track_end = time_synchronized()
                 track_time += track_end - infer_end
-            
+
             if cur_iter == len(self.dataloader) - 1:
                 result_filename = os.path.join(result_folder, '{}.txt'.format(video_names[video_id]))
                 write_results(result_filename, results)

@@ -140,8 +140,13 @@ class FaceRestorers:
 
             try:
                 # Use from_estimate constructor instead of .estimate()
-                tform = trans.SimilarityTransform()
-                tform.estimate(dst, self.models_processor.FFHQ_kps)
+                if hasattr(trans.SimilarityTransform, "from_estimate"):
+                    tform = trans.SimilarityTransform.from_estimate(
+                        dst, self.models_processor.FFHQ_kps
+                    )
+                else:
+                    tform = trans.SimilarityTransform()
+                    tform.estimate(dst, self.models_processor.FFHQ_kps)
             except Exception:
                 return swapped_face_upscaled
             # Transform, scale, and normalize

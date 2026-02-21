@@ -155,6 +155,24 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "requiredToggleValue": True,
             "help": "Preserves the energy/volume of the face features. Must be ON when using high Amount values to prevent grey/flat faces.",
         },
+        "FaceKeypointsReplaceEnableToggle": {
+            "level": 1,
+            "label": "Face Keypoints Replacer",
+            "default": False,
+            "help": "Adjust the source face to get the target KPS points",
+        },
+        "FaceKeypointsReplaceDecimalSlider": {
+            "level": 2,
+            "label": "Amount",
+            "min_value": "0.00",
+            "max_value": "1.00",
+            "default": "0.00",
+            "decimals": 2,
+            "step": 0.05,
+            "parentToggle": "FaceKeypointsReplaceEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Determines the factor of KPS transfert from target to the source face.",
+        },
     },
     "Masks": {
         "MaskShowSelection": {

@@ -138,12 +138,12 @@ def random_perspective(
         i = box_candidates(box1=targets[:, :4].T * s, box2=xy.T)
         targets = targets[i]
         targets[:, :4] = xy[i]
-        
+
         targets = targets[targets[:, 0] < width]
         targets = targets[targets[:, 2] > 0]
         targets = targets[targets[:, 1] < height]
         targets = targets[targets[:, 3] > 0]
-        
+
     return img, targets
 
 
