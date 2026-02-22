@@ -149,14 +149,17 @@ class FaceMasks:
         cx_o = (x_o_full.max() + x_o_full.min()) / 2.0
         cx_s = (x_s_full.max() + x_s_full.min()) / 2.0
 
-        # 3. Extract Y-Center based on UPPER LIP (Rigid anatomical anchor)
-        if upper_lip_orig.sum() > 0 and upper_lip_swap.sum() > 0:
-            y_o_upper, _ = torch.where(upper_lip_orig)
-            y_s_upper, _ = torch.where(upper_lip_swap)
-            cy_o = y_o_upper.float().mean()
-            cy_s = y_s_upper.float().mean()
+        # 3. Extract Y-Center based on the TOP of the INNER CAVITY (Rigid upper jaw anchor)
+        # Using the exact top pixel of the inner mouth ensures teeth start precisely beneath the upper lip.
+        if inner_orig.sum() > 0 and inner_swap.sum() > 0:
+            y_o_inner, _ = torch.where(inner_orig)
+            y_s_inner, _ = torch.where(inner_swap)
+            
+            # Use min() because Y axis goes from 0 (top) to H (bottom)
+            cy_o = y_o_inner.float().min()
+            cy_s = y_s_inner.float().min()
         else:
-            # Fallback if upper lip parser fails
+            # Fallback if inner cavity calculation fails
             y_o_full, _ = torch.where(mouth_orig)
             y_s_full, _ = torch.where(mouth_swap)
             cy_o = y_o_full.float().mean()
@@ -182,8 +185,45 @@ class FaceMasks:
             center=[cx_o.item(), cy_o.item()],
         )
 
-        # 5. Mask Processing (STRICTLY Inner Cavity)
+        # 5. Mask Processing (STRICTLY Inner Cavity with Anti-Bleed)
+        # --- A. Original Lips Exclusion ---
+        # Get original lips and transform them to the new position
+        lips_orig = (labels_orig == 12) | (labels_orig == 13)
+        lips_orig_transformed = v2.functional.affine(
+            lips_orig.unsqueeze(0).float(),
+            angle=0.0,
+            translate=[translate_x.item(), translate_y.item()],
+            scale=scale_factor.item(),
+            shear=[0.0, 0.0],
+            interpolation=v2.InterpolationMode.NEAREST,
+            center=[cx_o.item(), cy_o.item()],
+        ).squeeze(0)
+        
+        # Dilate original lips strictly to guarantee we cover parser inaccuracy at the rim
+        lips_orig_transformed = self._dilate_binary(lips_orig_transformed, 1, mode="conv")
+
+        # --- B. Original Inner Transform ---
+        inner_orig_transformed = v2.functional.affine(
+            inner_orig.unsqueeze(0).float(),
+            angle=0.0,
+            translate=[translate_x.item(), translate_y.item()],
+            scale=scale_factor.item(),
+            shear=[0.0, 0.0],
+            interpolation=v2.InterpolationMode.NEAREST,
+            center=[cx_o.item(), cy_o.item()],
+        ).squeeze(0)
+
+        # --- C. Final Mask Computation ---
+        # 1. Start with the target hole
         overlay_mask = inner_swap.float()
+        
+        
+        
+        # 3. STRICTLY subtract any original lips that might have bled into the inner mask
+        overlay_mask = overlay_mask * (1.0 - lips_orig_transformed)
+
+        # 2. Restrict to actual original teeth/cavity
+        overlay_mask = torch.minimum(overlay_mask, inner_orig_transformed)
         
         # Dilate 1 pixel to catch the anti-aliasing edge of the parser
         overlay_mask = self._dilate_binary(overlay_mask, 1, mode="conv")
