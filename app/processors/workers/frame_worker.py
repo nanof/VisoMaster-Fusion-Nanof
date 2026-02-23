@@ -2187,29 +2187,32 @@ class FrameWorker(threading.Thread):
             swap = swap * editor_mask + original_face_512 * (1 - editor_mask)
             swap = self.frame_edits.swap_edit_face_core(swap, swap, parameters, control)
 
-        # --- MOUTH FIT & ALIGN (PRE-RESTORER) ---
-        mouth_overlay_pkg_pre = None
-        if hasattr(self.models_processor, "face_masks"):
-            mouth_overlay_pkg_pre = self.models_processor.face_masks.get_mouth_overlay(
-                swap, original_face_512, parameters
-            )
-
-        if mouth_overlay_pkg_pre is not None:
-            overlay_rgb, overlay_mask = mouth_overlay_pkg_pre
-            if overlay_rgb is not None and overlay_mask is not None:
-                if overlay_rgb.shape[-1] != swap.shape[-1]:
-                    overlay_rgb = v2.Resize(
-                        (swap.shape[-2], swap.shape[-1]), antialias=True
-                    )(overlay_rgb)
-                    overlay_mask = v2.Resize(
-                        (swap.shape[-2], swap.shape[-1]), antialias=True
-                    )(overlay_mask.unsqueeze(0)).squeeze(0)
-
-                swap = swap * (1.0 - overlay_mask) + overlay_rgb * overlay_mask
-
         # First Denoiser pass - Before Restorers
         if control.get("DenoiserUNetEnableBeforeRestorersToggle", False):
             swap = self._apply_denoiser_pass(swap, control, "Before", kv_map)
+
+        # --- MOUTH ENHANCEMENT & ALIGNMENT (PRE-RESTORER) ---
+        paste_after_restorer = parameters.get("MouthParserStretchAfterToggle", False)
+
+        if not paste_after_restorer:
+            mouth_overlay_pkg = None
+            if hasattr(self.models_processor, "face_masks"):
+                mouth_overlay_pkg = self.models_processor.face_masks.get_mouth_overlay(
+                    swap, original_face_512, parameters
+                )
+
+            if mouth_overlay_pkg is not None:
+                overlay_rgb, overlay_mask = mouth_overlay_pkg
+                if overlay_rgb is not None and overlay_mask is not None:
+                    if overlay_rgb.shape[-1] != swap.shape[-1]:
+                        overlay_rgb = v2.Resize(
+                            (swap.shape[-2], swap.shape[-1]), antialias=True
+                        )(overlay_rgb)
+                        overlay_mask = v2.Resize(
+                            (swap.shape[-2], swap.shape[-1]), antialias=True
+                        )(overlay_mask.unsqueeze(0)).squeeze(0)
+
+                    swap = swap * (1.0 - overlay_mask) + overlay_rgb * overlay_mask
 
         # --- RESTORATION 1 ---
         swap_original = swap.clone()
@@ -2255,7 +2258,6 @@ class FrameWorker(threading.Thread):
             swap_mask_noFP *= swap_mask
 
         # --- MASKS (Parser / CLIPs / Restore) ---
-        need_mouth_stretch = parameters.get("MouthParserStretchToggle", False)
         need_any_parser = (
             parameters.get("FaceParserEnableToggle", False)
             or (
@@ -2275,7 +2277,6 @@ class FrameWorker(threading.Thread):
             )
             and (parameters.get("ExcludeMaskEnableToggle", False))
         )
-        need_any_parser = need_any_parser or need_mouth_stretch
 
         FaceParser_mask = None
         mouth_512 = None
@@ -2294,23 +2295,6 @@ class FrameWorker(threading.Thread):
             texture_exclude_512 = out.get("texture_mask", texture_exclude_512)
             mouth_512 = out.get("mouth", None)
             inner_mouth_protection_512 = out.get("inner_mouth_protection", None)
-
-            # Mask Patching for Mouth Fit
-            mouth_overlay_info = out.get("mouth_overlay_info", None)
-            if mouth_overlay_info is not None and FaceParser_mask is not None:
-                _, overlay_mask = mouth_overlay_info
-                if FaceParser_mask.shape[-1] != swap.shape[-1]:
-                    FaceParser_mask = v2.Resize(
-                        (swap.shape[-2], swap.shape[-1]), antialias=True
-                    )(FaceParser_mask)
-                if overlay_mask.shape[-1] != FaceParser_mask.shape[-1]:
-                    overlay_mask = v2.Resize(
-                        (FaceParser_mask.shape[-2], FaceParser_mask.shape[-1]),
-                        antialias=True,
-                    )(overlay_mask.unsqueeze(0)).squeeze(0)
-
-                # Close the hole in the mask
-                FaceParser_mask = torch.maximum(FaceParser_mask, overlay_mask)
 
         if FaceParser_mask is not None:
             if FaceParser_mask.shape[-1] != swap_mask.shape[-1]:
@@ -3024,11 +3008,32 @@ class FrameWorker(threading.Thread):
         if control.get("DenoiserAfterRestorersToggle", False):
             swap = self._apply_denoiser_pass(swap, control, "After", kv_map)
 
+        # --- MOUTH ENHANCEMENT & ALIGNMENT (POST-RESTORER) ---
+        if parameters.get("MouthParserStretchAfterToggle", False):
+            mouth_overlay_pkg = None
+            if hasattr(self.models_processor, "face_masks"):
+                # 'swap' now contains the fully restored face
+                mouth_overlay_pkg = self.models_processor.face_masks.get_mouth_overlay(
+                    swap, original_face_512, parameters
+                )
+
+            if mouth_overlay_pkg is not None:
+                overlay_rgb, overlay_mask = mouth_overlay_pkg
+                if overlay_rgb is not None and overlay_mask is not None:
+                    if overlay_rgb.shape[-1] != swap.shape[-1]:
+                        overlay_rgb = v2.Resize(
+                            (swap.shape[-2], swap.shape[-1]), antialias=True
+                        )(overlay_rgb)
+                        overlay_mask = v2.Resize(
+                            (swap.shape[-2], swap.shape[-1]), antialias=True
+                        )(overlay_mask.unsqueeze(0)).squeeze(0)
+
+                    swap = swap * (1.0 - overlay_mask) + overlay_rgb * overlay_mask
+
         # --- FACE PARSER (END) ---
-        if (
-            parameters.get("FaceParserEnableToggle")
-            and parameters.get("FaceParserEndToggle")
-        ) or (parameters.get("MouthParserStretchToggle", False)):
+        if parameters.get("FaceParserEnableToggle") and parameters.get(
+            "FaceParserEndToggle"
+        ):
             out = self.models_processor.process_masks_and_masks(
                 swap,
                 original_face_512,
@@ -3036,31 +3041,13 @@ class FrameWorker(threading.Thread):
                 control,
             )
 
-            if parameters.get("FaceParserEnableToggle") and parameters.get(
-                "FaceParserEndToggle"
-            ):
-                FaceParser_mask = out.get("FaceParser_mask", None)
-            else:
-                FaceParser_mask = None
-
-            # Mouth Stretch Mask Patching (End)
-            mouth_overlay_info_end = out.get("mouth_overlay_info", None)
+            FaceParser_mask = out.get("FaceParser_mask", None)
 
             if FaceParser_mask is not None:
                 if FaceParser_mask.shape[-1] != swap_mask.shape[-1]:
                     FaceParser_mask = v2.Resize(
                         (swap.shape[-2], swap.shape[-1]), antialias=True
                     )(FaceParser_mask)
-
-                if mouth_overlay_info_end is not None:
-                    _, overlay_mask_end = mouth_overlay_info_end
-                    if overlay_mask_end.shape[-1] != FaceParser_mask.shape[-1]:
-                        overlay_mask_end = v2.Resize(
-                            (FaceParser_mask.shape[-2], FaceParser_mask.shape[-1]),
-                            interpolation=v2.InterpolationMode.NEAREST,
-                        )(overlay_mask_end.unsqueeze(0)).squeeze(0)
-
-                    FaceParser_mask = torch.maximum(FaceParser_mask, overlay_mask_end)
 
                 swap_mask = swap_mask * FaceParser_mask
 

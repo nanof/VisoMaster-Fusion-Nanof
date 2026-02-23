@@ -107,7 +107,135 @@ class FaceMasks:
 
     # --- Mouth Processing Logic ---
 
-    def _create_aligned_mouth_overlay(
+    def _enhance_and_align_swapped_mouth(
+        self,
+        swap_img: torch.Tensor,
+        labels_swap: torch.Tensor,
+        parameters: dict,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """
+        Isolates the inner mouth from the raw swap, applies Thresholded Edge-Aware
+        Unsharp Masking (USM) if requested, and applies the user's Zoom (Scale)
+        using Center of Mass for stable anchoring.
+        """
+        # Group labels for performance
+        mouth_swap = (labels_swap == 11) | (labels_swap == 12) | (labels_swap == 13)
+        inner_swap = labels_swap == 11
+        lips_swap = (labels_swap == 12) | (labels_swap == 13)
+
+        if inner_swap.sum() == 0:
+            return None, None
+
+        enhanced_swap_img = swap_img.clone()
+
+        # --- Thresholded Edge-Aware Unsharp Masking (USM) ---
+        sharpen_amount = parameters.get("MouthParserStretchSharpenDecimalSlider", 0.0)
+
+        if sharpen_amount > 0.0:
+            y_ind, x_ind = torch.where(mouth_swap)
+            # Add padding for processing
+            ymin, ymax = (
+                max(0, y_ind.min().item() - 15),
+                min(swap_img.shape[1], y_ind.max().item() + 15),
+            )
+            xmin, xmax = (
+                max(0, x_ind.min().item() - 15),
+                min(swap_img.shape[2], x_ind.max().item() + 15),
+            )
+
+            mouth_crop = swap_img[:, ymin:ymax, xmin:xmax].clone().float()
+
+            # 1. Apply Gaussian Blur to find the base frequencies
+            blurred_mouth = v2.functional.gaussian_blur(
+                mouth_crop, kernel_size=5, sigma=1.0
+            )
+
+            # 2. Subtract blurred image from original to isolate edges
+            high_freq_edges = mouth_crop - blurred_mouth
+
+            # Threshold to protect smooth skin/noise
+            # Only amplify edges if their magnitude is above 5.0 (out of 255)
+            threshold = 3.0
+            mask_edges = (torch.abs(high_freq_edges) > threshold).float()
+
+            # 3. Add the amplified edges back to the original image ONLY where threshold is met
+            sharpened_mouth = mouth_crop + (
+                sharpen_amount * high_freq_edges * mask_edges
+            )
+
+            sharpened_mouth = torch.clamp(sharpened_mouth, 0.0, 255.0).to(
+                swap_img.dtype
+            )
+            enhanced_swap_img[:, ymin:ymax, xmin:xmax] = sharpened_mouth
+
+        # --- Alignment Logic (Stable Center of Mass) ---
+        y_s_full, x_s_full = torch.where(mouth_swap)
+        y_s_inner, _ = torch.where(inner_swap)
+
+        # Use Mean (Center of Mass) instead of min/max to avoid temporal jittering
+        cx_s = x_s_full.float().mean()
+        # Keep the top of the inner mouth as Y anchor (but average the top 5% to avoid 1-pixel noise)
+        top_y_k = max(1, int(y_s_inner.shape[0] * 0.01))
+        cy_s = torch.topk(y_s_inner.float(), k=top_y_k, largest=False).values.mean()
+
+        mouthzoom = parameters.get("MouthParserStretchDecimalSlider", 1.05)
+
+        # Affine transform parameters
+        affine_kwargs = {
+            "angle": 0.0,
+            "translate": [0.0, 0.0],
+            "scale": mouthzoom,
+            "shear": [0.0, 0.0],
+            "center": [cx_s.item(), cy_s.item()],
+        }
+
+        overlay = v2.functional.affine(
+            enhanced_swap_img,
+            interpolation=v2.InterpolationMode.BILINEAR,
+            **affine_kwargs,
+        )
+
+        inner_swap_transformed = v2.functional.affine(
+            inner_swap.unsqueeze(0).float(),
+            interpolation=v2.InterpolationMode.NEAREST,
+            **affine_kwargs,
+        ).squeeze(0)
+
+        lips_swap_transformed = v2.functional.affine(
+            lips_swap.unsqueeze(0).float(),
+            interpolation=v2.InterpolationMode.NEAREST,
+            **affine_kwargs,
+        ).squeeze(0)
+
+        lips_swap_transformed = self._dilate_binary(
+            lips_swap_transformed, 1, mode="conv"
+        )
+
+        # Combine masks
+        overlay_mask = inner_swap.float()
+        overlay_mask = overlay_mask * (1.0 - lips_swap_transformed)
+        overlay_mask = torch.minimum(overlay_mask, inner_swap_transformed)
+        overlay_mask = self._dilate_binary(overlay_mask, 1, mode="conv")
+
+        # Dynamic blur size based on mouth width to prevent harsh seams
+        mouth_width = x_s_full.max() - x_s_full.min()
+        dynamic_kernel = (
+            int(mouth_width.item() * 0.15) | 1
+        )  # 15% of width, force odd number
+        dynamic_kernel = max(5, min(31, dynamic_kernel))  # Clamp between 5 and 31
+
+        overlay_mask = v2.functional.gaussian_blur(
+            overlay_mask.unsqueeze(0),
+            kernel_size=dynamic_kernel,
+            sigma=dynamic_kernel / 3.0,
+        ).squeeze(0)
+
+        # Multiply by inner_swap to prevent blur from bleeding onto the lips
+        final_mask = overlay_mask * inner_swap.float()
+
+        return overlay, final_mask
+
+    def _enhance_and_align_original_mouth(
         self,
         img_orig: torch.Tensor,
         labels_orig: torch.Tensor,
@@ -116,56 +244,73 @@ class FaceMasks:
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """
         Creates an aligned mouth overlay from the original image to the swap image.
-        
-        HYBRID ANATOMICAL VERSION: 
-        - Scale & X-Center: Based on full mouth width (stable commissures).
-        - Y-Center: Anchored strictly to the Upper Lip to prevent jaw-drop sliding.
-        - Mask: Strictly limited to the Inner Mouth (Class 11) to prevent lip bleeding.
+        Strictly limited to the INNER mouth (class 11) to avoid overriding swapped lips.
         """
-        # 1. Define Regions
-        mouth_orig = (labels_orig == 11) | (labels_orig == 12) | (labels_orig == 13)
-        mouth_swap = (labels_swap == 11) | (labels_swap == 12) | (labels_swap == 13)
+        inner_orig = labels_orig == 11
+        inner_swap = labels_swap == 11
 
-        inner_orig = (labels_orig == 11)
-        inner_swap = (labels_swap == 11)
-
-        upper_lip_orig = (labels_orig == 12)
-        upper_lip_swap = (labels_swap == 12)
-
-        # Safety: We need inner cavities to have teeth to copy and a hole to fill
+        # CRITICAL FIX 1: We strictly require the inner mouth.
+        # If the mouth is closed, we cannot restore original teeth/tongue.
         if inner_orig.sum() == 0 or inner_swap.sum() == 0:
             return None, None
 
-        # 2. Extract Width and X-Center based on FULL MOUTH (Stable horizontal scaling)
-        _, x_o_full = torch.where(mouth_orig)
-        _, x_s_full = torch.where(mouth_swap)
-        
+        mouth_orig = (labels_orig == 11) | (labels_orig == 12) | (labels_orig == 13)
+        mouth_swap = (labels_swap == 11) | (labels_swap == 12) | (labels_swap == 13)
+
+        enhanced_img_orig = img_orig.clone()
+
+        # --- Thresholded Edge-Aware Unsharp Masking (USM) ---
+        sharpen_amount = parameters.get("MouthParserStretchSharpenDecimalSlider", 0.0)
+
+        if sharpen_amount > 0.0:
+            y_ind, x_ind = torch.where(mouth_orig)
+            ymin, ymax = (
+                max(0, y_ind.min().item() - 15),
+                min(img_orig.shape[1], y_ind.max().item() + 15),
+            )
+            xmin, xmax = (
+                max(0, x_ind.min().item() - 15),
+                min(img_orig.shape[2], x_ind.max().item() + 15),
+            )
+
+            mouth_crop = img_orig[:, ymin:ymax, xmin:xmax].clone().float()
+            blurred_mouth = v2.functional.gaussian_blur(
+                mouth_crop, kernel_size=5, sigma=1.0
+            )
+            high_freq_edges = mouth_crop - blurred_mouth
+
+            threshold = 3.0
+            mask_edges = (torch.abs(high_freq_edges) > threshold).float()
+
+            sharpened_mouth = mouth_crop + (
+                sharpen_amount * high_freq_edges * mask_edges
+            )
+            sharpened_mouth = torch.clamp(sharpened_mouth, 0.0, 255.0).to(
+                img_orig.dtype
+            )
+            enhanced_img_orig[:, ymin:ymax, xmin:xmax] = sharpened_mouth
+
+        # --- Alignment Logic (Stable Center of Mass) ---
+        y_o_full, x_o_full = torch.where(mouth_orig)
+        y_s_full, x_s_full = torch.where(mouth_swap)
+
         w_o = (x_o_full.max() - x_o_full.min()).float()
         w_s = (x_s_full.max() - x_s_full.min()).float()
 
         if w_o <= 0.0 or w_s <= 0.0:
             return None, None
 
-        cx_o = (x_o_full.max() + x_o_full.min()) / 2.0
-        cx_s = (x_s_full.max() + x_s_full.min()) / 2.0
+        cx_o = x_o_full.float().mean()
+        cx_s = x_s_full.float().mean()
 
-        # 3. Extract Y-Center based on the TOP of the INNER CAVITY (Rigid upper jaw anchor)
-        # Using the exact top pixel of the inner mouth ensures teeth start precisely beneath the upper lip.
-        if inner_orig.sum() > 0 and inner_swap.sum() > 0:
-            y_o_inner, _ = torch.where(inner_orig)
-            y_s_inner, _ = torch.where(inner_swap)
-            
-            # Use min() because Y axis goes from 0 (top) to H (bottom)
-            cy_o = y_o_inner.float().min()
-            cy_s = y_s_inner.float().min()
-        else:
-            # Fallback if inner cavity calculation fails
-            y_o_full, _ = torch.where(mouth_orig)
-            y_s_full, _ = torch.where(mouth_swap)
-            cy_o = y_o_full.float().mean()
-            cy_s = y_s_full.float().mean()
+        y_anchor_orig = torch.where(inner_orig)[0]
+        y_anchor_swap = torch.where(inner_swap)[0]
 
-        # 4. Apply Transformations
+        top_o_k = max(1, int(y_anchor_orig.shape[0] * 0.01))
+        top_s_k = max(1, int(y_anchor_swap.shape[0] * 0.01))
+        cy_o = torch.topk(y_anchor_orig.float(), k=top_o_k, largest=False).values.mean()
+        cy_s = torch.topk(y_anchor_swap.float(), k=top_s_k, largest=False).values.mean()
+
         mouthzoom = parameters.get("MouthParserStretchDecimalSlider", 1.05)
         scale_factor = (w_s / w_o) * mouthzoom
 
@@ -175,80 +320,67 @@ class FaceMasks:
         translate_x = cx_s - cx_o
         translate_y = cy_s - cy_o
 
+        affine_kwargs = {
+            "angle": 0.0,
+            "translate": [translate_x.item(), translate_y.item()],
+            "scale": scale_factor.item(),
+            "shear": [0.0, 0.0],
+            "center": [cx_o.item(), cy_o.item()],
+        }
+
         overlay = v2.functional.affine(
-            img_orig,
-            angle=0.0,
-            translate=[translate_x.item(), translate_y.item()],
-            scale=scale_factor.item(),
-            shear=[0.0, 0.0],
+            enhanced_img_orig,
             interpolation=v2.InterpolationMode.BILINEAR,
-            center=[cx_o.item(), cy_o.item()],
+            **affine_kwargs,
         )
 
-        # 5. Mask Processing (STRICTLY Inner Cavity with Anti-Bleed)
-        # --- A. Original Lips Exclusion ---
-        # Get original lips and transform them to the new position
-        lips_orig = (labels_orig == 12) | (labels_orig == 13)
-        lips_orig_transformed = v2.functional.affine(
-            lips_orig.unsqueeze(0).float(),
-            angle=0.0,
-            translate=[translate_x.item(), translate_y.item()],
-            scale=scale_factor.item(),
-            shear=[0.0, 0.0],
-            interpolation=v2.InterpolationMode.NEAREST,
-            center=[cx_o.item(), cy_o.item()],
-        ).squeeze(0)
-        
-        # Dilate original lips strictly to guarantee we cover parser inaccuracy at the rim
-        lips_orig_transformed = self._dilate_binary(lips_orig_transformed, 1, mode="conv")
-
-        # --- B. Original Inner Transform ---
+        # Inner mask alignment
         inner_orig_transformed = v2.functional.affine(
             inner_orig.unsqueeze(0).float(),
-            angle=0.0,
-            translate=[translate_x.item(), translate_y.item()],
-            scale=scale_factor.item(),
-            shear=[0.0, 0.0],
             interpolation=v2.InterpolationMode.NEAREST,
-            center=[cx_o.item(), cy_o.item()],
+            **affine_kwargs,
         ).squeeze(0)
 
-        # --- C. Final Mask Computation ---
-        # 1. Start with the target hole
+        # Build mask STRICTLY from the inner mouth intersection
         overlay_mask = inner_swap.float()
-        
-        
-        
-        # 3. STRICTLY subtract any original lips that might have bled into the inner mask
-        overlay_mask = overlay_mask * (1.0 - lips_orig_transformed)
-
-        # 2. Restrict to actual original teeth/cavity
         overlay_mask = torch.minimum(overlay_mask, inner_orig_transformed)
-        
-        # Dilate 1 pixel to catch the anti-aliasing edge of the parser
         overlay_mask = self._dilate_binary(overlay_mask, 1, mode="conv")
 
-        # Soft blur for seamless integration with the inner edge of the swap's lips
-        overlay_mask = v2.functional.gaussian_blur(
-            overlay_mask.unsqueeze(0), kernel_size=5, sigma=1.5
+        dynamic_kernel = int(w_s.item() * 0.15) | 1
+        dynamic_kernel = max(5, min(31, dynamic_kernel))
+
+        blurred_mask = v2.functional.gaussian_blur(
+            overlay_mask.unsqueeze(0),
+            kernel_size=dynamic_kernel,
+            sigma=dynamic_kernel / 3.0,
         ).squeeze(0)
 
-        return overlay, overlay_mask
+        # Multiply by inner_swap to prevent blur from bleeding onto the lips
+        final_mask = blurred_mask * inner_swap.float()
+
+        return overlay, final_mask
 
     def get_mouth_overlay(self, swap_img, original_img, parameters):
         """
-        Public helper to retrieve just the mouth overlay.
-        Used by FrameWorker to inject the mouth BEFORE the Face Restorer runs.
+        Public helper to retrieve the mouth overlay based on UI parameters.
+        Routes to original mouth alignment or swapped mouth enhancement & zoom.
         """
         if not parameters.get("MouthParserStretchToggle", False):
             return None
 
         labels_swap = self._faceparser_labels(swap_img)
-        labels_orig = self._faceparser_labels(original_img)
 
-        return self._create_aligned_mouth_overlay(
-            original_img, labels_orig, labels_swap, parameters
-        )
+        if parameters.get("MouthParserStretchOriginalToggle", False):
+            # L'utilisateur veut la bouche ORIGINALE (avec Alignement et Zoom)
+            labels_orig = self._faceparser_labels(original_img)
+            return self._enhance_and_align_original_mouth(
+                original_img, labels_orig, labels_swap, parameters
+            )
+        else:
+            # L'utilisateur veut la bouche SWAPPÉE (avec Upscale et Zoom)
+            return self._enhance_and_align_swapped_mouth(
+                swap_img, labels_swap, parameters
+            )
 
     # --- Main Mask Processing Pipeline ---
 
@@ -326,10 +458,10 @@ class FaceMasks:
         if should_get_orig_labels:
             labels_orig = self._faceparser_labels(original_face_512)
 
-        # ---------- 1. MOUTH FIT & ALIGN LOGIC ----------
-        if need_mouth_stretch and labels_orig is not None and labels_swap is not None:
-            overlay, overlay_mask = self._create_aligned_mouth_overlay(
-                original_face_512, labels_orig, labels_swap, parameters
+        """ # ---------- 1. MOUTH FIT & ALIGN LOGIC ----------
+        if need_mouth_stretch and labels_swap is not None:
+            overlay, overlay_mask = self._enhance_swapped_mouth(
+                swap_restorecalc, labels_swap, parameters
             )
 
             if overlay is not None:
@@ -341,8 +473,8 @@ class FaceMasks:
 
                 result["mouth_overlay_info"] = (overlay, overlay_mask)
                 if control.get("CommandLineDebugEnableToggle", False):
-                    print("[INFO] Mouth Align: Applied Stable Width Transform.")
-
+                    print("[INFO] Mouth Align: Applied Enhanced Swapped Mouth.")
+        """
         # ---------- 1.5 XSEG MOUTH PROTECTION (NEW) ----------
         if need_xseg_mouth_protection and labels_swap is not None:
             # Class 11: Inner Mouth, 12: Upper Lip, 13: Lower Lip
