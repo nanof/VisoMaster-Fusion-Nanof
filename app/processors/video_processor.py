@@ -1029,6 +1029,11 @@ class VideoProcessor(QObject):
         # Face tracker defaults
         self.main_window.models_processor.face_detectors.tracker = None
         self.main_window.models_processor.face_detectors.track_history = {}
+        try:
+            from app.processors.external.yolox.tracker.basetrack import BaseTrack
+            BaseTrack._count = 0
+        except ImportError:
+            pass
 
         # 3a. Release the capture object.
         print("[INFO] Releasing media capture to unblock feeder thread...")

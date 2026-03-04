@@ -18,6 +18,11 @@ def handle_face_detector_tracking_reset(main_window: "MainWindow", value):
     """Resets the tracker instance when tracking is toggled or media changes."""
     main_window.models_processor.face_detectors.tracker = None
     main_window.models_processor.face_detectors.track_history = {}
+    try:
+        from app.processors.external.yolox.tracker.basetrack import BaseTrack
+        BaseTrack._count = 0
+    except ImportError:
+        pass
     common_widget_actions.refresh_frame(main_window)
 
 

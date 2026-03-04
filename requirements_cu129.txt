@@ -31,7 +31,3 @@ omegaconf
 einops
 lightning
 send2trash
-cython_bbox==0.1.5
-lap==0.5.12
-thop
-loguru==0.7.3

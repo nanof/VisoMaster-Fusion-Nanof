@@ -302,7 +302,7 @@ class FaceDetectors:
                 ):
                     kpss_5[i] = landmark_kpss_5
             kpss = np.array(refined_kpss, dtype=object)
-        return det, kpss_5, kpss
+        return det, kpss_5, kpss, score_values
 
     def _run_model_with_lazy_build_check(
         self, model_name: str, ort_session, io_binding
@@ -478,7 +478,7 @@ class FaceDetectors:
             if t_det is not None:
                 # Optionally refine landmarks (if the user wants detailed landmarks)
                 if use_landmark_detection:
-                    return self._refine_landmarks(
+                    det_r, kpss_5_r, kpss_r, _ = self._refine_landmarks(
                         img,
                         t_det,
                         t_kpss,
@@ -489,6 +489,7 @@ class FaceDetectors:
                         from_points,
                         **kwargs,
                     )
+                    return det_r, kpss_5_r, kpss_r
                 return t_det, t_kpss, t_scores
 
         # FULL DETECTION FALLBACK
@@ -536,13 +537,11 @@ class FaceDetectors:
         if detect_mode in ["RetinaFace", "SCRFD"]:
             args["input_size"] = input_size
 
-        # Run the detector
-        det, kpss_5, kpss = detection_function(**args)
+        # Run the detector — returns (det, kpss_5, kpss, det_scores)
+        det, kpss_5, kpss, det_scores = detection_function(**args)
 
         # ByteTrack Advanced Tracking
-        if use_bytetrack:
-            from app.processors.external.yolox.tracker.byte_tracker import BYTETracker
-
+        if use_bytetrack and BYTETracker is not None:
             if self.tracker is None:
                 # Initialize ByteTrack default parameters
                 class TrackerArgs:
@@ -554,16 +553,18 @@ class FaceDetectors:
                 self.tracker = BYTETracker(TrackerArgs())
 
             # Prepare detections for ByteTrack [x1, y1, x2, y2, score]
+            img_hw = (int(img.shape[1]), int(img.shape[2]))
             if len(det) > 0:
-                # Detector already filtered by effective_score; use high dummy for persistence
-                tracker_input = np.column_stack([det, np.full(len(det), 0.9)])
-                online_targets = self.tracker.update(
-                    tracker_input, img.shape[1:3], img.shape[1:3]
+                # Use actual detection scores; fall back to 0.9 if lengths mismatch
+                scores_for_tracker = (
+                    det_scores
+                    if len(det_scores) == len(det)
+                    else np.full(len(det), 0.9)
                 )
+                tracker_input = np.column_stack([det, scores_for_tracker])
+                online_targets = self.tracker.update(tracker_input, img_hw, img_hw)
             else:
-                online_targets = self.tracker.update(
-                    np.empty((0, 5)), img.shape[1:3], img.shape[1:3]
-                )
+                online_targets = self.tracker.update(np.empty((0, 5)), img_hw, img_hw)
 
             tracked_det = []
             tracked_kpss_5 = []
@@ -627,11 +628,12 @@ class FaceDetectors:
                 )
 
         # Optionally refine landmarks (if the user wants detailed landmarks)
+        bytetrack_active = use_bytetrack and BYTETracker is not None
         if use_landmark_detection and len(det) > 0:
-            # If we just tracked, use current track scores, otherwise use detector scores
-            current_scores = score_values if use_bytetrack else np.full(len(det), 0.9)
+            # Use tracked scores when ByteTrack is active, otherwise actual detector scores
+            current_scores = score_values if bytetrack_active else det_scores
 
-            return self._refine_landmarks(
+            det_r, kpss_5_r, kpss_r, _ = self._refine_landmarks(
                 img,
                 det,
                 kpss_5,
@@ -642,6 +644,7 @@ class FaceDetectors:
                 from_points,
                 **kwargs,
             )
+            return det_r, kpss_5_r, kpss_r
 
         return det, kpss_5, kpss
 
@@ -822,7 +825,7 @@ class FaceDetectors:
             kwargs.get("max_num"),
         )
         if det is None:
-            return [], [], []
+            return [], [], [], np.array([])
 
         # Optionally refine landmarks with a secondary model
         return self._refine_landmarks(img_landmark, det, kpss, score_values, **kwargs)
@@ -995,7 +998,7 @@ class FaceDetectors:
             kwargs.get("max_num"),
         )
         if det is None:
-            return [], [], []
+            return [], [], [], np.array([])
 
         # Optionally refine landmarks with a secondary model
         return self._refine_landmarks(img_landmark, det, kpss, score_values, **kwargs)
@@ -1158,7 +1161,7 @@ class FaceDetectors:
             kwargs.get("max_num"),
         )
         if det is None:
-            return [], [], []
+            return [], [], [], np.array([])
 
         return self._refine_landmarks(img_landmark, det, kpss, score_values, **kwargs)
 
@@ -1367,6 +1370,6 @@ class FaceDetectors:
             kwargs.get("max_num"),
         )
         if det is None:
-            return [], [], []
+            return [], [], [], np.array([])
 
         return self._refine_landmarks(img_landmark, det, kpss, score_values, **kwargs)
