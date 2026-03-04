@@ -1425,36 +1425,55 @@ class FrameWorker(threading.Thread):
         dim = 1
         latent = None
 
-        # Helper to apply Identity Boost (Face Likeness) with Difference Boosting & Normalization
+        # Helper to apply Identity Boost (Face Likeness) using SLERP & LERP
         def apply_likeness_with_norm_preservation(
-            source_latent, target_embedding, params
-        ):
-            # 1. Capture the original 'Energy' (Norm) of the source latent
-            original_norm = torch.norm(source_latent)
+            source_latent: torch.Tensor, target_latent: torch.Tensor, params: dict
+        ) -> torch.Tensor:
+            if not params.get("FaceLikenessEnableToggle", False):
+                return source_latent
 
-            if params["FaceLikenessEnableToggle"]:
-                factor = params["FaceLikenessFactorDecimalSlider"]
+            factor = float(params.get("FaceLikenessFactorDecimalSlider", 0.0))
+            if factor == 0.0:
+                return source_latent
 
-                # Calculate target latent structure
-                dst_latent = (
-                    torch.from_numpy(
-                        self.models_processor.calc_inswapper_latent(target_embedding)
-                    )
-                    .float()
-                    .to(self.models_processor.device)
-                )
+            # 1. Capture original energy (Norms are generally constant in ArcFace)
+            s_norm = torch.norm(source_latent)
+            t_norm = torch.norm(target_latent)
 
-                difference_vector = source_latent - dst_latent
-                source_latent = source_latent + (factor * difference_vector)
+            if s_norm < 1e-6 or t_norm < 1e-6:
+                return source_latent
 
-                # 3. Re-Normalize based on Toggle
-                if params.get("FaceLikenessNormalizationEnableToggle", True):
-                    new_norm = torch.norm(source_latent)
-                    if new_norm > 1e-6:
-                        # Rescale to match original energy -> Prevents artifacts/saturation
-                        source_latent = source_latent * (original_norm / new_norm)
+            # 2. Normalize to get directional vectors on the hypersphere
+            s_dir = source_latent / s_norm
+            t_dir = target_latent / t_norm
 
-            return source_latent
+            if factor < 0.0:
+                # --- INTERPOLATION (SLERP) ---
+                # Move naturally towards the target face along the sphere
+                t = 1.0 + factor
+
+                cos_theta = torch.sum(s_dir * t_dir)
+                cos_theta = torch.clamp(cos_theta, -0.9999, 0.9999)
+                theta = torch.acos(cos_theta)
+                sin_theta = torch.sin(theta)
+
+                if sin_theta < 1e-3:
+                    blended_dir = (1.0 - t) * t_dir + t * s_dir
+                else:
+                    weight_t = torch.sin((1.0 - t) * theta) / sin_theta
+                    weight_s = torch.sin(t * theta) / sin_theta
+                    blended_dir = weight_t * t_dir + weight_s * s_dir
+            else:
+                # --- EXTRAPOLATION (LERP) ---
+                # Push the vector away from the target to exaggerate the source identity
+                difference_vector = s_dir - t_dir
+                blended_dir = s_dir + (factor * difference_vector)
+
+            # 3. Always restore original Source Energy to prevent latent space corruption
+            blended_dir = blended_dir / torch.norm(blended_dir)
+            final_latent = blended_dir * s_norm
+
+            return final_latent
 
         # --- Inswapper128 Logic ---
         if swapper_model == "Inswapper128":
@@ -1463,9 +1482,15 @@ class FrameWorker(threading.Thread):
                 .float()
                 .to(self.models_processor.device)
             )
+            dst_latent = (
+                torch.from_numpy(self.models_processor.calc_inswapper_latent(t_e))
+                .float()
+                .to(self.models_processor.device)
+            )
 
-            # Apply the enhanced likeness logic
-            latent = apply_likeness_with_norm_preservation(latent, t_e, parameters)
+            latent = apply_likeness_with_norm_preservation(
+                latent, dst_latent, parameters
+            )
 
             dim = 1
             if parameters["SwapperResAutoSelectEnableToggle"]:
@@ -1509,21 +1534,17 @@ class FrameWorker(threading.Thread):
                 .float()
                 .to(self.models_processor.device)
             )
-
-            if parameters["FaceLikenessEnableToggle"]:
-                original_norm = torch.norm(latent)
-                factor = parameters["FaceLikenessFactorDecimalSlider"]
-                dst_latent = (
-                    torch.from_numpy(
-                        self.models_processor.calc_swapper_latent_iss(t_e, version)
-                    )
-                    .float()
-                    .to(self.models_processor.device)
+            dst_latent = (
+                torch.from_numpy(
+                    self.models_processor.calc_swapper_latent_iss(t_e, version)
                 )
-                latent = latent - (factor * dst_latent)
-                new_norm = torch.norm(latent)
-                if new_norm > 1e-6:
-                    latent = latent * (original_norm / new_norm)
+                .float()
+                .to(self.models_processor.device)
+            )
+
+            latent = apply_likeness_with_norm_preservation(
+                latent, dst_latent, parameters
+            )
 
             if (
                 (
@@ -1554,21 +1575,17 @@ class FrameWorker(threading.Thread):
                 .float()
                 .to(self.models_processor.device)
             )
-
-            if parameters["FaceLikenessEnableToggle"]:
-                original_norm = torch.norm(latent)
-                factor = parameters["FaceLikenessFactorDecimalSlider"]
-                dst_latent = (
-                    torch.from_numpy(
-                        self.models_processor.calc_swapper_latent_simswap512(t_e)
-                    )
-                    .float()
-                    .to(self.models_processor.device)
+            dst_latent = (
+                torch.from_numpy(
+                    self.models_processor.calc_swapper_latent_simswap512(t_e)
                 )
-                latent = latent - (factor * dst_latent)
-                new_norm = torch.norm(latent)
-                if new_norm > 1e-6:
-                    latent = latent * (original_norm / new_norm)
+                .float()
+                .to(self.models_processor.device)
+            )
+
+            latent = apply_likeness_with_norm_preservation(
+                latent, dst_latent, parameters
+            )
 
             dim = 4
             input_face_affined = original_face_512
@@ -1584,21 +1601,15 @@ class FrameWorker(threading.Thread):
                 .float()
                 .to(self.models_processor.device)
             )
+            dst_latent = (
+                torch.from_numpy(self.models_processor.calc_swapper_latent_ghost(t_e))
+                .float()
+                .to(self.models_processor.device)
+            )
 
-            if parameters["FaceLikenessEnableToggle"]:
-                original_norm = torch.norm(latent)
-                factor = parameters["FaceLikenessFactorDecimalSlider"]
-                dst_latent = (
-                    torch.from_numpy(
-                        self.models_processor.calc_swapper_latent_ghost(t_e)
-                    )
-                    .float()
-                    .to(self.models_processor.device)
-                )
-                latent = latent - (factor * dst_latent)
-                new_norm = torch.norm(latent)
-                if new_norm > 1e-6:
-                    latent = latent * (original_norm / new_norm)
+            latent = apply_likeness_with_norm_preservation(
+                latent, dst_latent, parameters
+            )
 
             dim = 2
             input_face_affined = original_face_256
@@ -1610,21 +1621,15 @@ class FrameWorker(threading.Thread):
                 .float()
                 .to(self.models_processor.device)
             )
+            dst_latent = (
+                torch.from_numpy(self.models_processor.calc_swapper_latent_cscs(t_e))
+                .float()
+                .to(self.models_processor.device)
+            )
 
-            if parameters["FaceLikenessEnableToggle"]:
-                original_norm = torch.norm(latent)
-                factor = parameters["FaceLikenessFactorDecimalSlider"]
-                dst_latent = (
-                    torch.from_numpy(
-                        self.models_processor.calc_swapper_latent_cscs(t_e)
-                    )
-                    .float()
-                    .to(self.models_processor.device)
-                )
-                latent = latent - (factor * dst_latent)
-                new_norm = torch.norm(latent)
-                if new_norm > 1e-6:
-                    latent = latent * (original_norm / new_norm)
+            latent = apply_likeness_with_norm_preservation(
+                latent, dst_latent, parameters
+            )
 
             dim = 2
             input_face_affined = original_face_256
@@ -2663,6 +2668,7 @@ class FrameWorker(threading.Thread):
 
         # --- TRANSFER TEXTURE ---
         if parameters.get("TransferTextureEnableToggle", False):
+            # 1. Ensure resolutions match target 512x512
             if swap.shape[-1] != 512:
                 swap = t512_mask(swap)
                 swap_mask = t512_mask(swap_mask)
@@ -2672,20 +2678,23 @@ class FrameWorker(threading.Thread):
             mask_vgg_512 = torch.ones(
                 (1, 512, 512), dtype=torch.float32, device=self.models_processor.device
             )
+
             TextureFeatureLayerTypeSelection = "combo_relu3_3_relu3_1"
-            upper_thresh = parameters["TextureUpperLimitSlider"] / 100
+            upper_thresh = parameters["TextureUpperLimitSlider"] / 100.0
 
+            # 2. VGG Mask Processing
             if parameters.get("ExcludeOriginalVGGMaskEnableToggle", False):
-                if parameters.get("ExcludeVGGMaskEnableToggle", False):
-                    thr = parameters["VGGMaskThresholdSlider"]
-                    soft = 100
-                    mode = "smooth"
-                else:
-                    thr = 35
-                    soft = 100
-                    mode = "smooth"
+                # Fetch threshold values from UI
+                thr = (
+                    parameters["VGGMaskThresholdSlider"]
+                    if parameters.get("ExcludeVGGMaskEnableToggle", False)
+                    else 0
+                )
+                soft = 100
+                mode = "smooth"
 
-                mask_vgg_512, diff_norm_texture = (
+                # Retrieve BOTH the thresholded mask and the raw normalized difference (Size: 128x128)
+                mask_vgg_raw, diff_norm_texture_raw = (
                     self.models_processor.apply_vgg_mask_simple(
                         swap,
                         original_face_512,
@@ -2697,59 +2706,70 @@ class FrameWorker(threading.Thread):
                     )
                 )
 
-                if not parameters.get("ExcludeVGGMaskEnableToggle", False):
-                    mask_vgg_512 = t512_mask(diff_norm_texture)
-                    mask_vgg_512 = t512_mask(mask_vgg_512).clamp(0.0, 1.0)
+                # Upscale to 512x512 IMMEDIATELY to prevent tensor mismatch
+                mask_vgg_512 = t512_mask(mask_vgg_raw).clamp(0.0, 1.0)
+                diff_norm_texture_512 = t512_mask(diff_norm_texture_raw).clamp(0.0, 1.0)
 
+                # Fallback to the raw difference texture if manipulation is disabled (Restoring old behavior)
+                if not parameters.get("ExcludeVGGMaskEnableToggle", False):
+                    mask_vgg_512 = diff_norm_texture_512.clone()
+
+                # Optional VGG specific blur
                 if parameters.get("TextureBlendAmountSlider", 0) > 0:
                     b = parameters["TextureBlendAmountSlider"]
                     gauss = transforms.GaussianBlur(b * 2 + 1, (b + 1) * 0.2)
                     mask_vgg_512 = gauss(mask_vgg_512.float())
 
+            # 3. Features Exclusion Logic (Eyes, Mouth, etc.)
             if parameters.get("ExcludeMaskEnableToggle", False):
+                # texture_exclude_512: 1 means KEEP texture (skin), 0 means REMOVE texture (eyes/mouth)
                 feature_mask = texture_exclude_512.clone()
-                if parameters.get("FaceParserBlurTextureSlider", 0) > 0:
-                    b_fp = parameters["FaceParserBlurTextureSlider"]
-                    kernel_size = int(b_fp * 2 + 1)
-                    if kernel_size % 2 == 0:
-                        kernel_size += 1
-                    gauss_fp = transforms.GaussianBlur(kernel_size, (b_fp + 1) * 0.2)
-                    feature_mask = gauss_fp(feature_mask)
 
+                # Combine VGG mask with the spatial FaceParser mask
                 if parameters.get("ExcludeOriginalVGGMaskEnableToggle", False):
+                    # max() ensures that if feature_mask is 0 (eyes), (1 - 0) = 1, forcing mask_final to 1 (No Transfer)
+                    # mask_final_512 = torch.max(mask_vgg_512, (1.0 - feature_mask))
+                    # else:
+                    # mask_final_512 = 1.0 - feature_mask
+                    # Clamp upper limits to protect extreme highlights/differences
                     mask_vgg_512 = torch.where(
                         mask_vgg_512 >= upper_thresh, upper_thresh, mask_vgg_512
                     )
-                #    mask_final_512 = torch.max(mask_vgg_512, (1 - feature_mask))
-                # else:
-                #    mask_final_512 = 1 - feature_mask
 
-                # mask_final_512 = torch.max(mask_final_512, 1 - calc_mask_dill).clamp(0.0, 1.0)
                 mask_final_512 = (
                     torch.max(mask_vgg_512 * (1 - feature_mask), 1 - calc_mask_dill)
                 ).clamp(0.0, 1.0)
                 mask_final_512 = mask_final_512.clamp(0.0, 1.0)
 
+                # Protect background/dilated edges
+                # mask_final_512 = torch.max(mask_final_512, 1.0 - calc_mask_dill).clamp(0.0, 1.0)
+
             elif parameters.get("ExcludeOriginalVGGMaskEnableToggle", False):
+                # Clamp upper limits to protect extreme highlights/differences
                 mask_vgg_512 = torch.where(
                     mask_vgg_512 >= upper_thresh, upper_thresh, mask_vgg_512
                 )
-                mask_final_512 = torch.max(mask_vgg_512, 1 - calc_mask_dill).clamp(
+                # Protect background if no spatial exclusion is active
+                mask_final_512 = torch.max(mask_vgg_512, 1.0 - calc_mask_dill).clamp(
                     0.0, 1.0
                 )
+
             else:
-                mask_final_512 = (1 - mask_forcalc_512).clamp(0, 1)
+                # Fallback to raw mask if everything is disabled
+                mask_final_512 = (1.0 - mask_forcalc_512).clamp(0.0, 1.0)
 
-            if parameters["FaceParserBlurTextureSlider"] > 0:
+            """# 4. Final Mask Smoothing (Applied only ONCE at the end)
+            if parameters.get("FaceParserBlurTextureSlider", 0) > 0:
                 orig_m = mask_final_512.clone()
-                gauss = transforms.GaussianBlur(
-                    parameters["FaceParserBlurTextureSlider"] * 2 + 1,
-                    (parameters["FaceParserBlurTextureSlider"] + 1) * 0.2,
-                )
-                mask_final_512 = gauss(mask_final_512.type(torch.float32))
-                mask_final_512 = torch.max(mask_final_512, orig_m).clamp(0.0, 1.0)
+                b_fp = parameters["FaceParserBlurTextureSlider"]
+                kernel_size = int(b_fp * 2 + 1)
 
-            # AutoColor Backup Logic
+                gauss = transforms.GaussianBlur(kernel_size, (b_fp + 1) * 0.2)
+                mask_final_512 = gauss(mask_final_512.type(torch.float32))
+                # Restore sharp inner boundaries while softening the gradients
+                mask_final_512 = torch.max(mask_final_512, orig_m).clamp(0.0, 1.0)
+            """
+            # 5. AutoColor Backup Logic
             if parameters.get("AutoColorEnableToggle", False):
                 swap_texture_backup = swap.clone()
             else:
@@ -2757,12 +2777,13 @@ class FrameWorker(threading.Thread):
                     original_face_512, swap.clone(), mask_autocolor, 100
                 )
 
-            # Gradient / Texture Generation
+            # 6. Gradient / Texture Generation Settings
             TransferTextureKernelSizeSlider = 12
             TransferTextureSigmaDecimalSlider = 4.00
             TransferTextureWeightSlider = 1
             TransferTexturePhiDecimalSlider = 9.7
             TransferTextureGammaDecimalSlider = 0.5
+
             if parameters.get("TransferTextureModeEnableToggle", False):
                 TransferTextureLambdSlider = 8
                 TransferTextureThetaSlider = 8
@@ -2801,9 +2822,19 @@ class FrameWorker(threading.Thread):
                 original_face_512, gradient_texture, mask_autocolor, 100
             )
 
+            if parameters["FaceParserBlurTextureSlider"] > 0:
+                orig = mask_final_512.clone()
+                gauss = transforms.GaussianBlur(
+                    parameters["FaceParserBlurTextureSlider"] * 2 + 1,
+                    (parameters["FaceParserBlurTextureSlider"] + 1) * 0.2,
+                )
+                mask_final_512 = gauss(mask_final_512.type(torch.float32))
+                mask_final_512 = torch.max(mask_final_512, orig).clamp(0.0, 1.0)
+            # 7. Final Blending
+            # alpha_t modulates the overall strength, w determines the per-pixel application map
             alpha_t = parameters["TransferTextureBlendAmountSlider"] / 100.0
-            w = alpha_t * (1 - mask_final_512)
-            w = w.clamp(0, 1)
+            w = alpha_t * (1.0 - mask_final_512)
+            w = w.clamp(0.0, 1.0)
 
             swap = (swap_texture_backup * (1.0 - w) + gradient_texture * w).clamp(
                 0, 255

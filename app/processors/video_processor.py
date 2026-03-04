@@ -1539,12 +1539,21 @@ class VideoProcessor(QObject):
                 ]
             )
 
-        # Downscale filter
+        target_matrix = "bt2020nc" if control["HDREncodeToggle"] else "bt709"
+        scale_params = f"in_range=pc:out_range=tv:out_color_matrix={target_matrix}"
+
         if control["FrameEnhancerDownToggle"]:
             args.extend(
                 [
                     "-vf",
-                    f"scale={frame_width_down}x{frame_height_down}:flags=lanczos+accurate_rnd+full_chroma_int",
+                    f"scale={frame_width_down}x{frame_height_down}:{scale_params}:flags=lanczos+accurate_rnd+full_chroma_int",
+                ]
+            )
+        else:
+            args.extend(
+                [
+                    "-vf",
+                    f"scale={scale_params}",
                 ]
             )
 
