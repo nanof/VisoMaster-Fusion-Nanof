@@ -1377,7 +1377,111 @@ class LoadingDialog(QtWidgets.QDialog):
 
 # Custom progress dialog
 class ProgressDialog(QtWidgets.QProgressDialog):
-    pass
+    """
+    QProgressDialog with confirmation-before-cancel behavior that works with PySide6.
+
+    IMPORTANT:
+    - Do NOT rely on overriding cancel()/wasCanceled(); QProgressDialog's cancel is not virtual.
+    - Use the `canceled` signal to intercept cancellation.
+    - Batch code must check confirmedCanceled() instead of wasCanceled().
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self._confirmed_cancelled = False
+        self._confirm_dialog_open = False
+
+        # Prevent Qt from auto-closing/resetting the dialog unexpectedly
+        try:
+            self.setAutoClose(False)
+        except Exception:
+            pass
+        try:
+            self.setAutoReset(False)
+        except Exception:
+            pass
+
+        # Ensure cancel text exists
+        try:
+            self.setCancelButtonText("Cancel")
+        except Exception:
+            pass
+
+        # Intercept Qt's cancel flow via signal (this is reliable in PySide6)
+        self.canceled.connect(self._on_canceled)
+
+    def confirmedCanceled(self) -> bool:
+        """Return True only if the user confirmed stopping."""
+        return self._confirmed_cancelled
+
+    def _on_canceled(self):
+        """
+        Qt has already marked the dialog as canceled and may hide it.
+        We show confirmation ASAP (queued to the event loop) and then either:
+        - confirm: keep _confirmed_cancelled=True (batch loop will stop)
+        - decline: reset & re-show dialog, and keep _confirmed_cancelled=False (batch continues)
+        """
+        if self._confirmed_cancelled:
+            return
+        if self._confirm_dialog_open:
+            return
+
+        # Defer confirmation to next event loop turn to avoid showing behind/after close
+        QtCore.QTimer.singleShot(0, self._show_confirm_and_apply)
+
+    def _show_confirm_and_apply(self):
+        if self._confirmed_cancelled:
+            return
+        if self._confirm_dialog_open:
+            return
+
+        self._confirm_dialog_open = True
+        try:
+            parent = self.parent() or self
+
+            box = QtWidgets.QMessageBox(parent)
+            box.setIcon(QtWidgets.QMessageBox.Warning)
+            box.setWindowTitle("Confirm stop")
+            box.setText("Stop the current task?")
+            box.setInformativeText(
+                "Processing will stop immediately.\n"
+                "Outputs may be incomplete."
+            )
+            box.setStandardButtons(QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
+            box.setDefaultButton(QtWidgets.QMessageBox.No)
+
+            # Force on-top to avoid “dialog appears only after main window closes”
+            try:
+                box.setWindowFlag(QtCore.Qt.WindowStaysOnTopHint, True)
+            except Exception:
+                pass
+
+            ret = box.exec()
+
+            if ret == QtWidgets.QMessageBox.Yes:
+                self._confirmed_cancelled = True
+                # leave as-is; batch loop will see confirmedCanceled()==True and stop
+                return
+
+            # User declined: undo the cancel state and re-show progress dialog
+            self._confirmed_cancelled = False
+
+            # reset() clears internal canceled/hidden state; safe even if already hidden
+            try:
+                self.reset()
+            except Exception:
+                pass
+
+            try:
+                self.show()
+                self.raise_()
+                self.activateWindow()
+            except Exception:
+                pass
+
+        finally:
+            self._confirm_dialog_open = False
 
 
 class LoadLastWorkspaceDialog(QtWidgets.QDialog):
@@ -1441,7 +1545,7 @@ class JobLoadingDialog(QtWidgets.QDialog):
 
 
 class SaveJobDialog(QtWidgets.QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, input_filename=""):
         super().__init__(parent)
         self.setWindowTitle("Save Job")
         self.setWindowIcon(QtGui.QIcon(":/media/media/visomaster_small.png"))
@@ -1449,7 +1553,8 @@ class SaveJobDialog(QtWidgets.QDialog):
         # Widgets
         self.job_name_label = QtWidgets.QLabel("Job Name:")
         self.job_name_edit = QtWidgets.QLineEdit(self)
-        self.job_name_edit.setPlaceholderText("Enter job name")
+        #self.job_name_edit.setPlaceholderText("Enter job name")
+        self.job_name_edit.setText(input_filename)
 
         self.set_output_name_checkbox = QtWidgets.QCheckBox(
             "Use job name for output file name", self
@@ -1458,7 +1563,8 @@ class SaveJobDialog(QtWidgets.QDialog):
 
         self.output_name_label = QtWidgets.QLabel("Output File Name:")
         self.output_name_edit = QtWidgets.QLineEdit(self)
-        self.output_name_edit.setPlaceholderText("Leave blank for default")
+        #self.output_name_edit.setPlaceholderText("Leave blank for default")
+        self.output_name_edit.setText(input_filename)
 
         # Button box
         QBtn = QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel

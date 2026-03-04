@@ -3167,8 +3167,9 @@ class FrameWorker(threading.Thread):
             )
 
         if parameters["ColorNoiseDecimalSlider"] > 0:
+            swap = swap.to(torch.float32)
             noise = (
-                (torch.rand_like(swap) - 0.5)
+                (torch.rand_like(swap, dtype=torch.float32) - 0.5)
                 * 2
                 * parameters["ColorNoiseDecimalSlider"]
             )

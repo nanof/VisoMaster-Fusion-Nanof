@@ -790,6 +790,46 @@ def record_video(main_window: "MainWindow", checked: bool):
                 )
 
     else:
+        # --- Stop confirmation (manual UI only) ---
+        # The record button is toggle-based, and many call sites do not check return
+        # values. Therefore, cancellation must be handled here without relying on
+        # callers.
+        #
+        # Do NOT prompt when this stop was initiated programmatically by Job Manager.
+        if (video_processor.is_processing_segments or video_processor.recording) and not job_mgr_flag:
+            try:
+                box = QtWidgets.QMessageBox(main_window)
+                box.setIcon(QtWidgets.QMessageBox.Warning)
+                box.setWindowTitle("Confirm stop")
+                box.setText("Stop the current recording?")
+                if video_processor.is_processing_segments:
+                    box.setInformativeText(
+                        "Segment recording will stop immediately. Output may be incomplete."
+                    )
+                else:
+                    box.setInformativeText(
+                        "Recording will stop immediately and finalize the output."
+                    )
+                box.setStandardButtons(
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+                )
+                box.setDefaultButton(QtWidgets.QMessageBox.No)
+
+                if box.exec() != QtWidgets.QMessageBox.Yes:
+                    # User declined. Re-arm the toggle to the ON state.
+                    main_window.buttonMediaRecord.blockSignals(True)
+                    main_window.buttonMediaRecord.setChecked(True)
+                    main_window.buttonMediaRecord.blockSignals(False)
+                    set_record_button_icon_to_stop(main_window)
+                    return
+            except Exception:
+                # If anything goes wrong with the dialog, fail safe by NOT stopping.
+                main_window.buttonMediaRecord.blockSignals(True)
+                main_window.buttonMediaRecord.setChecked(True)
+                main_window.buttonMediaRecord.blockSignals(False)
+                set_record_button_icon_to_stop(main_window)
+                return
+            
         if video_processor.is_processing_segments:
             print(
                 "[INFO] Record button released: User requested stop during segment processing. Finalizing..."
@@ -1238,7 +1278,7 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
         original_target_faces = main_window.target_faces.copy()
 
     # 6. Setup Progress Dialog
-    progress_dialog = QtWidgets.QProgressDialog(
+    progress_dialog = widget_components.ProgressDialog(
         "Starting batch processing...",
         "Cancel",
         0,
@@ -1262,7 +1302,7 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
             progress_dialog.setLabelText(f"Processing: {os.path.basename(media_path)}")
             QtWidgets.QApplication.processEvents()  # Keep UI responsive
 
-            if progress_dialog.wasCanceled():
+            if progress_dialog.confirmedCanceled():
                 break
 
             try:
@@ -1413,7 +1453,7 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
                         QtWidgets.QApplication.processEvents()  # Process UI events (like cancel button)
 
                         # Check for cancellation *inside* the video wait loop
-                        if progress_dialog.wasCanceled():
+                        if progress_dialog.confirmedCanceled():
                             print(
                                 f"[WARN] Cancel detected during video processing: {media_path}. Aborting..."
                             )
@@ -1428,7 +1468,7 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
                     # 3. At this point, record_video has completed (or been aborted)
                     # We must check *again* if the loop was exited due to cancellation
                     # to avoid incorrectly incrementing the 'processed_count'.
-                    if not progress_dialog.wasCanceled():
+                    if not progress_dialog.confirmedCanceled():
                         print(f"[INFO] Finished processing video: {media_path}")
                         processed_count += 1
                     else:
@@ -1454,7 +1494,7 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
         progress_dialog.close()
 
         # 9. Show completion message
-        if progress_dialog.wasCanceled():
+        if progress_dialog.confirmedCanceled():
             result_msg = (
                 f"Batch processing cancelled.\n\n"
                 f"Processed: {processed_count}\n"

@@ -1177,7 +1177,8 @@ def prompt_job_name(main_window: "MainWindow"):
             return
     # --- End Validation ---
 
-    dialog = widget_components.SaveJobDialog(main_window)
+    input_filename = Path(main_window.video_processor.media_path).stem
+    dialog = widget_components.SaveJobDialog(main_window, input_filename)
     if dialog.exec() == QtWidgets.QDialog.Accepted:
         job_name = dialog.job_name
         use_job_name_for_output = dialog.use_job_name_for_output
@@ -1189,24 +1190,28 @@ def prompt_job_name(main_window: "MainWindow"):
                 main_window, "Invalid Job Name", "Job name cannot be empty."
             )
             return
-        if not re.match(r"^[\w\- ]+$", job_name):
+
+        invalid_chars = '<>:"/\\|?*'
+        if any(ch in job_name for ch in invalid_chars) or re.search(r'[\x00-\x1f]', job_name):
             QMessageBox.warning(
                 main_window,
                 "Invalid Job Name",
-                "Job name contains invalid characters. Only letters, numbers, spaces, dashes, and underscores are allowed.",
+                "Job name contains invalid characters.\n"
+                "Characters not allowed: <> : \" / \\ | ? * or control characters.",
             )
-            return
+            return	
 
         # Validate output file name if provided
         if not use_job_name_for_output and output_file_name:
-            if not re.match(r"^[\w\- ]+$", output_file_name):
+            # Simple check for characters not allowed in filenames (e.g. Windows)
+            if any(ch in output_file_name for ch in invalid_chars) or re.search(r'[\x00-\x1f]', output_file_name):
                 QMessageBox.warning(
                     main_window,
                     "Invalid Output File Name",
                     "Output file name contains invalid characters.\n"
-                    "Only letters, numbers, spaces, dashes, and underscores are allowed.",
+                    "Characters not allowed: <> : \" / \\ | ? * or control characters.",
                 )
-                return
+                return	
 
         # Save the job and refresh the list
         save_job(main_window, job_name, use_job_name_for_output, output_file_name)
