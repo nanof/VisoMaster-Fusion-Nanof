@@ -2723,26 +2723,27 @@ class FrameWorker(threading.Thread):
             # 3. Features Exclusion Logic (Eyes, Mouth, etc.)
             if parameters.get("ExcludeMaskEnableToggle", False):
                 # texture_exclude_512: 1 means KEEP texture (skin), 0 means REMOVE texture (eyes/mouth)
-                feature_mask = texture_exclude_512.clone()
+                feature_mask = texture_exclude_512.clone().float()
+
+                # This creates a smooth gradient transition instead of a harsh binary cut-off.
+                if parameters.get("ExcludeOriginalVGGMaskEnableToggle", False):
+                    blur_val = parameters.get("FaceParserBlurTextureSlider", 0)
+                    if blur_val > 0:
+                        kernel_size = int(blur_val * 2 + 1)
+                        sigma = max((blur_val + 1) * 0.2, 1e-6)
+                        blur_op = transforms.GaussianBlur(kernel_size, sigma=sigma)
+                        feature_mask = blur_op(feature_mask)
 
                 # Combine VGG mask with the spatial FaceParser mask
                 if parameters.get("ExcludeOriginalVGGMaskEnableToggle", False):
-                    # max() ensures that if feature_mask is 0 (eyes), (1 - 0) = 1, forcing mask_final to 1 (No Transfer)
-                    # mask_final_512 = torch.max(mask_vgg_512, (1.0 - feature_mask))
-                    # else:
-                    # mask_final_512 = 1.0 - feature_mask
                     # Clamp upper limits to protect extreme highlights/differences
                     mask_vgg_512 = torch.where(
                         mask_vgg_512 >= upper_thresh, upper_thresh, mask_vgg_512
                     )
 
                 mask_final_512 = (
-                    torch.max(mask_vgg_512 * (1 - feature_mask), 1 - calc_mask_dill)
+                    torch.max(mask_vgg_512 * (1.0 - feature_mask), 1.0 - calc_mask_dill)
                 ).clamp(0.0, 1.0)
-                mask_final_512 = mask_final_512.clamp(0.0, 1.0)
-
-                # Protect background/dilated edges
-                # mask_final_512 = torch.max(mask_final_512, 1.0 - calc_mask_dill).clamp(0.0, 1.0)
 
             elif parameters.get("ExcludeOriginalVGGMaskEnableToggle", False):
                 # Clamp upper limits to protect extreme highlights/differences
@@ -2758,18 +2759,7 @@ class FrameWorker(threading.Thread):
                 # Fallback to raw mask if everything is disabled
                 mask_final_512 = (1.0 - mask_forcalc_512).clamp(0.0, 1.0)
 
-            """# 4. Final Mask Smoothing (Applied only ONCE at the end)
-            if parameters.get("FaceParserBlurTextureSlider", 0) > 0:
-                orig_m = mask_final_512.clone()
-                b_fp = parameters["FaceParserBlurTextureSlider"]
-                kernel_size = int(b_fp * 2 + 1)
-
-                gauss = transforms.GaussianBlur(kernel_size, (b_fp + 1) * 0.2)
-                mask_final_512 = gauss(mask_final_512.type(torch.float32))
-                # Restore sharp inner boundaries while softening the gradients
-                mask_final_512 = torch.max(mask_final_512, orig_m).clamp(0.0, 1.0)
-            """
-            # 5. AutoColor Backup Logic
+            # 4. AutoColor Backup Logic
             if parameters.get("AutoColorEnableToggle", False):
                 swap_texture_backup = swap.clone()
             else:
@@ -2777,7 +2767,7 @@ class FrameWorker(threading.Thread):
                     original_face_512, swap.clone(), mask_autocolor, 100
                 )
 
-            # 6. Gradient / Texture Generation Settings
+            # 5. Gradient / Texture Generation Settings
             TransferTextureKernelSizeSlider = 12
             TransferTextureSigmaDecimalSlider = 4.00
             TransferTextureWeightSlider = 1
@@ -2830,7 +2820,7 @@ class FrameWorker(threading.Thread):
                 )
                 mask_final_512 = gauss(mask_final_512.type(torch.float32))
                 mask_final_512 = torch.max(mask_final_512, orig).clamp(0.0, 1.0)
-            # 7. Final Blending
+            # 6. Final Blending
             # alpha_t modulates the overall strength, w determines the per-pixel application map
             alpha_t = parameters["TransferTextureBlendAmountSlider"] / 100.0
             w = alpha_t * (1.0 - mask_final_512)
