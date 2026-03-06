@@ -5,6 +5,7 @@ from app.processors.utils import faceutil
 import numpy as np
 from numpy.linalg import norm as l2norm
 from typing import TYPE_CHECKING
+import kornia.geometry.transform as kgm
 
 if TYPE_CHECKING:
     from app.processors.models_processor import ModelsProcessor
@@ -158,9 +159,6 @@ class FaceSwappers:
 
         # --- ALIGNMENT STRATEGIES ---
         if similarity_type == "Optimal":
-            # Mode 1: Optimal (Multi-Template)
-            # Leverages faceutil to check against 5 different templates (Front, Left, Right, Profiles).
-            # This provides the best alignment for faces at steep angles (profiles), improving embedding accuracy.
             img, _ = faceutil.warp_face_by_face_landmark_5(
                 img,
                 face_kps,
@@ -169,76 +167,68 @@ class FaceSwappers:
             )
 
         elif similarity_type == "Pearl":
-            # Mode 2: Pearl (Wide Context)
-            # Uses a shifted center and wider crop (128x128) then resizes to 112x112.
-            # This captures more of the forehead and chin, useful when the detector is too tight.
             dst = self.models_processor.arcface_dst.copy()
-            dst[:, 0] += 8.0  # Shift X center to accommodate wider crop
-
-            # Use from_estimate to find the transform matrix
+            dst[:, 0] += 8.0
             tform = trans.SimilarityTransform.from_estimate(face_kps, dst)
 
-            # Apply affine transform to get 128x128 crop
-            img = v2.functional.affine(
-                img,
-                tform.rotation * 57.2958,
-                (tform.translation[0], tform.translation[1]),
-                tform.scale,
-                0,
-                center=(0, 0),
+            # OPTIMIZED: Direct GPU Warp to 128x128 using Kornia
+            M_tensor = (
+                torch.from_numpy(tform.params[0:2]).float().unsqueeze(0).to(img.device)
             )
-            # Crop at 128 then resize to standard 112
-            img = v2.functional.crop(img, 0, 0, 128, 128)
-            img = self.resize_112(img)
+            img_b = img.unsqueeze(0) if img.dim() == 3 else img
+            img = kgm.warp_affine(
+                img_b.float(),
+                M_tensor,
+                dsize=(128, 128),
+                mode="bilinear",
+                align_corners=True,
+            ).squeeze(0)
+
+            # Fast resize to standard 112
+            img = v2.functional.resize(img, [112, 112], antialias=True)
 
         else:
             # Mode 3: Opal (Standard / Default)
-            # Standard ArcFace frontal alignment.
-            # Efficient and accurate for most frontal/semi-frontal faces.
             tform = trans.SimilarityTransform.from_estimate(
                 face_kps, self.models_processor.arcface_dst
             )
 
-            # Transform and crop directly to 112x112
-            img = v2.functional.affine(
-                img,
-                tform.rotation * 57.2958,
-                (tform.translation[0], tform.translation[1]),
-                tform.scale,
-                0,
-                center=(0, 0),
+            # OPTIMIZED: Direct GPU Warp to 112x112 using Kornia (bypasses torchvision crop/affine)
+            M_tensor = (
+                torch.from_numpy(tform.params[0:2]).float().unsqueeze(0).to(img.device)
             )
-            img = v2.functional.crop(img, 0, 0, 112, 112)
+            img_b = img.unsqueeze(0) if img.dim() == 3 else img
+            img = kgm.warp_affine(
+                img_b.float(),
+                M_tensor,
+                dsize=(112, 112),
+                mode="bilinear",
+                align_corners=True,
+            ).squeeze(0)
 
         # --- NORMALIZATION & PRE-PROCESSING ---
+        cropped_image = img.permute(1, 2, 0).clone()  # Store for display/debug (H,W,3)
+
+        # Ensure float format
+        if img.dtype == torch.uint8:
+            img = img.float()
+
+        # OPTIMIZED: In-Place math operations (.sub_ and .div_) to save VRAM fragmentation
         if arcface_model == "Inswapper128ArcFace":
-            cropped_image = img.permute(1, 2, 0).clone()
-            if img.dtype == torch.uint8:
-                img = img.to(torch.float32)
             # FS-BUG-03: ensure input is in [0, 255] before normalizing
             if img.max() <= 1.0:
                 img = img * 255.0
-            img = torch.sub(img, 127.5)
-            img = torch.div(img, 127.5)
+            img.sub_(127.5).div_(127.5)
 
         elif arcface_model == "SimSwapArcFace":
-            cropped_image = img.permute(1, 2, 0).clone()
-            if img.dtype == torch.uint8:
-                img = torch.div(img.to(torch.float32), 255.0)
-            img = v2.functional.normalize(
-                img, (0.485, 0.456, 0.406), (0.229, 0.224, 0.225), inplace=False
+            img.div_(255.0)
+            v2.functional.normalize(
+                img, (0.485, 0.456, 0.406), (0.229, 0.224, 0.225), inplace=True
             )
 
         else:
             # GhostArcFace, CSCSArcFace, etc.
-            cropped_image = img.permute(
-                1, 2, 0
-            ).clone()  # Store for display/debug (H,W,3)
-            if img.dtype == torch.uint8:
-                img = img.to(torch.float32)
-            # Standard -1 to 1 normalization
-            img = torch.div(img, 127.5)
-            img = torch.sub(img, 1)
+            img.div_(127.5).sub_(1.0)
 
         # --- INFERENCE ---
         # Prepare data (N, C, H, W)
@@ -274,35 +264,36 @@ class FaceSwappers:
         return np.array(io_binding.copy_outputs_to_cpu()).flatten(), cropped_image
 
     def preprocess_image_cscs(self, img, face_kps):
-        # Use from_estimate
         tform = trans.SimilarityTransform.from_estimate(
             face_kps, self.models_processor.FFHQ_kps
         )
 
-        temp = v2.functional.affine(
-            img,
-            tform.rotation * 57.2958,
-            (tform.translation[0], tform.translation[1]),
-            tform.scale,
-            0,
-            center=(0, 0),
+        # OPTIMIZED: Direct GPU Warp to 512x512 using Kornia
+        M_tensor = (
+            torch.from_numpy(tform.params[0:2]).float().unsqueeze(0).to(img.device)
         )
-        temp = v2.functional.crop(temp, 0, 0, 512, 512)
+        img_b = img.unsqueeze(0) if img.dim() == 3 else img
+        temp = kgm.warp_affine(
+            img_b.float(),
+            M_tensor,
+            dsize=(512, 512),
+            mode="bilinear",
+            align_corners=True,
+        ).squeeze(0)
 
-        image = self.resize_112(temp)
+        # Fast resize to 112x112
+        image = v2.functional.resize(temp, [112, 112], antialias=True)
 
         cropped_image = image.permute(1, 2, 0).clone()
+
         if image.dtype == torch.uint8:
-            image = torch.div(image.to(torch.float32), 255.0)
+            image = image.float()
 
-        image = v2.functional.normalize(
-            image, (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=False
-        )
+        # OPTIMIZED: In-place division and normalization
+        image.div_(255.0)
+        v2.functional.normalize(image, (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True)
 
-        # Returns the preprocessed image and the cropped image
-        return torch.unsqueeze(
-            image, 0
-        ).contiguous(), cropped_image  # (C, H, W) and (H, W, C)
+        return torch.unsqueeze(image, 0).contiguous(), cropped_image
 
     def recognize_cscs(self, img, face_kps):
         # Usa la funzione di preprocessamento

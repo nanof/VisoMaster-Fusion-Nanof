@@ -3,13 +3,13 @@ from typing import TYPE_CHECKING, Dict, Optional, cast
 import threading
 import queue
 import math
-from math import floor, ceil
+from math import ceil
 from app.ui.widgets import widget_components
 import torch
 from skimage import transform as trans
 import kornia.enhance as ke
 import kornia.color as kc
-
+import kornia.geometry.transform as kgm
 
 from torchvision.transforms import v2
 import torchvision
@@ -173,6 +173,19 @@ class FrameWorker(threading.Thread):
 
         # Resize object cache (FW-PERF-08)
         self._resize_cache: dict = {}
+
+        # --- OPTIMIZATION: Cached Convolution Kernels (VRAM) ---
+        # Pre-allocating mathematical filters prevents massive CPU-to-GPU
+        # allocation overheads during the binary search loops (sharpness_score).
+        device = self.models_processor.device
+        self.kernel_lap = torch.tensor(
+            [[0, 1, 0], [1, -4, 1], [0, 1, 0]], device=device, dtype=torch.float32
+        ).view(1, 1, 3, 3)
+
+        self.kernel_sobel_x = torch.tensor(
+            [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], device=device, dtype=torch.float32
+        ).view(1, 1, 3, 3)
+        self.kernel_sobel_y = self.kernel_sobel_x.transpose(2, 3)
 
     def set_scaling_transforms(self, control_params):
         """Initializes the torchvision transforms based on user interpolation settings."""
@@ -1708,9 +1721,7 @@ class FrameWorker(threading.Thread):
     ) -> torch.Tensor:
         """
         Aligns and crops a 512×512 face patch from *img* using the 5-point keypoints.
-
-        The alignment transform is chosen based on the active SwapModelSelection so
-        the crop matches the template expected by each swapper architecture.
+        OPTIMIZED: Uses Kornia to warp directly on the GPU, avoiding CPU decomposition.
 
         Args:
             img:        Full-frame CHW uint8 tensor.
@@ -1721,16 +1732,21 @@ class FrameWorker(threading.Thread):
             CHW uint8 tensor of shape [3, 512, 512].
         """
         tform = self.get_face_similarity_tform(parameters["SwapModelSelection"], kps_5)
-        face_512_aligned = v2.functional.affine(
-            img,
-            angle=tform.rotation * 57.2958,
-            translate=(tform.translation[0], tform.translation[1]),
-            scale=tform.scale,
-            shear=(0.0, 0.0),
-            center=(0, 0),
-            interpolation=self.interpolation_get_cropped_face_kps,
+
+        M_tensor = (
+            torch.from_numpy(tform.params[0:2]).float().unsqueeze(0).to(img.device)
         )
-        return v2.functional.crop(face_512_aligned, 0, 0, 512, 512)
+
+        # Cast to float32 for Kornia
+        img_b = img.unsqueeze(0) if img.dim() == 3 else img
+        img_b_float = img_b.float()
+
+        face_512_aligned = kgm.warp_affine(
+            img_b_float, M_tensor, dsize=(512, 512), mode="bilinear", align_corners=True
+        ).squeeze(0)
+
+        # Convert back to original dtype (uint8)
+        return face_512_aligned.to(img.dtype)
 
     def get_face_similarity_tform(
         self, swapper_model: str, kps_5: np.ndarray
@@ -1788,6 +1804,7 @@ class FrameWorker(threading.Thread):
     def get_transformed_and_scaled_faces(self, tform, img):
         """
         Applies the similarity transform to extract aligned face crops at four resolutions.
+        OPTIMIZED: GPU warping directly from transformation matrix using Kornia.
 
         Args:
             tform: Fitted ``SimilarityTransform`` from ``get_face_similarity_tform``.
@@ -1796,16 +1813,21 @@ class FrameWorker(threading.Thread):
         Returns:
             Tuple ``(face_512, face_384, face_256, face_128)``, all CHW uint8 tensors.
         """
-        original_face_512 = v2.functional.affine(
-            img,
-            tform.rotation * 57.2958,
-            (tform.translation[0], tform.translation[1]),
-            tform.scale,
-            0,
-            center=(0, 0),
-            interpolation=self.interpolation_original_face_512,
+        M_tensor = (
+            torch.from_numpy(tform.params[0:2]).float().unsqueeze(0).to(img.device)
         )
-        original_face_512 = v2.functional.crop(original_face_512, 0, 0, 512, 512)
+
+        # Cast to float32 for Kornia's grid_sample compatibility on CUDA
+        img_b = img.unsqueeze(0) if img.dim() == 3 else img
+        img_b_float = img_b.float()
+
+        original_face_512 = kgm.warp_affine(
+            img_b_float, M_tensor, dsize=(512, 512), mode="bilinear", align_corners=True
+        ).squeeze(0)
+
+        # Convert back to original dtype (uint8) before passing to torchvision resizers
+        original_face_512 = original_face_512.to(img.dtype)
+
         original_face_384 = self.t384(original_face_512)
         original_face_256 = self.t256(original_face_512)
         original_face_128 = self.t128(original_face_256)
@@ -3986,63 +4008,45 @@ class FrameWorker(threading.Thread):
                 swap_mask_clone = swap_mask_clone.permute(1, 2, 0)
                 swap_mask_clone = torch.mul(swap_mask_clone, 255.0).type(torch.uint8)
 
-        # --- UNTRANSFORM (PASTE BACK) ---
-        IM512 = tform.inverse.params[0:2, :]
-        corners = np.array([[0, 0], [0, 511], [511, 0], [511, 511]])
+        # --- OPTIMIZED UNTRANSFORM (PASTE BACK) USING KORNIA ---
+        # Eliminates CPU bound calculations, manual slicing, and memory-heavy paddings.
+        # Warps directly to the full frame resolution in one highly optimized GPU pass.
 
-        x = IM512[0][0] * corners[:, 0] + IM512[0][1] * corners[:, 1] + IM512[0][2]
-        y = IM512[1][0] * corners[:, 0] + IM512[1][1] * corners[:, 1] + IM512[1][2]
-
-        left = floor(np.min(x))
-        if left < 0:
-            left = 0
-        top = floor(np.min(y))
-        if top < 0:
-            top = 0
-        right = ceil(np.max(x))
-        if right > img.shape[2]:
-            right = img.shape[2]
-        bottom = ceil(np.max(y))
-        if bottom > img.shape[1]:
-            bottom = img.shape[1]
-
-        # FW-BUG-04: prevent negative padding when img is smaller than 512 in either dimension
-        pad_w = max(0, img.shape[2] - 512)
-        pad_h = max(0, img.shape[1] - 512)
-        swap = v2.functional.pad(swap, (0, 0, pad_w, pad_h))
-        swap = v2.functional.affine(
-            swap,
-            tform.inverse.rotation * 57.2958,
-            (tform.inverse.translation[0], tform.inverse.translation[1]),
-            tform.inverse.scale,
-            0,
-            interpolation=self.interpolation_Untransform,
-            center=(0, 0),
+        M_inv = (
+            torch.from_numpy(tform.inverse.params[0:2])
+            .float()
+            .unsqueeze(0)
+            .to(self.models_processor.device)
         )
-        swap = swap[0:3, top:bottom, left:right]
+        dsize = (img.shape[1], img.shape[2])  # Full frame size (H, W)
 
-        swap_mask = v2.functional.pad(swap_mask, (0, 0, pad_w, pad_h))
-        swap_mask = v2.functional.affine(
-            swap_mask,
-            tform.inverse.rotation * 57.2958,
-            (tform.inverse.translation[0], tform.inverse.translation[1]),
-            tform.inverse.scale,
-            0,
-            interpolation=v2.InterpolationMode.BILINEAR,
-            center=(0, 0),
-        )
-        swap_mask = swap_mask[0:1, top:bottom, left:right]
-        swap_mask_minus = swap_mask.clone()
-        swap_mask_minus = torch.sub(1, swap_mask)
+        # Warp the 512x512 face and mask directly into the full frame space
+        swap_full = kgm.warp_affine(
+            swap.unsqueeze(0).float(),
+            M_inv,
+            dsize=dsize,
+            mode="bilinear",
+            padding_mode="zeros",
+            align_corners=True,
+        ).squeeze(0)
 
-        img_crop = img[0:3, top:bottom, left:right]
-        img_crop = torch.mul(swap_mask_minus, img_crop)
+        swap_mask_full = kgm.warp_affine(
+            swap_mask.unsqueeze(0).float(),
+            M_inv,
+            dsize=dsize,
+            mode="bilinear",
+            padding_mode="zeros",
+            align_corners=True,
+        ).squeeze(0)
 
-        swap = torch.add(swap, img_crop)
-        swap = swap.type(torch.uint8)
-        swap = swap.clamp(0, 255)
+        # Alpha blending on the GPU
+        img_float = img.float()
+        swap_mask_minus = 1.0 - swap_mask_full
 
-        img[0:3, top:bottom, left:right] = swap
+        # We just add the pre-multiplied face to the masked background.
+        img_float = swap_full + (img_float * swap_mask_minus)
+
+        img = img_float.clamp_(0, 255).type(torch.uint8)
 
         return img, original_face_512_clone, swap_mask_clone
 
@@ -4414,16 +4418,8 @@ class FrameWorker(threading.Thread):
             return m.sum().clamp(min=1.0) if m is not None else t.numel()
 
         # --- Variance of Laplacian ---
-        # FW-PERF-04: use promoted instance kernel; create lazily if not yet on device
-        if self._lap_kernel is None or self._lap_kernel.device != image.device:
-            self._lap_kernel = (
-                torch.tensor([[0, 1, 0], [1, -4, 1], [0, 1, 0]], dtype=torch.float32)
-                .unsqueeze(0)
-                .unsqueeze(0)
-                .to(image.device)
-            )
-        lap = self._lap_kernel
-        L = F.conv2d(gray, lap, padding=1).squeeze()  # [H,W]
+        # OPTIMIZED: Use pre-allocated kernel from VRAM to avoid CPU micro-allocations
+        L = F.conv2d(gray, self.kernel_lap, padding=1).squeeze()  # [H,W]
         L2 = L.pow(2)
         if m is not None:
             L = L * m
@@ -4434,24 +4430,9 @@ class FrameWorker(threading.Thread):
         var_lap = (mean_L2 - mean_L.pow(2)).clamp(min=0.0)
 
         # --- Thresholded Tenengrad ---
-        # FW-PERF-04: use promoted instance kernels; create lazily if not yet on device
-        if self._sobel_x is None or self._sobel_x.device != image.device:
-            self._sobel_x = (
-                torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32)
-                .unsqueeze(0)
-                .unsqueeze(0)
-                .to(image.device)
-            )
-            self._sobel_y = (
-                torch.tensor([[1, 2, 1], [0, 0, 0], [-1, -2, -1]], dtype=torch.float32)
-                .unsqueeze(0)
-                .unsqueeze(0)
-                .to(image.device)
-            )
-        sobel_x = self._sobel_x
-        sobel_y = self._sobel_y
-        Gx = F.conv2d(gray, sobel_x, padding=1).squeeze()  # [H,W]
-        Gy = F.conv2d(gray, sobel_y, padding=1).squeeze()
+        # OPTIMIZED: Use pre-allocated kernels
+        Gx = F.conv2d(gray, self.kernel_sobel_x, padding=1).squeeze()  # [H,W]
+        Gy = F.conv2d(gray, self.kernel_sobel_y, padding=1).squeeze()
         G = (Gx.pow(2) + Gy.pow(2)).sqrt()
         if m is not None:
             G = G * m
@@ -4482,34 +4463,10 @@ class FrameWorker(threading.Thread):
         # [3,H,W] -> [1,1,H,W] gray, range [0..1]
         gray = (image / 255.0).mean(dim=0, keepdim=True).unsqueeze(0)
 
-        # FW-PERF-04/05: use promoted instance kernels to avoid re-allocating each call
-        if self._lap_kernel is None or self._lap_kernel.device != device:
-            self._lap_kernel = (
-                torch.tensor([[0, 1, 0], [1, -4, 1], [0, 1, 0]], dtype=torch.float32)
-                .unsqueeze(0)
-                .unsqueeze(0)
-                .to(device)
-            )
-        if self._sobel_x is None or self._sobel_x.device != device:
-            self._sobel_x = (
-                torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32)
-                .unsqueeze(0)
-                .unsqueeze(0)
-                .to(device)
-            )
-            self._sobel_y = (
-                torch.tensor([[1, 2, 1], [0, 0, 0], [-1, -2, -1]], dtype=torch.float32)
-                .unsqueeze(0)
-                .unsqueeze(0)
-                .to(device)
-            )
-        lap_k = self._lap_kernel
-        sobel_x = self._sobel_x
-        sobel_y = self._sobel_y
-
-        lap = F.conv2d(gray, lap_k, padding=1).squeeze(0).squeeze(0)  # [H,W]
-        gx = F.conv2d(gray, sobel_x, padding=1).squeeze(0).squeeze(0)  # [H,W]
-        gy = F.conv2d(gray, sobel_y, padding=1).squeeze(0).squeeze(0)
+        # OPTIMIZED: Convs using pre-allocated VRAM kernels
+        lap = F.conv2d(gray, self.kernel_lap, padding=1).squeeze(0).squeeze(0)  # [H,W]
+        gx = F.conv2d(gray, self.kernel_sobel_x, padding=1).squeeze(0).squeeze(0)  # [H,W]
+        gy = F.conv2d(gray, self.kernel_sobel_y, padding=1).squeeze(0).squeeze(0)
         grad = (gx.pow(2) + gy.pow(2)).sqrt()  # [H,W]
 
         # Robust normalization via percentiles inside mask (if given)
@@ -4699,16 +4656,9 @@ class FrameWorker(threading.Thread):
         )
         speckle_noise = torch.mean(local_var)
         analysis["speckle_noise"] = min(speckle_noise.item() * 50, 1.0)
-        laplace_kernel = (
-            torch.tensor(
-                [[0, 1, 0], [1, -4, 1], [0, 1, 0]],
-                dtype=torch.float32,
-                device=image.device,
-            )
-            .unsqueeze(0)
-            .unsqueeze(0)
-        )
-        laplace_edges = F.conv2d(grayscale.unsqueeze(0), laplace_kernel, padding=1)
+
+        # OPTIMIZED: Use pre-allocated Laplacian kernel
+        laplace_edges = F.conv2d(grayscale.unsqueeze(0), self.kernel_lap, padding=1)
         edge_strength = torch.mean(torch.abs(laplace_edges))
         analysis["blur"] = 1.0 - min(edge_strength.item() * 5, 1.0)
         contrast = grayscale.std()

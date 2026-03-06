@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING
 import torch
 import numpy as np
 from torchvision.transforms import v2
-from skimage import transform as trans
+import kornia.geometry.transform as kgm
 
 from app.processors.utils import faceutil
 
@@ -528,21 +528,20 @@ class FrameEdits:
             out = torch.squeeze(out).clamp_(0, 1)
 
             # --- PASTE BACK ---
-            t = trans.SimilarityTransform()
-            t.params[0:2] = M_c2o
             dsize = (target.shape[1], target.shape[2])
 
             out = faceutil.pad_image_by_size(out, dsize)
-            out = v2.functional.affine(
-                out,
-                t.rotation * 57.2958,  # Convert radians to degrees
-                translate=(t.translation[0], t.translation[1]),
-                scale=t.scale,
-                shear=(0.0, 0.0),
-                interpolation=v2.InterpolationMode.BILINEAR,
-                center=(0, 0),
-            )
-            out = v2.functional.crop(out, 0, 0, dsize[0], dsize[1])
+            # OPTIMIZED: Replaced scikit-image and torchvision affine with Kornia GPU direct warp.
+            M_c2o_tensor = torch.from_numpy(M_c2o).float().unsqueeze(0).to(out.device)
+            out_b = out.unsqueeze(0) if out.dim() == 3 else out
+            out = kgm.warp_affine(
+                out_b,
+                M_c2o_tensor,
+                dsize=(dsize[0], dsize[1]),
+                mode="bilinear",
+                padding_mode="zeros",
+                align_corners=True,
+            ).squeeze(0)
 
             out = out.mul_(255.0).clamp_(0, 255)
 
@@ -782,20 +781,19 @@ class FrameEdits:
                 out = out.clamp_(0, 1)
 
             # --- POST-PROCESSING (Paste Back) ---
-            t = trans.SimilarityTransform()
-            t.params[0:2] = M_c2o
             dsize = (img.shape[1], img.shape[2])
             out = faceutil.pad_image_by_size(out, dsize)
-            out = v2.functional.affine(
-                out,
-                t.rotation * 57.2958,
-                translate=(t.translation[0], t.translation[1]),
-                scale=t.scale,
-                shear=(0.0, 0.0),
-                interpolation=interp_mode,
-                center=(0, 0),
-            )
-            out = v2.functional.crop(out, 0, 0, dsize[0], dsize[1])  # cols, rows
+            # OPTIMIZED: Replaced scikit-image and torchvision affine with Kornia GPU direct warp.
+            M_c2o_tensor = torch.from_numpy(M_c2o).float().unsqueeze(0).to(out.device)
+            out_b = out.unsqueeze(0) if out.dim() == 3 else out
+            out = kgm.warp_affine(
+                out_b,
+                M_c2o_tensor,
+                dsize=(dsize[0], dsize[1]),
+                mode="bilinear",
+                padding_mode="zeros",
+                align_corners=True,
+            ).squeeze(0)
 
             img = out
             img = img.mul_(255.0).clamp_(0, 255).type(torch.float32)

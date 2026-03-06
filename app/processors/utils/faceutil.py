@@ -192,6 +192,9 @@ def pad_image_by_size(img, image_size):
 
 
 def transform(img, center, output_size, scale, rotation):
+    """
+    OPTIMIZED: GPU Warping using Kornia.
+    """
     # pad image by image size
     img = pad_image_by_size(img, output_size)
 
@@ -206,18 +209,19 @@ def transform(img, center, output_size, scale, rotation):
     t = t1 + t2 + t3 + t4
     M = t.params[0:2]
 
-    cropped = v2.functional.affine(
-        img,
-        np.rad2deg(t.rotation),
-        (t.translation[0], t.translation[1]),
-        t.scale,
-        0,
-        interpolation=v2.InterpolationMode.BILINEAR,
-        center=(0, 0),
-    )
-    cropped = v2.functional.crop(cropped, 0, 0, output_size, output_size)
+    # Kornia GPU affine
+    M_tensor = torch.from_numpy(M).float().unsqueeze(0).to(img.device)
+    img_b = img.unsqueeze(0) if img.dim() == 3 else img
 
-    return cropped, M
+    cropped = kgm.warp_affine(
+        img_b.float(),
+        M_tensor,
+        dsize=(output_size, output_size),
+        mode="bilinear",
+        align_corners=True,
+    ).squeeze(0)
+
+    return cropped.to(img.dtype), M
 
 
 def trans_points2d(pts, M):
@@ -326,62 +330,55 @@ def warp_affine_torchvision(
     img,
     matrix,
     image_size,
-    rotation_ratio=0.0,
+    rotation_ratio=0.0,  # Gardé pour compatibilité des anciens appels, mais ignoré
     border_value=0.0,
     border_mode="replicate",
     interpolation_value=v2.functional.InterpolationMode.NEAREST,
     device="cpu",
 ):
-    # Ensure image_size is a tuple (width, height)
+    """
+    OPTIMIZED: Bypasses slow matrix decomposition and CPU trigonometry.
+    Feeds the 2x3 affine matrix directly to Kornia for instant GPU rendering.
+    """
     if isinstance(image_size, int):
         image_size = (image_size, image_size)
 
-    # Ensure the image tensor is on the correct device and of type float
+    # Convertir en tenseur si c'est un numpy array
     if isinstance(img, torch.Tensor):
         img_tensor = img.to(device).float()
-        if img_tensor.dim() == 3:  # If no batch dimension, add one
+        if img_tensor.dim() == 3:
             img_tensor = img_tensor.unsqueeze(0)
     else:
         img_tensor = (
             torch.from_numpy(img).unsqueeze(0).permute(0, 3, 1, 2).float().to(device)
         )
 
-    # Extract the translation parameters from the affine matrix
-    t = trans.SimilarityTransform()
-    t.params[0:2] = matrix
+    # Charger la matrice Numpy sur le GPU
+    M_tensor = torch.from_numpy(matrix).float().unsqueeze(0).to(device)
 
-    # Define default rotation
-    rotation = t.rotation
+    # Mapping des paramètres vers Kornia
+    mode_kgm = (
+        "nearest"
+        if interpolation_value == v2.functional.InterpolationMode.NEAREST
+        else "bilinear"
+    )
+    padding_mode_kgm = "border" if border_mode == "replicate" else "zeros"
 
-    if rotation_ratio != 0:
-        rotation *= rotation_ratio  # Rotation in degrees
-
-    # Convert border mode
-    if border_mode == "replicate":
-        fill = [border_value] * img_tensor.shape[1]  # Same value for all channels
-    elif border_mode == "constant":
-        fill = [border_value] * img_tensor.shape[1]  # Same value for all channels
-    else:
-        raise ValueError("Unsupported border_mode. Use 'replicate' or 'constant'.")
-
-    # Apply the affine transformation
-    warped_img_tensor = v2.functional.affine(
+    # Warping direct sur VRAM
+    warped_img_tensor = kgm.warp_affine(
         img_tensor,
-        angle=rotation,
-        translate=(t.translation[0], t.translation[1]),
-        scale=t.scale,
-        shear=(0.0, 0.0),
-        interpolation=interpolation_value,
-        center=(0, 0),
-        fill=fill,
-    )
+        M_tensor,
+        dsize=image_size,
+        mode=mode_kgm,
+        padding_mode=padding_mode_kgm,
+        align_corners=True,
+    ).squeeze(0)
 
-    # Crop the image to the desired size
-    warped_img_tensor = v2.functional.crop(
-        warped_img_tensor, 0, 0, image_size[1], image_size[0]
-    )
+    # Restauration du type d'origine
+    if isinstance(img, torch.Tensor):
+        warped_img_tensor = warped_img_tensor.to(img.dtype)
 
-    return warped_img_tensor.squeeze(0)
+    return warped_img_tensor
 
 
 def umeyama(src, dst, estimate_scale):
@@ -561,10 +558,12 @@ def estimate_norm(lmk, image_size=112, mode="arcface112"):
 
 
 def warp_face_by_bounding_box(img, bboxes, image_size=112):
+    """
+    OPTIMIZED: GPU Warping using Kornia.
+    """
     # pad image by image size
     img = pad_image_by_size(img, image_size)
 
-    # Set source points from bounding boxes
     source_points = np.array(
         [
             [bboxes[0], bboxes[1]],
@@ -574,29 +573,25 @@ def warp_face_by_bounding_box(img, bboxes, image_size=112):
         ]
     ).astype(np.float32)
 
-    # Set target points from image size
     target_points = np.array(
         [[0, 0], [image_size, 0], [0, image_size], [image_size, image_size]]
     ).astype(np.float32)
 
-    # Find transform
-    # CHANGE: Use from_estimate instead of instance.estimate
     tform = trans.SimilarityTransform.from_estimate(source_points, target_points)
-
-    # Transform
-    img = v2.functional.affine(
-        img,
-        tform.rotation * 57.2958,
-        (tform.translation[0], tform.translation[1]),
-        tform.scale,
-        0,
-        interpolation=v2.InterpolationMode.BILINEAR,
-        center=(0, 0),
-    )
-    img = v2.functional.crop(img, 0, 0, image_size, image_size)
     M = tform.params[0:2]
 
-    return img, M
+    M_tensor = torch.from_numpy(M).float().unsqueeze(0).to(img.device)
+    img_b = img.unsqueeze(0) if img.dim() == 3 else img
+
+    img_warped = kgm.warp_affine(
+        img_b.float(),
+        M_tensor,
+        dsize=(image_size, image_size),
+        mode="bilinear",
+        align_corners=True,
+    ).squeeze(0)
+
+    return img_warped.to(img.dtype), M
 
 
 def warp_face_by_face_landmark_5(
@@ -606,24 +601,30 @@ def warp_face_by_face_landmark_5(
     mode="arcface112",
     interpolation=v2.InterpolationMode.NEAREST,
 ):
+    """
+    OPTIMIZED: GPU Warping using Kornia.
+    """
     # pad image by image size
     img = pad_image_by_size(img, image_size)
 
     M, pose_index = estimate_norm(kpss, image_size, mode=mode)
-    t = trans.SimilarityTransform()
-    t.params[0:2] = M
-    img = v2.functional.affine(
-        img,
-        t.rotation * 57.2958,
-        (t.translation[0], t.translation[1]),
-        t.scale,
-        0,
-        interpolation=interpolation,
-        center=(0, 0),
-    )
-    img = v2.functional.crop(img, 0, 0, image_size, image_size)
 
-    return img, M
+    M_tensor = torch.from_numpy(M).float().unsqueeze(0).to(img.device)
+    img_b = img.unsqueeze(0) if img.dim() == 3 else img
+
+    mode_kgm = (
+        "nearest" if interpolation == v2.InterpolationMode.NEAREST else "bilinear"
+    )
+
+    img_warped = kgm.warp_affine(
+        img_b.float(),
+        M_tensor,
+        dsize=(image_size, image_size),
+        mode=mode_kgm,
+        align_corners=True,
+    ).squeeze(0)
+
+    return img_warped.to(img.dtype), M
 
 
 def getRotationMatrix2D(center, output_size, scale, rotation, is_clockwise=True):
@@ -661,36 +662,31 @@ def invertAffineTransform(M):
 
 def warp_face_by_bounding_box_for_landmark_68(img, bbox, input_size):
     """
-    :param img: raw image
-    :param bbox: the bbox for the face
-    :param input_size: tuple input image size
-    :return:
+    OPTIMIZED: GPU Warping using Kornia.
     """
     # pad image by image size
     img = pad_image_by_size(img, input_size[0])
 
     scale = 195 / np.subtract(bbox[2:], bbox[:2]).max()
     translation = (256 - np.add(bbox[2:], bbox[:2]) * scale) * 0.5
-    rotation = 0
-
-    t1 = trans.SimilarityTransform(scale=scale)
-    t2 = trans.SimilarityTransform(rotation=rotation)
-    t3 = trans.SimilarityTransform(translation=translation)
-
-    t = t1 + t2 + t3
     affine_matrix = np.array([[scale, 0, translation[0]], [0, scale, translation[1]]])
 
-    crop_image = v2.functional.affine(
-        img,
-        t.rotation,
-        (t.translation[0], t.translation[1]),
-        t.scale,
-        0,
-        interpolation=v2.InterpolationMode.BILINEAR,
-        center=(0, 0),
-    )
-    crop_image = v2.functional.crop(crop_image, 0, 0, input_size[1], input_size[0])
+    M_tensor = torch.from_numpy(affine_matrix).float().unsqueeze(0).to(img.device)
+    img_b = img.unsqueeze(0) if img.dim() == 3 else img
 
+    crop_image = (
+        kgm.warp_affine(
+            img_b.float(),
+            M_tensor,
+            dsize=(input_size[1], input_size[0]),
+            mode="bilinear",
+            align_corners=True,
+        )
+        .squeeze(0)
+        .to(img.dtype)
+    )
+
+    # Post-processing (CLAHE on CPU if too dark, kept as original as it's a rare fallback)
     if torch.mean(crop_image.to(dtype=torch.float32)[0, :, :]) < 30:
         lab = cv2.cvtColor(
             crop_image.permute(1, 2, 0).to("cpu").numpy(), cv2.COLOR_RGB2Lab
@@ -1697,17 +1693,18 @@ def _estimate_similar_transform_from_pts(
 
 
 def warp_face_by_face_landmark_x(img, pts, **kwargs):
-    dsize = kwargs.get("dsize", 224)  # 512
-    scale = kwargs.get("scale", 1.5)  # 1.5 | 1.6 | 2.5
-    vy_ratio = kwargs.get("vy_ratio", -0.1)  # -0.0625 | -0.1 | -0.125
-    interpolation = kwargs.get("interpolation", v2.InterpolationMode.BILINEAR)
+    """
+    OPTIMIZED: Uses Kornia (GPU) instead of torchvision+scikit-image for affine transformation.
+    Eliminates CPU-bound trigonometry and matrix decomposition bottlenecks.
+    """
+    dsize = kwargs.get("dsize", 224)  # Default LivePortrait size
+    scale = kwargs.get("scale", 1.5)
+    vy_ratio = kwargs.get("vy_ratio", -0.1)
 
-    # pad image by image size
+    # Pad image if necessary
     img = pad_image_by_size(img, dsize)
-    # if pts.shape[0] == 5:
-    #    scale *= 2.20
-    #    vy_ratio += (-vy_ratio / 2.20)
 
+    # Calculate matrix from landmarks (Fast CPU operation, no bottleneck here)
     M_o2c, M_c2o = _estimate_similar_transform_from_pts(
         pts,
         dsize=dsize,
@@ -1716,20 +1713,14 @@ def warp_face_by_face_landmark_x(img, pts, **kwargs):
         flag_do_rot=kwargs.get("flag_do_rot", True),
     )
 
-    t = trans.SimilarityTransform()
-    t.params[0:2] = M_o2c
-    img = v2.functional.affine(
-        img,
-        t.rotation * 57.2958,
-        translate=(t.translation[0], t.translation[1]),
-        scale=t.scale,
-        shear=(0.0, 0.0),
-        interpolation=interpolation,
-        center=(0, 0),
-    )
-    img = v2.functional.crop(img, 0, 0, dsize, dsize)
+    # 100% GPU Warping using Kornia
+    # Bypasses the slow t = trans.SimilarityTransform() completely
+    warped_img = transform_img_kgm(img.float(), M_o2c, dsize=dsize)
 
-    return img, M_o2c, M_c2o
+    # Ensure we return the original dtype (usually uint8 or float32 depending on pipeline)
+    warped_img = warped_img.to(img.dtype)
+
+    return warped_img, M_o2c, M_c2o
 
 
 def create_faded_inner_mask(
@@ -1800,23 +1791,14 @@ def create_faded_inner_mask(
 def prepare_paste_back(
     mask_crop, crop_M_c2o, dsize, interpolation=v2.InterpolationMode.BILINEAR
 ):
-    """prepare mask for later image paste back"""
-    t = trans.SimilarityTransform()
-    t.params[0:2] = crop_M_c2o
-
+    """
+    OPTIMIZED: prepare mask for later image paste back using direct GPU warping (Kornia).
+    """
     # pad image by image size
     mask_crop = pad_image_by_size(mask_crop, (dsize[0], dsize[1]))
 
-    mask_ori = v2.functional.affine(
-        mask_crop,
-        t.rotation * 57.2958,
-        translate=(t.translation[0], t.translation[1]),
-        scale=t.scale,
-        shear=(0.0, 0.0),
-        interpolation=interpolation,
-        center=(0, 0),
-    )
-    mask_ori = v2.functional.crop(mask_ori, 0, 0, dsize[0], dsize[1])  # cols, rows
+    # Use Kornia to warp the mask back to original space in one GPU pass
+    mask_ori = transform_img_kgm(mask_crop.float(), crop_M_c2o, dsize=dsize)
 
     return mask_ori
 
@@ -1825,38 +1807,30 @@ def prepare_paste_back(
 def paste_back(
     img_crop, M_c2o, img_ori, mask_ori, interpolation=v2.InterpolationMode.BILINEAR
 ):
-    """paste back the image"""
+    """
+    OPTIMIZED: paste back the image using Kornia for Affine Transform
+    and PyTorch in-place operations for blending to save VRAM and latency.
+    """
     dsize = (img_ori.shape[1], img_ori.shape[2])
-    t = trans.SimilarityTransform()
-    t.params[0:2] = M_c2o
 
     # pad image by image size
     img_crop = pad_image_by_size(img_crop, dsize)
 
-    output = v2.functional.affine(
-        img_crop,
-        t.rotation * 57.2958,
-        translate=(t.translation[0], t.translation[1]),
-        scale=t.scale,
-        shear=(0.0, 0.0),
-        interpolation=interpolation,
-        center=(0, 0),
-    )
-    output = v2.functional.crop(output, 0, 0, dsize[0], dsize[1])  # cols, rows
+    # Transform the crop back to the original image space using Kornia
+    output = transform_img_kgm(img_crop.float(), M_c2o, dsize=dsize)
 
-    # Converti i tensor al tipo appropriato prima delle operazioni in-place
-    output = output.float()  # Converte output in torch.float32
-    img_ori = (
-        img_ori.clone().float()
-    )  # F-03: clone before in-place ops to avoid mutating the caller's tensor
+    # F-03: clone before in-place ops to avoid mutating the caller's tensor
+    img_ori_float = img_ori.clone().float()
 
-    # Ottimizzazione con operazioni in-place
-    output.mul_(mask_ori)  # In-place multiplication
-    output.add_(img_ori.mul_(1 - mask_ori))  # In-place addition and multiplication
-    output.clamp_(0, 255)  # In-place clamping
-    output = output.to(torch.uint8)
+    # Highly optimized in-place blending to avoid memory fragmentation
+    # output = mask_ori * output + (1 - mask_ori) * img_ori
+    output.mul_(mask_ori)
+    output.add_(img_ori_float.mul_(1.0 - mask_ori))
 
-    return output
+    # Clamp and convert back to uint8
+    output.clamp_(0, 255)
+
+    return output.to(torch.uint8)
 
 
 def paste_back_adv(

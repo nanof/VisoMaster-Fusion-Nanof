@@ -422,11 +422,14 @@ class FaceMasks:
 
         target_h, target_w = swap_restorecalc.shape[1], swap_restorecalc.shape[2]
 
-        resize_to_target = v2.Resize(
-            (target_h, target_w),
-            interpolation=v2.InterpolationMode.BILINEAR,
-            antialias=True,
-        )
+        # OPTIMIZED: Replaced expensive class instantiation with a lightweight functional wrapper
+        def resize_to_target(tensor):
+            return v2.functional.resize(
+                tensor,
+                [target_h, target_w],
+                interpolation=v2.InterpolationMode.BILINEAR,
+                antialias=True,
+            )
 
         # --- Check Requirements ---
         need_mouth_stretch = parameters.get("MouthParserStretchToggle", False)
@@ -935,13 +938,12 @@ class FaceMasks:
 
         blur_amount = parameters.get("OccluderXSegBlurSlider", 0)
         if blur_amount > 0:
-            blur_key = (blur_amount, (blur_amount + 1) * 0.2)
-            if blur_key not in self._blur_cache:
-                kernel_size = blur_amount * 2 + 1
-                sigma = (blur_amount + 1) * 0.2
-                self._blur_cache[blur_key] = transforms.GaussianBlur(kernel_size, sigma)
-            gauss = self._blur_cache[blur_key]
-            outpred = gauss(outpred)
+            # OPTIMIZED: Zero-overhead functional blur (bypasses class instantiation and dict caching)
+            k_size = blur_amount * 2 + 1
+            sigma = (blur_amount + 1) * 0.2
+            outpred = v2.functional.gaussian_blur(
+                outpred, [k_size, k_size], [sigma, sigma]
+            )
 
         outpred_noFP = outpred.clone()
         if amount2 != amount:
@@ -961,15 +963,12 @@ class FaceMasks:
 
             blur_amount2 = parameters.get("XSeg2BlurSlider", 0)
             if blur_amount2 > 0:
-                blur_key2 = (blur_amount2, (blur_amount2 + 1) * 0.2)
-                if blur_key2 not in self._blur_cache:
-                    kernel_size2 = blur_amount2 * 2 + 1
-                    sigma2 = (blur_amount2 + 1) * 0.2
-                    self._blur_cache[blur_key2] = transforms.GaussianBlur(
-                        kernel_size2, sigma2
-                    )
-                gauss2 = self._blur_cache[blur_key2]
-                outpred2 = gauss2(outpred2)
+                # OPTIMIZED: Zero-overhead functional blur
+                k_size2 = blur_amount2 * 2 + 1
+                sigma2 = (blur_amount2 + 1) * 0.2
+                outpred2 = v2.functional.gaussian_blur(
+                    outpred2, [k_size2, k_size2], [sigma2, sigma2]
+                )
 
             outpred[mouth > 0.01] = outpred2[mouth > 0.01]
 
@@ -993,14 +992,12 @@ class FaceMasks:
                 outpred_calc_dill = outpred_calc_dill.clamp(0, 1)
                 bg_blur = parameters.get("BGExcludeBlurAmountSlider", 0)
                 if bg_blur > 0:
-                    # FM-10: use _blur_cache instead of creating new GaussianBlur per call
-                    bg_blur_key = (bg_blur, (bg_blur + 1) * 0.2)
-                    if bg_blur_key not in self._blur_cache:
-                        self._blur_cache[bg_blur_key] = transforms.GaussianBlur(
-                            bg_blur * 2 + 1, (bg_blur + 1) * 0.2
-                        )
-                    outpred_calc_dill = self._blur_cache[bg_blur_key](
-                        outpred_calc_dill.type(torch.float32)
+                    k_bg = bg_blur * 2 + 1
+                    s_bg = (bg_blur + 1) * 0.2
+                    outpred_calc_dill = v2.functional.gaussian_blur(
+                        outpred_calc_dill.type(torch.float32),
+                        [k_bg, k_bg],
+                        [s_bg, s_bg],
                     )
                 outpred_calc_dill = outpred_calc_dill.clamp(0, 1)
             elif amount_calc < 0:
@@ -1014,14 +1011,12 @@ class FaceMasks:
                 bg_blur = parameters.get("BGExcludeBlurAmountSlider", 0)
                 if bg_blur > 0:
                     orig = outpred_calc_dill.clone()
-                    # FM-10: use _blur_cache instead of creating new GaussianBlur per call
-                    bg_blur_key = (bg_blur, (bg_blur + 1) * 0.2)
-                    if bg_blur_key not in self._blur_cache:
-                        self._blur_cache[bg_blur_key] = transforms.GaussianBlur(
-                            bg_blur * 2 + 1, (bg_blur + 1) * 0.2
-                        )
-                    outpred_calc_dill = self._blur_cache[bg_blur_key](
-                        outpred_calc_dill.type(torch.float32)
+                    k_bg = bg_blur * 2 + 1
+                    s_bg = (bg_blur + 1) * 0.2
+                    outpred_calc_dill = v2.functional.gaussian_blur(
+                        outpred_calc_dill.type(torch.float32),
+                        [k_bg, k_bg],
+                        [s_bg, s_bg],
                     )
                     outpred_calc_dill = torch.max(outpred_calc_dill, orig)
                 outpred_calc_dill = outpred_calc_dill.clamp(0, 1)
@@ -1138,9 +1133,14 @@ class FaceMasks:
             self.models_processor.clip_session.to(device)
 
         clip_mask = torch.ones((352, 352), device=device)
-        img = img.float() / 255.0
-        # FM-05: use cached transform (correct order: Resize then Normalize)
-        CLIPimg = self._clip_transform(img).unsqueeze(0).contiguous().to(device)
+
+        # OPTIMIZED: Direct functional tensor operations (no Compose CPU overhead)
+        img_float = img.float() / 255.0
+        CLIPimg = v2.functional.resize(img_float, [352, 352], antialias=True)
+        CLIPimg = v2.functional.normalize(
+            CLIPimg, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+        )
+        CLIPimg = CLIPimg.unsqueeze(0).contiguous().to(device)
 
         if CLIPText != "":
             prompts = CLIPText.split(",")
@@ -1358,8 +1358,9 @@ class FaceMasks:
         """
         diff = torch.abs(swapped_face - original_face)
 
-        sample = diff.reshape(-1)
-        sample = sample[torch.randint(0, sample.numel(), (50_000,), device=diff.device)]
+        # OPTIMIZED: Deterministic strided slicing instead of random sampling.
+        # Eliminates CUDA RNG initialization overhead and prevents temporal mask flickering.
+        sample = diff.view(-1)[::10]
         diff_max = torch.quantile(sample, 0.99)
         diff = torch.clamp(diff, max=diff_max)
 
@@ -1439,10 +1440,9 @@ class FaceMasks:
         diff_map = torch.abs(swapped_feat - original_feat).mean(dim=1)[0]
         diff_map = diff_map * swap_mask.squeeze(0)
 
-        sample = diff_map.reshape(-1)
-        sample = sample[
-            torch.randint(0, diff_map.numel(), (50_000,), device=diff_map.device)
-        ]
+        # OPTIMIZED: Deterministic strided slicing instead of random sampling.
+        # Eliminates CUDA RNG initialization overhead and prevents temporal mask flickering.
+        sample = diff_map.view(-1)[::10]
         diff_max = torch.quantile(sample, 0.99)
         diff_map = torch.clamp(diff_map, max=diff_max)
 

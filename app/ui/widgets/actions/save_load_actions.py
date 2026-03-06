@@ -260,6 +260,10 @@ def load_saved_workspace(
             )
             main_window.video_loader_worker.run()
 
+            # OPTIMIZED: Force PySide6 to process the pending 'thumbnail_ready' signals
+            # before continuing, ensuring UI elements are fully instantiated.
+            QtWidgets.QApplication.processEvents()
+
             # Select target media
             selected_media_id = data["selected_media_id"]
             if selected_media_id is not False and main_window.target_videos.get(
@@ -289,6 +293,10 @@ def load_saved_workspace(
             )
             # Use run() instead of start(), as we dont want it running in a different thread as it could create synchronisation issues in the steps below
             main_window.input_faces_loader_worker.run()
+
+            # Force PySide6 event loop to flush the queue.
+            # This instantly populates `main_window.input_faces` before the next loop tries to access them.
+            QtWidgets.QApplication.processEvents()
 
             for face_id, input_face_data in data.get("input_faces_data", {}).items():
                 if face_id in main_window.input_faces:

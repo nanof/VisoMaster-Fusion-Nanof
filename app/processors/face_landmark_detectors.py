@@ -4,7 +4,6 @@ from typing import TYPE_CHECKING, List, Dict, Optional
 import pickle
 
 import torch
-import cv2
 import numpy as np
 from torchvision.transforms import v2
 
@@ -332,7 +331,6 @@ class FaceLandmarkDetectors:
         return net_outs
 
     def detect_face_landmark_5(self, img, bbox, det_kpss, from_points=False, **kwargs):
-        # This model's pre-processing is unique, so it doesn't use the `_prepare_crop` helper.
         if not from_points:
             w, h = (bbox[2] - bbox[0]), (bbox[3] - bbox[1])
             center = (bbox[2] + bbox[0]) / 2, (bbox[3] + bbox[1]) / 2
@@ -347,12 +345,14 @@ class FaceLandmarkDetectors:
                 interpolation=v2.InterpolationMode.BILINEAR,
             )
 
-        # Pre-process: subtract mean and reshape for the model.
-        image = image.to(dtype=torch.float32).permute(1, 2, 0)
+        # OPTIMIZATION: Bypassed multiple .permute() ping-pongs.
+        # Broadcasting the mean subtraction directly on the (C, H, W) tensor saves VRAM operations.
         mean = torch.tensor(
-            [104, 117, 123], dtype=torch.float32, device=self.models_processor.device
-        )
-        image = torch.sub(image, mean).permute(2, 0, 1).reshape(1, 3, 512, 512)
+            [104.0, 117.0, 123.0],
+            dtype=torch.float32,
+            device=self.models_processor.device,
+        ).view(3, 1, 1)
+        image = torch.sub(image.float(), mean).unsqueeze(0)
 
         # Prepare scaling factor for post-processing.
         height, width = 512, 512
@@ -372,42 +372,46 @@ class FaceLandmarkDetectors:
         )
         if not net_outs or len(net_outs) < 2:
             return [], [], []
-        conf, landmarks = (
-            torch.from_numpy(net_outs[0]).to(self.models_processor.device),
-            torch.from_numpy(net_outs[1]).to(self.models_processor.device),
-        )
+        conf = torch.from_numpy(net_outs[0]).to(self.models_processor.device)
+        landmarks = torch.from_numpy(net_outs[1]).to(self.models_processor.device)
 
         # Post-process the raw model output.
         scores = torch.squeeze(conf)[:, 1]
         priors, pre = self.landmark_5_priors, torch.squeeze(landmarks, 0)
 
-        # Decode landmarks from priors and predictions.
-        landmarks = (
-            torch.cat(
-                [
-                    priors[:, :2] + pre[:, i : i + 2] * 0.1 * priors[:, 2:]
-                    for i in range(0, 10, 2)
-                ],
-                dim=1,
-            )
-            * scale1
-        )
+        # OPTIMIZATION: Vectorized decoding on the GPU.
+        # Replaces the slow Python list comprehension [priors... for i in range(0, 10, 2)]
+        pre_reshaped = pre.view(-1, 5, 2)
+        priors_xy = priors[:, :2].unsqueeze(1)
+        priors_wh = priors[:, 2:].unsqueeze(1)
 
-        landmarks, scores = landmarks.cpu().numpy(), scores.cpu().numpy()
-        inds = np.where(scores > 0.1)[0]
-        landmarks, scores = landmarks[inds], scores[inds]
+        landmarks = (priors_xy + pre_reshaped * 0.1 * priors_wh).view(-1, 10) * scale1
 
-        order = scores.argsort()[::-1]
-        if len(order) > 0:
-            landmarks = landmarks[order][0]
-            scores = scores[order][0]
-            landmarks = np.array(
-                [[landmarks[i], landmarks[i + 1]] for i in range(0, 10, 2)]
+        # OPTIMIZATION: GPU-side filtering BEFORE CPU transfer.
+        # Drastically reduces the Device-to-Host (D2H) PCIe bandwidth usage.
+        mask = scores > 0.1
+        scores = scores[mask]
+        landmarks = landmarks[mask]
+
+        if len(scores) > 0:
+            # Sort directly on the GPU
+            order = torch.argsort(scores, descending=True)
+
+            # Transfer ONLY the best result to the CPU
+            best_landmark = landmarks[order[0]].cpu().numpy()
+            best_score = scores[order[0]].cpu().item()
+
+            # Reshape to standard (5, 2) format
+            best_landmark = np.array(
+                [[best_landmark[i], best_landmark[i + 1]] for i in range(0, 10, 2)]
             )
+
             # Transform landmarks back to the original image's coordinate space.
             IM = faceutil.invertAffineTransform(M)
-            landmarks = faceutil.trans_points2d(landmarks, IM)
-            return landmarks, landmarks, np.array([scores])
+            best_landmark = faceutil.trans_points2d(best_landmark, IM)
+
+            return best_landmark, best_landmark, np.array([best_score])
+
         return [], [], []
 
     def detect_face_landmark_68(self, img, bbox, det_kpss, from_points=False, **kwargs):
@@ -444,9 +448,12 @@ class FaceLandmarkDetectors:
         face_landmark_68 = (face_landmark_68[:, :, :2][0] / 64.0).reshape(
             1, -1, 2
         ) * 256.0
-        face_landmark_68 = cv2.transform(
-            face_landmark_68, cv2.invertAffineTransform(affine_matrix)
-        ).reshape(-1, 2)
+
+        # OPTIMIZATION: Bypassed heavy cv2 CPU instanciation.
+        # Using internal faceutil math directly on the Numpy points.
+        IM = faceutil.invertAffineTransform(affine_matrix)
+        face_landmark_68 = faceutil.trans_points2d(face_landmark_68[0], IM)
+
         face_landmark_68_score = np.amax(face_heatmap, axis=(2, 3)).reshape(-1, 1)
 
         # Convert the 68 points to a standard 5-point format.

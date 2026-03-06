@@ -901,58 +901,37 @@ def get_grid_for_pasting(
     device: torch.device,
 ):
     """
-    Generates a sampling grid for torch.nn.functional.grid_sample to warp content
-    back to the target frame coordinates.
+    OPTIMIZED: Generates a sampling grid for grid_sample.
+    Eliminated memory-heavy meshgrid, cat, and massive matmul operations.
+    Uses fast 1D tensor broadcasting instead, saving massive amounts of VRAM.
     """
-    # tform_target_to_source: maps points from target (e.g. full image) to source (e.g. 512x512 face)
-    grid_y, grid_x = torch.meshgrid(
-        torch.arange(target_h, device=device, dtype=torch.float32),
-        torch.arange(target_w, device=device, dtype=torch.float32),
-        indexing="ij",
-    )
-    target_grid_yx_pixels = torch.stack((grid_y, grid_x), dim=2).unsqueeze(
-        0
-    )  # 1xTargetHxTargetWx2 (Y,X order)
-
-    # Convert target grid pixel coordinates to homogeneous coordinates (X,Y,1)
-    target_grid_xy_flat_pixels = target_grid_yx_pixels[..., [1, 0]].reshape(
-        -1, 2
-    )  # (N,2) in XY
-    ones = torch.ones(
-        target_grid_xy_flat_pixels.shape[0], 1, device=device, dtype=torch.float32
-    )
-    homogeneous_target_grid_xy_pixels = torch.cat(
-        (target_grid_xy_flat_pixels, ones), dim=1
-    )  # (N,3)
-
     # Transformation matrix from tform_target_to_source (2x3)
-    M_target_to_source = torch.tensor(
+    M = torch.tensor(
         tform_target_to_source.params[0:2, :], dtype=torch.float32, device=device
     )
 
-    # Transform target grid to source coordinates (pixels)
-    # (N,3) @ (3,2) -> (N,2) in XY order
-    source_coords_xy_flat_pixels = torch.matmul(
-        homogeneous_target_grid_xy_pixels, M_target_to_source.T
+    # Create 1D vectors for coordinates (H, 1) and (1, W)
+    y = torch.arange(target_h, device=device, dtype=torch.float32).view(-1, 1)
+    x = torch.arange(target_w, device=device, dtype=torch.float32).view(1, -1)
+
+    # Apply affine transformation using automatic broadcasting -> results in (H, W)
+    src_x = x * M[0, 0] + y * M[0, 1] + M[0, 2]
+    src_y = x * M[1, 0] + y * M[1, 1] + M[1, 2]
+
+    # Normalize source coordinates directly for grid_sample [-1, 1]
+    src_x_norm = (src_x / (source_w - 1.0)) * 2.0 - 1.0
+    src_y_norm = (src_y / (source_h - 1.0)) * 2.0 - 1.0
+
+    # Stack to create the final normalized grid: 1 x H x W x 2
+    source_grid_normalized_xy = torch.stack((src_x_norm, src_y_norm), dim=-1).unsqueeze(
+        0
     )
 
-    # Reshape to grid format 1xTargetHxTargetWx2
-    source_coords_xy_grid_pixels = source_coords_xy_flat_pixels.view(
-        1, target_h, target_w, 2
-    )
+    # Recreate target_grid_yx_pixels (returned for completeness)
+    grid_y = y.expand(target_h, target_w)
+    grid_x = x.expand(target_h, target_w)
+    target_grid_yx_pixels = torch.stack((grid_y, grid_x), dim=-1).unsqueeze(0)
 
-    # Normalize source coordinates for grid_sample (expects XY order, range [-1,1])
-    source_grid_normalized_xy = torch.empty_like(source_coords_xy_grid_pixels)
-    # Normalize X coordinates
-    source_grid_normalized_xy[..., 0] = (
-        source_coords_xy_grid_pixels[..., 0] / (source_w - 1.0)
-    ) * 2.0 - 1.0
-    # Normalize Y coordinates
-    source_grid_normalized_xy[..., 1] = (
-        source_coords_xy_grid_pixels[..., 1] / (source_h - 1.0)
-    ) * 2.0 - 1.0
-
-    # target_grid_yx is not strictly needed by grid_sample but returned for completeness if ever useful
     return target_grid_yx_pixels, source_grid_normalized_xy
 
 
@@ -960,7 +939,8 @@ def draw_bounding_boxes_on_detected_faces(
     img: torch.Tensor, det_faces_data: list, color_rgb: list | None = None
 ) -> torch.Tensor:
     """
-    Draws bounding boxes on the image tensor based on detection data.
+    OPTIMIZED: Removed unnecessary .expand() calls.
+    Relies on PyTorch's native C++ broadcasting for instant assignment.
     """
     _color = color_rgb if color_rgb is not None else [0, 255, 0]
     for i, fface in enumerate(det_faces_data):
@@ -980,25 +960,19 @@ def draw_bounding_boxes_on_detected_faces(
             _color, dtype=img.dtype, device=img.device
         ).view(-1, 1, 1)
 
-        img[:, y_min : y_min + thickness, x_min : x_max + 1] = color_tensor_c11.expand(
-            -1, thickness, x_max - x_min + 1
-        )
-        img[:, y_max - thickness + 1 : y_max + 1, x_min : x_max + 1] = (
-            color_tensor_c11.expand(-1, thickness, x_max - x_min + 1)
-        )
-        img[:, y_min : y_max + 1, x_min : x_min + thickness] = color_tensor_c11.expand(
-            -1, y_max - y_min + 1, thickness
-        )
-        img[:, y_min : y_max + 1, x_max - thickness + 1 : x_max + 1] = (
-            color_tensor_c11.expand(-1, y_max - y_min + 1, thickness)
-        )
+        # PyTorch handles the broadcasting automatically, no need to expand()
+        img[:, y_min : y_min + thickness, x_min : x_max + 1] = color_tensor_c11
+        img[:, y_max - thickness + 1 : y_max + 1, x_min : x_max + 1] = color_tensor_c11
+        img[:, y_min : y_max + 1, x_min : x_min + thickness] = color_tensor_c11
+        img[:, y_min : y_max + 1, x_max - thickness + 1 : x_max + 1] = color_tensor_c11
+
     return img
 
 
 def paint_landmarks_on_image(img: torch.Tensor, landmarks_data: list) -> torch.Tensor:
     """
-    Draws landmarks on the image tensor.
-    landmarks_data: List of dicts {'kps': np.ndarray, 'color': tuple}
+    OPTIMIZED: Replaced deeply nested loops and per-pixel tensor allocations
+    with tensor slicing and pre-allocated colors to eliminate CPU bottlenecks.
     """
     img_out_hwc = img.clone()
     p = 2
@@ -1007,16 +981,19 @@ def paint_landmarks_on_image(img: torch.Tensor, landmarks_data: list) -> torch.T
         keypoints = item["kps"]
         kcolor = item["color"]
         if keypoints is not None:
+            # OPTIMIZATION: Allocate the color tensor ONCE per face, not per pixel
+            kcolor_tensor = torch.tensor(kcolor, device=img.device, dtype=img.dtype)
+
             for kpoint in keypoints:
                 kx, ky = int(kpoint[0]), int(kpoint[1])
-                for i_offset in range(-p // 2, p // 2 + 1):
-                    for j_offset in range(-p // 2, p // 2 + 1):
-                        final_y, final_x = ky + i_offset, kx + j_offset
-                        if (
-                            0 <= final_y < img_out_hwc.shape[0]
-                            and 0 <= final_x < img_out_hwc.shape[1]
-                        ):
-                            img_out_hwc[final_y, final_x] = torch.tensor(
-                                kcolor, device=img.device, dtype=img.dtype
-                            )
+
+                # OPTIMIZATION: Use direct slicing instead of nested loops
+                y_min = max(0, ky - p // 2)
+                y_max = min(img_out_hwc.shape[0], ky + p // 2 + 1)
+                x_min = max(0, kx - p // 2)
+                x_max = min(img_out_hwc.shape[1], kx + p // 2 + 1)
+
+                if y_min < y_max and x_min < x_max:
+                    img_out_hwc[y_min:y_max, x_min:x_max] = kcolor_tensor
+
     return img_out_hwc

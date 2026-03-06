@@ -899,8 +899,10 @@ class UNet_ResBlock(UNet_TimestepBlock):
         else:
             h = self.in_layers(x)
         emb_out = self.emb_layers(emb).type(h.dtype)
-        while len(emb_out.shape) < len(h.shape):
-            emb_out = emb_out[..., None]
+        # OPTIMIZED: Replaced the slow Python 'while' loop with direct dimensional expansion.
+        diff = h.dim() - emb_out.dim()
+        if diff > 0:
+            emb_out = emb_out.view(emb_out.shape + (1,) * diff)
         if self.use_scale_shift_norm:
             out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
             scale, shift = torch.chunk(emb_out, 2, dim=1)
@@ -934,10 +936,15 @@ class QKVAttentionLegacy(nn.Module):
                 cache_kv_module.k[id(self)].append(k.detach().clone())
                 cache_kv_module.v[id(self)].append(v.detach().clone())
 
-        scale = ch**-0.5
-        weight = torch.bmm(q.transpose(1, 2), k) * scale
-        weight = F.softmax(weight.float(), dim=-1).type(weight.dtype)
-        a = torch.bmm(v, weight.transpose(1, 2))
+        # OPTIMIZED: Native PyTorch 2.0+ Scaled Dot-Product Attention
+        # Bypasses manual bmm and softmax allocations, automatically enabling
+        # hardware acceleration like FlashAttention.
+        q_t = q.transpose(1, 2)
+        k_t = k.transpose(1, 2)
+        v_t = v.transpose(1, 2)
+        # sdpa handles the scale (ch**-0.5) automatically based on the last dimension
+        a_t = torch.nn.functional.scaled_dot_product_attention(q_t, k_t, v_t)
+        a = a_t.transpose(1, 2)
         return a.reshape(bs, -1, length)
 
 
@@ -1377,11 +1384,14 @@ class KVExtractor:
                 image = image.resize((512, 512), Image.Resampling.LANCZOS)
 
             image_rgb = image.convert("RGB")
-            img_np = np.array(image_rgb, dtype=np.float32)
-            img_tensor = torch.from_numpy(img_np).permute(2, 0, 1)
+            # OPTIMIZED: Avoid allocating slow float32 numpy arrays on CPU.
+            img_tensor = torch.from_numpy(np.array(image_rgb)).permute(2, 0, 1).float()
         elif isinstance(image, torch.Tensor):
             if image.shape[1:] != (512, 512):
-                img_tensor = v2.Resize((512, 512), antialias=True)(image)
+                # OPTIMIZED: Functional resize avoids object instantiation
+                img_tensor = v2.functional.resize(
+                    image, [512, 512], antialias=True
+                ).float()
             else:
                 img_tensor = image.float()
             # R-02: tensor inputs must be in [0, 1]; values in [0, 255] will produce
@@ -1393,8 +1403,9 @@ class KVExtractor:
         else:
             raise TypeError(f"Unsupported image type: {type(image)}")
 
-        image_tensor_norm = img_tensor / 127.5 - 1.0
-        return image_tensor_norm.unsqueeze(0)
+        # OPTIMIZED: In-place mathematical operations to save VRAM and CPU overhead
+        img_tensor.div_(127.5).sub_(1.0)
+        return img_tensor.unsqueeze(0)
 
     @torch.no_grad()
     def extract_kv(

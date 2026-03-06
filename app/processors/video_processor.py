@@ -529,7 +529,7 @@ class VideoProcessor(QObject):
                     local_params_for_worker = self.feeder_parameters.copy()
                     local_control_for_worker = self.feeder_control.copy()
 
-                frame_rgb = frame_bgr[..., ::-1]
+                frame_rgb = numpy.ascontiguousarray(frame_bgr[..., ::-1])
 
                 # The worker will use the feeder's state *from this exact moment*
                 task = (
@@ -583,7 +583,7 @@ class VideoProcessor(QObject):
                     print("[WARN] Feeder: Failed to read webcam frame.")
                     continue  # Try again
 
-                frame_rgb = frame_bgr[..., ::-1]
+                frame_rgb = numpy.ascontiguousarray(frame_bgr[..., ::-1])
 
                 # The worker pool expects a 4-tuple task.
                 # For webcam, we must read the *current* global parameters
@@ -676,7 +676,17 @@ class VideoProcessor(QObject):
 
         # --- 4. Schedule the *next* call IMMEDIATELY ---
         if self.processing:
-            QTimer.singleShot(wait_ms, self.display_next_frame)
+            from PySide6.QtCore import Qt, QTimer
+
+            # OPTIMIZED: Reusable PreciseTimer to eliminate micro-stuttering.
+            # Avoids PySide6 singleShot signature limitations and saves memory.
+            if not hasattr(self, "precise_metronome"):
+                self.precise_metronome = QTimer(self)
+                self.precise_metronome.setTimerType(Qt.TimerType.PreciseTimer)
+                self.precise_metronome.setSingleShot(True)
+                self.precise_metronome.timeout.connect(self.display_next_frame)
+
+            self.precise_metronome.start(wait_ms)
 
         # --- 6. Get the frame to display (if ready) ---
         pixmap = None
@@ -782,7 +792,11 @@ class VideoProcessor(QObject):
             self.next_frame_to_display += 1
 
     def send_frame_to_virtualcam(self, frame: numpy.ndarray):
-        """Sends the given frame to the pyvirtualcam device, if enabled."""
+        """
+        OPTIMIZED: Sends the given frame to the pyvirtualcam device.
+        Removed sleep_until_next_frame() to prevent blocking the Main GUI Thread.
+        The UI metronome (QTimer) already handles perfect timing and synchronization.
+        """
         if self.main_window.control["SendVirtCamFramesEnableToggle"] and self.virtcam:
             height, width, _ = frame.shape
             if self.virtcam.height != height or self.virtcam.width != width:
@@ -802,7 +816,8 @@ class VideoProcessor(QObject):
             if self.virtcam:
                 try:
                     self.virtcam.send(frame)
-                    self.virtcam.sleep_until_next_frame()
+                    # REMOVED: self.virtcam.sleep_until_next_frame()
+                    # It forces the UI thread to freeze and fights the metronome.
                 except Exception as e:
                     print(f"[WARN] Failed sending frame to virtualcam: {e}")
 
@@ -1147,7 +1162,7 @@ class VideoProcessor(QObject):
             )
 
             if ret and frame_bgr is not None:
-                frame_to_process = frame_bgr[..., ::-1]  # BGR to RGB
+                frame_to_process = numpy.ascontiguousarray(frame_bgr[..., ::-1])  # BGR to RGB
                 read_successful = True
                 misc_helpers.seek_frame(self.media_capture, self.current_frame_number)
             else:
@@ -1204,7 +1219,9 @@ class VideoProcessor(QObject):
                         frame_bgr, (new_w, target_height), interpolation=cv2.INTER_AREA
                     )
 
-                frame_to_process = frame_bgr[..., ::-1]  # BGR to RGB
+                frame_to_process = numpy.ascontiguousarray(
+                    frame_bgr[..., ::-1]
+                )  # BGR to RGB
                 read_successful = True
             else:
                 print("[ERROR] Unable to read image file for processing.")
@@ -1215,7 +1232,7 @@ class VideoProcessor(QObject):
                 self.media_capture, 0, preview_target_height=None
             )
             if ret and frame_bgr is not None:
-                frame_to_process = frame_bgr[..., ::-1]  # BGR to RGB
+                frame_to_process = numpy.ascontiguousarray(frame_bgr[..., ::-1])  # BGR to RGB
                 read_successful = True
             else:
                 print("[ERROR] Unable to read Webcam frame for processing!")

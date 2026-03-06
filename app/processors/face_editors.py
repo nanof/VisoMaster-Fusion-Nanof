@@ -3,6 +3,7 @@ import hashlib
 from typing import TYPE_CHECKING, Dict
 import platform
 import os
+import threading
 
 import torch
 import numpy as np
@@ -36,6 +37,7 @@ class FaceEditors:
             models_processor (ModelsProcessor): A reference to the main ModelsProcessor instance.
         """
         self.models_processor = models_processor
+        self.editor_lock = threading.Lock()
         self.current_face_editor_type: str | None = None
         self.editor_models: Dict[str, list[str]] = {
             "Human-Face": [
@@ -117,13 +119,13 @@ class FaceEditors:
         Manages loading and unloading of model groups for different face editor types.
         If the editor type changes, it unloads the models of the previous type.
         """
-
-        if (
-            self.current_face_editor_type
-            and self.current_face_editor_type != face_editor_type
-        ):
-            self.unload_models()
-        self.current_face_editor_type = face_editor_type
+        with self.editor_lock:
+            if (
+                self.current_face_editor_type
+                and self.current_face_editor_type != face_editor_type
+            ):
+                self.unload_models()
+            self.current_face_editor_type = face_editor_type
 
     def _run_onnx_io_binding(
         self,

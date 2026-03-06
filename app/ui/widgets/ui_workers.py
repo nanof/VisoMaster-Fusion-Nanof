@@ -204,27 +204,37 @@ class InputFacesLoaderWorker(qtc.QThread):
     def load_faces(self, folder_name=False, files_list=None):
         control = self.main_window.control.copy()
         files_list = files_list or []
-        image_files = []
+
+        # OPTIMIZED: Pair the file paths with their correct IDs before any processing
+        # This prevents ID shifting if an image fails, and avoids destructive sorting.
+        paired_files_ids = []
+
         if folder_name:
             image_files = misc_helpers.get_image_files(
                 self.folder_name,
                 self.main_window.control["InputFacesFolderRecursiveToggle"],
             )
+            image_files.sort()  # Safe to sort here, IDs are generated fresh
+            for path in image_files:
+                paired_files_ids.append(
+                    (os.path.join(folder_name, path), str(uuid.uuid1().int))
+                )
         elif files_list:
-            image_files = list(files_list)
+            # DO NOT SORT if loading from a workspace, keep original saved order
+            for idx, path in enumerate(files_list):
+                f_id = self.face_ids[idx] if self.face_ids else str(uuid.uuid1().int)
+                paired_files_ids.append((path, f_id))
 
-        i = 0
-        image_files.sort()
-        for image_file_path in image_files:
+        for image_file_path, face_id in paired_files_ids:
             if not self._running:  # Check if the thread is still running
                 break
             if not misc_helpers.is_image_file(image_file_path):
                 continue
-            if folder_name:
-                image_file_path = os.path.join(folder_name, image_file_path)
+
             frame = misc_helpers.read_image_file(image_file_path)
             if frame is None:
                 continue
+
             # Frame must be in RGB format
             frame = frame[..., ::-1]  # Swap the channels from BGR to RGB
 
@@ -278,15 +288,9 @@ class InputFacesLoaderWorker(qtc.QThread):
                     "kps_5": face_kps,
                 }
 
-                if not self.face_ids:
-                    face_id = str(uuid.uuid1().int)
-                else:
-                    face_id = self.face_ids[i]
-
                 self.thumbnail_ready.emit(
                     image_file_path, face_img, embedding_store, pixmap, face_id
                 )
-                i += 1
 
         torch.cuda.empty_cache()
 

@@ -80,8 +80,9 @@ class FaceDetectors:
         self, img: torch.Tensor, input_size: tuple, normalization_mode: str
     ) -> tuple[torch.Tensor, torch.Tensor, tuple]:
         """
-        Prepares an image for a face detection model by resizing, padding, and handling color space.
-        Normalization and dtype conversion for Yolo/Yunet are deferred to their respective functions.
+        OPTIMIZED: Prepares an image for a face detection model by resizing and padding.
+        Replaced explicit canvas creation, slicing, and permutations with native PyTorch padding
+        to eliminate memory fragmentation and speed up VRAM operations.
         """
         if not isinstance(input_size, tuple):
             input_size = (input_size, input_size)
@@ -101,47 +102,45 @@ class FaceDetectors:
         # Use float for det_scale calculation initially for precision
         det_scale = torch.tensor(
             new_height / float(img_height), device=self.models_processor.device
-        )  # Ensure float division
+        )
+
         resize = v2.Resize((new_height, new_width), antialias=True)
         resized_img = resize(img)
 
-        # Create a blank canvas with the model's required dtype and paste the resized image.
-        # Yolo and Yunet start with uint8 here. RetinaFace/SCRFD use float32.
+        # --- OPTIMIZATION: Native Zero-Copy Padding ---
+        # Calculate needed padding on the right and bottom
+        pad_right = input_size[0] - new_width
+        pad_bottom = input_size[1] - new_height
+
+        # Determine target dtype
         canvas_dtype = (
             torch.float32
             if normalization_mode in ["retinaface", "scrfd"]
             else torch.uint8
         )
-        det_img_canvas = torch.zeros(
-            (input_size[1], input_size[0], 3),
-            dtype=canvas_dtype,
-            device=self.models_processor.device,
-        )
-        # Ensure resized_img is compatible with canvas dtype before assignment
+
+        # Cast BEFORE padding to avoid casting the newly padded pixels (saves VRAM bandwidth)
         if canvas_dtype == torch.uint8 and resized_img.dtype != torch.uint8:
             # Assuming resized_img might be float [0, 255] after resize
             resized_img_casted = resized_img.clamp(0, 255).byte()
         elif canvas_dtype == torch.float32 and resized_img.dtype == torch.uint8:
-            resized_img_casted = resized_img.float()  # Keep range [0, 255] for now
+            resized_img_casted = resized_img.float()
         else:
             resized_img_casted = resized_img
 
-        det_img_canvas[:new_height, :new_width, :] = resized_img_casted.permute(1, 2, 0)
+        # Native PyTorch Pad: applies (left, right, top, bottom) to the last 2 dimensions (H, W)
+        det_img = torch.nn.functional.pad(
+            resized_img_casted, (0, pad_right, 0, pad_bottom), mode="constant", value=0
+        )
 
         # Apply model-specific color space.
         if normalization_mode == "yunet":
-            det_img_canvas = det_img_canvas[:, :, [2, 1, 0]]  # RGB to BGR for Yunet
-
-        det_img = det_img_canvas.permute(2, 0, 1)  # Back to CHW format
+            # RGB to BGR natively without permutations
+            det_img = det_img[[2, 1, 0], :, :]
 
         # Apply normalization ONLY for RetinaFace/SCRFD here.
         if normalization_mode in ["retinaface", "scrfd"]:
-            # If canvas was uint8 initially (unlikely here but safe check)
-            if det_img.dtype == torch.uint8:
-                det_img = det_img.float()
             det_img = (det_img - 127.5) / 128.0  # Normalize to [-1.0, 1.0] range
-
-        # For Yolo/Yunet, det_img remains uint8 [0, 255] at this stage.
 
         return det_img, det_scale, input_size
 

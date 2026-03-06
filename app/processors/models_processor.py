@@ -1944,11 +1944,13 @@ class ModelsProcessor(QtCore.QObject):
             target_proc_dim = 512
             _, h_input, w_input = image_cxhxw_uint8.shape
             if h_input != target_proc_dim or w_input != target_proc_dim:
-                image_to_process_cxhxw_uint8 = v2.Resize(
-                    (target_proc_dim, target_proc_dim),
+                # OPTIMIZED: Functional resize avoids slow class instantiation
+                image_to_process_cxhxw_uint8 = v2.functional.resize(
+                    image_cxhxw_uint8,
+                    [target_proc_dim, target_proc_dim],
                     interpolation=v2.InterpolationMode.BILINEAR,
                     antialias=True,
-                )(image_cxhxw_uint8)
+                )
             else:
                 image_to_process_cxhxw_uint8 = image_cxhxw_uint8
 
@@ -2283,10 +2285,10 @@ class ModelsProcessor(QtCore.QObject):
 
             # --- IMPROVEMENT A: Pixel Sharpening (Unsharp Mask) ---
             if ENABLE_PIXEL_SHARPENING:
-                gaussian = v2.GaussianBlur(kernel_size=5, sigma=1.0)
-                blurred = gaussian(image_after_postproc_float_0_1.unsqueeze(0)).squeeze(
-                    0
-                )
+                # OPTIMIZED: Functional gaussian blur avoids class instantiation
+                blurred = v2.functional.gaussian_blur(
+                    image_after_postproc_float_0_1.unsqueeze(0), [5, 5], [1.0, 1.0]
+                ).squeeze(0)
                 detail = image_after_postproc_float_0_1 - blurred
                 image_after_postproc_float_0_1 = (
                     image_after_postproc_float_0_1 + detail * PIXEL_SHARPEN_STRENGTH
@@ -2328,11 +2330,13 @@ class ModelsProcessor(QtCore.QObject):
             final_image_uint8 = (image_after_postproc_float_0_1 * 255.0).byte()
 
             if h_proc != h_input or w_proc != w_input:
-                output_image_cxhxw_uint8 = v2.Resize(
-                    (h_input, w_input),
+                # OPTIMIZED: Functional resize avoids slow class instantiation
+                output_image_cxhxw_uint8 = v2.functional.resize(
+                    final_image_uint8,
+                    [h_input, w_input],
                     interpolation=v2.InterpolationMode.BILINEAR,
                     antialias=True,
-                )(final_image_uint8)
+                )
             else:
                 output_image_cxhxw_uint8 = final_image_uint8
 
