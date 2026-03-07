@@ -37,6 +37,10 @@ if TYPE_CHECKING:
 
 TAIL_TOLERANCE = 300
 
+# Audio-Video Sync: Always use segmented extraction when frames are skipped (perfect sync)
+# Simple extraction used when no frames are skipped (no sync issues)
+
+
 class VideoProcessor(QObject):
     """
     Manages all video, image, and webcam processing pipelines.
@@ -139,6 +143,15 @@ class VideoProcessor(QObject):
 
         # --- Default Recording State ---
         self.temp_file: str = ""  # Temporary video file (without audio)
+        # Counters for accurate duration calculation
+        self.frames_written: int = 0  # Number of frames successfully sent to FFmpeg
+        self.last_displayed_frame: int | None = None  # Last frame number that was displayed/written
+
+        # --- Frame Skip Tracking (for corrupted frames) ---
+        self.skipped_frames: set[int] = set()  # Track which frames were skipped due to read errors
+        self.consecutive_read_errors: int = 0  # Count consecutive read failures
+        self.max_consecutive_errors: int = 300  # Stop after this many consecutive errors
+        self.total_skipped_frames: int = 0  # Counter for skipped frames
 
         # --- Multi-Segment Recording State ---
         self.segments_to_process: List[Tuple[int, int]] = []
@@ -324,6 +337,7 @@ class VideoProcessor(QObject):
         """
         Unified feeder logic for standard video playback AND segment recording.
         Reads frames as long as processing is active and within the limits.
+        Now supports skipping corrupted frames instead of stopping.
         """
 
         # Determine the mode at startup
@@ -340,6 +354,11 @@ class VideoProcessor(QObject):
         print(
             f"[INFO] Feeder: Starting video loop (Mode: {'Segment' if is_segment_mode else 'Standard'})."
         )
+
+        # Reset skip tracking at start
+        self.consecutive_read_errors = 0
+        self.skipped_frames.clear()
+        self.total_skipped_frames = 0
 
         while stop_flag_check():
             try:
@@ -388,21 +407,32 @@ class VideoProcessor(QObject):
                             print(f"[INFO] Feeder: Treat read failure near segment tail as EOF (frame={fn}).")
                             break
 
-                    # 2) Standard mode: read failure near max_frame -> treat as media EOF/stop
-                    if (not self.is_processing_segments) and (self.max_frame_number is not None):
-                        if fn >= self.max_frame_number - TAIL_TOLERANCE:
-                            with self.state_lock:
-                                # Advance past media end to trigger display_next_frame()'s "End of media reached" branch
-                                self.next_frame_to_display = self.max_frame_number + 1
-                                self.current_frame_number = self.max_frame_number + 1
-                            print(f"[INFO] Feeder: Treat read failure near media tail as EOF (frame={fn}).")
-                            break
-
-                    # 3) Non-tail failure: treat as a regular error (preserve original semantics)
+                    # 2) Standard mode: unified frame skip logic (no longer depends on potentially inaccurate max_frame_number)
+                    # Skip corrupted frames and continue, but stop if too many consecutive failures (likely reached EOF)
+                    self.consecutive_read_errors += 1
+                    self.skipped_frames.add(self.current_frame_number)
+                    self.total_skipped_frames += 1
+                    
+                    # Check if too many consecutive errors (likely reached actual EOF)
+                    if self.consecutive_read_errors > self.max_consecutive_errors:
+                        print(
+                            f"[INFO] Feeder: Too many consecutive read errors ({self.consecutive_read_errors}), likely reached EOF. Stopping."
+                        )
+                        if is_segment_mode:
+                            self.is_processing_segments = False
+                        else:
+                            self.processing = False
+                        break
+                    
+                    # Log skip and move to next frame
                     print(
-                        f"[ERROR] Feeder: Could not read frame {self.current_frame_number} (Mode: {'Segment' if is_segment_mode else 'Standard'})!"
+                        f"[WARN] Feeder: Skipping corrupted frame {self.current_frame_number} (Total skipped: {self.total_skipped_frames}, Consecutive errors: {self.consecutive_read_errors})."
                     )
-                    break  # Stop reading
+                    self.current_frame_number += 1
+                    continue  # Skip this frame and try the next one
+
+                # Successfully read a frame, reset consecutive error counter
+                self.consecutive_read_errors = 0
 
                 frame_num_to_process = self.current_frame_number
 
@@ -471,6 +501,11 @@ class VideoProcessor(QObject):
                     self.is_processing_segments = False
                 else:
                     self.processing = False  # Stop the loop
+
+        # Log summary of skipped frames at end
+        if self.total_skipped_frames > 0:
+            print(f"[INFO] Feeder loop finished. Total frames skipped: {self.total_skipped_frames}")
+            print(f"[INFO] Skipped frame numbers: {sorted(list(self.skipped_frames)[:100])}{'...' if len(self.skipped_frames) > 100 else ''}")
 
     def _feed_webcam(self):
         """Feeder logic for webcam streaming."""
@@ -601,6 +636,20 @@ class VideoProcessor(QObject):
         else:
             # --- Video/Image Logic (Dictionary) ---
             frame_number_to_display = self.next_frame_to_display
+            
+            # Skip frames that were corrupted/skipped during processing
+            # Find the next non-skipped frame to display
+            original_frame = frame_number_to_display
+            while (frame_number_to_display in self.skipped_frames and 
+                   frame_number_to_display <= self.max_frame_number):
+                frame_number_to_display += 1
+            
+            # Update next_frame_to_display to skip all consecutive skipped frames
+            if frame_number_to_display > original_frame:
+                skipped_count = frame_number_to_display - original_frame
+                print(f"[INFO] Display: Skipping {skipped_count} corrupted frame(s), jumping to frame {frame_number_to_display}")
+                self.next_frame_to_display = frame_number_to_display
+            
             if frame_number_to_display not in self.frames_to_display:
                 # Frame not ready.
                 return
@@ -628,6 +677,9 @@ class VideoProcessor(QObject):
             ):
                 try:
                     self.recording_sp.stdin.write(frame.tobytes())
+                    # update counters for duration calculation
+                    self.frames_written += 1
+                    self.last_displayed_frame = frame_number_to_display
                 except OSError as e:
                     log_prefix = (
                         f"segment {self.current_segment_index + 1}"
@@ -984,14 +1036,17 @@ class VideoProcessor(QObject):
             else:
                 fn = self.current_frame_number
                 max_fn = self.max_frame_number
-                if fn >= max_fn - TAIL_TOLERANCE:
+                # Note: max_frame_number may be inaccurate due to OpenCV limitations
+                # For single frame processing, we treat read failures as errors rather than skipping
+                if max_fn > 0 and fn >= max_fn - TAIL_TOLERANCE:
                     print(
-                        f"[INFO] EOF reached at frame {fn} (max={max_fn}), stopping gracefully."
+                        f"[INFO] EOF reached at frame {fn} (reported max={max_fn}), stopping gracefully."
                     )
                     self.current_frame_number = max_fn + 1
                     return None
                 print(
-                    f"[ERROR] Cannot read frame {self.current_frame_number} for single processing!"
+                    f"[ERROR] Cannot read frame {self.current_frame_number} for single processing! "
+                    f"This may be due to corrupted frame data or inaccurate frame count (reported max: {max_fn})."
                 )
                 self.main_window.last_seek_read_failed = True
 
@@ -1193,13 +1248,17 @@ class VideoProcessor(QObject):
             pass
         print("[INFO] Processing aborted and cleaned up.")
 
-        end_frame_for_calc = min(self.next_frame_to_display, self.max_frame_number + 1)
-        self.play_end_time = (
-            float(end_frame_for_calc / float(self.fps)) if self.fps > 0 else 0.0
-        )
-        print(
-            f"[INFO] Calculated recording end time: {self.play_end_time:.3f}s (based on frame {end_frame_for_calc})"
-        )
+        # compute end metrics using helper
+        self.play_end_time, end_frame_for_calc, frames_actually_processed, duration = self._compute_play_end()
+        if duration is not None:
+            print(
+                f"[INFO] Probed temp video duration during abort: {duration:.3f}s (recorded clip length), "
+                f"play_end_time set to {self.play_end_time:.3f}s [media time]."
+            )
+        else:
+            print(
+                f"[INFO] Calculated recording end time (frame estimate) during abort: {self.play_end_time:.3f}s (based on frame {end_frame_for_calc})"
+            )
 
         # 11. Final Timing and Logging
         self.end_time = time.perf_counter()
@@ -1601,6 +1660,9 @@ class VideoProcessor(QObject):
             self.recording_sp = subprocess.Popen(
                 args, stdin=subprocess.PIPE, bufsize=-1
             )
+            # reset write counters each time we start a new FFmpeg session
+            self.frames_written = 0
+            self.last_displayed_frame = None
             return True
         except FileNotFoundError:
             print(
@@ -1624,7 +1686,347 @@ class VideoProcessor(QObject):
                 )
             return False
 
+    def _identify_frame_segments(self, actual_end_frame: int) -> List[Tuple[int, int]]:
+        """
+        Identify all continuous segments of successfully processed frames.
+        Returns a list of (start_frame, end_frame) tuples, using absolute frame
+        numbers from the original media.  When recording began partway through
+        the source the first segment needs to start at ``self.processing_start_frame``
+        rather than zero.
+        
+        Args:
+            actual_end_frame: The actual last frame that was recorded (0-based,
+                              absolute index in source)
+        
+        Example: if recording started at frame 100 and frames 150, 175 were
+        skipped in a 200-frame video:
+        Returns: [(100, 149), (151, 174), (176, 199)]
+        """
+        # Determine the first frame we actually processed (may be >0 if we
+        # sought).  Default to 0 for standard playback/recordings that start
+        # at the beginning.
+        start_frame = getattr(self, "processing_start_frame", 0) or 0
+
+        if not self.skipped_frames:
+            # No skipped frames - single segment from start_frame to end
+            return [(start_frame, actual_end_frame)]
+
+        # Sort skipped frames and ignore any that occur before start_frame
+        sorted_skipped = [f for f in sorted(self.skipped_frames) if f >= start_frame]
+        segments = []
+        segment_start = start_frame
+
+        for skipped_frame in sorted_skipped:
+            if skipped_frame > segment_start:
+                # Frames from segment_start to skipped_frame-1 are successful
+                segment_end = skipped_frame - 1
+                if segment_start <= segment_end:
+                    segments.append((segment_start, segment_end))
+            # Next segment starts after the skipped frame
+            segment_start = skipped_frame + 1
+
+        # Add final segment if there are frames after the last skipped frame
+        if segment_start <= actual_end_frame:
+            segments.append((segment_start, actual_end_frame))
+
+        # summary only; detailed segment listings are rarely needed and can
+        # clutter the console.  If fuller diagnostics are required the
+        # developer can re-enable by inspecting `self.skipped_frames` directly.
+        print(f"[INFO] Identified {len(segments)} continuous frame segment(s)")
+
+        return segments
+
+    def _extract_audio_segments(
+        self, segments: List[Tuple[int, int]], temp_audio_dir: str
+    ) -> Tuple[bool, List[str]]:
+        """
+        Extract audio from the original media for each frame segment.
+        
+        Returns: (success: bool, audio_files: List[str])
+            - success: True if all segments extracted successfully
+            - audio_files: List of paths to extracted audio files
+        """
+        audio_files = []
+        
+        for idx, (start_frame, end_frame) in enumerate(segments):
+            # Convert frame numbers to time (seconds)
+            start_time = start_frame / self.fps if self.fps > 0 else 0
+            # end_time is exclusive (one frame after the last frame we want)
+            end_time = (end_frame + 1) / self.fps if self.fps > 0 else 0
+            
+            # Skip empty segments (should not happen with our segment identification, but safety check)
+            if start_time >= end_time:
+                print(f"[WARN] Skipping empty audio segment {idx + 1} (start_time={start_time:.3f}s >= end_time={end_time:.3f}s)")
+                continue
+            
+            audio_file = os.path.join(
+                temp_audio_dir, f"audio_segment_{idx:04d}.aac"
+            )
+            audio_files.append(audio_file)
+            
+            # Try a fast "copy" extraction first to avoid decoding corrupted
+            # packets.  If the input stream itself is damaged this will still
+            # produce a file and skip decoding, hopefully avoiding the error
+            # message the user observed.  We always run validation afterwards
+            # and fall back to re-encoding if needed.
+            args = [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "warning",
+                "-i",
+                self.media_path,
+                "-ss",
+                str(start_time),
+                "-to",
+                str(end_time),
+                "-c:a",
+                "copy",
+                "-y",
+                audio_file,
+            ]
+            
+            try:
+                print(f"[INFO] Extracting audio segment {idx + 1}/{len(segments)}: {start_time:.3f}s → {end_time:.3f}s")
+                result = subprocess.run(args, check=True, capture_output=True, text=True)
+                
+                # Check for audio decoding errors in stderr (copy mode usually avoids decoding,
+                # but some containers still report warnings)
+                stderr_output = result.stderr
+                needs_rerun = False
+                if "Error submitting packet to decoder" in stderr_output or "Invalid data found" in stderr_output:
+                    print(f"[WARN] Audio decoding errors detected in segment {idx + 1}")
+                    print(f"[WARN] FFmpeg stderr: {stderr_output[:500]}...")  # First 500 chars
+                    needs_rerun = True
+                
+                # Validate output; if it's not valid, we'll resort to re-encode
+                if not self._validate_audio_file(audio_file):
+                    print(f"[WARN] Validation failed for copied segment {idx + 1}, will retry with re-encoding")
+                    needs_rerun = True
+                
+                if needs_rerun:
+                    # re-extract by decoding and re-encoding, ignoring errors
+                    re_args = [
+                        "ffmpeg",
+                        "-hide_banner",
+                        "-loglevel",
+                        "warning",
+                        "-err_detect",
+                        "ignore_err",
+                        "-i",
+                        self.media_path,
+                        "-ss",
+                        str(start_time),
+                        "-to",
+                        str(end_time),
+                        "-q:a",
+                        "9",
+                        "-y",
+                        audio_file,
+                    ]
+                    try:
+                        print(f"[INFO]   Re-extracting segment {idx+1} with re-encode")
+                        subprocess.run(re_args, check=True, capture_output=True, text=True)
+                    except subprocess.CalledProcessError as e2:
+                        print(f"[ERROR] Retry extraction failed for segment {idx+1}: {e2}")
+                        print(f"[ERROR] FFmpeg stderr: {e2.stderr}")
+                        for audio in audio_files:
+                            try:
+                                os.remove(audio)
+                            except:
+                                pass
+                        return False, []
+                else:
+                    print(f"[INFO]   ✓ Segment {idx + 1} extracted successfully")
+            except subprocess.CalledProcessError as e:
+                print(f"[ERROR] Failed to extract audio segment {idx + 1}: {e}")
+                print(f"[ERROR] FFmpeg stderr: {e.stderr}")
+                print(f"[ERROR] FFmpeg command: {' '.join(args)}")
+                # Cleanup partial files
+                for audio in audio_files:
+                    try:
+                        os.remove(audio)
+                    except:
+                        pass
+                return False, []
+            except FileNotFoundError:
+                print("[ERROR] FFmpeg not found. Cannot extract audio segments.")
+                return False, []
+        
+        print(f"[INFO] All {len(segments)} audio segment(s) extracted successfully")
+        return True, audio_files
+
+    def _validate_audio_file(self, audio_file_path: str) -> bool:
+        """
+        Validate that an audio file can be properly decoded by FFmpeg.
+        Returns True if audio is valid, False if corrupted.
+        """
+        if not os.path.exists(audio_file_path):
+            print(f"[ERROR] Audio file does not exist: {audio_file_path}")
+            return False
+            
+        try:
+            # Try to probe the audio file with ffprobe
+            args = [
+                "ffprobe",
+                "-v", "quiet",
+                "-print_format", "json",
+                "-show_format",
+                "-show_streams",
+                audio_file_path
+            ]
+            result = subprocess.run(args, capture_output=True, text=True, timeout=30)
+            
+            if result.returncode != 0:
+                print(f"[WARN] ffprobe failed for {audio_file_path}: {result.stderr}")
+                return False
+                
+            # Check if we got valid JSON output
+            import json
+            probe_data = json.loads(result.stdout)
+            
+            # Check if there's an audio stream
+            audio_streams = [s for s in probe_data.get("streams", []) if s.get("codec_type") == "audio"]
+            if not audio_streams:
+                print(f"[WARN] No audio stream found in {audio_file_path}")
+                return False
+                
+            # Check duration
+            format_info = probe_data.get("format", {})
+            duration = format_info.get("duration")
+            if duration is None or float(duration) <= 0:
+                print(f"[WARN] Invalid or zero duration in {audio_file_path}")
+                return False
+                
+            print(f"[INFO] Audio validation passed: {duration}s duration")
+            return True
+            
+        except subprocess.TimeoutExpired:
+            print(f"[WARN] Audio validation timed out for {audio_file_path}")
+            return False
+        except json.JSONDecodeError:
+            print(f"[WARN] Invalid ffprobe output for {audio_file_path}")
+            return False
+        except Exception as e:
+            print(f"[WARN] Audio validation failed for {audio_file_path}: {e}")
+            return False
+
+    def _probe_video_duration(self, file_path: str) -> float | None:
+        """
+        Return the duration (in seconds) of the video file at `file_path` using
+        ffprobe.  If probing fails for any reason the function returns None.
+        """
+        if not file_path or not os.path.isfile(file_path):
+            return None
+        try:
+            args = [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                file_path,
+            ]
+            result = subprocess.run(args, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                return None
+            duration_str = result.stdout.strip()
+            return float(duration_str) if duration_str else None
+        except Exception as e:
+            print(f"[WARN] Failed to probe video duration for {file_path}: {e}")
+            return None
+
+    def _compute_play_end(self) -> Tuple[float, int, int, float | None]:
+        """Compute timing values used when finalizing a recording.
+
+        Returns a tuple of:
+          (play_end_time, end_frame_for_calc, frames_actually_processed, duration_probed)
+
+        ``duration_probed`` is the length of the temp video file if probing
+        succeeded, otherwise ``None``.  ``play_end_time`` is always an absolute
+        timestamp in the original media timeline (i.e. includes ``play_start_time``).
+        """
+        end_frame = min(self.next_frame_to_display, self.max_frame_number + 1)
+        frames_processed = end_frame - self.total_skipped_frames
+
+        duration = None
+        if self.temp_file and Path(self.temp_file).is_file():
+            duration = self._probe_video_duration(self.temp_file)
+
+        if duration is not None:
+            play_end = self.play_start_time + duration
+        elif self.frames_written > 0 and self.fps > 0:
+            play_end = self.play_start_time + (self.frames_written / float(self.fps))
+        else:
+            play_end = float(end_frame / float(self.fps)) if self.fps > 0 else 0.0
+
+        return play_end, end_frame, frames_processed, duration
+    def _concatenate_audio_segments(
+        self, audio_files: List[str], temp_audio_dir: str
+    ) -> Optional[str]:
+        """
+        Concatenate multiple audio files into a single audio file using FFmpeg concat demuxer.
+        
+        Returns: Path to concatenated audio file, or None if failed
+        """
+        
+        if len(audio_files) == 1:
+            # Only one segment, return it directly
+            print("[INFO] Only one audio segment, no concatenation needed")
+            return audio_files[0]
+        
+        # Create concat manifest file
+        concat_file = os.path.join(temp_audio_dir, "concat_manifest.txt")
+        try:
+            with open(concat_file, "w") as f:
+                for audio_file in audio_files:
+                    # FFmpeg concat demuxer expects absolute paths
+                    abs_path = os.path.abspath(audio_file)
+                    f.write(f"file '{abs_path}'\n")
+            print(f"[INFO] Created concat manifest with {len(audio_files)} segments")
+        except OSError as e:
+            print(f"[ERROR] Failed to create concat manifest: {e}")
+            return None
+        
+        output_audio = os.path.join(temp_audio_dir, "audio_concatenated.aac")
+        
+        # FFmpeg concat demuxer command
+        args = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "concat",
+            "-safe",
+            "0",  # Allow absolute filenames
+            "-i",
+            concat_file,
+            "-c",
+            "copy",  # No re-encoding, just copy
+            "-y",
+            output_audio,
+        ]
+        
+        try:
+            print(f"[INFO] Concatenating {len(audio_files)} audio segment(s)...")
+            subprocess.run(args, check=True)
+            print(f"[INFO] ✓ Successfully concatenated audio segments")
+            return output_audio
+        except subprocess.CalledProcessError as e:
+            print(f"[ERROR] Failed to concatenate audio segments: {e}")
+            print(f"[ERROR] FFmpeg command: {' '.join(args)}")
+            return None
+        except FileNotFoundError:
+            print("[ERROR] FFmpeg not found. Cannot concatenate audio.")
+            return None
+
     def _finalize_default_style_recording(self):
+
         """Finalizes a successful default-style recording (adds audio, cleans up)."""
         print("[INFO] Finalizing default-style recording...")
         self.processing = False  # Stop metronome
@@ -1667,13 +2069,91 @@ class VideoProcessor(QObject):
             print("[WARN] No recording subprocess found during finalization.")
 
         # 4. Calculate audio segment times
-        end_frame_for_calc = min(self.next_frame_to_display, self.max_frame_number + 1)
-        self.play_end_time = (
-            float(end_frame_for_calc / float(self.fps)) if self.fps > 0 else 0.0
-        )
-        print(
-            f"[INFO] Calculated recording end time: {self.play_end_time:.3f}s (based on frame {end_frame_for_calc})"
-        )
+        # CRITICAL NOTE: Audio-Video Sync with Skipped Frames
+        # When frames are skipped, there is INHERENT content misalignment:
+        # - Output video frame N may contain content from original frame N+skip_count
+        # - But audio at corresponding time still contains original frame N's audio
+        # - FFmpeg aresample CANNOT fix this (it only adjusts PTS, not content)
+        # - Error margin ≈ number_of_skipped_frames / fps seconds
+        
+        # compute end metrics using helper (handles probe & frame-count fallback)
+        self.play_end_time, end_frame_for_calc, frames_actually_processed, duration = self._compute_play_end()
+        if duration is not None:
+            print(
+                f"[INFO] Probed temp video duration: {duration:.3f}s (recorded clip length), "
+                f"play_end_time set to {self.play_end_time:.3f}s [media time]."
+            )
+        else:
+            # fall back to frame-based estimate
+            end_frame_for_calc = min(self.next_frame_to_display, self.max_frame_number + 1)
+            frames_actually_processed = end_frame_for_calc - self.total_skipped_frames
+            # if we counted written frames, that is a better estimate of duration
+            if self.frames_written > 0 and self.fps > 0:
+                self.play_end_time = self.play_start_time + (self.frames_written / float(self.fps))
+            else:
+                self.play_end_time = (
+                    float(end_frame_for_calc / float(self.fps)) if self.fps > 0 else 0.0
+                )
+
+        if self.total_skipped_frames > 0:
+            # Calculate metrics for detailed reporting
+            skipped_percentage = (self.total_skipped_frames / float(end_frame_for_calc) * 100) if end_frame_for_calc > 0 else 0
+            timing_offset_ms = self.total_skipped_frames * (1000.0 / self.fps) if self.fps > 0 else 0
+            
+            # compute relative counts for clarity
+            start_frame = getattr(self, "processing_start_frame", 0) or 0
+            rel_processed = frames_actually_processed - start_frame
+            rel_total = end_frame_for_calc - start_frame
+            print(
+                f"[INFO] Recording end time: {self.play_end_time:.3f}s "
+                f"(actual recorded frames: {rel_processed}/{rel_total})"
+            )
+            print(
+                f"[INFO] Skipped frames: {self.total_skipped_frames}/{end_frame_for_calc} ({skipped_percentage:.1f}%)"
+            )
+            print(
+                f"[INFO] Absolute frame range covered: {start_frame}-{end_frame_for_calc}"
+            )
+            print(
+                f"[⚠️  CRITICAL] Potential audio-video misalignment: ≈{timing_offset_ms:.0f}ms"
+            )
+            
+            # Risk assessment
+            if timing_offset_ms <= 50:
+                print(
+                    f"[✓ LOW RISK] Timing offset < 50ms: Likely imperceptible to human ear/eye"
+                )
+            elif timing_offset_ms <= 200:
+                print(
+                    f"[~ MODERATE RISK] Timing offset {timing_offset_ms:.0f}ms: May be barely perceptible"
+                )
+                print(
+                    f"[SUGGEST] Monitor output video for audio-video sync issues"
+                )
+            elif timing_offset_ms <= 500:
+                print(
+                    f"[✗ HIGH RISK] Timing offset {timing_offset_ms:.0f}ms: Likely noticeable out-of-sync"
+                )
+                print(
+                    f"[SUGGEST] Consider using frame-by-frame audio segment extraction for better sync"
+                )
+            else:
+                print(
+                    f"[✗✗ CRITICAL RISK] Timing offset {timing_offset_ms:.0f}ms: Severe audio-video misalignment expected"
+                )
+                print(
+                    f"[URGENT SUGGEST] Strongly recommend implementing segmented audio extraction"
+                )
+                print(
+                    f"[INFO] Contact developer to enable advanced audio sync mode"
+                )
+        else:
+            print(
+                f"[INFO] Recording end time: {self.play_end_time:.3f}s (frame {end_frame_for_calc})"
+            )
+            print(
+                f"[✓] No skipped frames: Audio-video sync guaranteed"
+            )
 
         # 5. Audio Merging
         if (
@@ -1743,42 +2223,207 @@ class VideoProcessor(QObject):
                         f"[WARN] Failed to remove existing final file {final_file_path}: {e}"
                     )
 
-            # 5b. Run FFmpeg audio merge command
-            print("[INFO] Adding audio (default-style merge)...")
-            args = [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-i",
-                self.temp_file,  # Input 0: temp video (no audio)
-                "-ss",
-                str(self.play_start_time),  # Start time for audio
-                "-to",
-                str(self.play_end_time),  # End time for audio
-                "-i",
-                self.media_path,  # Input 1: original media (for audio)
-                "-c:v",
-                "copy",
-                "-map",
-                "0:v:0",  # Map video from input 0
-                "-map",
-                "1:a:0?",  # Map audio from input 1 (if exists)
-                "-shortest",
-                "-af",
-                "aresample=async=1000",
-                final_file_path,
-            ]
-            try:
-                subprocess.run(args, check=True)
+            # 5b. Audio Processing Strategy
+            final_audio_file = None
+            temp_audio_dir = None
+            
+            # Audio Processing: Use segmented extraction when frames are skipped (perfect sync)
+            if self.total_skipped_frames > 0:
                 print(
-                    f"[INFO] --- Successfully created final video (default-style): {final_file_path} ---"
+                    f"[INFO] Using STRATEGY_SEGMENTED (segmented audio extraction) for perfect audio-video sync"
+                )
+                print(f"[INFO] Processing {self.total_skipped_frames} skipped frame(s)...")
+                
+                # Create temporary directory for audio segments.  Use the same
+                # base directory as other temporary data when possible so everything
+                # lives together and can be cleaned up in one place.
+                if self.segment_temp_dir:
+                    base = self.segment_temp_dir
+                else:
+                    # fall back to the directory containing the video temp file
+                    base = os.path.dirname(self.temp_file) if self.temp_file else "temp"
+                temp_audio_dir = os.path.join(base, "audio_segments")
+                try:
+                    os.makedirs(temp_audio_dir, exist_ok=True)
+                except OSError as e:
+                    print(f"[ERROR] Failed to create temp audio directory: {e}")
+                    temp_audio_dir = None
+                
+                if temp_audio_dir:
+                    # 1. Identify continuous frame segments
+                    # We prefer to use the last displayed frame number if we tracked it,
+                    # otherwise fall back to the frame estimate we already computed.
+                    actual_end_frame = (
+                        self.last_displayed_frame
+                        if self.last_displayed_frame is not None
+                        else end_frame_for_calc - 1
+                    )
+                    segments = self._identify_frame_segments(actual_end_frame)
+                    
+                    # 2. Extract audio for each segment
+                    success, audio_files = self._extract_audio_segments(segments, temp_audio_dir)
+                    
+                    if success and audio_files:
+                        # 3. Validate extracted audio files
+                        all_audio_valid = True
+                        for audio_file in audio_files:
+                            if not self._validate_audio_file(audio_file):
+                                all_audio_valid = False
+                                print(f"[WARN] Audio validation failed for segment: {audio_file}")
+                                break
+                        
+                        if all_audio_valid:
+                            # 4. Concatenate audio segments
+                            final_audio_file = self._concatenate_audio_segments(audio_files, temp_audio_dir)
+                            
+                            if final_audio_file and self._validate_audio_file(final_audio_file):
+                                print(
+                                    f"[INFO] ✓ Audio processing completed successfully with perfect sync"
+                                )
+                            else:
+                                print(
+                                    f"[WARN] Audio concatenation or validation failed, falling back to simple audio merge"
+                                )
+                                final_audio_file = None
+                        else:
+                            print(
+                                f"[WARN] Audio segment validation failed, falling back to simple audio merge"
+                            )
+                            final_audio_file = None
+                    else:
+                        print(
+                            f"[WARN] Audio extraction failed, falling back to simple audio merge"
+                        )
+                        final_audio_file = None
+            else:
+                if self.total_skipped_frames > 0:
+                    print(f"[INFO] Using STRATEGY_SIMPLE (conservative single-pass audio extraction)")
+                else:
+                    print(f"[INFO] No skipped frames, using simple audio merge")
+
+            # 5c. Merge video with audio
+            print("[INFO] Merging audio with video...")
+            
+            if final_audio_file and os.path.exists(final_audio_file):
+                # Use the pre-extracted and concatenated audio (perfect sync)
+                print(f"[INFO] Using segmented audio file for perfect sync")
+                
+                # Verify input files exist and get sizes
+                if not os.path.exists(self.temp_file):
+                    print(f"[ERROR] Temp video file missing: {self.temp_file}")
+                    final_audio_file = None  # Fall back to simple merge
+                else:
+                    temp_video_size = os.path.getsize(self.temp_file) / (1024 * 1024)  # MB
+                    audio_size = os.path.getsize(final_audio_file) / (1024 * 1024)  # MB
+                    print(f"[INFO] Merging files: Video={temp_video_size:.1f}MB, Audio={audio_size:.1f}MB")
+                    
+                    args = [
+                        "ffmpeg",
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-i",
+                        self.temp_file,  # Input 0: temp video (no audio)
+                        "-i",
+                        final_audio_file,  # Input 1: segmented audio (perfect sync)
+                        "-c:v",
+                        "copy",  # Copy video without re-encoding
+                        "-c:a",
+                        "aac",  # Audio codec
+                        "-map",
+                        "0:v:0",  # Map video from input 0
+                        "-map",
+                        "1:a:0",  # Map audio from input 1
+                        "-y",
+                        final_file_path,
+                    ]
+            else:
+                # Fallback to simple audio extraction (less perfect but simpler)
+                if final_audio_file is None:
+                    print(f"[INFO] Using simple audio merge (original timeline)")
+                args = [
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel",
+                    "warning",  # Changed from "error" to "warning" for better error detection
+                    "-i",
+                    self.temp_file,  # Input 0: temp video (no audio)
+                    "-ss",
+                    str(self.play_start_time),  # Start time for audio
+                    "-to",
+                    str(self.play_end_time),  # End time for audio
+                    "-i",
+                    self.media_path,  # Input 1: original media (for audio)
+                    "-c:v",
+                    "copy",
+                    "-map",
+                    "0:v:0",  # Map video from input 0
+                    "-map",
+                    "1:a:0?",  # Map audio from input 1 (if exists)
+                    "-shortest",
+                    "-af",
+                    "aresample=async=1000",
+                    final_file_path,
+                ]
+            
+            try:
+                print(f"[INFO] Starting FFmpeg merge process...")
+                print(f"[INFO] This may take a while for large files. Please wait...")
+                
+                # Run FFmpeg with error capture
+                result = subprocess.run(args, capture_output=True, text=True, timeout=600)
+                
+                if result.returncode != 0:
+                    print(f"[ERROR] FFmpeg merge failed with return code {result.returncode}")
+                    print(f"[ERROR] FFmpeg stderr: {result.stderr}")
+                    
+                    # Check for specific audio corruption errors
+                    stderr_lower = result.stderr.lower()
+                    if any(error in stderr_lower for error in [
+                        "error submitting packet to decoder",
+                        "invalid data found when processing input",
+                        "corrupt input packet",
+                        "decode_slice_header error"
+                    ]):
+                        print(f"[ERROR] Audio corruption detected during merge - source audio may be damaged")
+                        self.main_window.display_messagebox_signal.emit(
+                            "Recording Error",
+                            "Audio corruption detected in source file. The video was saved without audio.\n\n"
+                            "This usually happens with damaged or partially corrupted video files.",
+                            self.main_window,
+                        )
+                        # Try to copy video without audio as fallback
+                        try:
+                            import shutil
+                            shutil.copy2(self.temp_file, final_file_path)
+                            print(f"[INFO] Saved video without audio as fallback: {final_file_path}")
+                        except Exception as e:
+                            print(f"[ERROR] Failed to save video without audio: {e}")
+                    else:
+                        self.main_window.display_messagebox_signal.emit(
+                            "Recording Error",
+                            f"FFmpeg merge failed:\n{result.stderr[:500]}...",
+                            self.main_window,
+                        )
+                else:
+                    print(
+                        f"[INFO] ✓✓✓ Successfully created final video: {final_file_path} ✓✓✓"
+                    )
+                    if self.total_skipped_frames > 0:
+                        print(
+                            f"[✓] PERFECT AUDIO-VIDEO SYNC: Skipped frame offsets were NOT transferred to output"
+                        )
+                        
+            except subprocess.TimeoutExpired:
+                print(f"[ERROR] FFmpeg merge timed out after 10 minutes")
+                self.main_window.display_messagebox_signal.emit(
+                    "Recording Error",
+                    "FFmpeg merge process timed out. The video file may be too large or corrupted.",
+                    self.main_window,
                 )
             except subprocess.CalledProcessError as e:
-                print(
-                    f"[ERROR] FFmpeg command failed during default-style audio merge: {e}"
-                )
-                print(f"FFmpeg arguments: {' '.join(args)}")
+                print(f"[ERROR] FFmpeg command failed during audio merge: {e}")
+                print(f"[ERROR] FFmpeg arguments: {' '.join(args)}")
                 self.main_window.display_messagebox_signal.emit(
                     "Recording Error",
                     f"FFmpeg command failed during audio merge:\n{e}\nCheck console for command.",
@@ -1790,13 +2435,27 @@ class VideoProcessor(QObject):
                     "Recording Error", "FFmpeg not found.", self.main_window
                 )
             finally:
-                # 5c. Clean up temp file
-                print(f"[INFO] Removing temporary file: {self.temp_file}")
-                try:
-                    os.remove(self.temp_file)
-                except OSError as e:
-                    print(f"[WARN] Failed to remove temp file {self.temp_file}: {e}")
-                self.temp_file = ""
+                # 5d. Clean up temp files
+                print(f"[INFO] Cleaning up temporary files...")
+                
+                # Remove main temp video file
+                if self.temp_file:
+                    try:
+                        os.remove(self.temp_file)
+                        print(f"[INFO]   ✓ Removed temp video: {self.temp_file}")
+                    except OSError as e:
+                        print(f"[WARN] Failed to remove temp file {self.temp_file}: {e}")
+                    self.temp_file = ""
+                
+                # Remove temp audio directory and all audio segment files
+                if temp_audio_dir and os.path.exists(temp_audio_dir):
+                    try:
+                        import shutil
+                        shutil.rmtree(temp_audio_dir)
+                        print(f"[INFO]   ✓ Removed temp audio directory: {temp_audio_dir}")
+                    except OSError as e:
+                        print(f"[WARN] Failed to remove temp audio directory: {e}")
+
         else:
             if not self.temp_file:
                 print("[WARN] No temporary file name recorded. Cannot merge audio.")
