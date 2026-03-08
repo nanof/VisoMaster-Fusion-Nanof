@@ -1,6 +1,7 @@
 """
 PD-* tests for app.helpers.miscellaneous.ParametersDict
 """
+
 import pytest
 from app.helpers.miscellaneous import ParametersDict
 
@@ -48,7 +49,6 @@ def test_default_parameters_not_mutated(defaults):
 # PD-05: two independent ParametersDicts sharing the same default dict don't interfere
 def test_independent_instances_share_defaults_safely(defaults):
     pd1 = ParametersDict({}, defaults)
-    pd2 = ParametersDict({}, defaults)
     pd1["alpha"] = 100
     # pd2 should still see the original default, not pd1's override
     pd2_fresh = ParametersDict({}, defaults)
@@ -63,6 +63,7 @@ def test_get_with_explicit_fallback(defaults):
     # Key absent from data → fallback (UserDict.get does not call __getitem__)
     assert pd.get("nonexistent", "fallback") == "fallback"
     assert pd.get("alpha", "fallback") == "fallback"  # not in data → fallback
+
 
 def test_getitem_returns_default_not_get(defaults):
     pd = ParametersDict({}, defaults)

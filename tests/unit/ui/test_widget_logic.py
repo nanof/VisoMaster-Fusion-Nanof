@@ -11,18 +11,18 @@ match the interface the function reads from, and verifying that it calls
 .show() / .hide() on the child widget correctly.
 No Qt display is needed — we mock at the object level.
 """
+
 from __future__ import annotations
 
 import sys
 import os
-from types import ModuleType
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock
 
-import pytest
 
 # ---------------------------------------------------------------------------
 # Stub PySide6 and all Qt-dependent imports so common_actions can be imported
 # ---------------------------------------------------------------------------
+
 
 def _stub(name: str) -> MagicMock:
     m = MagicMock()
@@ -32,7 +32,10 @@ def _stub(name: str) -> MagicMock:
 
 
 _STUBS = [
-    "PySide6", "PySide6.QtWidgets", "PySide6.QtCore", "PySide6.QtGui",
+    "PySide6",
+    "PySide6.QtWidgets",
+    "PySide6.QtCore",
+    "PySide6.QtGui",
     # Not installed in test venv — must be set before common_actions is imported
     "pyqttoast",
     "qdarkstyle",
@@ -78,6 +81,7 @@ from app.helpers.miscellaneous import DFMModelManager  # noqa: E402
 #
 # We build a thin mock infrastructure that matches what the function reads.
 # =============================================================================
+
 
 def _make_toggle_setup(
     parent_name: str,
@@ -128,6 +132,7 @@ def _make_toggle_setup(
 # WC-04: parent toggle ON, requiredToggleValue=True  → child shown
 # ---------------------------------------------------------------------------
 
+
 def test_toggle_on_required_true_shows_child():
     mw, parent, child = _make_toggle_setup(
         parent_name="VR180ModeEnableToggle",
@@ -143,6 +148,7 @@ def test_toggle_on_required_true_shows_child():
 # ---------------------------------------------------------------------------
 # WC-05: parent toggle OFF, requiredToggleValue=True  → child hidden
 # ---------------------------------------------------------------------------
+
 
 def test_toggle_off_required_true_hides_child():
     mw, parent, child = _make_toggle_setup(
@@ -161,6 +167,7 @@ def test_toggle_off_required_true_hides_child():
 # (e.g. a widget that should appear only when the parent is disabled)
 # ---------------------------------------------------------------------------
 
+
 def test_toggle_off_required_false_shows_child():
     mw, parent, child = _make_toggle_setup(
         parent_name="SomeFeatureToggle",
@@ -176,6 +183,7 @@ def test_toggle_off_required_false_shows_child():
 # ---------------------------------------------------------------------------
 # Parent toggle ON, requiredToggleValue=False  → child hidden
 # ---------------------------------------------------------------------------
+
 
 def test_toggle_on_required_false_hides_child():
     mw, parent, child = _make_toggle_setup(
@@ -193,6 +201,7 @@ def test_toggle_on_required_false_hides_child():
 # Widget not in parameter_widgets → no show/hide call (graceful skip)
 # ---------------------------------------------------------------------------
 
+
 def test_child_not_in_parameter_widgets_is_skipped():
     parent_widget = MagicMock()
     parent_widget.isChecked.return_value = True
@@ -203,7 +212,7 @@ def test_child_not_in_parameter_widgets_is_skipped():
         }
     }
     mw = MagicMock()
-    mw.parameter_widgets = {}   # empty — child not present
+    mw.parameter_widgets = {}  # empty — child not present
     # Should not raise
     show_hide_related_widgets(mw, parent_widget, "SomeToggle")
 
@@ -211,6 +220,7 @@ def test_child_not_in_parameter_widgets_is_skipped():
 # ---------------------------------------------------------------------------
 # parameter_widgets is falsy (None / {}) → function returns early
 # ---------------------------------------------------------------------------
+
 
 def test_no_parameter_widgets_returns_early():
     parent = MagicMock()
@@ -224,6 +234,7 @@ def test_no_parameter_widgets_returns_early():
 # VR180 real-world scenario: VR180ModeEnableToggle ON → EyeModeSelection visible
 # ---------------------------------------------------------------------------
 
+
 def test_vr180_real_scenario_toggle_on():
     """
     Simulates the actual VR180EyeModeSelection / VR180ModeEnableToggle pair
@@ -231,7 +242,7 @@ def test_vr180_real_scenario_toggle_on():
     """
     eye_mode_widget = MagicMock()
     toggle_mock = MagicMock()
-    toggle_mock.isChecked.return_value = True   # VR180 is ON
+    toggle_mock.isChecked.return_value = True  # VR180 is ON
 
     parent_widget = MagicMock()
     parent_widget.isChecked.return_value = True
@@ -266,7 +277,7 @@ def test_vr180_real_scenario_toggle_on():
 def test_vr180_real_scenario_toggle_off():
     eye_mode_widget = MagicMock()
     toggle_mock = MagicMock()
-    toggle_mock.isChecked.return_value = False   # VR180 is OFF
+    toggle_mock.isChecked.return_value = False  # VR180 is OFF
 
     parent_widget = MagicMock()
     parent_widget.isChecked.return_value = False
@@ -293,8 +304,8 @@ def test_vr180_real_scenario_toggle_off():
 # DFMModelManager — filesystem scanning
 # =============================================================================
 
-class TestDFMModelManager:
 
+class TestDFMModelManager:
     def test_empty_directory_gives_empty_data(self, tmp_path):
         mgr = DFMModelManager(models_path=str(tmp_path))
         assert mgr.get_models_data() == {}

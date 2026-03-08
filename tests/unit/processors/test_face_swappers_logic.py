@@ -3,16 +3,17 @@ FS-* tests for face-swapper logic (embedding math, guards, model dispatch).
 
 All model inference is mocked.
 """
+
 from __future__ import annotations
 
 import numpy as np
-import pytest
 import torch
 
 
 # ---------------------------------------------------------------------------
 # FS-02: CSCS normalized embedding is a unit vector
 # ---------------------------------------------------------------------------
+
 
 def test_cscs_embedding_unit_norm():
     """After L2 normalisation the embedding magnitude should be 1.0."""
@@ -34,6 +35,7 @@ def test_cscs_embedding_unit_norm_batch():
 # ---------------------------------------------------------------------------
 # FS-01: calc_inswapper_latent returns None on bad input
 # ---------------------------------------------------------------------------
+
 
 def test_calc_inswapper_latent_returns_none_on_none_embedding():
     """Simulate the None-on-failure guard in calc_inswapper_latent."""
@@ -64,6 +66,7 @@ def test_calc_inswapper_latent_returns_none_on_empty():
 # FS-05: GHOSTFACE_MODELS frozenset has exactly 3 expected members
 # ---------------------------------------------------------------------------
 
+
 def test_ghostface_models_frozenset_contents():
     GHOSTFACE_MODELS = frozenset({"GhostFace-v1", "GhostFace-v2", "GhostFace-v3"})
     assert "GhostFace-v1" in GHOSTFACE_MODELS
@@ -80,6 +83,7 @@ def test_ghostface_models_is_frozenset():
 # ---------------------------------------------------------------------------
 # FS-04: GhostFace fallback to input face when model fails
 # ---------------------------------------------------------------------------
+
 
 def test_ghostface_fallback_on_none_output():
     """If the swapper returns None, output should fall back to the input face."""
@@ -100,6 +104,7 @@ def test_ghostface_fallback_on_none_output():
 # FS-06: keep_alive_tensors list grows when restorer/KV tensors are appended
 # ---------------------------------------------------------------------------
 
+
 def test_keep_alive_tensors_grows():
     keep_alive_tensors: list = []
     kv_tensor = torch.randn(1, 4, 64, 64)
@@ -111,11 +116,14 @@ def test_keep_alive_tensors_grows():
 def test_keep_alive_tensors_prevents_gc():
     """Tensors appended to keep_alive_tensors are still reachable."""
     import weakref
+
     keep_alive: list = []
     t = torch.randn(100, 100)
     ref = weakref.ref(t)
     keep_alive.append(t)
     del t
-    import gc; gc.collect()
+    import gc
+
+    gc.collect()
     # Still alive because keep_alive holds a reference
     assert ref() is not None

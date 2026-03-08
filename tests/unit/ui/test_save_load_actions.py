@@ -8,12 +8,12 @@ Targets:
 
 All PySide6, widget, and UI imports are stubbed so this runs without Qt.
 """
+
 from __future__ import annotations
 
 import sys
 import json
 import copy
-from types import ModuleType
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -22,6 +22,7 @@ import pytest
 # ---------------------------------------------------------------------------
 # Stub every heavy import before the module is loaded
 # ---------------------------------------------------------------------------
+
 
 def _stub(name: str) -> MagicMock:
     m = MagicMock()
@@ -32,7 +33,10 @@ def _stub(name: str) -> MagicMock:
 
 _STUBS = [
     # Qt — not installed in test env
-    "PySide6", "PySide6.QtWidgets", "PySide6.QtCore", "PySide6.QtGui",
+    "PySide6",
+    "PySide6.QtWidgets",
+    "PySide6.QtCore",
+    "PySide6.QtGui",
     # Widget components have heavy Qt deps — stub the leaf, not the parent package
     "app.ui.widgets.widget_components",
     "app.ui.widgets.ui_workers",
@@ -50,7 +54,6 @@ for _s in _STUBS:
         sys.modules[_s] = _stub(_s)
 
 # Provide the real ParametersDict through misc_helpers
-import app.helpers.miscellaneous as misc_helpers  # noqa: E402 (already imported by conftest chain)
 from app.helpers.miscellaneous import ParametersDict  # noqa: E402
 
 # Now import the module under test
@@ -63,6 +66,7 @@ from app.ui.widgets.actions.save_load_actions import (  # noqa: E402
 # ---------------------------------------------------------------------------
 # Shared fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def default_params_data() -> dict:
@@ -90,23 +94,32 @@ def sample_plain_dict() -> dict:
 # convert_parameters_to_supported_type — ParametersDict → dict
 # ---------------------------------------------------------------------------
 
+
 def test_convert_parameters_dict_to_dict(mock_main_window, sample_params_dict):
-    result = convert_parameters_to_supported_type(mock_main_window, sample_params_dict, dict)
+    result = convert_parameters_to_supported_type(
+        mock_main_window, sample_params_dict, dict
+    )
     assert isinstance(result, dict)
     assert not isinstance(result, ParametersDict)
     assert result["brightness"] == 1.5
 
 
-def test_convert_parameters_dict_to_dict_returns_underlying_data(mock_main_window, sample_params_dict):
+def test_convert_parameters_dict_to_dict_returns_underlying_data(
+    mock_main_window, sample_params_dict
+):
     """Returned dict should contain the values stored in .data, not the defaults."""
-    result = convert_parameters_to_supported_type(mock_main_window, sample_params_dict, dict)
+    result = convert_parameters_to_supported_type(
+        mock_main_window, sample_params_dict, dict
+    )
     # Only keys explicitly set in sample_params_dict — not the full defaults
     assert set(result.keys()) == {"brightness", "contrast"}
 
 
 def test_convert_plain_dict_to_dict_passthrough(mock_main_window, sample_plain_dict):
     """A plain dict passed with convert_type=dict is returned as-is."""
-    result = convert_parameters_to_supported_type(mock_main_window, sample_plain_dict, dict)
+    result = convert_parameters_to_supported_type(
+        mock_main_window, sample_plain_dict, dict
+    )
     assert isinstance(result, dict)
     assert result is sample_plain_dict  # exact same object
 
@@ -115,22 +128,33 @@ def test_convert_plain_dict_to_dict_passthrough(mock_main_window, sample_plain_d
 # convert_parameters_to_supported_type — dict → ParametersDict
 # ---------------------------------------------------------------------------
 
-def test_convert_dict_to_parameters_dict(mock_main_window, sample_plain_dict, default_params_data):
-    result = convert_parameters_to_supported_type(mock_main_window, sample_plain_dict, ParametersDict)
+
+def test_convert_dict_to_parameters_dict(
+    mock_main_window, sample_plain_dict, default_params_data
+):
+    result = convert_parameters_to_supported_type(
+        mock_main_window, sample_plain_dict, ParametersDict
+    )
     assert isinstance(result, ParametersDict)
     assert result["brightness"] == 1.5
 
 
-def test_convert_dict_to_parameters_dict_uses_defaults(mock_main_window, default_params_data):
+def test_convert_dict_to_parameters_dict_uses_defaults(
+    mock_main_window, default_params_data
+):
     """Missing keys should fall back to default_parameters."""
     result = convert_parameters_to_supported_type(mock_main_window, {}, ParametersDict)
     assert isinstance(result, ParametersDict)
     assert result["brightness"] == default_params_data["brightness"]
 
 
-def test_convert_parameters_dict_to_parameters_dict_passthrough(mock_main_window, sample_params_dict):
+def test_convert_parameters_dict_to_parameters_dict_passthrough(
+    mock_main_window, sample_params_dict
+):
     """A ParametersDict passed with convert_type=ParametersDict is returned unchanged."""
-    result = convert_parameters_to_supported_type(mock_main_window, sample_params_dict, ParametersDict)
+    result = convert_parameters_to_supported_type(
+        mock_main_window, sample_params_dict, ParametersDict
+    )
     assert isinstance(result, ParametersDict)
     assert result is sample_params_dict
 
@@ -139,9 +163,16 @@ def test_convert_parameters_dict_to_parameters_dict_passthrough(mock_main_window
 # Round-trip: ParametersDict → dict → ParametersDict
 # ---------------------------------------------------------------------------
 
-def test_round_trip_parameters_dict(mock_main_window, sample_params_dict, default_params_data):
-    as_dict = convert_parameters_to_supported_type(mock_main_window, sample_params_dict, dict)
-    restored = convert_parameters_to_supported_type(mock_main_window, as_dict, ParametersDict)
+
+def test_round_trip_parameters_dict(
+    mock_main_window, sample_params_dict, default_params_data
+):
+    as_dict = convert_parameters_to_supported_type(
+        mock_main_window, sample_params_dict, dict
+    )
+    restored = convert_parameters_to_supported_type(
+        mock_main_window, as_dict, ParametersDict
+    )
     assert isinstance(restored, ParametersDict)
     assert restored["brightness"] == sample_params_dict["brightness"]
     assert restored["contrast"] == sample_params_dict["contrast"]
@@ -149,7 +180,9 @@ def test_round_trip_parameters_dict(mock_main_window, sample_params_dict, defaul
 
 def test_round_trip_is_json_serializable(mock_main_window, sample_params_dict):
     """The dict form must be JSON-serializable (no custom objects)."""
-    as_dict = convert_parameters_to_supported_type(mock_main_window, sample_params_dict, dict)
+    as_dict = convert_parameters_to_supported_type(
+        mock_main_window, sample_params_dict, dict
+    )
     json_str = json.dumps(as_dict)
     recovered = json.loads(json_str)
     assert recovered["brightness"] == sample_params_dict["brightness"]
@@ -158,6 +191,7 @@ def test_round_trip_is_json_serializable(mock_main_window, sample_params_dict):
 # ---------------------------------------------------------------------------
 # convert_markers_to_supported_type — nested conversion
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def sample_markers(sample_params_dict, default_params_data):
@@ -183,7 +217,9 @@ def test_convert_markers_to_dict(mock_main_window, sample_markers):
     result = convert_markers_to_supported_type(mock_main_window, sample_markers, dict)
     for frame_id, marker_data in result.items():
         for face_id, params in marker_data["parameters"].items():
-            assert isinstance(params, dict), f"Frame {frame_id}, face {face_id} should be dict"
+            assert isinstance(params, dict), (
+                f"Frame {frame_id}, face {face_id} should be dict"
+            )
             assert not isinstance(params, ParametersDict)
 
 
@@ -193,7 +229,9 @@ def test_convert_markers_to_parameters_dict(mock_main_window, sample_markers):
         mock_main_window, copy.deepcopy(sample_markers), dict
     )
     # Replace ParametersDict values with plain dicts (simulate loaded JSON)
-    result = convert_markers_to_supported_type(mock_main_window, as_dict_form, ParametersDict)
+    result = convert_markers_to_supported_type(
+        mock_main_window, as_dict_form, ParametersDict
+    )
     for frame_id, marker_data in result.items():
         for face_id, params in marker_data["parameters"].items():
             assert isinstance(params, ParametersDict), (
@@ -213,13 +251,16 @@ def test_convert_markers_mutates_in_place(mock_main_window, sample_markers):
 
 def test_convert_markers_preserves_control_dict(mock_main_window, sample_markers):
     """The 'control' sub-dict inside each marker must be preserved intact."""
-    result = convert_markers_to_supported_type(mock_main_window, copy.deepcopy(sample_markers), dict)
+    result = convert_markers_to_supported_type(
+        mock_main_window, copy.deepcopy(sample_markers), dict
+    )
     assert result[100]["control"]["VR180ModeEnableToggle"] is False
 
 
 # ---------------------------------------------------------------------------
 # Embedding numpy ↔ list round-trip (pattern used in save/load)
 # ---------------------------------------------------------------------------
+
 
 def test_embedding_numpy_to_list_and_back():
     """numpy arrays must survive JSON serialization via .tolist() / np.array()."""

@@ -5,12 +5,12 @@ All tests run on CPU; no GPU required.
 External Equirec2Perspec_vr / Perspec2Equirec_vr are imported as-is — the test
 uses a small (90×180) equirectangular so they execute quickly.
 """
+
 from __future__ import annotations
 
 import numpy as np
 import pytest
 import torch
-from unittest.mock import MagicMock, patch
 
 from app.helpers.vr_utils import (
     EquirectangularConverter,
@@ -26,6 +26,7 @@ CPU = torch.device("cpu")
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def make_equirect(h: int = 90, w: int = 180) -> np.ndarray:
     """Minimal gradient equirectangular image (HWC, uint8, RGB)."""
@@ -44,6 +45,7 @@ def make_crop_tensor(h: int = 64, w: int = 64) -> torch.Tensor:
 # Module-level kernel tests
 # ---------------------------------------------------------------------------
 
+
 def test_sobel_kernels_shape():
     assert _SOBEL_X_KERNEL.shape == (1, 1, 3, 3)
     assert _SOBEL_Y_KERNEL.shape == (1, 1, 3, 3)
@@ -58,6 +60,7 @@ def test_get_sobel_kernels_moves_to_device():
 # ---------------------------------------------------------------------------
 # VR-EC-* EquirectangularConverter
 # ---------------------------------------------------------------------------
+
 
 class TestEquirectangularConverter:
     @pytest.fixture(autouse=True)
@@ -82,8 +85,8 @@ class TestEquirectangularConverter:
         # Center of a 90×180 image
         bbox = np.array([85.0, 40.0, 95.0, 50.0])  # center ~(90, 45) on 180×90
         theta, phi = self.ec.calculate_theta_phi_from_bbox(bbox)
-        assert abs(theta) < 10.0   # roughly centred horizontally
-        assert abs(phi) < 10.0     # roughly centred vertically
+        assert abs(theta) < 10.0  # roughly centred horizontally
+        assert abs(phi) < 10.0  # roughly centred vertically
 
     # VR-EC-05: left-half bbox → negative theta
     def test_left_bbox_gives_negative_theta(self):
@@ -115,6 +118,7 @@ class TestEquirectangularConverter:
 # VR-PC-* / VR-SE-* PerspectiveConverter
 # ---------------------------------------------------------------------------
 
+
 class TestPerspectiveConverter:
     @pytest.fixture(autouse=True)
     def converter(self):
@@ -130,7 +134,9 @@ class TestPerspectiveConverter:
         self.pc.stitch_single_perspective(
             target_equirect_torch_cxhxw_rgb_uint8=target,
             processed_crop_torch_cxhxw_rgb_uint8=crop,
-            theta=0.0, phi=0.0, fov=60.0,
+            theta=0.0,
+            phi=0.0,
+            fov=60.0,
             is_left_eye=True,
         )
         assert target.data_ptr() == original_data_ptr
@@ -144,7 +150,9 @@ class TestPerspectiveConverter:
         self.pc.stitch_single_perspective(
             target_equirect_torch_cxhxw_rgb_uint8=target,
             processed_crop_torch_cxhxw_rgb_uint8=crop,
-            theta=-90.0, phi=0.0, fov=60.0,
+            theta=-90.0,
+            phi=0.0,
+            fov=60.0,
             is_left_eye=True,
         )
         # Right half must not have changed
@@ -159,7 +167,9 @@ class TestPerspectiveConverter:
         self.pc.stitch_single_perspective(
             target_equirect_torch_cxhxw_rgb_uint8=target,
             processed_crop_torch_cxhxw_rgb_uint8=crop,
-            theta=90.0, phi=0.0, fov=60.0,
+            theta=90.0,
+            phi=0.0,
+            fov=60.0,
             is_left_eye=False,
         )
         assert torch.equal(target[:, :, :half], left_half_before)
@@ -171,7 +181,9 @@ class TestPerspectiveConverter:
         self.pc.stitch_single_perspective(
             target_equirect_torch_cxhxw_rgb_uint8=target,
             processed_crop_torch_cxhxw_rgb_uint8=None,
-            theta=0.0, phi=0.0, fov=60.0,
+            theta=0.0,
+            phi=0.0,
+            fov=60.0,
             is_left_eye=True,
         )
         assert torch.equal(target, target_before)
@@ -184,7 +196,9 @@ class TestPerspectiveConverter:
         self.pc.stitch_single_perspective(
             target_equirect_torch_cxhxw_rgb_uint8=target,
             processed_crop_torch_cxhxw_rgb_uint8=empty_crop,
-            theta=0.0, phi=0.0, fov=60.0,
+            theta=0.0,
+            phi=0.0,
+            fov=60.0,
             is_left_eye=True,
         )
         assert torch.equal(target, target_before)
@@ -196,7 +210,9 @@ class TestPerspectiveConverter:
         self.pc.stitch_single_perspective(
             target_equirect_torch_cxhxw_rgb_uint8=target,
             processed_crop_torch_cxhxw_rgb_uint8=crop,
-            theta=0.0, phi=0.0, fov=60.0,
+            theta=0.0,
+            phi=0.0,
+            fov=60.0,
             is_left_eye=True,
         )
         assert target.dtype == torch.uint8
@@ -208,7 +224,9 @@ class TestPerspectiveConverter:
         self.pc.stitch_single_perspective(
             target_equirect_torch_cxhxw_rgb_uint8=target,
             processed_crop_torch_cxhxw_rgb_uint8=crop,
-            theta=0.0, phi=0.0, fov=60.0,
+            theta=0.0,
+            phi=0.0,
+            fov=60.0,
             is_left_eye=True,
         )
         assert target.min().item() >= 0
@@ -218,7 +236,9 @@ class TestPerspectiveConverter:
     def test_apply_feathering_range(self):
         mask = torch.zeros(1, self.h, self.w, dtype=torch.bool)
         mask[:, 20:70, 40:140] = True
-        feathered = self.pc._apply_feathering(mask, feather_radius=5, erosion_kernel_size=5)
+        feathered = self.pc._apply_feathering(
+            mask, feather_radius=5, erosion_kernel_size=5
+        )
         assert feathered.dtype == torch.float32
         assert feathered.min().item() >= 0.0
         assert feathered.max().item() <= 1.0
@@ -236,6 +256,7 @@ class TestPerspectiveConverter:
 # ---------------------------------------------------------------------------
 # VR-SE-* Single-Eye Mode — eye_region_mask construction
 # ---------------------------------------------------------------------------
+
 
 class TestEyeRegionMask:
     """
@@ -265,7 +286,9 @@ class TestEyeRegionMask:
         self.pc.stitch_single_perspective(
             target_equirect_torch_cxhxw_rgb_uint8=target_full,
             processed_crop_torch_cxhxw_rgb_uint8=crop,
-            theta=0.0, phi=0.0, fov=90.0,
+            theta=0.0,
+            phi=0.0,
+            fov=90.0,
             is_left_eye=None,
         )
 
@@ -274,7 +297,9 @@ class TestEyeRegionMask:
         self.pc.stitch_single_perspective(
             target_equirect_torch_cxhxw_rgb_uint8=target_left,
             processed_crop_torch_cxhxw_rgb_uint8=crop,
-            theta=0.0, phi=0.0, fov=90.0,
+            theta=0.0,
+            phi=0.0,
+            fov=90.0,
             is_left_eye=True,
         )
 
@@ -296,7 +321,9 @@ class TestEyeRegionMask:
         self.pc.stitch_single_perspective(
             target_equirect_torch_cxhxw_rgb_uint8=target,
             processed_crop_torch_cxhxw_rgb_uint8=crop,
-            theta=-90.0, phi=0.0, fov=60.0,
+            theta=-90.0,
+            phi=0.0,
+            fov=60.0,
             is_left_eye=True,
         )
         # Right half must remain all-zero
@@ -310,7 +337,9 @@ class TestEyeRegionMask:
         self.pc.stitch_single_perspective(
             target_equirect_torch_cxhxw_rgb_uint8=target,
             processed_crop_torch_cxhxw_rgb_uint8=crop,
-            theta=90.0, phi=0.0, fov=60.0,
+            theta=90.0,
+            phi=0.0,
+            fov=60.0,
             is_left_eye=False,
         )
         assert target[:, :, :half].sum().item() == 0
@@ -325,7 +354,9 @@ class TestEyeRegionMask:
         self.pc.stitch_single_perspective(
             target_equirect_torch_cxhxw_rgb_uint8=target,
             processed_crop_torch_cxhxw_rgb_uint8=crop,
-            theta=0.0, phi=0.0, fov=60.0,
+            theta=0.0,
+            phi=0.0,
+            fov=60.0,
             is_left_eye=None,
         )
         assert target.shape == (3, self.h, self.w)

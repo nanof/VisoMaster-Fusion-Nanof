@@ -4,6 +4,7 @@ VR180-* integration tests for the VR180 feature.
 Tests the full EquirectangularConverter → PerspectiveConverter round-trip
 with real (but tiny) equirectangular images and no ML models.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -26,6 +27,7 @@ def make_equirect(h: int = 90, w: int = 180) -> np.ndarray:
 # VR180-01: Both-Eyes mode — left face bbox → only left half modified
 # ---------------------------------------------------------------------------
 
+
 def test_both_eyes_left_face_modifies_only_left_half():
     h, w = 90, 180
     img = make_equirect(h, w)
@@ -38,7 +40,9 @@ def test_both_eyes_left_face_modifies_only_left_half():
     pc.stitch_single_perspective(
         target_equirect_torch_cxhxw_rgb_uint8=target,
         processed_crop_torch_cxhxw_rgb_uint8=crop,
-        theta=-90.0, phi=0.0, fov=60.0,
+        theta=-90.0,
+        phi=0.0,
+        fov=60.0,
         is_left_eye=True,
     )
 
@@ -49,6 +53,7 @@ def test_both_eyes_left_face_modifies_only_left_half():
 # ---------------------------------------------------------------------------
 # VR180-02: Both-Eyes mode — right face bbox → only right half modified
 # ---------------------------------------------------------------------------
+
 
 def test_both_eyes_right_face_modifies_only_right_half():
     h, w = 90, 180
@@ -62,7 +67,9 @@ def test_both_eyes_right_face_modifies_only_right_half():
     pc.stitch_single_perspective(
         target_equirect_torch_cxhxw_rgb_uint8=target,
         processed_crop_torch_cxhxw_rgb_uint8=crop,
-        theta=90.0, phi=0.0, fov=60.0,
+        theta=90.0,
+        phi=0.0,
+        fov=60.0,
         is_left_eye=False,
     )
 
@@ -73,6 +80,7 @@ def test_both_eyes_right_face_modifies_only_right_half():
 # ---------------------------------------------------------------------------
 # VR180-03: Single-Eye mode — full frame can be modified
 # ---------------------------------------------------------------------------
+
 
 def test_single_eye_allows_full_frame_modification():
     h, w = 90, 180
@@ -86,7 +94,9 @@ def test_single_eye_allows_full_frame_modification():
     pc.stitch_single_perspective(
         target_equirect_torch_cxhxw_rgb_uint8=target_single,
         processed_crop_torch_cxhxw_rgb_uint8=crop,
-        theta=0.0, phi=0.0, fov=90.0,
+        theta=0.0,
+        phi=0.0,
+        fov=90.0,
         is_left_eye=None,
     )
 
@@ -95,7 +105,9 @@ def test_single_eye_allows_full_frame_modification():
     pc.stitch_single_perspective(
         target_equirect_torch_cxhxw_rgb_uint8=target_left,
         processed_crop_torch_cxhxw_rgb_uint8=crop,
-        theta=0.0, phi=0.0, fov=90.0,
+        theta=0.0,
+        phi=0.0,
+        fov=90.0,
         is_left_eye=True,
     )
 
@@ -118,6 +130,7 @@ def test_single_eye_allows_full_frame_modification():
 # VR180-04: calculate_theta_phi round-trip stability
 # ---------------------------------------------------------------------------
 
+
 def test_theta_phi_round_trip_consistency():
     """
     The same bbox at the same location should always produce the same angles —
@@ -139,6 +152,7 @@ def test_theta_phi_round_trip_consistency():
 # VR180-05: switching mode mid-session doesn't corrupt state
 # ---------------------------------------------------------------------------
 
+
 def test_mode_switch_does_not_corrupt_target():
     """
     Process one stitch in Both-Eyes mode, then one in Single-Eye mode.
@@ -147,8 +161,6 @@ def test_mode_switch_does_not_corrupt_target():
     h, w = 90, 180
     img = make_equirect(h, w)
     pc = PerspectiveConverter(img, CPU)
-    half = w // 2
-
     target = torch.zeros(3, h, w, dtype=torch.uint8)
     crop = torch.full((3, 32, 32), 128, dtype=torch.uint8)
 
@@ -156,17 +168,19 @@ def test_mode_switch_does_not_corrupt_target():
     pc.stitch_single_perspective(
         target_equirect_torch_cxhxw_rgb_uint8=target,
         processed_crop_torch_cxhxw_rgb_uint8=crop,
-        theta=-90.0, phi=0.0, fov=60.0,
+        theta=-90.0,
+        phi=0.0,
+        fov=60.0,
         is_left_eye=True,
     )
-    state_after_first = target.clone()
-
     # Second stitch: Single-Eye mode at a different position
     crop2 = torch.full((3, 32, 32), 64, dtype=torch.uint8)
     pc.stitch_single_perspective(
         target_equirect_torch_cxhxw_rgb_uint8=target,
         processed_crop_torch_cxhxw_rgb_uint8=crop2,
-        theta=90.0, phi=0.0, fov=60.0,
+        theta=90.0,
+        phi=0.0,
+        fov=60.0,
         is_left_eye=None,
     )
 
@@ -180,6 +194,7 @@ def test_mode_switch_does_not_corrupt_target():
 # ---------------------------------------------------------------------------
 # VR180 — equirect dimensions are stored correctly
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize("h,w", [(90, 180), (180, 360), (360, 720)])
 def test_equirect_converter_dimensions(h, w):

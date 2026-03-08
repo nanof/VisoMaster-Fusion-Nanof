@@ -2,13 +2,13 @@
 Shared pytest fixtures for VisoMaster-Fusion test suite.
 All GPU tests are skipped by default; use -m gpu to run them explicitly.
 """
+
 from __future__ import annotations
 
-import os
 import sys
 import threading
 from pathlib import Path
-from unittest.mock import MagicMock, PropertyMock
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -28,13 +28,17 @@ FIXTURE_IMAGES = PROJECT_ROOT / "tests" / "fixtures" / "images"
 # Synthetic image fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(scope="session")
 def face_rgb_np() -> np.ndarray:
     """512×512 synthetic face image as HWC uint8 RGB numpy array."""
     import cv2
+
     path = FIXTURE_IMAGES / "face_512.png"
     img_bgr = cv2.imread(str(path))
-    assert img_bgr is not None, f"Fixture image not found: {path}. Run tests/fixtures/generate_fixtures.py first."
+    assert img_bgr is not None, (
+        f"Fixture image not found: {path}. Run tests/fixtures/generate_fixtures.py first."
+    )
     return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
 
@@ -42,9 +46,12 @@ def face_rgb_np() -> np.ndarray:
 def equirect_np() -> np.ndarray:
     """360×720 equirectangular image as HWC uint8 RGB numpy array."""
     import cv2
+
     path = FIXTURE_IMAGES / "equirect_360_720.png"
     img_bgr = cv2.imread(str(path))
-    assert img_bgr is not None, f"Fixture image not found: {path}. Run tests/fixtures/generate_fixtures.py first."
+    assert img_bgr is not None, (
+        f"Fixture image not found: {path}. Run tests/fixtures/generate_fixtures.py first."
+    )
     return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
 
@@ -52,9 +59,12 @@ def equirect_np() -> np.ndarray:
 def equirect_half_np() -> np.ndarray:
     """180×360 single-eye equirectangular image as HWC uint8 RGB numpy array."""
     import cv2
+
     path = FIXTURE_IMAGES / "equirect_180_360.png"
     img_bgr = cv2.imread(str(path))
-    assert img_bgr is not None, f"Fixture image not found: {path}. Run tests/fixtures/generate_fixtures.py first."
+    assert img_bgr is not None, (
+        f"Fixture image not found: {path}. Run tests/fixtures/generate_fixtures.py first."
+    )
     return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
 
@@ -77,6 +87,7 @@ def small_equirect_np() -> np.ndarray:
 # CPU device fixture
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(scope="session")
 def cpu_device() -> torch.device:
     return torch.device("cpu")
@@ -85,6 +96,7 @@ def cpu_device() -> torch.device:
 # ---------------------------------------------------------------------------
 # Mock ModelsProcessor
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def mock_models_processor(cpu_device):
@@ -101,6 +113,7 @@ def mock_models_processor(cpu_device):
 # Mock MainWindow
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def mock_main_window(mock_models_processor):
     mw = MagicMock()
@@ -114,6 +127,7 @@ def mock_main_window(mock_models_processor):
 # ---------------------------------------------------------------------------
 # Minimal control dict (safe defaults — all toggle-gated features off)
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def base_control() -> dict:

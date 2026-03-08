@@ -4,19 +4,18 @@ SLD-* tests for app.ui.widgets.settings_layout_data
 Pure data-validation tests — no Qt, no GPU, no mocks required.
 These catch schema regressions when settings are added or changed.
 """
+
 from __future__ import annotations
 
 import sys
-from pathlib import Path
-from types import ModuleType
 from unittest.mock import MagicMock
 
-import pytest
 
 # ---------------------------------------------------------------------------
 # Stub out PySide6 and action modules before importing settings_layout_data
 # so this test file works without Qt installed.
 # ---------------------------------------------------------------------------
+
 
 def _stub_module(name: str) -> MagicMock:
     # Do NOT pass spec= — we need free attribute access so that e.g.
@@ -28,7 +27,10 @@ def _stub_module(name: str) -> MagicMock:
 
 
 _QT_MODULES = [
-    "PySide6", "PySide6.QtWidgets", "PySide6.QtCore", "PySide6.QtGui",
+    "PySide6",
+    "PySide6.QtWidgets",
+    "PySide6.QtCore",
+    "PySide6.QtGui",
 ]
 _ACTION_MODULES = [
     # Do NOT stub the parent package — it's a namespace package and stubbing it
@@ -43,7 +45,7 @@ for _mod_name in _QT_MODULES + _ACTION_MODULES:
 
 # Also stub cv2 if not available (may not be in minimal env)
 try:
-    import cv2
+    import cv2  # noqa: F401
 except ImportError:
     sys.modules["cv2"] = MagicMock()
 
@@ -54,6 +56,7 @@ from app.ui.widgets.settings_layout_data import SETTINGS_LAYOUT_DATA  # noqa: E4
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _all_widget_entries():
     """Yield (category, widget_name, widget_dict) for every entry."""
@@ -66,6 +69,7 @@ def _all_widget_entries():
 # SLD-01: all top-level keys are strings
 # ---------------------------------------------------------------------------
 
+
 def test_all_category_keys_are_strings():
     for key in SETTINGS_LAYOUT_DATA.keys():
         assert isinstance(key, str), f"Category key {key!r} is not a string"
@@ -74,6 +78,7 @@ def test_all_category_keys_are_strings():
 # ---------------------------------------------------------------------------
 # SLD-02: every entry has 'label' and 'level'
 # ---------------------------------------------------------------------------
+
 
 def test_every_entry_has_label_and_level():
     for cat, name, entry in _all_widget_entries():
@@ -85,6 +90,7 @@ def test_every_entry_has_label_and_level():
 # SLD-03: every 'options' list is non-empty
 # ---------------------------------------------------------------------------
 
+
 def test_options_lists_are_non_empty():
     for cat, name, entry in _all_widget_entries():
         if "options" in entry:
@@ -94,6 +100,7 @@ def test_options_lists_are_non_empty():
 # ---------------------------------------------------------------------------
 # SLD-04: default value is in options list when both present
 # ---------------------------------------------------------------------------
+
 
 def test_default_in_options_when_present():
     for cat, name, entry in _all_widget_entries():
@@ -107,6 +114,7 @@ def test_default_in_options_when_present():
 # SLD-05: VR180EyeModeSelection has correct options
 # ---------------------------------------------------------------------------
 
+
 def test_vr180_eye_mode_options():
     entry = SETTINGS_LAYOUT_DATA["Swap settings"]["VR180EyeModeSelection"]
     assert entry["options"] == ["Both Eyes", "Single Eye"]
@@ -115,6 +123,7 @@ def test_vr180_eye_mode_options():
 # ---------------------------------------------------------------------------
 # SLD-06: VR180EyeModeSelection has correct parentToggle
 # ---------------------------------------------------------------------------
+
 
 def test_vr180_eye_mode_parent_toggle():
     entry = SETTINGS_LAYOUT_DATA["Swap settings"]["VR180EyeModeSelection"]
@@ -125,6 +134,7 @@ def test_vr180_eye_mode_parent_toggle():
 # SLD-07: VR180EyeModeSelection has requiredToggleValue=True
 # ---------------------------------------------------------------------------
 
+
 def test_vr180_eye_mode_required_toggle_value():
     entry = SETTINGS_LAYOUT_DATA["Swap settings"]["VR180EyeModeSelection"]
     assert entry.get("requiredToggleValue") is True
@@ -133,6 +143,7 @@ def test_vr180_eye_mode_required_toggle_value():
 # ---------------------------------------------------------------------------
 # SLD-08: exec_function values are callable when present
 # ---------------------------------------------------------------------------
+
 
 def test_exec_functions_are_callable():
     for cat, name, entry in _all_widget_entries():
@@ -144,6 +155,7 @@ def test_exec_functions_are_callable():
 # ---------------------------------------------------------------------------
 # SLD-09: no duplicate widget keys across all categories
 # ---------------------------------------------------------------------------
+
 
 def test_no_duplicate_widget_keys():
     seen: dict[str, str] = {}
@@ -158,6 +170,7 @@ def test_no_duplicate_widget_keys():
 # SLD-10: VR180ModeEnableToggle exists and precedes VR180EyeModeSelection
 # ---------------------------------------------------------------------------
 
+
 def test_vr180_mode_toggle_exists():
     swap = SETTINGS_LAYOUT_DATA["Swap settings"]
     assert "VR180ModeEnableToggle" in swap
@@ -168,12 +181,15 @@ def test_vr180_mode_toggle_before_eye_selection():
     keys = list(SETTINGS_LAYOUT_DATA["Swap settings"].keys())
     toggle_idx = keys.index("VR180ModeEnableToggle")
     eye_idx = keys.index("VR180EyeModeSelection")
-    assert toggle_idx < eye_idx, "VR180ModeEnableToggle should appear before VR180EyeModeSelection"
+    assert toggle_idx < eye_idx, (
+        "VR180ModeEnableToggle should appear before VR180EyeModeSelection"
+    )
 
 
 # ---------------------------------------------------------------------------
 # SLD-11: parentToggle references point to existing keys
 # ---------------------------------------------------------------------------
+
 
 def test_parent_toggle_references_exist():
     all_keys = set(name for _, name, _ in _all_widget_entries())

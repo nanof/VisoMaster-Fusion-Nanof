@@ -2,16 +2,16 @@
 FM-* tests for face mask math and guard logic.
 No ML models loaded; tests cover pure tensor/numpy operations.
 """
+
 from __future__ import annotations
 
-import numpy as np
-import pytest
 import torch
 
 
 # ---------------------------------------------------------------------------
 # FM-02: torch.zeros_like initialises mask to zero
 # ---------------------------------------------------------------------------
+
 
 def test_mask_initialises_to_zero():
     ref = torch.ones(1, 128, 128, dtype=torch.bool)
@@ -23,6 +23,7 @@ def test_mask_initialises_to_zero():
 # ---------------------------------------------------------------------------
 # FM-03: division-by-zero guard — denominator clamped to avoid NaN
 # ---------------------------------------------------------------------------
+
 
 def test_blend_no_nan_when_denominator_zero():
     """If denominator is 0 it must be clamped so no NaN appears in output."""
@@ -37,20 +38,23 @@ def test_blend_no_nan_when_denominator_zero():
 # FM-06: mask values stay in [0, 1] after feathering (Gaussian blur)
 # ---------------------------------------------------------------------------
 
+
 def test_feathered_mask_range():
     """After Gaussian blur a [0,1] mask should still be in [0,1]."""
     from torchvision import transforms
+
     mask = torch.zeros(1, 64, 64, dtype=torch.float32)
     mask[:, 16:48, 16:48] = 1.0
     gauss = transforms.GaussianBlur(kernel_size=11, sigma=3.0)
     feathered = gauss(mask)
-    assert feathered.min().item() >= -1e-6   # numerical precision
+    assert feathered.min().item() >= -1e-6  # numerical precision
     assert feathered.max().item() <= 1.0 + 1e-6
 
 
 # ---------------------------------------------------------------------------
 # FM-05: blending formula produces sensible output
 # ---------------------------------------------------------------------------
+
 
 def test_blend_formula_correctness():
     """target + (component - target) * mask should equal lerp(target, component, mask)."""
@@ -71,6 +75,7 @@ def test_blend_formula_correctness():
 # FM-01: initialisation — mask groups are dict-like (structural check)
 # ---------------------------------------------------------------------------
 
+
 def test_mask_groups_are_dict_compatible():
     """Simulate the group-dict init pattern used in FaceMasks.__init__."""
     mouth_groups: dict = {}
@@ -86,6 +91,7 @@ def test_mask_groups_are_dict_compatible():
 # ---------------------------------------------------------------------------
 # FM-04: transform order — affine applied before mask blend
 # ---------------------------------------------------------------------------
+
 
 def test_affine_before_blend_ordering():
     """

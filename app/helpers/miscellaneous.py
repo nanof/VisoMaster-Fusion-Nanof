@@ -939,13 +939,13 @@ def get_grid_for_pasting(
 
 
 def draw_bounding_boxes_on_detected_faces(
-    img: torch.Tensor, det_faces_data: list
+    img: torch.Tensor, det_faces_data: list, color_rgb: list | None = None
 ) -> torch.Tensor:
     """
     Draws bounding boxes on the image tensor based on detection data.
     """
+    _color = color_rgb if color_rgb is not None else [0, 255, 0]
     for i, fface in enumerate(det_faces_data):
-        color_rgb = [0, 255, 0]
         bbox = fface["bbox"]
         x_min, y_min, x_max, y_max = map(int, bbox)
 
@@ -959,7 +959,7 @@ def draw_bounding_boxes_on_detected_faces(
         thickness = max(4, max_dimension // 400)
 
         color_tensor_c11 = torch.tensor(
-            color_rgb, dtype=img.dtype, device=img.device
+            _color, dtype=img.dtype, device=img.device
         ).view(-1, 1, 1)
 
         img[:, y_min : y_min + thickness, x_min : x_max + 1] = color_tensor_c11.expand(

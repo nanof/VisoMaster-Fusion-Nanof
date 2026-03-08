@@ -4,6 +4,7 @@ Run once from the project root:
     python tests/fixtures/generate_fixtures.py
 Outputs are committed to the repo so CI never re-generates them.
 """
+
 import os
 import cv2
 import numpy as np
@@ -24,7 +25,9 @@ def make_face_512() -> None:
     cv2.circle(img, (322, 210), 14, (50, 40, 30), -1)
     # Mouth
     cv2.ellipse(img, (256, 330), (60, 25), 0, 0, 180, (160, 80, 80), 3)
-    cv2.imwrite(os.path.join(OUTPUT_DIR, "face_512.png"), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+    cv2.imwrite(
+        os.path.join(OUTPUT_DIR, "face_512.png"), cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    )
     print("Written: face_512.png")
 
 

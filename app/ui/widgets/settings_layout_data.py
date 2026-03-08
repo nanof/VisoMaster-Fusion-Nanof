@@ -400,6 +400,14 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "default": False,
             "help": "Draw bounding boxes to all detected faces in the frame",
         },
+        "ShowByteTrackBBoxToggle": {
+            "level": 1,
+            "label": "Show ByteTrack Bounding Boxes",
+            "default": False,
+            "help": "Draw ByteTrack tracked bounding boxes in orange. Use instead of 'Show Bounding Boxes' when face tracking is enabled.",
+            "parentToggle": "FaceTrackingEnableToggle",
+            "requiredToggleValue": True,
+        },
     },
     "Frame Enhancer": {
         "FrameEnhancerEnableToggle": {

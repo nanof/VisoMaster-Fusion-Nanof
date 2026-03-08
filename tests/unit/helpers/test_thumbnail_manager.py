@@ -1,6 +1,7 @@
 """
 TM-* tests for app.helpers.miscellaneous.ThumbnailManager
 """
+
 import os
 import numpy as np
 import pytest

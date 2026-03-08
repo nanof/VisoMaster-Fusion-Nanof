@@ -478,18 +478,23 @@ class FrameWorker(threading.Thread):
         edit_button_is_checked_global: bool,
         eye_side_for_debug: str = "",
         kv_map_for_swap: Dict | None = None,
-    ) -> torch.Tensor:
-        """Processes a single perspective crop extracted from a VR frame."""
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Processes a single perspective crop extracted from a VR frame.
+
+        Returns:
+            (processed_crop, swap_mask_1x512x512_float_or_None)
+            The mask is only populated when self.is_view_face_mask is True.
+        """
         # VR-12: assert crop is 512x512 so downstream swap_core assumptions hold
         assert perspective_crop_torch_rgb_uint8.shape[-2:] == (512, 512), (
             f"VR perspective crop must be 512x512, got {perspective_crop_torch_rgb_uint8.shape}"
         )
         processed_crop_torch_rgb_uint8 = perspective_crop_torch_rgb_uint8.clone()
         if kps_5_on_crop_param is None or kps_5_on_crop_param.size == 0:
-            return processed_crop_torch_rgb_uint8
+            return processed_crop_torch_rgb_uint8, None
 
         if not (swap_button_is_checked_global or edit_button_is_checked_global):
-            return processed_crop_torch_rgb_uint8
+            return processed_crop_torch_rgb_uint8, None
 
         arcface_model_for_swap = self.models_processor.get_arcface_model(
             parameters_for_face["SwapModelSelection"]
@@ -518,6 +523,7 @@ class FrameWorker(threading.Thread):
                 )
 
         s_e_for_swap_core = s_e_for_swap_np if swap_button_is_checked_global else None
+        vr_swap_mask_for_compare: torch.Tensor | None = None
 
         if (
             swap_button_is_checked_global
@@ -596,10 +602,16 @@ class FrameWorker(threading.Thread):
                         device=perspective_crop_torch_rgb_uint8.device,
                     )
                 )
+                vr_swap_mask_for_compare = None
             else:
                 # Primary path
                 persp_final_combined_mask_1x512x512_float_for_paste = (
                     comprehensive_mask_1x512x512_from_swap_core.float()
+                )
+                vr_swap_mask_for_compare = (
+                    comprehensive_mask_1x512x512_from_swap_core
+                    if self.is_view_face_mask
+                    else None
                 )
 
                 if parameters_for_face.get("BordermaskEnableToggle", False):
@@ -704,7 +716,7 @@ class FrameWorker(threading.Thread):
                             )
                         )
 
-        return processed_crop_torch_rgb_uint8
+        return processed_crop_torch_rgb_uint8, vr_swap_mask_for_compare
 
     def process_frame(self, control: dict, stop_event: threading.Event):
         """
@@ -1006,23 +1018,44 @@ class FrameWorker(threading.Thread):
                 del face_crop_tensor
 
         # Process collected faces
+        compare_mode_active_vr = self.is_view_face_mask or self.is_view_face_compare
+        vr_compare_crops: list[
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]
+        ] = []
+
         for item_data in analyzed_faces_for_vr:
-            processed_crop_for_stitching = (
-                self._process_single_vr_perspective_crop_multi(
-                    item_data["face_crop_tensor"],
-                    item_data["target_button"],
-                    item_data["params"],
-                    control,
-                    kps_5_on_crop_param=item_data["kps_on_crop"],
-                    kps_all_on_crop_param=item_data["kps_all_on_crop"],
-                    swap_button_is_checked_global=swap_button_is_checked_global,
-                    edit_button_is_checked_global=edit_button_is_checked_global,
-                    eye_side_for_debug=item_data["original_eye_side"],
-                    kv_map_for_swap=item_data["target_button"].assigned_kv_map,
-                )
-                if swap_button_is_checked_global or edit_button_is_checked_global
-                else item_data["face_crop_tensor"]
+            original_crop_for_compare = (
+                item_data["face_crop_tensor"].clone()
+                if compare_mode_active_vr
+                else None
             )
+            if swap_button_is_checked_global or edit_button_is_checked_global:
+                processed_crop_for_stitching, vr_crop_swap_mask = (
+                    self._process_single_vr_perspective_crop_multi(
+                        item_data["face_crop_tensor"],
+                        item_data["target_button"],
+                        item_data["params"],
+                        control,
+                        kps_5_on_crop_param=item_data["kps_on_crop"],
+                        kps_all_on_crop_param=item_data["kps_all_on_crop"],
+                        swap_button_is_checked_global=swap_button_is_checked_global,
+                        edit_button_is_checked_global=edit_button_is_checked_global,
+                        eye_side_for_debug=item_data["original_eye_side"],
+                        kv_map_for_swap=item_data["target_button"].assigned_kv_map,
+                    )
+                )
+            else:
+                processed_crop_for_stitching = item_data["face_crop_tensor"]
+                vr_crop_swap_mask = None
+
+            if compare_mode_active_vr and original_crop_for_compare is not None:
+                vr_compare_crops.append(
+                    (
+                        original_crop_for_compare,
+                        processed_crop_for_stitching,
+                        vr_crop_swap_mask,
+                    )
+                )
 
             # VR-07: append (eye_side, tensor, theta, phi, fov) tuple instead of dict entry
             processed_perspective_crops_details.append(
@@ -1082,6 +1115,29 @@ class FrameWorker(threading.Thread):
         )
         # FW-MEM-1: removed torch.cuda.empty_cache() — calling it per-frame
         # defeats the CUDA caching allocator and causes unnecessary overhead.
+
+        # --- VR Compare/Mask view ---
+        # Build side-by-side crop strips when Face Compare or Face Mask is active.
+        if compare_mode_active_vr and vr_compare_crops:
+            imgs_to_vstack = []
+            for original_chw, processed_chw, mask_1chw_float in vr_compare_crops:
+                imgs_to_cat: list[torch.Tensor] = []
+                if self.is_view_face_compare:
+                    imgs_to_cat.append(original_chw)
+                imgs_to_cat.append(processed_chw)
+                if self.is_view_face_mask and mask_1chw_float is not None:
+                    mask_display = torch.sub(1, mask_1chw_float).repeat(3, 1, 1)
+                    mask_display = torch.mul(mask_display, 255.0).type(torch.uint8)
+                    imgs_to_cat.append(mask_display)
+                if imgs_to_cat:
+                    imgs_to_vstack.append(torch.cat(imgs_to_cat, dim=2))
+            if imgs_to_vstack:
+                max_width = max(t.size(2) for t in imgs_to_vstack)
+                padded = [
+                    torch.nn.functional.pad(t, (0, max_width - t.size(2), 0, 0))
+                    for t in imgs_to_vstack
+                ]
+                return torch.cat(padded, dim=1)
 
         return processed_tensor_rgb_uint8
 
@@ -1446,6 +1502,13 @@ class FrameWorker(threading.Thread):
         if control["ShowAllDetectedFacesBBoxToggle"] and det_faces_data_for_display:
             processed_tensor_rgb_uint8 = draw_bounding_boxes_on_detected_faces(
                 processed_tensor_rgb_uint8, det_faces_data_for_display
+            )
+
+        if control.get("ShowByteTrackBBoxToggle", False) and det_faces_data_for_display:
+            processed_tensor_rgb_uint8 = draw_bounding_boxes_on_detected_faces(
+                processed_tensor_rgb_uint8,
+                det_faces_data_for_display,
+                color_rgb=[255, 165, 0],
             )
 
         if control["ShowLandmarksEnableToggle"] and det_faces_data_for_display:

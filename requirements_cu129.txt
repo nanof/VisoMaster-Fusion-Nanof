@@ -22,7 +22,7 @@ ftfy
 regex
 pyvirtualcam
 numexpr
-onnxsim==0.4.36
+onnxsim
 requests
 pyqt-toast-notification
 qdarkstyle

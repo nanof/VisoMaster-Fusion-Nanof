@@ -4,13 +4,12 @@ FW-VR-* tests for the VR180 control-flow logic inside FrameWorker.
 Strategy: mock everything external to FrameWorker so we can test the
 decision logic without loading any ML models or requiring a GPU.
 """
+
 from __future__ import annotations
 
 import sys
 import threading
-import queue
-from types import ModuleType
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 from collections import OrderedDict
 
 import numpy as np
@@ -20,6 +19,7 @@ import torch
 # ---------------------------------------------------------------------------
 # Stub heavyweight imports that FrameWorker pulls at module level
 # ---------------------------------------------------------------------------
+
 
 def _stub(name: str) -> MagicMock:
     # Do NOT use spec= — a spec-limited mock restricts attribute access, which breaks
@@ -32,9 +32,15 @@ def _stub(name: str) -> MagicMock:
 
 
 _STUBS = [
-    "PySide6", "PySide6.QtWidgets", "PySide6.QtCore", "PySide6.QtGui",
-    "kornia", "kornia.enhance", "kornia.color",
-    "skimage", "skimage.transform",
+    "PySide6",
+    "PySide6.QtWidgets",
+    "PySide6.QtCore",
+    "PySide6.QtGui",
+    "kornia",
+    "kornia.enhance",
+    "kornia.color",
+    "skimage",
+    "skimage.transform",
     "app.ui.widgets.widget_components",
     # Do NOT stub the parent package — it's a namespace package and stubbing it
     # prevents sibling test files from importing real submodules in the same session.
@@ -54,8 +60,8 @@ for _s in _STUBS:
         sys.modules[_s] = _stub(_s)
 
 # Stub FrameEnhancers / FrameEdits constructors
-sys.modules["app.processors.frame_enhancers"].FrameEnhancers = MagicMock
-sys.modules["app.processors.frame_edits"].FrameEdits = MagicMock
+sys.modules["app.processors.frame_enhancers"].FrameEnhancers = MagicMock  # type: ignore[attr-defined]
+sys.modules["app.processors.frame_edits"].FrameEdits = MagicMock  # type: ignore[attr-defined]
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -95,12 +101,16 @@ def small_equirect() -> np.ndarray:
 # Helpers to build a FrameWorker instance without starting the thread
 # ---------------------------------------------------------------------------
 
+
 def _make_worker(main_window):
     """Import and instantiate FrameWorker without calling .start()."""
     # Patch vr_utils so we don't need the full external converters
-    with patch("app.helpers.vr_utils.E2P_Equirectangular", MagicMock()), \
-         patch("app.helpers.vr_utils.P2E_Perspective", MagicMock()):
+    with (
+        patch("app.helpers.vr_utils.E2P_Equirectangular", MagicMock()),
+        patch("app.helpers.vr_utils.P2E_Perspective", MagicMock()),
+    ):
         from app.processors.workers.frame_worker import FrameWorker
+
         worker = FrameWorker.__new__(FrameWorker)
         # Must call Thread.__init__ so the .name property setter works
         threading.Thread.__init__(worker)
@@ -158,6 +168,7 @@ def _make_worker(main_window):
 # FW-VR-04: missing VR180EyeModeSelection defaults to "Both Eyes"
 # ---------------------------------------------------------------------------
 
+
 def test_vr180_eye_mode_defaults_to_both_eyes(mock_main_window, small_equirect):
     """control dict without VR180EyeModeSelection should behave like "Both Eyes"."""
     control = {
@@ -176,11 +187,15 @@ def test_missing_key_defaults_to_both_eyes():
 # FW-VR-02 / FW-VR-03: vr_single_eye_mode flag evaluation
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("selection,expected_single", [
-    ("Both Eyes", False),
-    ("Single Eye", True),
-    ("Both Eyes", False),  # duplicate to ensure no state leak
-])
+
+@pytest.mark.parametrize(
+    "selection,expected_single",
+    [
+        ("Both Eyes", False),
+        ("Single Eye", True),
+        ("Both Eyes", False),  # duplicate to ensure no state leak
+    ],
+)
 def test_vr_single_eye_mode_flag(selection, expected_single):
     control = {"VR180EyeModeSelection": selection}
     result = control.get("VR180EyeModeSelection", "Both Eyes") == "Single Eye"
@@ -190,6 +205,7 @@ def test_vr_single_eye_mode_flag(selection, expected_single):
 # ---------------------------------------------------------------------------
 # FW-VR-02: is_left_eye is bool (not None) when "Both Eyes"
 # ---------------------------------------------------------------------------
+
 
 def test_is_left_eye_is_bool_for_both_eyes():
     vr_single_eye_mode = False
@@ -211,6 +227,7 @@ def test_is_left_eye_is_bool_false_for_right_eye():
 # FW-VR-03: is_left_eye is None when "Single Eye"
 # ---------------------------------------------------------------------------
 
+
 def test_is_left_eye_is_none_for_single_eye():
     vr_single_eye_mode = True
     _eye_side = "L"  # doesn't matter
@@ -229,17 +246,21 @@ def test_is_left_eye_is_none_for_single_eye_right():
 # FW-VR-05: empty bboxes_eq_np → return original equirect unchanged
 # ---------------------------------------------------------------------------
 
+
 def test_empty_bboxes_returns_original(mock_main_window, small_equirect):
     """When no faces are detected, _process_frame_vr180 returns the input tensor."""
     # mock run_detect to return empty
     mock_main_window.models_processor.run_detect.return_value = (
-        np.empty((0, 5), dtype=np.float32), None, None
+        np.empty((0, 5), dtype=np.float32),
+        None,
+        None,
     )
     original_tensor = torch.from_numpy(small_equirect).permute(2, 0, 1).to(CPU)
 
-    with patch("app.helpers.vr_utils.E2P_Equirectangular", MagicMock()), \
-         patch("app.helpers.vr_utils.P2E_Perspective", MagicMock()):
-        from app.processors.workers.frame_worker import FrameWorker
+    with (
+        patch("app.helpers.vr_utils.E2P_Equirectangular", MagicMock()),
+        patch("app.helpers.vr_utils.P2E_Perspective", MagicMock()),
+    ):
         worker = _make_worker(mock_main_window)
 
         # Minimal control dict
@@ -259,8 +280,10 @@ def test_empty_bboxes_returns_original(mock_main_window, small_equirect):
         mock_ec.height = small_equirect.shape[0]
         mock_ec.width = small_equirect.shape[1]
 
-        with patch("app.processors.workers.frame_worker.EquirectangularConverter",
-                   return_value=mock_ec):
+        with patch(
+            "app.processors.workers.frame_worker.EquirectangularConverter",
+            return_value=mock_ec,
+        ):
             result = worker._process_frame_vr180(
                 img_numpy_rgb_uint8=small_equirect,
                 original_equirect_tensor_for_vr=original_tensor,
@@ -275,12 +298,15 @@ def test_empty_bboxes_returns_original(mock_main_window, small_equirect):
 # FW-VR-06: no crops → PerspectiveConverter NOT instantiated
 # ---------------------------------------------------------------------------
 
+
 def test_no_crops_skips_perspective_converter(mock_main_window, small_equirect):
     """If processed_perspective_crops_details is empty, PerspectiveConverter must not be created."""
     original_tensor = torch.from_numpy(small_equirect).permute(2, 0, 1).to(CPU)
 
     mock_main_window.models_processor.run_detect.return_value = (
-        np.empty((0, 5), dtype=np.float32), None, None
+        np.empty((0, 5), dtype=np.float32),
+        None,
+        None,
     )
 
     control = {
@@ -297,14 +323,21 @@ def test_no_crops_skips_perspective_converter(mock_main_window, small_equirect):
     mock_ec.height = small_equirect.shape[0]
     mock_ec.width = small_equirect.shape[1]
 
-    with patch("app.helpers.vr_utils.E2P_Equirectangular", MagicMock()), \
-         patch("app.helpers.vr_utils.P2E_Perspective", MagicMock()):
-        from app.processors.workers.frame_worker import FrameWorker
+    with (
+        patch("app.helpers.vr_utils.E2P_Equirectangular", MagicMock()),
+        patch("app.helpers.vr_utils.P2E_Perspective", MagicMock()),
+    ):
         worker = _make_worker(mock_main_window)
 
-        with patch("app.processors.workers.frame_worker.EquirectangularConverter",
-                   return_value=mock_ec) as mock_ec_cls, \
-             patch("app.processors.workers.frame_worker.PerspectiveConverter") as mock_pc_cls:
+        with (
+            patch(
+                "app.processors.workers.frame_worker.EquirectangularConverter",
+                return_value=mock_ec,
+            ),
+            patch(
+                "app.processors.workers.frame_worker.PerspectiveConverter"
+            ) as mock_pc_cls,
+        ):
             worker._process_frame_vr180(
                 img_numpy_rgb_uint8=small_equirect,
                 original_equirect_tensor_for_vr=original_tensor,
@@ -318,6 +351,7 @@ def test_no_crops_skips_perspective_converter(mock_main_window, small_equirect):
 # ---------------------------------------------------------------------------
 # FW-VR-01: stop_event exits stitch loop early
 # ---------------------------------------------------------------------------
+
 
 def test_stop_event_in_stitch_loop():
     """stop_event.is_set() == True before the loop body → stitch is skipped."""
@@ -334,13 +368,15 @@ def test_stop_event_in_stitch_loop():
     target = torch.zeros(3, 90, 180, dtype=torch.uint8)
     pc = FakePConverter()
 
-    for (_eye_side, _crop_tensor, _theta, _phi, _fov) in crops:
+    for _eye_side, _crop_tensor, _theta, _phi, _fov in crops:
         if stop_event is not None and stop_event.is_set():
             break
         pc.stitch_single_perspective(
             target_equirect_torch_cxhxw_rgb_uint8=target,
             processed_crop_torch_cxhxw_rgb_uint8=_crop_tensor,
-            theta=_theta, phi=_phi, fov=_fov,
+            theta=_theta,
+            phi=_phi,
+            fov=_fov,
             is_left_eye=("L" in _eye_side),
         )
 
@@ -351,17 +387,23 @@ def test_stop_event_in_stitch_loop():
 # FW-CACHE-01/02: _resize_cache reuse
 # ---------------------------------------------------------------------------
 
+
 def test_resize_cache_reuses_object():
     """Same (h, w, interp, antialias) key returns the same Resize object."""
     from torchvision.transforms import v2
+
     cache: dict = {}
     key = (256, 256, v2.InterpolationMode.BILINEAR, False)
     if key not in cache:
-        cache[key] = v2.Resize((256, 256), interpolation=v2.InterpolationMode.BILINEAR, antialias=False)
+        cache[key] = v2.Resize(
+            (256, 256), interpolation=v2.InterpolationMode.BILINEAR, antialias=False
+        )
     obj1 = cache[key]
 
     if key not in cache:
-        cache[key] = v2.Resize((256, 256), interpolation=v2.InterpolationMode.BILINEAR, antialias=False)
+        cache[key] = v2.Resize(
+            (256, 256), interpolation=v2.InterpolationMode.BILINEAR, antialias=False
+        )
     obj2 = cache[key]
 
     assert obj1 is obj2
@@ -369,6 +411,7 @@ def test_resize_cache_reuses_object():
 
 def test_resize_cache_different_size_different_object():
     from torchvision.transforms import v2
+
     cache: dict = {}
     key1 = (256, 256, v2.InterpolationMode.BILINEAR, False)
     key2 = (128, 128, v2.InterpolationMode.BILINEAR, False)
@@ -381,10 +424,14 @@ def test_resize_cache_different_size_different_object():
 # FW-GHOSTFACE: GHOSTFACE_MODELS frozenset completeness
 # ---------------------------------------------------------------------------
 
+
 def test_ghostface_models_frozenset():
-    with patch("app.helpers.vr_utils.E2P_Equirectangular", MagicMock()), \
-         patch("app.helpers.vr_utils.P2E_Perspective", MagicMock()):
+    with (
+        patch("app.helpers.vr_utils.E2P_Equirectangular", MagicMock()),
+        patch("app.helpers.vr_utils.P2E_Perspective", MagicMock()),
+    ):
         from app.processors.workers.frame_worker import FrameWorker
+
         expected = {"GhostFace-v1", "GhostFace-v2", "GhostFace-v3"}
         assert FrameWorker.GHOSTFACE_MODELS == expected
         assert isinstance(FrameWorker.GHOSTFACE_MODELS, frozenset)

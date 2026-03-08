@@ -1,8 +1,8 @@
 """
 MISC-* tests for pure utility functions in app.helpers.miscellaneous
 """
+
 import pytest
-import numpy as np
 from app.helpers.miscellaneous import (
     is_image_file,
     is_video_file,
@@ -18,31 +18,49 @@ from app.helpers.miscellaneous import (
 # MISC-03/04 — file type detection
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("name", [
-    "photo.png", "photo.jpg", "photo.jpeg", "photo.webp",
-    "scan.tif", "scan.tiff", "image.jp2",
-])
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "photo.png",
+        "photo.jpg",
+        "photo.jpeg",
+        "photo.webp",
+        "scan.tif",
+        "scan.tiff",
+        "image.jp2",
+    ],
+)
 def test_is_image_file_true(name):
     assert is_image_file(name) is True
 
 
-@pytest.mark.parametrize("name", [
-    "video.mp4", "clip.avi", "movie.mkv", "record.mov", "doc.txt", "archive.zip", ""
-])
+@pytest.mark.parametrize(
+    "name",
+    ["video.mp4", "clip.avi", "movie.mkv", "record.mov", "doc.txt", "archive.zip", ""],
+)
 def test_is_image_file_false(name):
     assert is_image_file(name) is False
 
 
-@pytest.mark.parametrize("name", [
-    "video.mp4", "clip.avi", "movie.mkv", "record.mov", "stream.webm", "anim.gif",
-])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "video.mp4",
+        "clip.avi",
+        "movie.mkv",
+        "record.mov",
+        "stream.webm",
+        "anim.gif",
+    ],
+)
 def test_is_video_file_true(name):
     assert is_video_file(name) is True
 
 
-@pytest.mark.parametrize("name", [
-    "photo.png", "photo.jpg", "doc.txt", "archive.zip", ""
-])
+@pytest.mark.parametrize(
+    "name", ["photo.png", "photo.jpg", "doc.txt", "archive.zip", ""]
+)
 def test_is_video_file_false(name):
     assert is_video_file(name) is False
 
@@ -62,6 +80,7 @@ def test_get_file_type_unknown():
 # ---------------------------------------------------------------------------
 # MISC-01/02 — get_scaling_transforms cache behaviour
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(autouse=True)
 def clear_transform_cache():
@@ -120,6 +139,7 @@ def test_returns_tuple_of_expected_length():
 
 def test_resize_objects_have_correct_size():
     from torchvision.transforms import v2
+
     ctrl = _make_control()
     t512, t384, t256, t128 = get_scaling_transforms(ctrl)[:4]
     # Each Resize object should have the right target size
@@ -132,6 +152,7 @@ def test_resize_objects_have_correct_size():
 # ---------------------------------------------------------------------------
 # Extension tuple completeness sanity checks
 # ---------------------------------------------------------------------------
+
 
 def test_image_extensions_are_lowercase_dotted():
     for ext in image_extensions:
