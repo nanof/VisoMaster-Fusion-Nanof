@@ -240,6 +240,47 @@ In Windows - Either via:
   pre-commit run --all-files
   ```
 
+### Unit Tests
+
+The project has a test suite covering core pipeline logic (VR math, face masks, face detectors, serialization, job validation, widget logic). Tests run without a GPU and without Qt installed.
+
+**Setup (one-time)**
+
+```sh
+# Create a lightweight test venv (separate from the main app venv)
+uv venv --python 3.12 .venv-test
+.venv-test\Scripts\activate
+
+# Install test dependencies
+uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+uv pip install numpy scipy scikit-image opencv-python pillow pytest pytest-mock
+```
+
+> If you already have a `.venv` with the full `requirements_cu129.txt` installed, you can run tests directly in it — the GPU packages don't interfere.
+
+**Running the tests**
+
+```sh
+# Activate your venv first, then:
+python -m pytest                  # run the full suite (206 tests, ~2s)
+python -m pytest tests/unit/      # unit tests only
+python -m pytest tests/integration/  # integration tests only
+python -m pytest -k "vr"          # filter by keyword
+python -m pytest -v               # verbose output
+```
+
+**Test structure**
+
+```
+tests/
+├── unit/
+│   ├── helpers/      # ParametersDict, miscellaneous utils, VR math, thumbnails
+│   ├── processors/   # Face detectors, masks, swappers, frame worker VR flow
+│   ├── ui/           # Settings layout schema, save/load actions, job manager, widget logic
+│   └── utils/        # faceutil math
+└── integration/      # VR180 pipeline end-to-end
+```
+
 ---
 
 ## [Join Discord](https://discord.gg/5rx4SQuDbp)

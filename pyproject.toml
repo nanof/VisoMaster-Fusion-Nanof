@@ -8,3 +8,12 @@ extra-index-url = [
     "https://download.pytorch.org/whl/cu129",
     "https://pypi.org/simple"
 ]
+
+[tool.pytest.ini_options]
+testpaths  = ["tests"]
+addopts    = "-ra -q --tb=short"
+markers    = [
+    "slow: tests that take > 2 s (deselect with -m 'not slow')",
+    "gpu:  tests requiring a CUDA device",
+    "qt:   tests requiring a Qt application instance",
+]
