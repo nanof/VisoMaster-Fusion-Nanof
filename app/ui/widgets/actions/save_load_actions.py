@@ -549,9 +549,7 @@ def load_saved_workspace(
             dock_state_str = window_state.get("dock_state", data.get("dock_state", ""))
             if dock_state_str:
                 try:
-                    ba = QtCore.QByteArray.fromBase64(
-                        dock_state_str.encode("utf-8")
-                    )
+                    ba = QtCore.QByteArray.fromBase64(dock_state_str.encode("utf-8"))
                     main_window.restoreState(ba)
                 except Exception as e:
                     print(f"[WARN] Failed to restore dock layout: {e}")

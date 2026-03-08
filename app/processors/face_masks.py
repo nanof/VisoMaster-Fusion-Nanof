@@ -28,19 +28,9 @@ class FaceMasks:
         self._morph_kernels: Dict[tuple, torch.Tensor] = {}
         self._kernel_cache: Dict[str, torch.Tensor] = {}
         self._meshgrid_cache: Dict[tuple, tuple[torch.Tensor, torch.Tensor]] = {}
-        self._blur_cache: Dict[tuple, transforms.GaussianBlur] = {}
 
         self.clip_model_loaded = False
         self.active_models: set[str] = set()
-        # FM-05: cache the CLIP transform as a class attribute (Resize must come before Normalize)
-        self._clip_transform = transforms.Compose(
-            [
-                transforms.Resize((352, 352)),
-                transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-                ),
-            ]
-        )
 
     def unload_models(self):
         """Unloads all models managed by this class via the processor."""

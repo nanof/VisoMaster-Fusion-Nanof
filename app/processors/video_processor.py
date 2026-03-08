@@ -27,6 +27,7 @@ from app.ui.widgets.actions import common_actions as common_widget_actions
 from app.ui.widgets.actions import video_control_actions
 from app.ui.widgets.actions import layout_actions
 from app.ui.widgets.actions import list_view_actions
+from app.ui.widgets.actions import save_load_actions
 from app.ui.widgets.settings_layout_data import CAMERA_BACKENDS
 import app.helpers.miscellaneous as misc_helpers
 from app.helpers.typing_helper import ControlTypes, FacesParametersTypes
@@ -38,7 +39,6 @@ TAIL_TOLERANCE = 10  # Reduced from 300 (VP-34) to allow seeking closer to EOF.
 
 # Audio-Video Sync: Always use segmented extraction when frames are skipped (perfect sync)
 # Simple extraction used when no frames are skipped (no sync issues)
-
 
 
 class VideoProcessor(QObject):
@@ -161,12 +161,18 @@ class VideoProcessor(QObject):
         self.temp_file: str = ""  # Temporary video file (without audio)
         # Counters for accurate duration calculation
         self.frames_written: int = 0  # Number of frames successfully sent to FFmpeg
-        self.last_displayed_frame: int | None = None  # Last frame number that was displayed/written
+        self.last_displayed_frame: int | None = (
+            None  # Last frame number that was displayed/written
+        )
 
         # --- Frame Skip Tracking (for corrupted frames) ---
-        self.skipped_frames: set[int] = set()  # Track which frames were skipped due to read errors
+        self.skipped_frames: set[int] = (
+            set()
+        )  # Track which frames were skipped due to read errors
         self.consecutive_read_errors: int = 0  # Count consecutive read failures
-        self.max_consecutive_errors: int = 300  # Stop after this many consecutive errors
+        self.max_consecutive_errors: int = (
+            300  # Stop after this many consecutive errors
+        )
         self.total_skipped_frames: int = 0  # Counter for skipped frames
 
         # --- Multi-Segment Recording State ---
@@ -562,8 +568,12 @@ class VideoProcessor(QObject):
 
         # Log summary of skipped frames at end
         if self.total_skipped_frames > 0:
-            print(f"[INFO] Feeder loop finished. Total frames skipped: {self.total_skipped_frames}")
-            print(f"[INFO] Skipped frame numbers: {sorted(list(self.skipped_frames)[:100])}{'...' if len(self.skipped_frames) > 100 else ''}")
+            print(
+                f"[INFO] Feeder loop finished. Total frames skipped: {self.total_skipped_frames}"
+            )
+            print(
+                f"[INFO] Skipped frame numbers: {sorted(list(self.skipped_frames)[:100])}{'...' if len(self.skipped_frames) > 100 else ''}"
+            )
 
     def _feed_webcam(self):
         """Feeder logic for webcam streaming."""
@@ -703,20 +713,24 @@ class VideoProcessor(QObject):
         else:
             # --- Video/Image Logic (Dictionary) ---
             frame_number_to_display = self.next_frame_to_display
-            
+
             # Skip frames that were corrupted/skipped during processing
             # Find the next non-skipped frame to display
             original_frame = frame_number_to_display
-            while (frame_number_to_display in self.skipped_frames and 
-                   frame_number_to_display <= self.max_frame_number):
+            while (
+                frame_number_to_display in self.skipped_frames
+                and frame_number_to_display <= self.max_frame_number
+            ):
                 frame_number_to_display += 1
-            
+
             # Update next_frame_to_display to skip all consecutive skipped frames
             if frame_number_to_display > original_frame:
                 skipped_count = frame_number_to_display - original_frame
-                print(f"[INFO] Display: Skipping {skipped_count} corrupted frame(s), jumping to frame {frame_number_to_display}")
+                print(
+                    f"[INFO] Display: Skipping {skipped_count} corrupted frame(s), jumping to frame {frame_number_to_display}"
+                )
                 self.next_frame_to_display = frame_number_to_display
-            
+
             if frame_number_to_display not in self.frames_to_display:
                 # Frame not ready.
                 return
@@ -1162,7 +1176,9 @@ class VideoProcessor(QObject):
             )
 
             if ret and frame_bgr is not None:
-                frame_to_process = numpy.ascontiguousarray(frame_bgr[..., ::-1])  # BGR to RGB
+                frame_to_process = numpy.ascontiguousarray(
+                    frame_bgr[..., ::-1]
+                )  # BGR to RGB
                 read_successful = True
                 misc_helpers.seek_frame(self.media_capture, self.current_frame_number)
             else:
@@ -1232,7 +1248,9 @@ class VideoProcessor(QObject):
                 self.media_capture, 0, preview_target_height=None
             )
             if ret and frame_bgr is not None:
-                frame_to_process = numpy.ascontiguousarray(frame_bgr[..., ::-1])  # BGR to RGB
+                frame_to_process = numpy.ascontiguousarray(
+                    frame_bgr[..., ::-1]
+                )  # BGR to RGB
                 read_successful = True
             else:
                 print("[ERROR] Unable to read Webcam frame for processing!")
@@ -1410,7 +1428,9 @@ class VideoProcessor(QObject):
             pass
 
         # compute end metrics using helper
-        self.play_end_time, end_frame_for_calc, frames_actually_processed, duration = self._compute_play_end()
+        self.play_end_time, end_frame_for_calc, frames_actually_processed, duration = (
+            self._compute_play_end()
+        )
         if duration is not None:
             print(
                 f"[INFO] Probed temp video duration during abort: {duration:.3f}s (recorded clip length), "
@@ -1906,11 +1926,11 @@ class VideoProcessor(QObject):
         numbers from the original media.  When recording began partway through
         the source the first segment needs to start at ``self.processing_start_frame``
         rather than zero.
-        
+
         Args:
             actual_end_frame: The actual last frame that was recorded (0-based,
                               absolute index in source)
-        
+
         Example: if recording started at frame 100 and frames 150, 175 were
         skipped in a 200-frame video:
         Returns: [(100, 149), (151, 174), (176, 199)]
@@ -1954,41 +1974,42 @@ class VideoProcessor(QObject):
     ) -> Tuple[bool, List[str]]:
         """
         Extract audio from the original media for each frame segment.
-        
+
         Returns: (success: bool, audio_files: List[str])
             - success: True if all segments extracted successfully
             - audio_files: List of paths to extracted audio files
         """
         audio_files = []
-        
+
         for idx, (start_frame, end_frame) in enumerate(segments):
             # Convert frame numbers to time (seconds)
             start_time = start_frame / self.fps if self.fps > 0 else 0
             # end_time is exclusive (one frame after the last frame we want)
             end_time = (end_frame + 1) / self.fps if self.fps > 0 else 0
-            
+
             # Skip empty segments (should not happen with our segment identification, but safety check)
             if start_time >= end_time:
-                print(f"[WARN] Skipping empty audio segment {idx + 1} (start_time={start_time:.3f}s >= end_time={end_time:.3f}s)")
+                print(
+                    f"[WARN] Skipping empty audio segment {idx + 1} (start_time={start_time:.3f}s >= end_time={end_time:.3f}s)"
+                )
                 continue
-            
-            audio_file = os.path.join(
-                temp_audio_dir, f"audio_segment_{idx:04d}.aac"
-            )
+
+            audio_file = os.path.join(temp_audio_dir, f"audio_segment_{idx:04d}.aac")
             audio_files.append(audio_file)
-            
+
             # Try a fast "copy" extraction first to avoid decoding corrupted
             # packets.  If the input stream itself is damaged this will still
             # produce a file and skip decoding, hopefully avoiding the error
             # message the user observed.  We always run validation afterwards
             # and fall back to re-encoding if needed.
-            args = [
+            media_path: str = self.media_path  # type: ignore[assignment]
+            args: list[str] = [
                 "ffmpeg",
                 "-hide_banner",
                 "-loglevel",
                 "warning",
                 "-i",
-                self.media_path,
+                media_path,
                 "-ss",
                 str(start_time),
                 "-to",
@@ -1998,28 +2019,39 @@ class VideoProcessor(QObject):
                 "-y",
                 audio_file,
             ]
-            
+
             try:
-                print(f"[INFO] Extracting audio segment {idx + 1}/{len(segments)}: {start_time:.3f}s → {end_time:.3f}s")
-                result = subprocess.run(args, check=True, capture_output=True, text=True)
-                
+                print(
+                    f"[INFO] Extracting audio segment {idx + 1}/{len(segments)}: {start_time:.3f}s → {end_time:.3f}s"
+                )
+                result = subprocess.run(
+                    args, check=True, capture_output=True, text=True
+                )
+
                 # Check for audio decoding errors in stderr (copy mode usually avoids decoding,
                 # but some containers still report warnings)
                 stderr_output = result.stderr
                 needs_rerun = False
-                if "Error submitting packet to decoder" in stderr_output or "Invalid data found" in stderr_output:
+                if (
+                    "Error submitting packet to decoder" in stderr_output
+                    or "Invalid data found" in stderr_output
+                ):
                     print(f"[WARN] Audio decoding errors detected in segment {idx + 1}")
-                    print(f"[WARN] FFmpeg stderr: {stderr_output[:500]}...")  # First 500 chars
+                    print(
+                        f"[WARN] FFmpeg stderr: {stderr_output[:500]}..."
+                    )  # First 500 chars
                     needs_rerun = True
-                
+
                 # Validate output; if it's not valid, we'll resort to re-encode
                 if not self._validate_audio_file(audio_file):
-                    print(f"[WARN] Validation failed for copied segment {idx + 1}, will retry with re-encoding")
+                    print(
+                        f"[WARN] Validation failed for copied segment {idx + 1}, will retry with re-encoding"
+                    )
                     needs_rerun = True
-                
+
                 if needs_rerun:
                     # re-extract by decoding and re-encoding, ignoring errors
-                    re_args = [
+                    re_args: list[str] = [
                         "ffmpeg",
                         "-hide_banner",
                         "-loglevel",
@@ -2027,7 +2059,7 @@ class VideoProcessor(QObject):
                         "-err_detect",
                         "ignore_err",
                         "-i",
-                        self.media_path,
+                        media_path,
                         "-ss",
                         str(start_time),
                         "-to",
@@ -2038,15 +2070,21 @@ class VideoProcessor(QObject):
                         audio_file,
                     ]
                     try:
-                        print(f"[INFO]   Re-extracting segment {idx+1} with re-encode")
-                        subprocess.run(re_args, check=True, capture_output=True, text=True)
+                        print(
+                            f"[INFO]   Re-extracting segment {idx + 1} with re-encode"
+                        )
+                        subprocess.run(
+                            re_args, check=True, capture_output=True, text=True
+                        )
                     except subprocess.CalledProcessError as e2:
-                        print(f"[ERROR] Retry extraction failed for segment {idx+1}: {e2}")
+                        print(
+                            f"[ERROR] Retry extraction failed for segment {idx + 1}: {e2}"
+                        )
                         print(f"[ERROR] FFmpeg stderr: {e2.stderr}")
                         for audio in audio_files:
                             try:
                                 os.remove(audio)
-                            except:
+                            except OSError:
                                 pass
                         return False, []
                 else:
@@ -2059,13 +2097,13 @@ class VideoProcessor(QObject):
                 for audio in audio_files:
                     try:
                         os.remove(audio)
-                    except:
+                    except OSError:
                         pass
                 return False, []
             except FileNotFoundError:
                 print("[ERROR] FFmpeg not found. Cannot extract audio segments.")
                 return False, []
-        
+
         print(f"[INFO] All {len(segments)} audio segment(s) extracted successfully")
         return True, audio_files
 
@@ -2077,43 +2115,50 @@ class VideoProcessor(QObject):
         if not os.path.exists(audio_file_path):
             print(f"[ERROR] Audio file does not exist: {audio_file_path}")
             return False
-            
+
         try:
             # Try to probe the audio file with ffprobe
             args = [
                 "ffprobe",
-                "-v", "quiet",
-                "-print_format", "json",
+                "-v",
+                "quiet",
+                "-print_format",
+                "json",
                 "-show_format",
                 "-show_streams",
-                audio_file_path
+                audio_file_path,
             ]
             result = subprocess.run(args, capture_output=True, text=True, timeout=30)
-            
+
             if result.returncode != 0:
                 print(f"[WARN] ffprobe failed for {audio_file_path}: {result.stderr}")
                 return False
-                
+
             # Check if we got valid JSON output
             import json
+
             probe_data = json.loads(result.stdout)
-            
+
             # Check if there's an audio stream
-            audio_streams = [s for s in probe_data.get("streams", []) if s.get("codec_type") == "audio"]
+            audio_streams = [
+                s
+                for s in probe_data.get("streams", [])
+                if s.get("codec_type") == "audio"
+            ]
             if not audio_streams:
                 print(f"[WARN] No audio stream found in {audio_file_path}")
                 return False
-                
+
             # Check duration
             format_info = probe_data.get("format", {})
             duration = format_info.get("duration")
             if duration is None or float(duration) <= 0:
                 print(f"[WARN] Invalid or zero duration in {audio_file_path}")
                 return False
-                
+
             print(f"[INFO] Audio validation passed: {duration}s duration")
             return True
-            
+
         except subprocess.TimeoutExpired:
             print(f"[WARN] Audio validation timed out for {audio_file_path}")
             return False
@@ -2178,20 +2223,21 @@ class VideoProcessor(QObject):
             play_end = float(end_frame / float(self.fps)) if self.fps > 0 else 0.0
 
         return play_end, end_frame, frames_processed, duration
+
     def _concatenate_audio_segments(
         self, audio_files: List[str], temp_audio_dir: str
     ) -> Optional[str]:
         """
         Concatenate multiple audio files into a single audio file using FFmpeg concat demuxer.
-        
+
         Returns: Path to concatenated audio file, or None if failed
         """
-        
+
         if len(audio_files) == 1:
             # Only one segment, return it directly
             print("[INFO] Only one audio segment, no concatenation needed")
             return audio_files[0]
-        
+
         # Create concat manifest file
         concat_file = os.path.join(temp_audio_dir, "concat_manifest.txt")
         try:
@@ -2204,9 +2250,9 @@ class VideoProcessor(QObject):
         except OSError as e:
             print(f"[ERROR] Failed to create concat manifest: {e}")
             return None
-        
+
         output_audio = os.path.join(temp_audio_dir, "audio_concatenated.aac")
-        
+
         # FFmpeg concat demuxer command
         args = [
             "ffmpeg",
@@ -2224,11 +2270,11 @@ class VideoProcessor(QObject):
             "-y",
             output_audio,
         ]
-        
+
         try:
             print(f"[INFO] Concatenating {len(audio_files)} audio segment(s)...")
             subprocess.run(args, check=True)
-            print(f"[INFO] ✓ Successfully concatenated audio segments")
+            print("[INFO] ✓ Successfully concatenated audio segments")
             return output_audio
         except subprocess.CalledProcessError as e:
             print(f"[ERROR] Failed to concatenate audio segments: {e}")
@@ -2239,7 +2285,6 @@ class VideoProcessor(QObject):
             return None
 
     def _finalize_default_style_recording(self):
-
         """Finalizes a successful default-style recording (adds audio, cleans up)."""
         print("[INFO] Finalizing default-style recording...")
 
@@ -2410,7 +2455,9 @@ class VideoProcessor(QObject):
             self.end_time = time.perf_counter()
             processing_time_sec = self.end_time - self.start_time
             try:
-                start_frame_num = getattr(self, "processing_start_frame", end_frame_for_calc)
+                start_frame_num = getattr(
+                    self, "processing_start_frame", end_frame_for_calc
+                )
                 num_frames_processed = end_frame_for_calc - start_frame_num
                 if num_frames_processed < 0:
                     num_frames_processed = 0
@@ -2424,7 +2471,9 @@ class VideoProcessor(QObject):
                     self.media_path, self.main_window.control["OutputMediaFolder"]
                 )
                 json_file_path += ".json"
-                save_load_actions.save_current_workspace(self.main_window, json_file_path)
+                save_load_actions.save_current_workspace(
+                    self.main_window, json_file_path
+                )
 
             # 8b. Reopen media capture AFTER FFmpeg audio merge.
             if self.file_type == "video" and self.media_path:

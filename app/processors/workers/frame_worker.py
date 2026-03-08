@@ -159,11 +159,6 @@ class FrameWorker(threading.Thread):
         # FW-ROBUST-05: initialize feeder state dict so worker-thread reads never see NameError
         self.local_control_state_from_feeder: dict = {}
 
-        # FW-PERF-04: promote kernel tensors to instance attributes (populated lazily on first use)
-        self._lap_kernel: torch.Tensor | None = None
-        self._sobel_x: torch.Tensor | None = None
-        self._sobel_y: torch.Tensor | None = None
-
         # VR converter cache (VR-08)
         self._vr_converter: Optional[EquirectangularConverter] = None
         self._vr_frame_size: Optional[tuple] = None
@@ -4476,7 +4471,9 @@ class FrameWorker(threading.Thread):
 
         # OPTIMIZED: Convs using pre-allocated VRAM kernels
         lap = F.conv2d(gray, self.kernel_lap, padding=1).squeeze(0).squeeze(0)  # [H,W]
-        gx = F.conv2d(gray, self.kernel_sobel_x, padding=1).squeeze(0).squeeze(0)  # [H,W]
+        gx = (
+            F.conv2d(gray, self.kernel_sobel_x, padding=1).squeeze(0).squeeze(0)
+        )  # [H,W]
         gy = F.conv2d(gray, self.kernel_sobel_y, padding=1).squeeze(0).squeeze(0)
         grad = (gx.pow(2) + gy.pow(2)).sqrt()  # [H,W]
 
