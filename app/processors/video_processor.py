@@ -373,6 +373,11 @@ class VideoProcessor(QObject):
                     print(
                         f"[ERROR] Feeder: Could not read frame {self.current_frame_number} (Mode: {'Segment' if is_segment_mode else 'Standard'})!"
                     )
+                    if not is_segment_mode:
+                        self.max_frame_number = min(
+                            self.max_frame_number,
+                            max(0, self.current_frame_number - 1),
+                        )
                     break  # Stop reading
 
                 frame_num_to_process = self.current_frame_number
