@@ -449,6 +449,10 @@ class TargetFaceCardButton(CardButton):
         ] = {}  # Key: embedding_swap_model, Value: np.ndarray
         self.assigned_kv_map: Dict | None = None
 
+        # Face re-aging: aged versions of embedding/KV map (populated by Apply button)
+        self.aged_input_embedding: Dict[str, np.ndarray] = {}
+        self.aged_kv_map: Dict | None = None
+
         self.setCheckable(True)
         self.clicked.connect(self.load_target_face)
 

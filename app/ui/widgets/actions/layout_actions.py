@@ -326,6 +326,8 @@ def add_widgets_to_tab_layout(
                     step_size=widget_data["step"],
                     main_window=main_window,
                 )
+                if widget_data.get("enable_refresh_frame") is False:
+                    widget.enable_refresh_frame = False
                 widget.line_edit = widget_components.ParameterLineEdit(
                     min_value=int(
                         cast(Union[int, float, str], widget_data["min_value"])
@@ -338,12 +340,27 @@ def add_widgets_to_tab_layout(
                 widget.reset_default_button = (
                     widget_components.ParameterResetDefaultButton(related_widget=widget)
                 )
-                horizontal_layout = add_horizontal_layout_to_category(
-                    category_layout,
+                _slider_row_widgets: list = [
                     label,
                     widget,
                     widget.line_edit,
                     widget.reset_default_button,
+                ]
+                if "action_button" in widget_data:
+                    _ab_data: dict = cast(dict, widget_data["action_button"])
+                    _action_btn = QtWidgets.QPushButton(cast(str, _ab_data["label"]))
+                    _action_btn.setToolTip(cast(str, _ab_data.get("help", "")))
+                    _action_btn.setMaximumWidth(55)
+                    if "exec_function" in _ab_data:
+                        _action_btn.clicked.connect(
+                            partial(
+                                cast(Callable, _ab_data["exec_function"]), main_window
+                            )
+                        )
+                    _slider_row_widgets.append(_action_btn)
+                horizontal_layout = add_horizontal_layout_to_category(
+                    category_layout,
+                    *_slider_row_widgets,
                 )
 
                 if data_type == "parameter":

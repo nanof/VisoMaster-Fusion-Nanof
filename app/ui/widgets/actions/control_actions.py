@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from pathlib import Path
 import torch
 import qdarkstyle
@@ -543,3 +543,137 @@ def handle_face_expression_toggle_change(
     # This function is called by the parameter change.
     # We just need to check the overall state.
     _check_and_manage_face_editor_models(main_window)
+
+
+def apply_face_reaging(main_window: "MainWindow", *_args) -> None:
+    """Apply age transformation to the assigned input face for the selected target face.
+
+    Re-computes ArcFace embeddings (and optionally the denoiser KV map) from the
+    age-transformed face image, storing the results on the target face button so
+    frame_worker can use them when FaceReagingEnableToggle is active.
+    """
+    import traceback
+    import numpy as np
+
+    target_face = main_window.cur_selected_target_face_button
+    if target_face is None:
+        print("[WARN] apply_face_reaging: No target face selected.")
+        return
+
+    if not target_face.assigned_input_faces:
+        print(
+            "[WARN] apply_face_reaging: No input face assigned to the selected target face."
+        )
+        return
+
+    face_id = target_face.face_id
+    params: Any = main_window.parameters.get(face_id, {})
+    source_age = int(params.get("FaceReagingSourceAgeSlider", 25))
+    target_age_val = int(params.get("FaceReagingTargetAgeSlider", 70))
+
+    first_input_id = list(target_face.assigned_input_faces.keys())[0]
+    input_face_button = main_window.input_faces.get(first_input_id)
+    if input_face_button is None:
+        print("[WARN] apply_face_reaging: Input face button not found.")
+        return
+
+    cropped_face_bgr = input_face_button.cropped_face
+    if cropped_face_bgr is None or cropped_face_bgr.size == 0:
+        print("[WARN] apply_face_reaging: Input face has no cropped image.")
+        return
+
+    try:
+        from torchvision.transforms import v2
+
+        models_processor = main_window.models_processor
+
+        # BGR numpy → RGB CHW uint8 tensor
+        face_rgb_np = np.ascontiguousarray(cropped_face_bgr[..., ::-1])
+        face_chw = torch.from_numpy(face_rgb_np).permute(2, 0, 1)  # CHW uint8
+
+        # Ensure 512 × 512
+        if face_chw.shape[1] != 512 or face_chw.shape[2] != 512:
+            face_chw = v2.Resize((512, 512), antialias=False)(face_chw)
+
+        # Run re-aging
+        aged_chw = models_processor.face_reaging.apply_reaging(
+            face_chw, source_age, target_age_val
+        )  # CHW uint8 RGB
+
+        # Move to the device for recognition
+        aged_chw_dev = aged_chw.to(models_processor.device)
+
+        # Approximate 5-point keypoints for the 512 × 512 face crop
+        h, w = aged_chw.shape[1], aged_chw.shape[2]
+        approx_kps_5 = np.array(
+            [
+                [w * 0.3, h * 0.40],  # left eye
+                [w * 0.7, h * 0.40],  # right eye
+                [w * 0.5, h * 0.55],  # nose
+                [w * 0.35, h * 0.70],  # left mouth corner
+                [w * 0.65, h * 0.70],  # right mouth corner
+            ],
+            dtype=np.float32,
+        )
+
+        similarity_type = main_window.control.get("SimilarityTypeSelection", "Opal")
+
+        # Determine which arcface models to recompute.  Filter strictly to known
+        # arcface model names so that non-model keys (e.g. "kps_5") that may also
+        # live inside assigned_input_embedding are never passed to run_recognize_direct.
+        from app.processors.models_data import arcface_mapping_model_dict
+
+        _valid_arcface_models: set = set(arcface_mapping_model_dict.values())
+        models_to_compute = (
+            set(target_face.assigned_input_embedding.keys()) & _valid_arcface_models
+        )
+        if not models_to_compute:
+            models_to_compute = _valid_arcface_models
+
+        aged_embeddings = {}
+        for arcface_model in models_to_compute:
+            try:
+                embedding, _ = models_processor.run_recognize_direct(
+                    aged_chw_dev, approx_kps_5, similarity_type, arcface_model
+                )
+                if embedding is not None and embedding.size > 0:
+                    aged_embeddings[arcface_model] = embedding
+            except Exception as e_emb:
+                print(
+                    f"[WARN] apply_face_reaging: embedding for '{arcface_model}' failed: {e_emb}"
+                )
+
+        target_face.aged_input_embedding = aged_embeddings
+
+        # Recompute KV map if denoiser is active
+        control = main_window.control
+        denoiser_on = (
+            control.get("DenoiserUNetEnableBeforeRestorersToggle", False)
+            or control.get("DenoiserAfterFirstRestorerToggle", False)
+            or control.get("DenoiserAfterRestorersToggle", False)
+        )
+        if denoiser_on:
+            try:
+                from PIL import Image as _PIL_Image
+
+                aged_hwc = aged_chw.permute(1, 2, 0).cpu().numpy()
+                pil_img = _PIL_Image.fromarray(aged_hwc)
+                with models_processor.kv_extraction_lock:
+                    kv_map = models_processor.get_kv_map_for_face(pil_img)
+                target_face.aged_kv_map = kv_map
+            except Exception as e_kv:
+                print(f"[ERROR] apply_face_reaging: KV map extraction failed: {e_kv}")
+                target_face.aged_kv_map = None
+        else:
+            target_face.aged_kv_map = None
+
+        print(
+            f"[INFO] apply_face_reaging: Applied (source={source_age}, target={target_age_val}) "
+            f"for face {face_id}. Embeddings computed for: {list(aged_embeddings.keys())}"
+        )
+
+        common_widget_actions.refresh_frame(main_window)
+
+    except Exception as exc:
+        print(f"[ERROR] apply_face_reaging: {exc}")
+        traceback.print_exc()

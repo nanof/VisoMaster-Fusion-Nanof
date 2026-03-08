@@ -50,6 +50,7 @@ from app.processors.face_restorers import FaceRestorers
 from app.processors.face_swappers import FaceSwappers
 from app.processors.frame_enhancers import FrameEnhancers
 from app.processors.face_editors import FaceEditors
+from app.processors.face_reaging import FaceReaging
 from app.processors.utils.dfm_model import DFMModel
 from app.processors.models_data import (
     models_list,
@@ -295,6 +296,7 @@ class ModelsProcessor(QtCore.QObject):
         self.face_swappers = FaceSwappers(self)
         self.frame_enhancers = FrameEnhancers(self)
         self.face_editors = FaceEditors(self)
+        self.face_reaging = FaceReaging(self)
 
         # Initialize Mask Latent
         self.lp_mask_crop_latent = faceutil.create_faded_inner_mask(

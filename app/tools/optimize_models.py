@@ -47,7 +47,9 @@ MODEL_EXCEPTIONS = {
     "ghost_arcface_backbone.onnx",
     "ghost_unet_2_block.onnx",
     "ghost_unet_3_block.onnx",
+    "RealESRGAN_x2plus.fp16.onnx",
     "realesr-general-x4v3.onnx",
+    "BSRGANx2.fp16.onnx",
 }
 
 # --- Script Logic ---
