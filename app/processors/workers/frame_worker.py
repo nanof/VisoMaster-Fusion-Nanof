@@ -917,6 +917,47 @@ class FrameWorker(threading.Thread):
             _keep = torchvision.ops.nms(_boxes_t, _areas, iou_threshold=0.5)
             bboxes_eq_np = bboxes_eq_np[_keep.cpu().numpy()]
 
+        # VR-MIRROR: in Both-Eyes mode, if a face is detected on one eye side but not
+        # the other, synthesize a mirrored bbox on the missing side using the same
+        # relative position and size. This prevents one-eye-only swaps when the detector
+        # fires on one half but not the other due to marginal confidence or rendering
+        # differences between the two stereo views.
+        # Only applies to Both-Eyes VR180 (not Single Eye, not VR360 panoramic).
+        if (
+            control.get("VR180EyeModeSelection", "Both Eyes") != "Single Eye"
+            and bboxes_eq_np.ndim == 2
+            and bboxes_eq_np.shape[0] > 0
+        ):
+            _half_w = equirect_converter.width / 2.0
+            _cx = (bboxes_eq_np[:, 0] + bboxes_eq_np[:, 2]) / 2.0
+            _is_left = _cx < _half_w
+            _mirrored_bboxes: list[np.ndarray] = []
+            for _i in range(len(bboxes_eq_np)):
+                _b = bboxes_eq_np[_i]
+                _tol = max(_b[2] - _b[0], _b[3] - _b[1]) * 0.5
+                if _is_left[_i]:
+                    _mx1, _mx2 = _b[0] + _half_w, _b[2] + _half_w
+                    _other_mask = ~_is_left
+                else:
+                    _mx1, _mx2 = _b[0] - _half_w, _b[2] - _half_w
+                    _other_mask = _is_left
+                _mcx = (_mx1 + _mx2) / 2.0
+                _mcy = (_b[1] + _b[3]) / 2.0
+                _found = False
+                for _j in np.where(_other_mask)[0]:
+                    _ocx = (bboxes_eq_np[_j, 0] + bboxes_eq_np[_j, 2]) / 2.0
+                    _ocy = (bboxes_eq_np[_j, 1] + bboxes_eq_np[_j, 3]) / 2.0
+                    if abs(_ocx - _mcx) < _tol and abs(_ocy - _mcy) < _tol:
+                        _found = True
+                        break
+                if not _found:
+                    _mb = _b.copy()
+                    _mb[0] = _mx1
+                    _mb[2] = _mx2
+                    _mirrored_bboxes.append(_mb)
+            if _mirrored_bboxes:
+                bboxes_eq_np = np.vstack([bboxes_eq_np, np.array(_mirrored_bboxes)])
+
         # VR-07: use list of namedtuple-style tuples instead of a string-keyed dict
         # to avoid string allocation for each face and simplify downstream iteration
         processed_perspective_crops_details = []  # each entry: (eye_side, tensor, theta, phi, fov)
