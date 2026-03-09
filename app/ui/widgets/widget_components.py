@@ -281,7 +281,7 @@ class TargetMediaCardButton(CardButton):
         )
 
         main_window.loading_new_media = True
-        common_widget_actions.refresh_frame(main_window)
+        common_widget_actions.refresh_frame(main_window, synchronous=True)
 
         if main_window.control.get("AutoSwapToggle"):
             # Run detect on 0 frame or image
