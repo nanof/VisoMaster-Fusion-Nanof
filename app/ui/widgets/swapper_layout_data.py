@@ -1681,7 +1681,6 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "label": "Enable Face Re-Aging",
             "default": False,
             "help": "Apply age transformation to the assigned input (source) face before swapping. Use 'Apply' to re-compute embeddings and KV maps after adjusting the age sliders.",
-            "exec_function": control_actions.handle_face_reaging_toggle_change,
         },
         "FaceReagingSourceAgeSlider": {
             "level": 2,

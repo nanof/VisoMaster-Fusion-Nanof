@@ -8,7 +8,6 @@ The model accepts a (batch, 5, H, W) input tensor composed of:
 It returns a (batch, 3, H, W) residual that is added to the original
 image to produce the aged output.
 """
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -53,9 +52,7 @@ class FaceReaging:
         """
         session = self.models_processor.load_model(self.MODEL_NAME)
         if session is None:
-            print(
-                f"[ERROR] FaceReaging: model '{self.MODEL_NAME}' could not be loaded."
-            )
+            print(f"[ERROR] FaceReaging: model '{self.MODEL_NAME}' could not be loaded.")
             return face_chw_uint8
 
         try:
@@ -64,9 +61,7 @@ class FaceReaging:
 
             src_ch = torch.full((1, h, w), source_age / 100.0, dtype=torch.float32)
             tgt_ch = torch.full((1, h, w), target_age / 100.0, dtype=torch.float32)
-            inp = torch.cat([face_float, src_ch, tgt_ch], dim=0).unsqueeze(
-                0
-            )  # (1,5,H,W)
+            inp = torch.cat([face_float, src_ch, tgt_ch], dim=0).unsqueeze(0)  # (1,5,H,W)
 
             inp_np = inp.numpy().astype(np.float32)
             input_name = session.get_inputs()[0].name

@@ -555,19 +555,9 @@ def apply_face_reaging(main_window: "MainWindow", *_args) -> None:
     import traceback
     import numpy as np
 
-    # Guard: do nothing if Swap Faces is not active
-    if not main_window.swapfacesButton.isChecked():
-        return
-
     target_face = main_window.cur_selected_target_face_button
     if target_face is None:
-        return
-
-    face_id = target_face.face_id
-    params: Any = main_window.parameters.get(face_id, {})
-
-    # Guard: do nothing if the toggle is currently disabled
-    if not params.get("FaceReagingEnableToggle", False):
+        print("[WARN] apply_face_reaging: No target face selected.")
         return
 
     if not target_face.assigned_input_faces:
@@ -575,6 +565,9 @@ def apply_face_reaging(main_window: "MainWindow", *_args) -> None:
             "[WARN] apply_face_reaging: No input face assigned to the selected target face."
         )
         return
+
+    face_id = target_face.face_id
+    params: Any = main_window.parameters.get(face_id, {})
     source_age = int(params.get("FaceReagingSourceAgeSlider", 25))
     target_age_val = int(params.get("FaceReagingTargetAgeSlider", 70))
 
@@ -684,22 +677,3 @@ def apply_face_reaging(main_window: "MainWindow", *_args) -> None:
     except Exception as exc:
         print(f"[ERROR] apply_face_reaging: {exc}")
         traceback.print_exc()
-
-
-def handle_face_reaging_toggle_change(
-    main_window: "MainWindow", new_value: bool
-) -> None:
-    """Clear aged embedding/KV map when Face Re-Aging toggle is disabled.
-
-    When the toggle is turned off the original (non-aged) embedding and KV map
-    should be used immediately, so we wipe the cached aged data and refresh.
-    """
-    if new_value:
-        # Toggle just enabled — user still needs to press Apply, nothing to clear.
-        return
-    target_face = main_window.cur_selected_target_face_button
-    if target_face is None:
-        return
-    target_face.aged_input_embedding = {}
-    target_face.aged_kv_map = None
-    common_widget_actions.refresh_frame(main_window)

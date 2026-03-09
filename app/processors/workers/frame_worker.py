@@ -554,9 +554,10 @@ class FrameWorker(threading.Thread):
         s_e_for_swap_np = None
         if swap_button_is_checked_global:
             _vr_reaging_on = parameters_for_face.get("FaceReagingEnableToggle", False)
-            _vr_aged_emb = getattr(target_face_button, "aged_input_embedding", {})
-            if _vr_reaging_on and _vr_aged_emb:
-                s_e_for_swap_np = _vr_aged_emb.get(arcface_model_for_swap)
+            if _vr_reaging_on and target_face_button.aged_input_embedding:
+                s_e_for_swap_np = target_face_button.aged_input_embedding.get(
+                    arcface_model_for_swap
+                )
             else:
                 s_e_for_swap_np = target_face_button.assigned_input_embedding.get(
                     arcface_model_for_swap
@@ -1235,10 +1236,9 @@ class FrameWorker(threading.Thread):
                         edit_button_is_checked_global=edit_button_is_checked_global,
                         eye_side_for_debug=item_data["original_eye_side"],
                         kv_map_for_swap=(
-                            getattr(item_data["target_button"], "aged_kv_map", None)
+                            item_data["target_button"].aged_kv_map
                             if item_data["params"].get("FaceReagingEnableToggle", False)
-                            and getattr(item_data["target_button"], "aged_kv_map", None)
-                            is not None
+                            and item_data["target_button"].aged_kv_map is not None
                             else item_data["target_button"].assigned_kv_map
                         ),
                     )
@@ -1611,9 +1611,10 @@ class FrameWorker(threading.Thread):
                             and params["SwapModelSelection"] != "DeepFaceLive (DFM)"
                         ):
                             _reaging_on = params.get("FaceReagingEnableToggle", False)
-                            _aged_emb = getattr(target_face, "aged_input_embedding", {})
-                            if _reaging_on and _aged_emb:
-                                s_e = _aged_emb.get(arcface_model)
+                            if _reaging_on and target_face.aged_input_embedding:
+                                s_e = target_face.aged_input_embedding.get(
+                                    arcface_model
+                                )
                             else:
                                 s_e = target_face.assigned_input_embedding.get(
                                     arcface_model
@@ -1621,11 +1622,10 @@ class FrameWorker(threading.Thread):
                             if s_e is not None and np.isnan(s_e).any():
                                 s_e = None
 
-                        _aged_kv = getattr(target_face, "aged_kv_map", None)
                         _reaging_kv = (
-                            _aged_kv
+                            target_face.aged_kv_map
                             if params.get("FaceReagingEnableToggle", False)
-                            and _aged_kv is not None
+                            and target_face.aged_kv_map is not None
                             else target_face.assigned_kv_map
                         )
                         img, best_fface["original_face"], best_fface["swap_mask"] = (
@@ -1706,11 +1706,10 @@ class FrameWorker(threading.Thread):
                             and params["SwapModelSelection"] != "DeepFaceLive (DFM)"
                         ):
                             _reaging_on = params.get("FaceReagingEnableToggle", False)
-                            _aged_emb_bt = getattr(
-                                best_target, "aged_input_embedding", {}
-                            )
-                            if _reaging_on and _aged_emb_bt:
-                                s_e = _aged_emb_bt.get(arcface_model)
+                            if _reaging_on and best_target.aged_input_embedding:
+                                s_e = best_target.aged_input_embedding.get(
+                                    arcface_model
+                                )
                             else:
                                 s_e = best_target.assigned_input_embedding.get(
                                     arcface_model
@@ -1718,11 +1717,10 @@ class FrameWorker(threading.Thread):
                             if s_e is not None and np.isnan(s_e).any():
                                 s_e = None
 
-                        _aged_kv_bt = getattr(best_target, "aged_kv_map", None)
                         _reaging_kv = (
-                            _aged_kv_bt
+                            best_target.aged_kv_map
                             if params.get("FaceReagingEnableToggle", False)
-                            and _aged_kv_bt is not None
+                            and best_target.aged_kv_map is not None
                             else best_target.assigned_kv_map
                         )
                         img, fface["original_face"], fface["swap_mask"] = (
