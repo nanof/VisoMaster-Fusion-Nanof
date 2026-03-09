@@ -2,6 +2,7 @@ import traceback
 from typing import TYPE_CHECKING, Dict, Optional, cast
 import threading
 import queue
+import copy
 import math
 from math import ceil
 from app.ui.widgets import widget_components
@@ -306,8 +307,8 @@ class FrameWorker(threading.Thread):
                 # Single-Frame worker MUST use the *current* global state
                 # to reflect immediate UI changes.
                 with self.main_window.models_processor.model_lock:
-                    local_parameters_copy = self.main_window.parameters.copy()
-                    local_control_copy = self.main_window.control.copy()
+                    local_parameters_copy = copy.deepcopy(self.main_window.parameters)
+                    local_control_copy = copy.deepcopy(self.main_window.control)
 
                 # Ensure parameter dicts exist (failsafe for new faces)
                 active_target_face_ids = list(self.main_window.target_faces.keys())
@@ -1185,7 +1186,9 @@ class FrameWorker(threading.Thread):
                     and best_target_button_vr.assigned_kv_map is None
                     and best_target_button_vr.assigned_input_faces
                 ):
-                    best_target_button_vr.calculate_assigned_input_embedding()
+                    with self.models_processor.model_lock:
+                        if best_target_button_vr.assigned_kv_map is None: # Double Check inside lock
+                            best_target_button_vr.calculate_assigned_input_embedding()
 
                 analyzed_faces_for_vr.append(
                     {
@@ -1597,7 +1600,9 @@ class FrameWorker(threading.Thread):
                             and target_face.assigned_kv_map is None
                             and target_face.assigned_input_faces
                         ):
-                            target_face.calculate_assigned_input_embedding()
+                            with self.models_processor.model_lock:
+                                if target_face.assigned_kv_map is None: # Double Check inside lock
+                                    target_face.calculate_assigned_input_embedding()
 
                         # --- MORPHING: Swap Only Best Match ---
                         source_kps = None
@@ -1694,7 +1699,9 @@ class FrameWorker(threading.Thread):
                             and best_target.assigned_kv_map is None
                             and best_target.assigned_input_faces
                         ):
-                            best_target.calculate_assigned_input_embedding()
+                            with self.models_processor.model_lock:
+                                if best_target.assigned_kv_map is None: # Double Check inside lock
+                                    best_target.calculate_assigned_input_embedding()
 
                         # --- MORPHING: Branch Swap All Matches ---
                         source_kps = None
@@ -2533,7 +2540,7 @@ class FrameWorker(threading.Thread):
                         )
 
                 if self.models_processor.device == "cuda":
-                    torch.cuda.synchronize()
+                    torch.cuda.current_stream().synchronize()
 
                 # --- MODE 2 ---
                 if use_mode_2:
@@ -2584,7 +2591,7 @@ class FrameWorker(threading.Thread):
             version = swapper_model[-1]
             dim_res = dim // 2
 
-            for _ in range(itex):  # FW-QUAL-06: renamed k -> _
+            for k in range(itex):  # FW-QUAL-06: renamed k -> _ - Fix : Restored k to prevent crash
                 prev_face = (
                     input_face_affined.clone()
                 )  # save N-1 result before this pass
@@ -2609,7 +2616,7 @@ class FrameWorker(threading.Thread):
                         )
 
                 if self.models_processor.device == "cuda":
-                    torch.cuda.synchronize()
+                    torch.cuda.current_stream().synchronize()
 
                 # --- MODE 2 ---
                 if use_mode_2:
@@ -2655,7 +2662,7 @@ class FrameWorker(threading.Thread):
                     output = torch.clamp(output, 0, 255)
 
         elif swapper_model == "SimSwap512":
-            for _ in range(itex):  # FW-QUAL-06: renamed k -> _
+            for k in range(itex):  # FW-QUAL-06: renamed k -> _ - Fix : restored k to prevent crash
                 prev_face = (
                     input_face_affined.clone()
                 )  # save N-1 result before this pass
@@ -2672,7 +2679,7 @@ class FrameWorker(threading.Thread):
                 )
 
                 if self.models_processor.device == "cuda":
-                    torch.cuda.synchronize()  # FW-PERF-13: moved after inference
+                    torch.cuda.current_stream().synchronize()
 
                 # FW-BUG-08: use abs().max() instead of sum() for zero-face heuristic
                 if swapper_output.abs().max() < 1e-4:
@@ -2707,7 +2714,7 @@ class FrameWorker(threading.Thread):
 
         # FW-QUAL-10: use GHOSTFACE_MODELS frozenset
         elif swapper_model in self.GHOSTFACE_MODELS:
-            for _ in range(itex):  # FW-QUAL-06: renamed k -> _
+            for k in range(itex):  # FW-QUAL-06: renamed k -> _
                 prev_face = (
                     input_face_affined.clone()
                 )  # save N-1 result before this pass
@@ -2726,7 +2733,7 @@ class FrameWorker(threading.Thread):
                 )
 
                 if self.models_processor.device == "cuda":
-                    torch.cuda.synchronize()  # FW-PERF-13: moved after inference
+                    torch.cuda.current_stream().synchronize()
 
                 swapper_output = swapper_output[0]
                 # FW-BUG-11: use abs().mean() instead of sum() for zero-output heuristic
@@ -2769,7 +2776,7 @@ class FrameWorker(threading.Thread):
                     output = torch.clamp(output, 0, 255)
 
         elif swapper_model == "CSCS":
-            for _ in range(itex):  # FW-QUAL-06: renamed k -> _
+            for k in range(itex):  # FW-QUAL-06: renamed k -> _
                 prev_face = (
                     input_face_affined.clone()
                 )  # save N-1 result before this pass
@@ -2789,7 +2796,7 @@ class FrameWorker(threading.Thread):
                 )
 
                 if self.models_processor.device == "cuda":
-                    torch.cuda.synchronize()  # FW-PERF-13: moved after inference
+                    torch.cuda.current_stream().synchronize()
 
                 swapper_output = torch.squeeze(swapper_output)
                 swapper_output = torch.add(torch.mul(swapper_output, 0.5), 0.5)
