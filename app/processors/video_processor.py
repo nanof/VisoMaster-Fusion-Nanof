@@ -511,6 +511,7 @@ class VideoProcessor(QObject):
                         f"[WARN] Feeder: Skipping corrupted frame {self.current_frame_number} (Total skipped: {self.total_skipped_frames}, Consecutive errors: {self.consecutive_read_errors})."
                     )
                     self.current_frame_number += 1
+                    misc_helpers.seek_frame(self.media_capture, self.current_frame_number)
                     continue  # Skip this frame and try the next one
 
                 # Successfully read a frame, reset consecutive error counter
@@ -556,8 +557,8 @@ class VideoProcessor(QObject):
 
                     # Use the (potentially updated) feeder state
                     # We MUST send copies, as the worker will use them in parallel
-                    local_params_for_worker = self.feeder_parameters.copy()
-                    local_control_for_worker = self.feeder_control.copy()
+                    local_params_for_worker = copy.deepcopy(self.feeder_parameters)
+                    local_control_for_worker = copy.deepcopy(self.feeder_control)
 
                 frame_rgb = numpy.ascontiguousarray(frame_bgr[..., ::-1])
 
@@ -622,8 +623,8 @@ class VideoProcessor(QObject):
                 # The worker pool expects a 4-tuple task.
                 # For webcam, we must read the *current* global parameters
                 with self.main_window.models_processor.model_lock:
-                    local_params_for_worker = self.main_window.parameters.copy()
-                    local_control_for_worker = self.main_window.control.copy()
+                    local_params_for_worker = copy.deepcopy(self.feeder_parameters)
+                    local_control_for_worker = copy.deepcopy(self.feeder_control)
 
                 # Create the 4-tuple task
                 task = (
@@ -942,8 +943,8 @@ class VideoProcessor(QObject):
 
         # Initialize feeder state with the current UI global state
         with self.state_lock:
-            self.feeder_parameters = self.main_window.parameters.copy()
-            self.feeder_control = self.main_window.control.copy()
+            self.feeder_parameters = copy.deepcopy(self.main_window.parameters)
+            self.feeder_control = copy.deepcopy(self.main_window.control)
 
         # Seed global PyTorch/CUDA RNG once per video session from the denoiser seed
         # slider. This ensures reproducible denoiser output for the whole video without
@@ -1571,6 +1572,7 @@ class VideoProcessor(QObject):
                         print(
                             f"[WARN] Attempt {attempt + 1}: Capture is open but read() failed."
                         )
+                        seek_frame = max(0, seek_frame - 1)
                 else:
                     print(
                         f"[WARN] Attempt {attempt + 1}: VideoCapture.isOpened() is False."
