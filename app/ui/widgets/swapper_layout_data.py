@@ -91,6 +91,13 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "requiredSelectionValue": "DeepFaceLive (DFM)",
             "help": "RCT Color Transfer for DFM Models",
         },
+        "FaceAlignmentInterpolation": {
+            "level": 1,
+            "label": "Face Alignment Interpolation",
+            "options": ["Bilinear", "Bicubic"],
+            "default": "Bilinear",
+            "help": "Interpolation mode used when warping the face into the 512x512 alignment crop. Bicubic preserves more high-frequency detail (sharper edges, eye corneas) at a small extra cost.",
+        },
         "SimilarityThresholdSlider": {
             "level": 1,
             "label": "Similarity Threshold",

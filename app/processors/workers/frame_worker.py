@@ -52,6 +52,19 @@ class FrameWorker(threading.Thread):
     # FW-QUAL-10: frozenset of GhostFace model names for cleaner membership tests
     GHOSTFACE_MODELS = frozenset({"GhostFace-v1", "GhostFace-v2", "GhostFace-v3"})
 
+    # Q-IMP-01: interpolation mode constants for face alignment
+    _BICUBIC_INTERP = "bicubic"
+    _BILINEAR_INTERP = "bilinear"
+
+    # Q-QUAL-01: EMA alpha for keypoint smoothing
+    _KPS_EMA_ALPHA: float = 0.35
+
+    # Q-QUAL-03: EMA alpha for AutoColor reference statistics
+    _COLOR_EMA_ALPHA: float = 0.30
+
+    # Q-IMP-04: minimum face bounding-box side length (pixels) to process
+    _MIN_FACE_PIXELS: int = 20
+
     def __init__(
         self,
         main_window: "MainWindow",
@@ -173,6 +186,12 @@ class FrameWorker(threading.Thread):
 
         # Resize object cache (FW-PERF-08)
         self._resize_cache: dict = {}
+
+        # Q-QUAL-01: EMA-smoothed keypoints to reduce detection-interval flicker
+        self._smoothed_kps: dict[int, np.ndarray] = {}
+
+        # Q-QUAL-03: EMA over per-face AutoColor reference statistics to reduce flicker
+        self._color_stats_ema: dict[bytes, dict] = {}
 
         # --- OPTIMIZATION: Cached Convolution Kernels (VRAM) ---
         # Pre-allocating mathematical filters prevents massive CPU-to-GPU
@@ -441,7 +460,7 @@ class FrameWorker(threading.Thread):
             denoiser_cfg_scale=cfg_scale_val,
             latent_sharpening_strength=sharpen_val,
         )
-        return denoised_image
+        return torch.clamp(denoised_image, 0, 255)
 
     def _find_best_target_match(
         self,
@@ -683,7 +702,7 @@ class FrameWorker(threading.Thread):
                 masked_swapped_face_to_paste_float.unsqueeze(0),
                 source_grid_normalized_xy_persp,
                 mode="bilinear",
-                padding_mode="border",
+                padding_mode="zeros",
                 align_corners=False,
             ).squeeze(0)
             transformed_mask_on_persp_float = torch.nn.functional.grid_sample(
@@ -1465,6 +1484,24 @@ class FrameWorker(threading.Thread):
             self.last_detected_faces = detected_for_state
             self.last_processed_frame_number = self.frame_number
 
+        # Q-QUAL-01: Apply EMA to keypoints to smooth detection-interval jumps
+        if isinstance(kpss_5, np.ndarray) and kpss_5.shape[0] > 0:
+            kpss_5 = kpss_5.copy()  # ensure mutable before EMA writes
+            n_faces = kpss_5.shape[0]
+            if len(self._smoothed_kps) != n_faces:
+                self._smoothed_kps = {}
+            for _i in range(n_faces):
+                if _i in self._smoothed_kps:
+                    self._smoothed_kps[_i] = (
+                        self._KPS_EMA_ALPHA * kpss_5[_i]
+                        + (1.0 - self._KPS_EMA_ALPHA) * self._smoothed_kps[_i]
+                    )
+                else:
+                    self._smoothed_kps[_i] = kpss_5[_i].copy()
+                kpss_5[_i] = self._smoothed_kps[_i]
+
+        img_h_for_kps = img.shape[-2]
+        img_w_for_kps = img.shape[-1]
         if (
             isinstance(kpss_5, np.ndarray)
             and kpss_5.shape[0] > 0
@@ -1472,6 +1509,14 @@ class FrameWorker(threading.Thread):
             and len(kpss_5) > 0
         ):
             for i in range(len(kpss_5)):
+                if not self._is_kps_valid(kpss_5[i], img_h_for_kps, img_w_for_kps):
+                    continue
+                _bbox_i = bboxes[i]
+                if (
+                    min(_bbox_i[2] - _bbox_i[0], _bbox_i[3] - _bbox_i[1])
+                    < self._MIN_FACE_PIXELS
+                ):
+                    continue  # too small to produce meaningful swap
                 face_emb, _ = self.models_processor.run_recognize_direct(
                     img,
                     kpss_5[i],
@@ -1877,16 +1922,21 @@ class FrameWorker(threading.Thread):
         return img
 
     def get_cropped_face_using_kps(
-        self, img: torch.Tensor, kps_5: np.ndarray, parameters: dict
+        self,
+        img: torch.Tensor,
+        kps_5: np.ndarray,
+        parameters: dict,
+        interp_mode: str = "bilinear",
     ) -> torch.Tensor:
         """
         Aligns and crops a 512×512 face patch from *img* using the 5-point keypoints.
         OPTIMIZED: Uses Kornia to warp directly on the GPU, avoiding CPU decomposition.
 
         Args:
-            img:        Full-frame CHW uint8 tensor.
-            kps_5:      5-point facial keypoints (numpy array, shape [5, 2]).
-            parameters: Per-face parameter dict containing at least ``SwapModelSelection``.
+            img:         Full-frame CHW uint8 tensor.
+            kps_5:       5-point facial keypoints (numpy array, shape [5, 2]).
+            parameters:  Per-face parameter dict containing at least ``SwapModelSelection``.
+            interp_mode: Interpolation mode for warp_affine (e.g. "bilinear" or "bicubic").
 
         Returns:
             CHW uint8 tensor of shape [3, 512, 512].
@@ -1902,7 +1952,11 @@ class FrameWorker(threading.Thread):
         img_b_float = img_b.float()
 
         face_512_aligned = kgm.warp_affine(
-            img_b_float, M_tensor, dsize=(512, 512), mode="bilinear", align_corners=True
+            img_b_float,
+            M_tensor,
+            dsize=(512, 512),
+            mode=interp_mode,
+            align_corners=True,
         ).squeeze(0)
 
         # Convert back to original dtype (uint8)
@@ -1935,6 +1989,10 @@ class FrameWorker(threading.Thread):
             # Use instance initialization + .estimate() for older skimage versions
             if hasattr(trans.SimilarityTransform, "from_estimate"):
                 tform = trans.SimilarityTransform.from_estimate(kps_5, dst)
+                if np.any(np.isnan(tform.params)) or np.any(np.isinf(tform.params)):
+                    raise ValueError(
+                        "Similarity transform estimation produced NaN/Inf (degenerate face geometry)"
+                    )
             else:
                 tform = trans.SimilarityTransform()
                 # FW-ROBUST-11: check return value of tform.estimate()
@@ -1946,6 +2004,10 @@ class FrameWorker(threading.Thread):
                 tform = trans.SimilarityTransform.from_estimate(
                     kps_5, self.models_processor.FFHQ_kps
                 )
+                if np.any(np.isnan(tform.params)) or np.any(np.isinf(tform.params)):
+                    raise ValueError(
+                        "Similarity transform estimation produced NaN/Inf (degenerate face geometry)"
+                    )
             else:
                 tform = trans.SimilarityTransform()
                 # FW-ROBUST-11: check return value
@@ -1958,17 +2020,24 @@ class FrameWorker(threading.Thread):
             tform = trans.SimilarityTransform()
             dst = faceutil.get_arcface_template(image_size=512, mode="arcfacemap")
             M, _ = faceutil.estimate_norm_arcface_template(kps_5, src=dst)
+            if M is None or np.any(np.isnan(M)) or np.any(np.isinf(M)):
+                raise ValueError(
+                    "GhostFace transform estimation failed (degenerate face geometry)"
+                )
             tform.params[0:2] = M
         return tform
 
-    def get_transformed_and_scaled_faces(self, tform, img):
+    def get_transformed_and_scaled_faces(
+        self, tform, img, interp_mode: str = "bilinear"
+    ):
         """
         Applies the similarity transform to extract aligned face crops at four resolutions.
         OPTIMIZED: GPU warping directly from transformation matrix using Kornia.
 
         Args:
-            tform: Fitted ``SimilarityTransform`` from ``get_face_similarity_tform``.
-            img:   Full-frame CHW uint8 tensor.
+            tform:       Fitted ``SimilarityTransform`` from ``get_face_similarity_tform``.
+            img:         Full-frame CHW uint8 tensor.
+            interp_mode: Interpolation mode for warp_affine (e.g. "bilinear" or "bicubic").
 
         Returns:
             Tuple ``(face_512, face_384, face_256, face_128)``, all CHW uint8 tensors.
@@ -1982,12 +2051,25 @@ class FrameWorker(threading.Thread):
         img_b_float = img_b.float()
 
         original_face_512 = kgm.warp_affine(
-            img_b_float, M_tensor, dsize=(512, 512), mode="bilinear", align_corners=True
+            img_b_float,
+            M_tensor,
+            dsize=(512, 512),
+            mode=interp_mode,
+            align_corners=True,
         ).squeeze(0)
 
         # Convert back to original dtype (uint8) before passing to torchvision resizers
         original_face_512 = original_face_512.to(img.dtype)
 
+        assert self.t384 is not None, (
+            "t384 must be initialized via set_scaling_transforms"
+        )
+        assert self.t256 is not None, (
+            "t256 must be initialized via set_scaling_transforms"
+        )
+        assert self.t128 is not None, (
+            "t128 must be initialized via set_scaling_transforms"
+        )
         original_face_384 = self.t384(original_face_512)
         original_face_256 = self.t256(original_face_512)
         original_face_128 = self.t128(original_face_256)
@@ -1997,6 +2079,19 @@ class FrameWorker(threading.Thread):
             original_face_256,
             original_face_128,
         )
+
+    @staticmethod
+    def _is_kps_valid(kps: np.ndarray, img_h: int, img_w: int) -> bool:
+        """Returns False if any keypoint is NaN, Inf, or outside image bounds."""
+        if kps is None or kps.size == 0:
+            return False
+        if np.any(np.isnan(kps)) or np.any(np.isinf(kps)):
+            return False
+        if np.any(kps[:, 0] < 0) or np.any(kps[:, 0] >= img_w):
+            return False
+        if np.any(kps[:, 1] < 0) or np.any(kps[:, 1] >= img_h):
+            return False
+        return True
 
     @staticmethod
     def _apply_likeness(
@@ -2967,8 +3062,13 @@ class FrameWorker(threading.Thread):
             "t128_mask must be initialized via set_scaling_transforms before swap_core"
         )
 
+        _face_interp = (
+            "bicubic"
+            if parameters.get("FaceAlignmentInterpolation", "Bilinear") == "Bicubic"
+            else "bilinear"
+        )
         original_face_512, original_face_384, original_face_256, original_face_128 = (
-            self.get_transformed_and_scaled_faces(tform, img)
+            self.get_transformed_and_scaled_faces(tform, img, interp_mode=_face_interp)
         )
         original_faces = (
             original_face_512,
@@ -3601,25 +3701,61 @@ class FrameWorker(threading.Thread):
         # to the global swap_mask (the EndingColorTransfer runs at the end, AFTER the
         # FaceParser end-pass and the final swap_mask re-calculation, so it operates on a
         # tighter mask that excludes eyes/mouth/hairline etc.).
+
+        # Q-QUAL-03: build a smoothed reference face for AutoColor to reduce per-frame flicker.
+        # Key by target embedding bytes so each target face has its own EMA history.
+        original_face_for_color = original_face_512
+        if parameters.get("AutoColorEnableToggle", False) and valid_t_e is not None:
+            _ema_key = valid_t_e.tobytes()
+            _face_f = original_face_512.float()
+            _curr_mean = _face_f.mean(dim=(1, 2), keepdim=True)
+            _curr_std = _face_f.std(dim=(1, 2), keepdim=True) + 1e-6
+            if _ema_key in self._color_stats_ema:
+                _prev = self._color_stats_ema[_ema_key]
+                _ema_mean = (
+                    self._COLOR_EMA_ALPHA * _curr_mean
+                    + (1.0 - self._COLOR_EMA_ALPHA) * _prev["mean"]
+                )
+                _ema_std = (
+                    self._COLOR_EMA_ALPHA * _curr_std
+                    + (1.0 - self._COLOR_EMA_ALPHA) * _prev["std"]
+                )
+            else:
+                _ema_mean, _ema_std = _curr_mean, _curr_std
+            self._color_stats_ema[_ema_key] = {
+                "mean": _ema_mean.detach(),
+                "std": _ema_std.detach(),
+            }
+            # Remap original_face to have smoothed colour statistics
+            original_face_for_color = (
+                ((_face_f - _curr_mean) / _curr_std * _ema_std + _ema_mean)
+                .clamp(0, 255)
+                .to(original_face_512.dtype)
+            )
+
         if parameters.get("AutoColorEnableToggle", False):
             if parameters["AutoColorTransferTypeSelection"] == "Test":
                 swap = faceutil.histogram_matching(
-                    original_face_512, swap, parameters["AutoColorBlendAmountSlider"]
+                    original_face_for_color,
+                    swap,
+                    parameters["AutoColorBlendAmountSlider"],
                 )
             elif parameters["AutoColorTransferTypeSelection"] == "Test_Mask":
                 swap = faceutil.histogram_matching_withmask(
-                    original_face_512,
+                    original_face_for_color,
                     swap,
                     mask_autocolor,
                     parameters["AutoColorBlendAmountSlider"],
                 )
             elif parameters["AutoColorTransferTypeSelection"] == "DFL_Test":
                 swap = faceutil.histogram_matching_DFL_test(
-                    original_face_512, swap, parameters["AutoColorBlendAmountSlider"]
+                    original_face_for_color,
+                    swap,
+                    parameters["AutoColorBlendAmountSlider"],
                 )
             elif parameters["AutoColorTransferTypeSelection"] == "DFL_Orig":
                 swap = faceutil.histogram_matching_DFL_Orig(
-                    original_face_512,
+                    original_face_for_color,
                     swap,
                     mask_autocolor,
                     parameters["AutoColorBlendAmountSlider"],
@@ -3627,7 +3763,7 @@ class FrameWorker(threading.Thread):
             elif parameters["AutoColorTransferTypeSelection"] == "AdaIN_Statistical":
                 swap = faceutil.apply_adain_color_transfer(
                     swap,
-                    original_face_512,
+                    original_face_for_color,
                     mask_autocolor,
                     parameters["AutoColorBlendAmountSlider"],
                 )

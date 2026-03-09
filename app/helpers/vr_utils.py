@@ -202,9 +202,20 @@ class PerspectiveConverter:
         # A 25px erosion kernel can completely remove masks for distant/small faces.
         _mask_h = eye_specific_mask_torch_original_shape.shape[-2]
         _mask_w = eye_specific_mask_torch_original_shape.shape[-1]
-        _max_erosion = min(_mask_h, _mask_w) // 8
-        _erosion_k = min(2 * feather_radius_val + 1, _max_erosion)
-        _erosion_k = max(3, _erosion_k | 1)  # ensure odd and at least 3
+        # Q-IMP-03: check approximate size of the TRUE mask region (face extent in
+        # equirectangular space).  For distant/small faces the TRUE region may only
+        # cover a few hundred pixels; full erosion would destroy the blend area.
+        # sqrt(sum) gives the approximate side length of the mask bounding box.
+        _mask_region_side = int(
+            eye_specific_mask_torch_original_shape.sum().item() ** 0.5
+        )
+        if _mask_region_side < 48:
+            # Very small face — skip erosion entirely, only apply light blur
+            _erosion_k = 1
+        else:
+            _max_erosion = min(_mask_h, _mask_w) // 8
+            _erosion_k = min(2 * feather_radius_val + 1, _max_erosion)
+            _erosion_k = max(3, _erosion_k | 1)  # ensure odd and at least 3
         feathered_mask_torch_float_1hw = self._apply_feathering(
             eye_specific_mask_torch_original_shape,
             feather_radius=feather_radius_val,
@@ -235,7 +246,11 @@ class PerspectiveConverter:
         target_float.add_(component_float)
 
         # 5. Clamp and convert back to uint8, writing back to the original tensor.
-        target_equirect_torch_cxhxw_rgb_uint8[:] = target_float.clamp_(0, 255).byte()
+        # Q-BUG-02: use round_() before byte() to avoid systematic truncation bias
+        # (.byte() truncates toward zero; .round_() gives nearest integer).
+        target_equirect_torch_cxhxw_rgb_uint8[:] = (
+            target_float.clamp_(0, 255).round_().byte()
+        )
 
         del p2e_instance, equirect_component_torch, mask_torch_original_shape
         del eye_region_mask, eye_specific_mask_torch_original_shape
