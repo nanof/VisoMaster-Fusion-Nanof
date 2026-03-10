@@ -525,9 +525,7 @@ def _restore_batch_refresh_state(main_window: "MainWindow", previous_batch_flag:
     main_window._batch_update_in_progress = previous_batch_flag
 
 
-def _restore_state_and_refresh(
-    main_window: "MainWindow", previous_batch_flag: bool
-):
+def _restore_state_and_refresh(main_window: "MainWindow", previous_batch_flag: bool):
     """Restore suppression flag and run a single final frame refresh."""
     _restore_batch_refresh_state(main_window, previous_batch_flag)
     common_widget_actions.refresh_frame(main_window)

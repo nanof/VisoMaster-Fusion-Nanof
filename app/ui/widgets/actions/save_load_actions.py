@@ -207,7 +207,10 @@ def get_auto_load_workspace_toggle(
         data_filename = False
     if data_filename:
         with open(data_filename, "r") as data_file:  # pylint: disable=unspecified-encoding
-            data = json.load(data_file)
+            try:
+                data = json.load(data_file)
+            except json.JSONDecodeError:
+                return False
             control = data["control"]
             return control.get("AutoLoadWorkspaceToggle", False)
 
