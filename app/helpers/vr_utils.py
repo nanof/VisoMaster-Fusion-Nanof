@@ -2,7 +2,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torchvision import transforms
-from typing import Dict, Optional
+from collections import OrderedDict
+from typing import Optional
 
 
 # Assuming Equirec2Perspec_vr and Perspec2Equirec_vr are in app.processors.external
@@ -92,7 +93,10 @@ class PerspectiveConverter:
             self.base_equirect_tensor_cxhxw_rgb_uint8.shape
         )
         self.sobel_x_kernel, self.sobel_y_kernel = _get_sobel_kernels(self.device)
-        self._blur_cache: Dict[tuple, torch.nn.Module] = {}
+        # Bounded LRU cache for GaussianBlur instances (keyed by kernel_size, sigma).
+        # A plain dict would grow unbounded across frames with varying face sizes.
+        self._blur_cache: OrderedDict[tuple, torch.nn.Module] = OrderedDict()
+        self._blur_cache_max = 32
 
     def _apply_feathering(
         self,
@@ -141,9 +145,14 @@ class PerspectiveConverter:
 
         blur_key = (kernel_size_blur, sigma)
         if blur_key not in self._blur_cache:
+            if len(self._blur_cache) >= self._blur_cache_max:
+                self._blur_cache.popitem(last=False)  # evict oldest
             self._blur_cache[blur_key] = transforms.GaussianBlur(
                 kernel_size_blur, sigma
             )
+        else:
+            # Move to end (most-recently-used) for LRU eviction ordering
+            self._blur_cache.move_to_end(blur_key)
 
         gauss = self._blur_cache[blur_key]
         feathered_mask = gauss(eroded_mask)
@@ -196,19 +205,26 @@ class PerspectiveConverter:
             mask_torch_original_shape & eye_region_mask
         )
 
-        # Balanced parameters for erosion and feathering
-        feather_radius_val = 12
-        # VR-14: clamp erosion kernel so small masks are not completely eroded.
-        # A 25px erosion kernel can completely remove masks for distant/small faces.
+        # Improvement G: scale feather_radius with face size in equirectangular space.
+        # A fixed 12px radius is too coarse for distant faces (under-feathered) and
+        # can be too aggressive for large/close faces (over-feathered).
         _mask_h = eye_specific_mask_torch_original_shape.shape[-2]
         _mask_w = eye_specific_mask_torch_original_shape.shape[-1]
-        # Q-IMP-03: check approximate size of the TRUE mask region (face extent in
-        # equirectangular space).  For distant/small faces the TRUE region may only
-        # cover a few hundred pixels; full erosion would destroy the blend area.
-        # sqrt(sum) gives the approximate side length of the mask bounding box.
-        _mask_region_side = int(
-            eye_specific_mask_torch_original_shape.sum().item() ** 0.5
-        )
+        # Compute the TRUE bounding-box side length of the mask region.
+        # sqrt(sum) (old approach) underestimates for sparse/irregular masks because it
+        # conflates pixel count with geometric extent.  Using nonzero() indices of the
+        # 2D mask gives the actual pixel span in the equirectangular image.
+        _mask_2d = eye_specific_mask_torch_original_shape.squeeze(0)  # H, W
+        _nonzero = _mask_2d.nonzero(as_tuple=False)  # N×2
+        if _nonzero.shape[0] > 0:
+            _y_span = int(_nonzero[:, 0].max() - _nonzero[:, 0].min()) + 1
+            _x_span = int(_nonzero[:, 1].max() - _nonzero[:, 1].min()) + 1
+            _mask_region_side = max(_y_span, _x_span)
+        else:
+            _mask_region_side = 0
+        # Dynamic feather: proportional to face size, clamped to [4, 20]
+        _mask_side_clamped = max(48, _mask_region_side)
+        feather_radius_val = max(4, min(20, _mask_side_clamped // 12))
         if _mask_region_side < 48:
             # Very small face — skip erosion entirely, only apply light blur
             _erosion_k = 1

@@ -150,6 +150,8 @@ def _make_worker(main_window):
         worker.kernel_sobel_y = None
         worker._vr_converter = None
         worker._vr_frame_size = None
+        worker._vr_p2e_converter = None  # Improvement K: cached PerspectiveConverter
+        worker._vr_p2e_frame_size = None
         worker._last_scaling_control = None
         worker._resize_cache = {}
         worker._gabor_kernels_cache = OrderedDict()

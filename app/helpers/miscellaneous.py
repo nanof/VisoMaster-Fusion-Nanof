@@ -9,7 +9,7 @@ from functools import wraps
 from datetime import datetime
 from pathlib import Path
 from torchvision.transforms import v2
-from typing import Dict, Tuple, Optional
+from typing import Dict, Mapping, Tuple, Optional, Any
 import threading
 import subprocess
 import json
@@ -820,7 +820,9 @@ def tensor_to_pil(tensor: torch.Tensor) -> Image.Image:
 
 
 def keypoints_adjustments(
-    kps_5: np.ndarray, parameters: dict, source_kps: np.ndarray = None
+    kps_5: np.ndarray,
+    parameters: Mapping[str, Any],
+    source_kps: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     Adjusts facial keypoints for morphing and manual alignments.

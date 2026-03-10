@@ -35,7 +35,7 @@ def _get_equirect_xyz_grid_cached(height: int, width: int, device_str: str) -> t
 
 
 # This function should be at the module level
-@lru_cache(maxsize=None) # Cache based on THETA_deg, PHI_deg, device_str
+@lru_cache(maxsize=1024)  # Bounded: prevents unbounded GPU tensor accumulation for long videos
 def _get_rotation_matrices_cached(THETA_deg: float, PHI_deg: float, device_str: str):
     """
     Calculates and caches rotation matrices.
@@ -146,16 +146,18 @@ class Perspective:
         grid_x_persp = u_norm / self.w_len  # Maps to [-1, 1]
         grid_y_persp = - (v_norm / self.h_len)  # Invert Y-axis for grid_sample convention
 
-        # Where mask is False, set grid coordinates to something outside [-1,1] to be handled by padding_mode
-        grid_x_persp = torch.where(mask, grid_x_persp, torch.tensor(2.0, device=self.device)) # Value > 1
-        grid_y_persp = torch.where(mask, grid_y_persp, torch.tensor(2.0, device=self.device)) # Value > 1
+        # Bug 4 fix: clamp out-of-FOV coords to ±1.0 (boundary) and use padding_mode='border'.
+        # Previously used 2.0 sentinel + 'zeros' padding which pulled boundary-adjacent in-FOV
+        # pixels toward black via bilinear interpolation, creating dark halos at stitch seams.
+        grid_x_persp = torch.where(mask, grid_x_persp, torch.clamp(grid_x_persp, -1.0, 1.0))
+        grid_y_persp = torch.where(mask, grid_y_persp, torch.clamp(grid_y_persp, -1.0, 1.0))
 
         grid = torch.stack((grid_x_persp, grid_y_persp), dim=2).unsqueeze(0) # 1, H_out, W_out, 2
 
         # Sample from the perspective image
         # self._img_tensor_cxhxw_rgb_float is (C, H_persp, W_persp)
         equirect_component_float = F.grid_sample(self._img_tensor_cxhxw_rgb_float.unsqueeze(0), grid,
-                                                 mode='bilinear', padding_mode='zeros', align_corners=True)
+                                                 mode='bilinear', padding_mode='border', align_corners=True)
 
         equirect_component_uint8 = (torch.clamp(equirect_component_float.squeeze(0) * 255.0, 0, 255)).byte()
 

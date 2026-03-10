@@ -532,6 +532,7 @@ class FaceDetectors:
         from_points=False,
         rotation_angles=None,
         previous_detections=None,
+        bypass_bytetrack=False,
         **kwargs,
     ):
         """
@@ -540,6 +541,64 @@ class FaceDetectors:
         """
         control = self.models_processor.main_window.control
         use_bytetrack = control.get("FaceTrackingEnableToggle", False)
+        # bypass_bytetrack=True disables ByteTrack for this call only (e.g. per-eye VR
+        # detection where the half-width coordinate space would corrupt tracker state)
+        if bypass_bytetrack:
+            use_bytetrack = False
+
+        # ByteTrack skip-frame shortcut: when ByteTrack is active, the tracker has been
+        # initialised, AND this is a detection-interval skip frame (indicated by non-empty
+        # previous_detections), advance the Kalman filter with empty detections rather than
+        # running the full detector.  This makes FaceDetectionIntervalSlider effective even
+        # when ByteTrack is enabled (previously the slider was silently ignored).
+        if (
+            use_bytetrack
+            and BYTETracker is not None
+            and previous_detections is not None
+            and len(previous_detections) > 0
+        ):
+            with self._tracker_lock:
+                if self.tracker is not None:
+                    img_hw = (int(img.shape[1]), int(img.shape[2]))
+                    active_before_skip = len(self.tracker.tracked_stracks)
+                    online_targets = self.tracker.update(
+                        np.empty((0, 5)), img_hw, img_hw
+                    )
+                else:
+                    online_targets = []
+                    active_before_skip = 0
+
+            # Build return arrays from coasted tracks (Kalman-predicted positions
+            # with last known landmarks) — same logic as the main ByteTrack path below
+            tracked_det: list = []
+            tracked_kpss_5: list = []
+            tracked_kpss_all: list = []
+            tracked_scores: list = []
+            current_frame_num_skip = getattr(
+                self.models_processor, "current_frame_number", 0
+            )
+            for t in online_targets:
+                tlwh = t.tlwh
+                tid = t.track_id
+                t_bbox = np.array(
+                    [tlwh[0], tlwh[1], tlwh[0] + tlwh[2], tlwh[1] + tlwh[3]]
+                )
+                with self._track_history_lock:
+                    hist = self.track_history.get(tid)
+                if hist is not None and hist.get("kps") is not None:
+                    tracked_det.append(t_bbox)
+                    tracked_kpss_5.append(hist["kps"])
+                    tracked_kpss_all.append(hist["kps"])
+                    tracked_scores.append(hist["cum_score"])
+
+            if tracked_det:
+                return (
+                    np.array(tracked_det, dtype=np.float32),
+                    np.array(tracked_kpss_5, dtype=np.float32),
+                    np.array(tracked_kpss_all, dtype=object),
+                )
+            # Tracker had no active tracks (e.g. first ever frame) → fall through to full detection
+            # so the user sees faces immediately rather than waiting one extra frame.
 
         # TRACKING ATTEMPT (Simple Fallback)
         # If we have previous faces and tracking is requested (via implicit logic or kwargs)
@@ -621,9 +680,7 @@ class FaceDetectors:
         args.update(kwargs)
 
         if detect_mode in ["RetinaFace", "SCRFD"]:
-            args["input_size"] = self._resolve_detector_input_size(
-                detect_mode, input_size, ort_session
-            )
+            args["input_size"] = input_size
 
         # Run the detector — returns (det, kpss_5, kpss, det_scores)
         det, kpss_5, kpss, det_scores = detection_function(**args)
@@ -647,6 +704,10 @@ class FaceDetectors:
 
                 # Prepare detections for ByteTrack [x1, y1, x2, y2, score]
                 img_hw = (int(img.shape[1]), int(img.shape[2]))
+                # BT-13: measure active tracks BEFORE update so we have the correct
+                # pre-update baseline for scene-cut detection (measuring after update
+                # inflates the count by newly confirmed tracks, making cuts harder to detect)
+                active_before = len(self.tracker.tracked_stracks)
                 if len(det) > 0:
                     # Use actual detection scores; fall back to 0.9 if lengths mismatch
                     scores_for_tracker = (
@@ -663,7 +724,6 @@ class FaceDetectors:
 
                 # BT-13: scene-cut detection — if fewer than 30% of active tracks matched,
                 # the scene has likely changed; reset the tracker to avoid stale Kalman state
-                active_before = len(self.tracker.tracked_stracks)
                 matched_count = len(online_targets)
                 if active_before > 0 and matched_count / active_before < 0.3:
                     # print("[ByteTrack] Scene cut detected — resetting tracker")
@@ -736,7 +796,7 @@ class FaceDetectors:
                         tracked_scores.append(hist["cum_score"])
 
             # BT-08: evict stale track_history entries (last seen > track_buffer frames ago)
-            track_buffer = 30
+            track_buffer = int(control.get("ByteTrackTrackBufferSlider", 30))
             with self._track_history_lock:
                 stale_ids = [
                     tid

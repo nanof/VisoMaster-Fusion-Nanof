@@ -181,6 +181,12 @@ class FrameWorker(threading.Thread):
         # VR converter cache (VR-08)
         self._vr_converter: Optional[EquirectangularConverter] = None
         self._vr_frame_size: Optional[tuple] = None
+        # Improvement K: cache PerspectiveConverter across frames (same lifetime as E2P converter)
+        self._vr_p2e_converter: Optional[PerspectiveConverter] = None
+        # Tracked separately from _vr_frame_size: _vr_frame_size is updated by the E2P branch
+        # before the P2E check executes, making them always equal and preventing P2E recreation
+        # on resolution change.  This dedicated attribute fixes that race.
+        self._vr_p2e_frame_size: Optional[tuple] = None
 
         # Dirty-check cache for set_scaling_transforms (FW-PERF-07)
         self._last_scaling_control: dict | None = None
@@ -538,9 +544,15 @@ class FrameWorker(threading.Thread):
             (processed_crop, swap_mask_1x512x512_float_or_None)
             The mask is only populated when self.is_view_face_mask is True.
         """
-        # VR-12: assert crop is 512x512 so downstream swap_core assumptions hold
-        assert perspective_crop_torch_rgb_uint8.shape[-2:] == (512, 512), (
-            f"VR perspective crop must be 512x512, got {perspective_crop_torch_rgb_uint8.shape}"
+        # VR-12: assert crop is square with the configured render size so downstream
+        # swap_core assumptions hold.  Improvement F allows 512/768/1024 via UI.
+        _expected_crop_size = self.VR_PERSPECTIVE_RENDER_SIZE
+        assert perspective_crop_torch_rgb_uint8.shape[-2:] == (
+            _expected_crop_size,
+            _expected_crop_size,
+        ), (
+            f"VR perspective crop must be {_expected_crop_size}×{_expected_crop_size}, "
+            f"got {perspective_crop_torch_rgb_uint8.shape}"
         )
         processed_crop_torch_rgb_uint8 = perspective_crop_torch_rgb_uint8.clone()
         if kps_5_on_crop_param is None or kps_5_on_crop_param.size == 0:
@@ -705,19 +717,22 @@ class FrameWorker(threading.Thread):
                 512,
                 perspective_crop_torch_rgb_uint8.device,
             )
+            # Bug 5 fix: use align_corners=True to match the E2P/P2E projection convention.
+            # Previously align_corners=False introduced a sub-pixel shift (~0.2% for 512px)
+            # at the face-paste step, causing slight misalignment at crop boundaries.
             pasted_face_on_persp_float = torch.nn.functional.grid_sample(
                 masked_swapped_face_to_paste_float.unsqueeze(0),
                 source_grid_normalized_xy_persp,
                 mode="bilinear",
                 padding_mode="zeros",
-                align_corners=False,
+                align_corners=True,
             ).squeeze(0)
             transformed_mask_on_persp_float = torch.nn.functional.grid_sample(
                 persp_final_combined_mask_3x512x512_float_for_paste.unsqueeze(0),
                 source_grid_normalized_xy_persp,
                 mode="bilinear",
                 padding_mode="zeros",
-                align_corners=False,
+                align_corners=True,
             ).squeeze(0)
             blended_persp_crop_float = (
                 pasted_face_on_persp_float
@@ -771,6 +786,9 @@ class FrameWorker(threading.Thread):
                             "LipsMakeupEnableToggle",
                         )
                     ):
+                        assert (
+                            kps_all_on_crop_param is not None
+                        )  # guarded by outer landmark check
                         processed_crop_torch_rgb_uint8 = (
                             self.frame_edits.swap_edit_face_core_makeup(
                                 processed_crop_torch_rgb_uint8,
@@ -821,6 +839,7 @@ class FrameWorker(threading.Thread):
             self.set_scaling_transforms(control)
             self._last_scaling_control = _scaling_keys
         img_numpy_rgb_uint8 = self.frame
+        assert img_numpy_rgb_uint8 is not None, "frame must be set before processing"
 
         # Prepare the base tensor
         processed_tensor_rgb_uint8 = (
@@ -859,6 +878,192 @@ class FrameWorker(threading.Thread):
             final_img_np_rgb_uint8 = np.ascontiguousarray(final_img_np_rgb_uint8)
 
         return final_img_np_rgb_uint8[..., ::-1]
+
+    # ------------------------------------------------------------------
+    # VR180 helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _rodrigues_np(axis_angle: np.ndarray) -> np.ndarray:
+        """Compute a 3×3 rotation matrix from an axis-angle vector (Rodrigues formula).
+        Pure numpy — no cv2 dependency needed for the VR bbox projection helper."""
+        angle = float(np.linalg.norm(axis_angle))
+        if angle < 1e-10:
+            return np.eye(3, dtype=np.float64)
+        k = axis_angle / angle
+        K = np.array(
+            [[0.0, -k[2], k[1]], [k[2], 0.0, -k[0]], [-k[1], k[0], 0.0]],
+            dtype=np.float64,
+        )
+        return np.eye(3) + math.sin(angle) * K + (1.0 - math.cos(angle)) * (K @ K)
+
+    @staticmethod
+    def _project_crop_bbox_to_equirect(
+        bbox_crop: np.ndarray,
+        theta: float,
+        phi: float,
+        fov: float,
+        crop_size: int,
+        eq_h: int,
+        eq_w: int,
+    ) -> "np.ndarray | None":
+        """Project a crop-space bounding box back to equirectangular pixel coordinates.
+
+        Samples 9 points (4 corners + 4 edge midpoints + centre) through the same
+        forward rotation used by E2P, then takes the axis-aligned bounding box of
+        the projected points.
+
+        Returns (x1, y1, x2, y2) float32 in equirect pixel space, or None if the
+        resulting box is degenerate (<2 px on either side).
+        """
+        y_axis = np.array([0.0, 1.0, 0.0], np.float64)
+        z_axis = np.array([0.0, 0.0, 1.0], np.float64)
+        R1 = FrameWorker._rodrigues_np(z_axis * math.radians(theta))
+        R2 = FrameWorker._rodrigues_np(np.dot(R1, y_axis) * math.radians(-phi))
+        R = R2 @ R1
+
+        w_len = math.tan(math.radians(fov / 2.0))
+        equ_cx = (eq_w - 1) / 2.0
+        equ_cy = (eq_h - 1) / 2.0
+
+        x1_c, y1_c, x2_c, y2_c = (
+            float(bbox_crop[0]),
+            float(bbox_crop[1]),
+            float(bbox_crop[2]),
+            float(bbox_crop[3]),
+        )
+        mx_c = (x1_c + x2_c) / 2.0
+        my_c = (y1_c + y2_c) / 2.0
+
+        sample_pts = [
+            (x1_c, y1_c),
+            (mx_c, y1_c),
+            (x2_c, y1_c),
+            (x1_c, my_c),
+            (mx_c, my_c),
+            (x2_c, my_c),
+            (x1_c, y2_c),
+            (mx_c, y2_c),
+            (x2_c, y2_c),
+        ]
+
+        lon_pxs: list[float] = []
+        lat_pxs: list[float] = []
+        for u, v in sample_pts:
+            px_norm = 2.0 * u / (crop_size - 1) - 1.0
+            py_norm = 2.0 * v / (crop_size - 1) - 1.0
+            d = np.array([1.0, w_len * px_norm, -w_len * py_norm], np.float64)
+            d_norm = d / np.linalg.norm(d)
+            d_world = R @ d_norm
+            lon = math.atan2(d_world[1], d_world[0])
+            lat = math.asin(float(np.clip(d_world[2], -1.0, 1.0)))
+            lon_pxs.append((lon / math.pi) * equ_cx + equ_cx)
+            lat_pxs.append((-lat / (math.pi / 2.0)) * equ_cy + equ_cy)
+
+        x1_eq = float(np.clip(min(lon_pxs), 0.0, eq_w - 1))
+        y1_eq = float(np.clip(min(lat_pxs), 0.0, eq_h - 1))
+        x2_eq = float(np.clip(max(lon_pxs), 0.0, eq_w - 1))
+        y2_eq = float(np.clip(max(lat_pxs), 0.0, eq_h - 1))
+
+        if x2_eq - x1_eq < 2.0 or y2_eq - y1_eq < 2.0:
+            return None
+        return np.array([x1_eq, y1_eq, x2_eq, y2_eq], dtype=np.float32)
+
+    def _detect_faces_vr_tiled(
+        self,
+        equirect_converter: EquirectangularConverter,
+        control: dict,
+        eq_h: int,
+        eq_w: int,
+        crop_size: int,
+    ) -> list:
+        """Detect faces in a grid of undistorted perspective crops.
+
+        Catches faces that are invisible to the equirect-domain detector because
+        of projection distortion (high elevation, near the ±180° seam, or very
+        large near-camera faces).
+
+        Returns a list of float32 numpy arrays, each (4,) or (5,) in equirect
+        pixel coordinates.
+        """
+        # Full-sphere tile grid: (theta_deg, phi_deg)
+        # 60° horizontal spacing at each latitude band gives ~30° overlap with a 90° FOV tile.
+        TILE_GRID = [
+            # equator band
+            (-150, 0),
+            (-90, 0),
+            (-30, 0),
+            (30, 0),
+            (90, 0),
+            (150, 0),
+            # upper band ~40°
+            (-150, 40),
+            (-90, 40),
+            (-30, 40),
+            (30, 40),
+            (90, 40),
+            (150, 40),
+            # lower band ~-40°
+            (-150, -40),
+            (-90, -40),
+            (-30, -40),
+            (30, -40),
+            (90, -40),
+            (150, -40),
+            # near-pole tiles — 3 per pole is sufficient given the 90° FOV
+            (-90, 70),
+            (0, 70),
+            (90, 70),
+            (-90, -70),
+            (0, -70),
+            (90, -70),
+        ]
+        tile_fov = 90.0
+        det_score = control["DetectorScoreSlider"] / 100.0
+        found: list = []
+
+        for theta, phi in TILE_GRID:
+            tile_crop = equirect_converter.get_perspective_crop(
+                tile_fov, theta, phi, crop_size, crop_size
+            )
+            if tile_crop is None or tile_crop.numel() == 0:
+                continue
+
+            bboxes_tile, _, _ = self.models_processor.run_detect(
+                tile_crop,
+                control["DetectorModelSelection"],
+                max_num=control["MaxFacesToDetectSlider"],
+                score=det_score,
+                use_landmark_detection=False,
+                landmark_detect_mode=control["LandmarkDetectModelSelection"],
+                landmark_score=control["LandmarkDetectScoreSlider"] / 100.0,
+                from_points=False,
+                rotation_angles=[0],
+                use_mean_eyes=False,
+                previous_detections=None,
+            )
+
+            if not isinstance(bboxes_tile, np.ndarray):
+                bboxes_tile = np.array(bboxes_tile)
+            if bboxes_tile.ndim == 1 and bboxes_tile.shape[0] in (4, 5):
+                bboxes_tile = bboxes_tile.reshape(1, -1)
+            if bboxes_tile.ndim != 2 or bboxes_tile.shape[0] == 0:
+                continue
+
+            for bbox_tile in bboxes_tile:
+                eq_bbox = self._project_crop_bbox_to_equirect(
+                    bbox_tile[:4], theta, phi, tile_fov, crop_size, eq_h, eq_w
+                )
+                if eq_bbox is None:
+                    continue
+                if bboxes_tile.shape[1] >= 5:
+                    found.append(
+                        np.append(eq_bbox, float(bbox_tile[4])).astype(np.float32)
+                    )
+                else:
+                    found.append(eq_bbox)
+
+        return found
 
     def _process_frame_vr180(
         self,
@@ -912,11 +1117,12 @@ class FrameWorker(threading.Thread):
         # geometrically invalid spherical coordinates.
         vr_rotation_angles = [0]
 
+        # Improvement F: read perspective crop resolution from UI (512/768/1024).
+        self.VR_PERSPECTIVE_RENDER_SIZE = int(
+            control.get("VR180CropResolutionSelection", "512")
+        )
+
         # Detection interval / previous-detections setup (mirrors standard-mode logic).
-        # When ByteTrack is OFF and detection_interval > 1, pass previous equirect
-        # bboxes so run_detect can use the cheaper track_faces fallback on non-keyframes.
-        # When ByteTrack is ON, run_detect handles tracking internally and ignores
-        # previous_detections, but we still maintain state for scene-cut recovery.
         _vr_detection_interval = int(control.get("FaceDetectionIntervalSlider", 1))
         _previous_faces_vr: list | None = None
         with self.lock:
@@ -929,25 +1135,100 @@ class FrameWorker(threading.Thread):
         ):
             _previous_faces_vr = _last_detected_vr
 
-        # Detection on full equirectangular image.
-        # Use the standard (512, 512) input size — TRT engines are compiled for this shape.
-        # A custom 2:1 size like (1024, 512) produces a (1, 3, 512, 1024) tensor that TRT
-        # has no profile for, causing "TensorRT EP failed to create engine from network".
-        # _prepare_detection_image letterboxes the 2:1 equirect into 512×256 within the
-        # 512×512 canvas, which still gives adequate resolution for face detection.
-        bboxes_eq_np, _, _ = self.models_processor.run_detect(
-            original_equirect_tensor_for_vr,
-            control["DetectorModelSelection"],
-            max_num=control["MaxFacesToDetectSlider"],
-            score=control["DetectorScoreSlider"] / 100.0,
-            use_landmark_detection=False,  # VR usually detects faces first, then landmarks on crops
-            landmark_detect_mode=control["LandmarkDetectModelSelection"],
-            landmark_score=control["LandmarkDetectScoreSlider"] / 100.0,
-            from_points=False,
-            rotation_angles=vr_rotation_angles,
-            use_mean_eyes=control.get("LandmarkMeanEyesToggle", False),
-            previous_detections=_previous_faces_vr,
+        # Improvement D: in Both-Eyes mode, detect on each eye-half separately.
+        # A standard VR180 SBS equirect is 2:1 (W=2H), so each half is square (H×H).
+        # Detecting on each 1:1 half gives the detector 4× more pixels per face vs
+        # letterboxing the full 2:1 equirect to 512×256.
+        _eq_h = img_numpy_rgb_uint8.shape[0]
+        _eq_w = img_numpy_rgb_uint8.shape[1]
+        _is_both_eyes = (
+            control.get("VR180EyeModeSelection", "Both Eyes") != "Single Eye"
         )
+        _aspect = _eq_w / max(_eq_h, 1)
+        _do_per_eye_detect = _is_both_eyes and _aspect >= 1.8
+
+        _det_score = control["DetectorScoreSlider"] / 100.0
+        _det_mode = control["DetectorModelSelection"]
+        _det_max = control["MaxFacesToDetectSlider"]
+        _lm_mode = control["LandmarkDetectModelSelection"]
+        _lm_score = control["LandmarkDetectScoreSlider"] / 100.0
+        _use_mean_eyes = control.get("LandmarkMeanEyesToggle", False)
+
+        def _run_det(tensor, prev_dets=None, bypass_bytetrack=False):
+            return self.models_processor.run_detect(
+                tensor,
+                _det_mode,
+                max_num=_det_max,
+                score=_det_score,
+                use_landmark_detection=False,
+                landmark_detect_mode=_lm_mode,
+                landmark_score=_lm_score,
+                from_points=False,
+                rotation_angles=vr_rotation_angles,
+                use_mean_eyes=_use_mean_eyes,
+                previous_detections=prev_dets,
+                bypass_bytetrack=bypass_bytetrack,
+            )
+
+        def _norm_bboxes(arr):
+            if not isinstance(arr, np.ndarray):
+                arr = np.array(arr)
+            if arr.ndim == 1 and arr.shape[0] in (4, 5):
+                arr = arr.reshape(1, -1)
+            return arr
+
+        if _do_per_eye_detect:
+            _half_w = original_equirect_tensor_for_vr.shape[2] // 2
+            _left_tensor = original_equirect_tensor_for_vr[:, :, :_half_w]
+            _right_tensor = original_equirect_tensor_for_vr[:, :, _half_w:]
+
+            # Split previous_detections into per-eye coordinate spaces
+            _prev_left: list | None = None
+            _prev_right: list | None = None
+            if _previous_faces_vr is not None:
+                _prev_left = [
+                    f
+                    for f in _previous_faces_vr
+                    if (f["bbox"][0] + f["bbox"][2]) / 2.0 < _half_w
+                ]
+                _prev_right = [
+                    {
+                        "bbox": [
+                            f["bbox"][0] - _half_w,
+                            f["bbox"][1],
+                            f["bbox"][2] - _half_w,
+                            f["bbox"][3],
+                        ],
+                        "score": f.get("score", 1.0),
+                    }
+                    for f in _previous_faces_vr
+                    if (f["bbox"][0] + f["bbox"][2]) / 2.0 >= _half_w
+                ]
+
+            # bypass_bytetrack=True: per-eye detection uses half-width coordinate spaces,
+            # which would corrupt the tracker's Kalman state if ByteTrack ran on both halves.
+            # Simple fallback tracking (via previous_detections) handles the interval skip.
+            _bboxes_left = _norm_bboxes(_run_det(_left_tensor, _prev_left, bypass_bytetrack=True)[0])
+            _bboxes_right = _norm_bboxes(_run_det(_right_tensor, _prev_right, bypass_bytetrack=True)[0])
+
+            # Offset right-half x-coordinates into full-equirect space
+            if _bboxes_right.ndim == 2 and _bboxes_right.shape[0] > 0:
+                _bboxes_right = _bboxes_right.copy()
+                _bboxes_right[:, 0] += _half_w
+                _bboxes_right[:, 2] += _half_w
+
+            _pieces = []
+            if _bboxes_left.ndim == 2 and _bboxes_left.shape[0] > 0:
+                _pieces.append(_bboxes_left)
+            if _bboxes_right.ndim == 2 and _bboxes_right.shape[0] > 0:
+                _pieces.append(_bboxes_right)
+            bboxes_eq_np = np.vstack(_pieces) if _pieces else np.array([])
+        else:
+            # Single Eye or non-2:1 equirect — detect on the full frame as before.
+            # Use the standard (512, 512) input size — TRT engines are compiled for this shape.
+            bboxes_eq_np = _norm_bboxes(
+                _run_det(original_equirect_tensor_for_vr, _previous_faces_vr)[0]
+            )
 
         if not isinstance(bboxes_eq_np, np.ndarray):
             bboxes_eq_np = np.array(bboxes_eq_np)
@@ -956,23 +1237,139 @@ class FrameWorker(threading.Thread):
         if bboxes_eq_np.ndim == 1 and bboxes_eq_np.shape[0] in (4, 5):
             bboxes_eq_np = bboxes_eq_np.reshape(1, -1)
 
-        # VR-03: replace custom O(n^2) distance-NMS with torchvision IoU-NMS
-        # which runs in C++ and handles the standard suppress-by-overlap case correctly.
+        # Improvement A: tiled perspective detection — catch faces missed by equirect
+        # detection (distorted at high elevation, near ±180° seam, or large near-camera faces).
+        # Guard: only run on detection keyframes (same interval as equirect detection) to avoid
+        # running 24 full inference passes every frame, which causes major slowdowns.
+        _is_detection_keyframe = (
+            _vr_detection_interval <= 1
+            or self.frame_number % _vr_detection_interval == 0
+        )
+        if control.get("VR180TileDetectionToggle", True) and _is_detection_keyframe:
+            _tile_bboxes = self._detect_faces_vr_tiled(
+                equirect_converter,
+                control,
+                _eq_h,
+                _eq_w,
+                self.VR_PERSPECTIVE_RENDER_SIZE,
+            )
+            if _tile_bboxes:
+                _tile_arr = np.array(_tile_bboxes, dtype=np.float32)
+                if _tile_arr.ndim == 1 and _tile_arr.shape[0] in (4, 5):
+                    _tile_arr = _tile_arr.reshape(1, -1)
+                if _tile_arr.ndim == 2 and _tile_arr.shape[0] > 0:
+                    _dev = self.models_processor.device
+                    _tile_boxes_t = torch.from_numpy(
+                        _tile_arr[:, :4].astype(np.float32)
+                    ).to(_dev)
+
+                    # Step 1 — intra-tile NMS: the same face is often detected by
+                    # multiple overlapping tiles (90° FOV with 60° spacing gives 30°
+                    # of overlap).  Run a tight NMS to merge these near-duplicates
+                    # before comparing against the equirect detections.
+                    if _tile_arr.shape[0] > 1:
+                        _t_scores = (
+                            torch.from_numpy(_tile_arr[:, 4].astype(np.float32))
+                            .to(_dev)
+                            .clamp(min=1e-6)
+                            if _tile_arr.shape[1] >= 5
+                            else (
+                                (_tile_boxes_t[:, 2] - _tile_boxes_t[:, 0])
+                                * (_tile_boxes_t[:, 3] - _tile_boxes_t[:, 1])
+                            ).clamp(min=0.0)
+                        )
+                        _t_keep = torchvision.ops.nms(
+                            _tile_boxes_t, _t_scores, iou_threshold=0.3
+                        )
+                        _tile_arr = _tile_arr[_t_keep.cpu().numpy()]
+                        _tile_boxes_t = torch.from_numpy(
+                            _tile_arr[:, :4].astype(np.float32)
+                        ).to(_dev)
+
+                    # Step 2 — suppress tile detections that already have a
+                    # corresponding equirect detection.  If a tile bbox overlaps any
+                    # equirect bbox by IoU ≥ 0.3, it represents the same face and
+                    # adding it would cause double-processing (two swaps stitched on
+                    # top of each other → artifacts, wrong size, colour shift).
+                    # Only genuinely NEW detections (IoU < 0.3 with all equirect
+                    # bboxes) are merged into the candidate list.
+                    if bboxes_eq_np.ndim == 2 and bboxes_eq_np.shape[0] > 0:
+                        _eq_boxes_t = torch.from_numpy(
+                            bboxes_eq_np[:, :4].astype(np.float32)
+                        ).to(_dev)
+                        # pairwise IoU matrix: shape (N_tile, N_equirect)
+                        _iou_tile_vs_eq = torchvision.ops.box_iou(
+                            _tile_boxes_t, _eq_boxes_t
+                        )
+                        _novel_mask = (
+                            (_iou_tile_vs_eq.max(dim=1).values < 0.3).cpu().numpy()
+                        )
+                        _novel_tile = _tile_arr[_novel_mask]
+                        if _novel_tile.shape[0] > 0:
+                            # Pad score column with 0.9 default where missing
+                            _n_cols = max(bboxes_eq_np.shape[1], _novel_tile.shape[1])
+                            if bboxes_eq_np.shape[1] < _n_cols:
+                                bboxes_eq_np = np.hstack(
+                                    [
+                                        bboxes_eq_np,
+                                        np.full(
+                                            (
+                                                bboxes_eq_np.shape[0],
+                                                _n_cols - bboxes_eq_np.shape[1],
+                                            ),
+                                            0.9,
+                                            dtype=np.float32,
+                                        ),
+                                    ]
+                                )
+                            if _novel_tile.shape[1] < _n_cols:
+                                _novel_tile = np.hstack(
+                                    [
+                                        _novel_tile,
+                                        np.full(
+                                            (
+                                                _novel_tile.shape[0],
+                                                _n_cols - _novel_tile.shape[1],
+                                            ),
+                                            0.9,
+                                            dtype=np.float32,
+                                        ),
+                                    ]
+                                )
+                            bboxes_eq_np = np.vstack([bboxes_eq_np, _novel_tile])
+                    else:
+                        # No equirect detections at all — use all (intra-NMS'd) tile bboxes
+                        bboxes_eq_np = _tile_arr
+
+        # VR-03 / Bug 2 fix: IoU-NMS using detector confidence score when available,
+        # falling back to bbox area only when scores are not present.
         if bboxes_eq_np.ndim == 2 and bboxes_eq_np.shape[0] > 1:
             _boxes_t = torch.from_numpy(bboxes_eq_np[:, :4].astype(np.float32)).to(
                 self.models_processor.device
             )
-            _areas = (
-                (_boxes_t[:, 2] - _boxes_t[:, 0]) * (_boxes_t[:, 3] - _boxes_t[:, 1])
-            ).clamp(min=0.0)
-            # Use area as proxy score so larger faces are preferred (kept) by NMS
-            _keep = torchvision.ops.nms(_boxes_t, _areas, iou_threshold=0.5)
+            if bboxes_eq_np.shape[1] >= 5:
+                # Use detector confidence score — keeps the highest-confidence detection
+                _scores_t = (
+                    torch.from_numpy(bboxes_eq_np[:, 4].astype(np.float32))
+                    .to(self.models_processor.device)
+                    .clamp(min=1e-6)
+                )
+            else:
+                # Fall back to area when no confidence score column is present
+                _scores_t = (
+                    (_boxes_t[:, 2] - _boxes_t[:, 0])
+                    * (_boxes_t[:, 3] - _boxes_t[:, 1])
+                ).clamp(min=0.0)
+            _keep = torchvision.ops.nms(_boxes_t, _scores_t, iou_threshold=0.5)
             bboxes_eq_np = bboxes_eq_np[_keep.cpu().numpy()]
 
         # Update VR tracking state for the next frame. Done here — post-NMS so the
         # stored bboxes are clean, pre-VR-MIRROR so synthetic bboxes are not tracked.
         _vr_state_for_next: list = (
-            [{"bbox": row[:4], "score": 1.0} for row in bboxes_eq_np]
+            [
+                {"bbox": row[:4], "score": float(row[4]) if len(row) >= 5 else 1.0}
+                for row in bboxes_eq_np
+            ]
             if bboxes_eq_np.ndim == 2 and bboxes_eq_np.shape[0] > 0
             else []
         )
@@ -1067,11 +1464,16 @@ class FrameWorker(threading.Thread):
             cos_phi = math.cos(phi_radians)
             # Avoid division by near-zero at poles; clamp cos_phi to at least 0.1
             angular_width_deg_corrected = angular_width_deg / max(cos_phi, 0.1)
-            dynamic_fov_for_crop = np.clip(
-                max(angular_width_deg_corrected, angular_height_deg)
-                * self.VR_FOV_SCALE_FACTOR,
-                15.0,
-                100.0,
+            # Improvement C: use VR180MaxFOVSlider instead of the previous hard-cap of
+            # 100°.  Near-camera faces can subtend >100° and were being clipped.
+            _vr_max_fov = float(control.get("VR180MaxFOVSlider", 120))
+            dynamic_fov_for_crop = float(
+                np.clip(
+                    max(angular_width_deg_corrected, angular_height_deg)
+                    * self.VR_FOV_SCALE_FACTOR,
+                    15.0,
+                    _vr_max_fov,
+                )
             )
 
             face_crop_tensor = equirect_converter.get_perspective_crop(
@@ -1127,12 +1529,38 @@ class FrameWorker(threading.Thread):
                 }
             )
 
-        # VR-LANDMARK-MIRROR: in Both-Eyes mode, if landmark detection failed for a
-        # face crop but the partner eye view (same face, other VR180 half) succeeded,
-        # reuse those keypoints. In the equirectangular projection the partner's theta
-        # is exactly ±180° away (mirrored x-offset = width/2). A small angular
-        # tolerance (1° theta, 0.5° phi) also catches naturally-detected stereo pairs
-        # whose detector bboxes differ by a few pixels.
+        # Improvement I / VR-LANDMARK-MIRROR:
+        # Step 1: for faces that failed landmark detection, retry with a reduced
+        # score threshold (half of user setting) before falling back to stereo copy.
+        # This avoids importing wrong-eye keypoints when the face is clearly present
+        # in the crop but the detector is marginally below threshold.
+        _lm_score_orig = control["LandmarkDetectScoreSlider"] / 100.0
+        _lm_score_retry = max(0.05, _lm_score_orig * 0.5)
+        _lm_detect_mode = control["LandmarkDetectModelSelection"]
+        _lm_use_mean = control.get("LandmarkMeanEyesToggle", False)
+        for _fd in _crop_landmark_results:
+            if _fd["kps_on_crop"] is not None:
+                continue
+            _cs = _fd["face_crop_tensor"].shape[-1]
+            _pad = int(_cs * 0.025)
+            _dummy_bb = np.array([_pad, _pad, _cs - _pad, _cs - _pad])
+            _r5, _rall, _ = self.models_processor.run_detect_landmark(
+                img=_fd["face_crop_tensor"],
+                bbox=_dummy_bb,
+                det_kpss=[],
+                detect_mode=_lm_detect_mode,
+                score=_lm_score_retry,
+                from_points=False,
+                use_mean_eyes=_lm_use_mean,
+            )
+            if len(_r5) > 0:
+                _fd["kps_on_crop"] = _r5
+                _fd["kps_all_on_crop"] = _rall if len(_rall) > 0 else None
+
+        # Step 2: VR-LANDMARK-MIRROR — if a face crop still has no landmarks but the
+        # partner eye view (same face, other VR180 half) succeeded, reuse those
+        # keypoints as a last resort. In the equirectangular projection the partner's
+        # theta is exactly ±180° away (mirrored x-offset = width/2).
         if control.get("VR180EyeModeSelection", "Both Eyes") != "Single Eye":
             _kps_cache: dict[tuple[float, float], tuple] = {}
             for _fd in _crop_landmark_results:
@@ -1159,6 +1587,12 @@ class FrameWorker(threading.Thread):
                 break
 
             if _fd["kps_on_crop"] is None:
+                # Improvement H: log faces that are detected but cannot be swapped
+                # (landmark detection failed even after retry and stereo fallback).
+                print(
+                    f"[VR] Skipping face at theta={_fd['theta']:.1f}° phi={_fd['phi']:.1f}° "
+                    f"({_fd['original_eye_side']}) — landmark detection failed."
+                )
                 del _fd["face_crop_tensor"]
                 continue
 
@@ -1298,9 +1732,21 @@ class FrameWorker(threading.Thread):
         vr_single_eye_mode = (
             control.get("VR180EyeModeSelection", "Both Eyes") == "Single Eye"
         )
-        p2e_converter = PerspectiveConverter(
-            img_numpy_rgb_uint8, device=self.models_processor.device
-        )
+        # Improvement K: cache PerspectiveConverter across frames (like E2P converter).
+        # PerspectiveConverter only uses img_numpy_rgb_uint8 for its dimensions; the
+        # per-frame image content is not stored in the converter itself (stitch_single_perspective
+        # receives the target tensor directly).  We can therefore reuse the cached instance
+        # whenever the frame resolution is unchanged, avoiding repeated kernel allocation.
+        # NOTE: deliberately uses _vr_p2e_frame_size (NOT _vr_frame_size) for this check.
+        # _vr_frame_size is updated by the E2P branch above, so by the time we reach this
+        # point it always equals _cur_frame_size.  A separate tracking attribute ensures the
+        # P2E converter is properly recreated when the frame resolution changes.
+        if self._vr_p2e_converter is None or self._vr_p2e_frame_size != _cur_frame_size:
+            self._vr_p2e_converter = PerspectiveConverter(
+                img_numpy_rgb_uint8, device=self.models_processor.device
+            )
+            self._vr_p2e_frame_size = _cur_frame_size
+        p2e_converter = self._vr_p2e_converter
 
         # VR-15: check stop_event in stitching loop so we can abort early
         # VR-07: iterate over list of (eye_side, tensor, theta, phi, fov) tuples
@@ -1339,11 +1785,8 @@ class FrameWorker(threading.Thread):
 
         # Cleanup
         # VR-08: equirect_converter is now self._vr_converter (cached); do not del it
-        del (
-            p2e_converter,
-            processed_perspective_crops_details,
-            analyzed_faces_for_vr,
-        )
+        # Improvement K: p2e_converter is now self._vr_p2e_converter (cached); do not del it
+        del processed_perspective_crops_details, analyzed_faces_for_vr
         # FW-MEM-1: removed torch.cuda.empty_cache() — calling it per-frame
         # defeats the CUDA caching allocator and causes unnecessary overhead.
 

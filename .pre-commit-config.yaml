@@ -64,6 +64,10 @@ repos:
           - types-Pillow
           - types-requests
           - types-PyYAML
+        args:
+          # Suppress the "bodies of untyped functions are not checked" note.
+          # This is informational-only (exit code 0) but clutters commit output.
+          - --disable-error-code=annotation-unchecked
         exclude: *exclude_files
 
 # ===================================================================
