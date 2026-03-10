@@ -1,5 +1,5 @@
 import traceback
-from typing import TYPE_CHECKING, Dict, Optional, cast
+from typing import TYPE_CHECKING, Any, Dict, Optional, cast
 import threading
 import queue
 import copy
@@ -605,6 +605,12 @@ class FrameWorker(threading.Thread):
                 cast(dict, parameters_for_face),
                 source_kps=source_kps,  # type: ignore[arg-type]
             )
+            _params_for_swap_vr = self._apply_auto_mouth(
+                parameters_for_face.data,  # plain dict — VR convention
+                kps_all_on_crop_param,
+                target_face_button,
+                control_global,
+            )
             try:
                 (
                     swapped_face_512_torch_rgb_uint8,
@@ -616,7 +622,7 @@ class FrameWorker(threading.Thread):
                     kps=kps_all_on_crop_param,
                     s_e=s_e_for_swap_core,
                     t_e=t_e_for_swap_np,
-                    parameters=parameters_for_face.data,
+                    parameters=_params_for_swap_vr,
                     control=control_global,
                     dfm_model_name=parameters_for_face["DFMModelSelection"],
                     is_perspective_crop=True,
@@ -1646,6 +1652,12 @@ class FrameWorker(threading.Thread):
                             and _aged_kv is not None
                             else target_face.assigned_kv_map
                         )
+                        _params_for_swap_a = self._apply_auto_mouth(
+                            cast(dict, params),
+                            best_fface["kps_all"],
+                            target_face,
+                            control,
+                        )
                         img, best_fface["original_face"], best_fface["swap_mask"] = (
                             self.swap_core(
                                 img,
@@ -1653,7 +1665,7 @@ class FrameWorker(threading.Thread):
                                 best_fface["kps_all"],
                                 s_e=s_e,
                                 t_e=target_face.get_embedding(arcface_model),
-                                parameters=cast(dict, params),
+                                parameters=_params_for_swap_a,
                                 control=control,
                                 dfm_model_name=params["DFMModelSelection"],
                                 kv_map=_reaging_kv,
@@ -1745,6 +1757,9 @@ class FrameWorker(threading.Thread):
                             and _aged_kv_bt is not None
                             else best_target.assigned_kv_map
                         )
+                        _params_for_swap_b = self._apply_auto_mouth(
+                            cast(dict, params), fface["kps_all"], best_target, control
+                        )
                         img, fface["original_face"], fface["swap_mask"] = (
                             self.swap_core(
                                 img,
@@ -1752,7 +1767,7 @@ class FrameWorker(threading.Thread):
                                 fface["kps_all"],
                                 s_e=s_e,
                                 t_e=best_target.get_embedding(arcface_model),
-                                parameters=params,
+                                parameters=_params_for_swap_b,
                                 control=control,
                                 dfm_model_name=params["DFMModelSelection"],
                                 kv_map=_reaging_kv,
@@ -3032,6 +3047,86 @@ class FrameWorker(threading.Thread):
                 torch.mul(swap_original2, 1 - alpha_restorer2),
             )
         return swap
+
+    # ------------------------------------------------------------------
+    # Auto-Mouth Expression helper
+    # ------------------------------------------------------------------
+    def _apply_auto_mouth(
+        self,
+        params: dict,
+        kps_all: "np.ndarray | None",
+        target_fb: Any,
+        control: dict,
+    ) -> dict:
+        """Check auto-mouth state and, if active, return a modified params dict
+        with expression-restorer settings configured for lip transfer.
+
+        Returns *params* unchanged (same object, zero allocation) when the
+        feature is disabled or not yet triggered.
+        """
+        if not params.get("AutoMouthExpressionEnableToggle", False):
+            return params
+
+        from app.processors.mouth_openness import (
+            MouthOpennessState,
+            compute_lip_open_ratio_203,
+            compute_lip_open_ratio_68,
+        )
+
+        _alpha = params.get("AutoMouthEMAAlphaDecimalSlider", 0.40)
+        _threshold = params.get("AutoMouthOpenThresholdDecimalSlider", 0.20)
+        _lmk_model = control.get("LandmarkDetectModelSelection", "203")
+
+        _ratio: "float | None" = None
+        if _lmk_model == "203":
+            _ratio = compute_lip_open_ratio_203(kps_all)
+        elif _lmk_model == "68":
+            _ratio = compute_lip_open_ratio_68(kps_all)
+        else:
+            if not getattr(self, "_auto_mouth_warned", False):
+                print(
+                    f"[WARN] Auto-mouth requires landmark model '203' or '68'. "
+                    f"Current model is '{_lmk_model}'. Feature disabled until model is changed."
+                )
+                self._auto_mouth_warned = True
+
+        # Defensive: handle stale button objects that predate this attribute
+        _state: "MouthOpennessState | None" = getattr(
+            target_fb, "mouth_openness_state", None
+        )
+        if _state is None:
+            target_fb.mouth_openness_state = MouthOpennessState()
+            _state = target_fb.mouth_openness_state
+
+        _auto_active = _state.update(_ratio, _alpha, _threshold)
+
+        if _auto_active and not params.get("FaceExpressionEnableBothToggle", False):
+            _strength = params.get("AutoMouthExpressionStrengthDecimalSlider", 0.80)
+            _normalize = params.get("AutoMouthNormalizeLipsToggle", True)
+            _p = dict(params)
+            _p["FaceExpressionEnableBothToggle"] = True
+            _p["FaceExpressionModeSelection"] = "Advanced"
+            _p["FaceExpressionBeforeTypeSelection"] = "Beginning"
+            _p["FaceExpressionLipsToggle"] = True
+            _p["FaceExpressionFriendlyFactorLipsDecimalSlider"] = _strength
+            _p["FaceExpressionRelativeLipsToggle"] = True
+            _p["FaceExpressionNormalizeLipsEnableToggle"] = _normalize
+            _p["FaceExpressionGeneralToggle"] = True
+            _p["FaceExpressionGeneralJawToggle"] = True
+            _p["FaceExpressionFriendlyFactorGeneralDecimalSlider"] = _strength * 0.5
+            _p["FaceExpressionEyesToggle"] = False
+            _p["FaceExpressionBrowsToggle"] = False
+            _p["FaceExpressionGeneralNoseToggle"] = False
+            _p["FaceExpressionGeneralCheekToggle"] = False
+            _p["FaceExpressionGeneralContourToggle"] = False
+            _p["FaceExpressionGeneralHeadToggle"] = False
+            # Enable face parser lower-lip mask so the swapped mouth area is
+            # fully covered when the mouth is wide open.
+            _p["FaceParserEnableToggle"] = True
+            _p["LowerLipParserSlider"] = 1
+            return _p
+
+        return params
 
     def swap_core(
         self,

@@ -453,6 +453,11 @@ class TargetFaceCardButton(CardButton):
         self.aged_input_embedding: Dict[str, np.ndarray] = {}
         self.aged_kv_map: Dict | None = None
 
+        # Auto-mouth expression: per-face EMA state
+        from app.processors.mouth_openness import MouthOpennessState
+
+        self.mouth_openness_state: MouthOpennessState = MouthOpennessState()
+
         self.setCheckable(True)
         self.clicked.connect(self.load_target_face)
 

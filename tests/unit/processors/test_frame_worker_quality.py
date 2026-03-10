@@ -25,9 +25,9 @@ import torch
 # (keeps tests import-free and avoids heavy stubbing)
 # ---------------------------------------------------------------------------
 
-_MIN_FACE_PIXELS: int = 20       # mirrors FrameWorker._MIN_FACE_PIXELS
-_KPS_EMA_ALPHA: float = 0.35     # mirrors FrameWorker._KPS_EMA_ALPHA
-_COLOR_EMA_ALPHA: float = 0.30   # mirrors FrameWorker._COLOR_EMA_ALPHA
+_MIN_FACE_PIXELS: int = 20  # mirrors FrameWorker._MIN_FACE_PIXELS
+_KPS_EMA_ALPHA: float = 0.35  # mirrors FrameWorker._KPS_EMA_ALPHA
+_COLOR_EMA_ALPHA: float = 0.30  # mirrors FrameWorker._COLOR_EMA_ALPHA
 
 
 def _is_kps_valid(kps, img_h: int, img_w: int) -> bool:
@@ -71,7 +71,10 @@ class TestIsKpsValid:
         assert _is_kps_valid(None, self.IMG_H, self.IMG_W) is False
 
     def test_empty_array_returns_false(self):
-        assert _is_kps_valid(np.empty((0, 2), dtype=np.float32), self.IMG_H, self.IMG_W) is False
+        assert (
+            _is_kps_valid(np.empty((0, 2), dtype=np.float32), self.IMG_H, self.IMG_W)
+            is False
+        )
 
     def test_nan_in_x_returns_false(self):
         kps = self._valid_kps()
@@ -159,13 +162,16 @@ class TestMinFacePixelsGuard:
         bbox = [10.0, 10.0, 29.0, 30.0]  # width=19 < 20
         assert _bbox_shortest_side(bbox) < _MIN_FACE_PIXELS
 
-    @pytest.mark.parametrize("w,h,expect_skip", [
-        (5, 5, True),
-        (19, 100, True),
-        (20, 20, False),
-        (21, 21, False),
-        (100, 100, False),
-    ])
+    @pytest.mark.parametrize(
+        "w,h,expect_skip",
+        [
+            (5, 5, True),
+            (19, 100, True),
+            (20, 20, False),
+            (21, 21, False),
+            (100, 100, False),
+        ],
+    )
     def test_parametrized_sizes(self, w, h, expect_skip):
         bbox = [0.0, 0.0, float(w), float(h)]
         assert (_bbox_shortest_side(bbox) < _MIN_FACE_PIXELS) is expect_skip
@@ -242,7 +248,9 @@ class TestKpsEMA:
         if not _is_kps_valid(raw_nan.reshape(1, 2), IMG_H, IMG_W):
             pass  # do NOT update smoothed[0]
         else:
-            smoothed[0] = _KPS_EMA_ALPHA * raw_nan + (1.0 - _KPS_EMA_ALPHA) * smoothed[0]
+            smoothed[0] = (
+                _KPS_EMA_ALPHA * raw_nan + (1.0 - _KPS_EMA_ALPHA) * smoothed[0]
+            )
 
         # EMA state must still be the prior good value
         assert not np.any(np.isnan(smoothed[0]))
@@ -284,7 +292,9 @@ class TestColorStatsEMA:
             ema_mean, ema_std = curr_mean, curr_std
         else:
             prev = ema_cache[key]
-            ema_mean = _COLOR_EMA_ALPHA * curr_mean + (1 - _COLOR_EMA_ALPHA) * prev["mean"]
+            ema_mean = (
+                _COLOR_EMA_ALPHA * curr_mean + (1 - _COLOR_EMA_ALPHA) * prev["mean"]
+            )
             ema_std = _COLOR_EMA_ALPHA * curr_std + (1 - _COLOR_EMA_ALPHA) * prev["std"]
 
         ema_cache[key] = {"mean": ema_mean.detach(), "std": ema_std.detach()}
@@ -303,9 +313,17 @@ class TestColorStatsEMA:
     def test_different_keys_are_independent(self):
         """Each target-face embedding has its own EMA history."""
         ema_cache: dict = {}
-        ema_cache[b"face_a"] = {"mean": torch.tensor([[[10.0]]]), "std": torch.tensor([[[1.0]]])}
-        ema_cache[b"face_b"] = {"mean": torch.tensor([[[200.0]]]), "std": torch.tensor([[[20.0]]])}
-        assert not torch.allclose(ema_cache[b"face_a"]["mean"], ema_cache[b"face_b"]["mean"])
+        ema_cache[b"face_a"] = {
+            "mean": torch.tensor([[[10.0]]]),
+            "std": torch.tensor([[[1.0]]]),
+        }
+        ema_cache[b"face_b"] = {
+            "mean": torch.tensor([[[200.0]]]),
+            "std": torch.tensor([[[20.0]]]),
+        }
+        assert not torch.allclose(
+            ema_cache[b"face_a"]["mean"], ema_cache[b"face_b"]["mean"]
+        )
 
     def test_std_floor_prevents_division_by_zero(self):
         """The 1e-6 std floor ensures no division-by-zero in colour normalisation."""
