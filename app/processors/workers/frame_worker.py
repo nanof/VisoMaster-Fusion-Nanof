@@ -207,6 +207,9 @@ class FrameWorker(threading.Thread):
         self._color_stats_ema: _OrderedDict = _OrderedDict()
         self._COLOR_STATS_EMA_MAX = 32
 
+        # Mouth action detection score (set per-face call in _detect_mouth_action_score)
+        self._mouth_action_score: float = 0.0
+
         # --- OPTIMIZATION: Cached Convolution Kernels (VRAM) ---
         # Pre-allocating mathematical filters prevents massive CPU-to-GPU
         # allocation overheads during the binary search loops (sharpness_score).
@@ -652,9 +655,8 @@ class FrameWorker(threading.Thread):
             )
             _params_for_swap_vr = self._apply_auto_mouth(
                 parameters_for_face.data,  # plain dict — VR convention
-                kps_all_on_crop_param,
                 target_face_button,
-                control_global,
+                vr_crop_chw=perspective_crop_torch_rgb_uint8,  # already a focused face region
             )
             try:
                 (
@@ -2142,9 +2144,8 @@ class FrameWorker(threading.Thread):
                         )
                         _params_for_swap_a = self._apply_auto_mouth(
                             cast(dict, params),
-                            best_fface["kps_all"],
                             target_face,
-                            control,
+                            face_bbox=best_fface["bbox"],
                         )
                         img, best_fface["original_face"], best_fface["swap_mask"] = (
                             self.swap_core(
@@ -2248,7 +2249,9 @@ class FrameWorker(threading.Thread):
                             else best_target.assigned_kv_map
                         )
                         _params_for_swap_b = self._apply_auto_mouth(
-                            cast(dict, params), fface["kps_all"], best_target, control
+                            cast(dict, params),
+                            best_target,
+                            face_bbox=fface["bbox"],
                         )
                         img, fface["original_face"], fface["swap_mask"] = (
                             self.swap_core(
@@ -3547,14 +3550,81 @@ class FrameWorker(threading.Thread):
         return swap
 
     # ------------------------------------------------------------------
+    # Mouth action detection helper
+    # ------------------------------------------------------------------
+    def _detect_mouth_action_score(
+        self,
+        face_bbox: "np.ndarray | None" = None,
+        vr_crop_chw: "torch.Tensor | np.ndarray | None" = None,
+    ) -> "float | None":
+        """Run the mouth action detector on a face-region crop.
+
+        For standard mode pass ``face_bbox`` ([x1,y1,x2,y2]) — the function crops
+        ``self.frame`` at 2× scale around the bbox so the head and mouth surroundings
+        are included without flooding the model with irrelevant background.
+
+        For VR180 mode pass ``vr_crop_chw`` (the 512×512 perspective crop tensor) —
+        that image is already a focused face region and is used directly.
+
+        Falls back to the full frame when neither argument is supplied.
+
+        Returns a positive float on detection, or None (no detection) so that the
+        MouthOpennessState occlusion-timeout can bridge short missed-frame gaps.
+        """
+        from app.processors.mouth_action_detector import MouthActionDetector
+
+        detector = MouthActionDetector.get()
+        if not detector.available:
+            if not getattr(self, "_mouth_action_detector_warned", False):
+                err = detector.load_error or "unknown error"
+                print(f"[WARN] Mouth action detector unavailable: {err}")
+                self._mouth_action_detector_warned = True
+            return None
+
+        if vr_crop_chw is not None:
+            # VR perspective crop — already CHW, convert to numpy if needed
+            if isinstance(vr_crop_chw, torch.Tensor):
+                img_chw_np = vr_crop_chw.cpu().numpy().astype(np.uint8)
+            else:
+                img_chw_np = np.asarray(vr_crop_chw, dtype=np.uint8)
+        elif face_bbox is not None and self.frame is not None:
+            # Standard mode — crop self.frame (HWC) at 2× scale around the face bbox
+            frame_hwc = self.frame  # HWC uint8 RGB numpy
+            fh, fw = frame_hwc.shape[:2]
+            x1 = float(face_bbox[0])
+            y1 = float(face_bbox[1])
+            x2 = float(face_bbox[2])
+            y2 = float(face_bbox[3])
+            cx = (x1 + x2) / 2.0
+            cy = (y1 + y2) / 2.0
+            half_w = x2 - x1  # 2× scale → full bbox width as half-extent
+            half_h = y2 - y1
+            crop_x1 = max(0, int(cx - half_w))
+            crop_y1 = max(0, int(cy - half_h))
+            crop_x2 = min(fw, int(cx + half_w))
+            crop_y2 = min(fh, int(cy + half_h))
+            crop_hwc = frame_hwc[crop_y1:crop_y2, crop_x1:crop_x2]
+            if crop_hwc.size == 0:
+                return None
+            img_chw_np = np.transpose(crop_hwc, (2, 0, 1))
+        else:
+            # Fallback — full frame
+            img_chw_np = np.transpose(self.frame, (2, 0, 1))
+
+        raw_score = detector.score(img_chw_np)
+
+        # Return None on no detection so the state machine uses the occlusion grace period
+        return raw_score if raw_score > 0.0 else None
+
+    # ------------------------------------------------------------------
     # Auto-Mouth Expression helper
     # ------------------------------------------------------------------
     def _apply_auto_mouth(
         self,
         params: dict,
-        kps_all: "np.ndarray | None",
         target_fb: Any,
-        control: dict,
+        face_bbox: "np.ndarray | None" = None,
+        vr_crop_chw: "torch.Tensor | np.ndarray | None" = None,
     ) -> dict:
         """Check auto-mouth state and, if active, return a modified params dict
         using Simple-mode lip transfer (same quality path as 'Restore The Lips').
@@ -3565,28 +3635,16 @@ class FrameWorker(threading.Thread):
         if not params.get("AutoMouthExpressionEnableToggle", False):
             return params
 
-        from app.processors.mouth_openness import (
-            MouthOpennessState,
-            compute_lip_open_ratio_203,
-            compute_lip_open_ratio_68,
-        )
+        from app.processors.mouth_openness import MouthOpennessState
 
         _alpha = params.get("AutoMouthEMAAlphaDecimalSlider", 0.65)
-        _threshold = params.get("AutoMouthOpenThresholdDecimalSlider", 0.12)
-        _lmk_model = control.get("LandmarkDetectModelSelection", "203")
+        _threshold = params.get("AutoMouthOpenThresholdDecimalSlider", 0.50)
 
-        _ratio: "float | None" = None
-        if _lmk_model == "203":
-            _ratio = compute_lip_open_ratio_203(kps_all)
-        elif _lmk_model == "68":
-            _ratio = compute_lip_open_ratio_68(kps_all)
-        else:
-            if not getattr(self, "_auto_mouth_warned", False):
-                print(
-                    f"[WARN] Auto-mouth requires landmark model '203' or '68'. "
-                    f"Current model is '{_lmk_model}'. Feature disabled until model is changed."
-                )
-                self._auto_mouth_warned = True
+        # Run detection on the face-region crop for this specific face.
+        # None = no detection; triggers occlusion grace period in state machine.
+        _ratio: "float | None" = self._detect_mouth_action_score(
+            face_bbox=face_bbox, vr_crop_chw=vr_crop_chw
+        )
 
         # Defensive: handle stale button objects that predate this attribute
         _state: "MouthOpennessState | None" = getattr(
@@ -3661,7 +3719,17 @@ class FrameWorker(threading.Thread):
             _p["FaceExpressionEyesToggle"] = False
             _p["FaceExpressionBrowsToggle"] = False
             _p["FaceExpressionGeneralToggle"] = False
-            # Do NOT override FaceParserEnableToggle — respect user's existing settings
+            # Face-parser mouth/lip override — reads configurable values from the
+            # AutoMouth UI section and forces them onto the per-face params, overriding
+            # whatever the user has set in the Face Swap tab for these three sliders.
+            _mouth_val = int(params.get("AutoMouthMouthParserSlider", 1))
+            _upper_val = int(params.get("AutoMouthUpperLipParserSlider", 3))
+            _lower_val = int(params.get("AutoMouthLowerLipParserSlider", 17))
+            if _mouth_val > 0 or _upper_val > 0 or _lower_val > 0:
+                _p["FaceParserEnableToggle"] = True
+            _p["MouthParserSlider"] = _mouth_val
+            _p["UpperLipParserSlider"] = _upper_val
+            _p["LowerLipParserSlider"] = _lower_val
             return _p
 
         return params

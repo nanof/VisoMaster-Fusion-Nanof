@@ -643,48 +643,39 @@ COMMON_LAYOUT_DATA: Any = {
             "exec_function": control_actions.handle_auto_mouth_toggle,
             "exec_function_args": [],
             "help": (
-                "Automatically activates the lip-transfer expression restorer when the "
-                "target face's mouth is detected as wide-open (eating, yawning, etc.). "
-                "Requires landmark model '203' or '68'."
+                "Automatically activates lip-transfer expression and face-parser mouth "
+                "regions when mouth action is detected in the scene. "
             ),
         },
         "AutoMouthOpenThresholdDecimalSlider": {
             "level": 2,
-            "label": "Open Threshold",
-            "min_value": "0.05",
-            "max_value": "0.60",
-            "default": "0.12",
+            "label": "Confidence Threshold",
+            "min_value": "0.01",
+            "max_value": "0.99",
+            "default": "0.20",
             "decimals": 2,
             "step": 0.01,
             "parentToggle": "AutoMouthExpressionEnableToggle",
             "requiredToggleValue": True,
             "enable_refresh_frame": False,
             "help": (
-                "Lip-open ratio that triggers auto-mouth activation. "
-                "Use 'Set from frame' to calibrate from the current video frame."
+                "Minimum detection confidence required to trigger auto-mouth activation. "
+                "Higher values require a more confident detection before activating."
             ),
-            "action_button": {
-                "label": "Set from frame",
-                "help": (
-                    "Seek to a frame where the mouth is open, then click this button "
-                    "to measure the lip-open ratio and use it as the threshold."
-                ),
-                "exec_function": control_actions.set_auto_mouth_threshold_from_frame,
-            },
         },
         "AutoMouthEMAAlphaDecimalSlider": {
             "level": 2,
             "label": "EMA Smoothing",
             "min_value": "0.05",
             "max_value": "1.00",
-            "default": "0.65",
+            "default": "0.40",
             "decimals": 2,
             "step": 0.01,
             "parentToggle": "AutoMouthExpressionEnableToggle",
             "requiredToggleValue": True,
             "enable_refresh_frame": False,
             "help": (
-                "Exponential moving-average factor applied to the lip-open ratio. "
+                "Exponential moving-average factor applied to the detection confidence. "
                 "Lower values smooth more aggressively (slower reaction); "
                 "1.0 means no smoothing (instant response)."
             ),
@@ -703,7 +694,7 @@ COMMON_LAYOUT_DATA: Any = {
             "help": (
                 "Base expression factor applied to lips when auto-mouth is active. "
                 "Actual strength is scaled proportionally with how far above the "
-                "threshold the detected ratio is (smooth ramp-in)."
+                "threshold the detected confidence is (smooth ramp-in)."
             ),
         },
         "AutoMouthAnimationRegionSelection": {
@@ -727,6 +718,51 @@ COMMON_LAYOUT_DATA: Any = {
             "help": (
                 "Enable lip-ratio normalisation (uses lp_retarget_lip) for better "
                 "lip shape accuracy when auto-mouth is active."
+            ),
+        },
+        "AutoMouthMouthParserSlider": {
+            "level": 2,
+            "label": "Mouth Parser",
+            "min_value": "0",
+            "max_value": "30",
+            "default": "1",
+            "step": 1,
+            "parentToggle": "AutoMouthExpressionEnableToggle",
+            "requiredToggleValue": True,
+            "enable_refresh_frame": False,
+            "help": (
+                "Dilation amount for the inner-mouth face-parser mask when auto-mouth "
+                "is active. Overrides the Mouth slider in the Face Swap tab."
+            ),
+        },
+        "AutoMouthUpperLipParserSlider": {
+            "level": 2,
+            "label": "Upper Lip Parser",
+            "min_value": "0",
+            "max_value": "30",
+            "default": "3",
+            "step": 1,
+            "parentToggle": "AutoMouthExpressionEnableToggle",
+            "requiredToggleValue": True,
+            "enable_refresh_frame": False,
+            "help": (
+                "Dilation amount for the upper-lip face-parser mask when auto-mouth "
+                "is active. Overrides the Upper Lip slider in the Face Swap tab."
+            ),
+        },
+        "AutoMouthLowerLipParserSlider": {
+            "level": 2,
+            "label": "Lower Lip Parser",
+            "min_value": "0",
+            "max_value": "30",
+            "default": "17",
+            "step": 1,
+            "parentToggle": "AutoMouthExpressionEnableToggle",
+            "requiredToggleValue": True,
+            "enable_refresh_frame": False,
+            "help": (
+                "Dilation amount for the lower-lip face-parser mask when auto-mouth "
+                "is active. Overrides the Lower Lip slider in the Face Swap tab."
             ),
         },
     },

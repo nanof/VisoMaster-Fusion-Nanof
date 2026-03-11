@@ -7,7 +7,6 @@ UT-07: apply_reaging output is always a CHW uint8 CPU tensor (P3-05 fix).
 from __future__ import annotations
 
 import sys
-from types import ModuleType
 from unittest.mock import MagicMock
 
 import numpy as np
