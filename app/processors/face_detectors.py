@@ -187,19 +187,39 @@ class FaceDetectors:
         For fixed-shape RetinaFace/SCRFD exports, running at a mismatched size can spam
         ONNX Runtime VerifyOutputSizes warnings. If a fixed square size is detectable,
         prefer it over the requested value.
+
+        Strategy (most reliable first):
+        1. Read the model's declared input shape (NCHW → H/W at indices 2 and 3).
+        2. Fall back to inferring from the first detection-head output shape.
         """
         if detect_mode not in ("RetinaFace", "SCRFD"):
             return requested_input_size
 
-        inferred_size = self._infer_fixed_square_input_from_outputs(ort_session)
-        if inferred_size is None:
+        # PRIMARY: read declared input spatial size directly from model metadata.
+        model_input_size = None
+        try:
+            inputs = ort_session.get_inputs()
+            if inputs:
+                shape = inputs[0].shape  # NCHW: [N, C, H, W]
+                if shape and len(shape) >= 4:
+                    h, w = shape[2], shape[3]
+                    if isinstance(h, int) and isinstance(w, int) and h > 0 and h == w:
+                        model_input_size = h
+        except Exception:
+            pass
+
+        # FALLBACK: infer from the first detection-head output shape.
+        if model_input_size is None:
+            model_input_size = self._infer_fixed_square_input_from_outputs(ort_session)
+
+        if model_input_size is None:
             return requested_input_size
 
         requested_w, requested_h = requested_input_size
-        if requested_w == inferred_size and requested_h == inferred_size:
+        if requested_w == model_input_size and requested_h == model_input_size:
             return requested_input_size
 
-        return (inferred_size, inferred_size)
+        return (model_input_size, model_input_size)
 
     def _filter_detections_gpu(
         self,
