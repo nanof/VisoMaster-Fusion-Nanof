@@ -199,12 +199,7 @@ class DFMModel:
                 buffer_ptr=binding_outputs[idx].data_ptr(),
             )
 
-        # D-02: run inference first, then synchronize (sync before was a no-op barrier, not a correctness gate)
         self._sess.run_with_iobinding(io_binding)
-        if self.device == "cuda":
-            torch.cuda.synchronize()
-        elif self.device != "cpu":
-            self.syncvec.cpu()
 
         # Process outputs (resize, clip channels, and convert back to original dtype)
         out_face_mask = self.to_dtype(

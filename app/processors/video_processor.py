@@ -166,6 +166,11 @@ class VideoProcessor(QObject):
         self.play_start_time = 0.0  # Used by default style for audio segmenting
         self.play_end_time = 0.0  # Used by default style for audio segmenting
 
+        # Adding Cuda Streams for thread safety
+        self.feeder_stream = (
+            None  # torch.cuda.Stream() if torch.cuda.is_available() else None
+        )
+
         # --- Default Recording State ---
         self.temp_file: str = ""  # Temporary video file (without audio)
         # Counters for accurate duration calculation
@@ -394,54 +399,80 @@ class VideoProcessor(QObject):
         if local_control_for_worker.get("VR180ModeEnableToggle", False):
             return None, None, None
 
-        use_landmark = local_control_for_worker.get("LandmarkDetectToggle", True)
-        landmark_mode = local_control_for_worker.get(
-            "LandmarkDetectModelSelection", "203"
-        )
-        from_points = local_control_for_worker.get("DetectFromPointsToggle", False)
+        import contextlib
 
-        # If edit/swap is enabled globally, UI typically forces landmark
-        if local_control_for_worker.get(
-            "edit_enabled", True
-        ) or local_control_for_worker.get("swap_enabled", True):
-            use_landmark, landmark_mode, from_points = True, "203", True
+        # VRAM Optimization: Get the current global stream instead of a custom one.
+        local_stream = (
+            torch.cuda.current_stream() if torch.cuda.is_available() else None
+        )
+        stream_context = (
+            torch.cuda.stream(local_stream)
+            if local_stream
+            else contextlib.nullcontext()
+        )
 
-        detection_interval = int(
-            local_control_for_worker.get("FaceDetectionIntervalSlider", 1)
-        )
-        previous_faces_arg = None
+        with stream_context:
+            use_landmark = local_control_for_worker.get("LandmarkDetectToggle", True)
+            landmark_mode = local_control_for_worker.get(
+                "LandmarkDetectModelSelection", "203"
+            )
+            from_points = local_control_for_worker.get("DetectFromPointsToggle", False)
 
-        if (
-            len(self.last_detected_faces) > 0
-            and self.current_frame_number % detection_interval != 0
-        ):
-            previous_faces_arg = self.last_detected_faces
-        device = self.main_window.models_processor.device
-        frame_tensor = (
-            torch.from_numpy(frame_rgb)
-            .to(device)
-            .permute(2, 0, 1)  # Convert [H, W, C] -> [C, H, W]
-        )
-        # 1. Run Detection
-        bboxes, kpss_5, kpss = self.main_window.models_processor.run_detect(
-            frame_tensor,
-            local_control_for_worker.get("DetectorModelSelection", "retinaface_10g"),
-            max_num=local_control_for_worker.get("MaxFacesToDetectSlider", 1),
-            score=local_control_for_worker.get("DetectorScoreSlider", 50) / 100.0,
-            input_size=(512, 512),
-            use_landmark_detection=use_landmark,
-            landmark_detect_mode=landmark_mode,
-            landmark_score=local_control_for_worker.get("LandmarkDetectScoreSlider", 50)
-            / 100.0,
-            from_points=from_points,
-            rotation_angles=[0]
-            if not local_control_for_worker.get("AutoRotationToggle", False)
-            else [0, 90, 180, 270],
-            use_mean_eyes=local_control_for_worker.get("LandmarkMeanEyesToggle", False),
-            previous_detections=previous_faces_arg,
-        )
-        # Free up VRAM immediately since the tensor is no longer needed in this thread
-        del frame_tensor
+            # If edit/swap is enabled globally, UI typically forces landmark
+            if local_control_for_worker.get(
+                "edit_enabled", True
+            ) or local_control_for_worker.get("swap_enabled", True):
+                use_landmark, landmark_mode, from_points = True, "203", True
+
+            detection_interval = int(
+                local_control_for_worker.get("FaceDetectionIntervalSlider", 1)
+            )
+            previous_faces_arg = None
+
+            if (
+                len(self.last_detected_faces) > 0
+                and self.current_frame_number % detection_interval != 0
+            ):
+                previous_faces_arg = self.last_detected_faces
+            device = self.main_window.models_processor.device
+
+            # OPTIMISATION PCIe : non_blocking=True frees CPU immediately
+            frame_tensor = (
+                torch.from_numpy(frame_rgb)
+                .to(device, non_blocking=True)
+                .permute(2, 0, 1)  # Convert [H, W, C] -> [C, H, W]
+            )
+
+            # 1. Run Detection
+            bboxes, kpss_5, kpss = self.main_window.models_processor.run_detect(
+                frame_tensor,
+                local_control_for_worker.get(
+                    "DetectorModelSelection", "retinaface_10g"
+                ),
+                max_num=local_control_for_worker.get("MaxFacesToDetectSlider", 1),
+                score=local_control_for_worker.get("DetectorScoreSlider", 50) / 100.0,
+                input_size=(512, 512),
+                use_landmark_detection=use_landmark,
+                landmark_detect_mode=landmark_mode,
+                landmark_score=local_control_for_worker.get(
+                    "LandmarkDetectScoreSlider", 50
+                )
+                / 100.0,
+                from_points=from_points,
+                rotation_angles=[0]
+                if not local_control_for_worker.get("AutoRotationToggle", False)
+                else [0, 90, 180, 270],
+                use_mean_eyes=local_control_for_worker.get(
+                    "LandmarkMeanEyesToggle", False
+                ),
+                previous_detections=previous_faces_arg,
+            )
+            # Free up VRAM immediately since the tensor is no longer needed in this thread
+            del frame_tensor
+
+            # CUDA Stream Sync: Safely wait for GPU on the current stream
+            if local_stream:
+                local_stream.synchronize()
 
         # 2. Update tracking state for the next sequential frame
         detected_for_state = []
@@ -450,58 +481,103 @@ class VideoProcessor(QObject):
                 detected_for_state.append({"bbox": bboxes[i], "score": 1.0})
         self.last_detected_faces = detected_for_state
 
+        # Get toggle value to enable smoothing
+        is_smoothing_enabled = local_control_for_worker.get(
+            "KPSSmoothingEnableToggle", True
+        )
+
         # 3. Apply Sequential EMA smoothing perfectly in order
-        img_h_for_kps, img_w_for_kps = frame_rgb.shape[0], frame_rgb.shape[1]
+        if is_smoothing_enabled:
+            img_h_for_kps, img_w_for_kps = frame_rgb.shape[0], frame_rgb.shape[1]
 
-        if isinstance(kpss_5, numpy.ndarray) and kpss_5.shape[0] > 0:
-            kpss_5 = kpss_5.copy()
-            n_faces = kpss_5.shape[0]
-            new_smoothed_kps = {}
+            if isinstance(kpss_5, numpy.ndarray) and kpss_5.shape[0] > 0:
+                kpss_5 = kpss_5.copy()
+                n_faces = kpss_5.shape[0]
+                new_smoothed_kps = {}
 
-            for _i in range(n_faces):
-                _raw = kpss_5[_i]
+                # Initialize Dense KPS Dict
+                if not hasattr(self, "_smoothed_dense_kps"):
+                    self._smoothed_dense_kps = {}
+                new_smoothed_dense_kps = {}
 
-                # Validation
-                if (
-                    _raw is None
-                    or _raw.size == 0
-                    or numpy.any(numpy.isnan(_raw))
-                    or numpy.any(numpy.isinf(_raw))
-                ):
-                    continue
-                if (
-                    numpy.any(_raw[:, 0] < 0)
-                    or numpy.any(_raw[:, 0] >= img_w_for_kps)
-                    or numpy.any(_raw[:, 1] < 0)
-                    or numpy.any(_raw[:, 1] >= img_h_for_kps)
-                ):
-                    continue
+                has_dense_kps = isinstance(kpss, numpy.ndarray) and kpss.shape[0] > 0
+                if has_dense_kps:
+                    kpss = kpss.copy()
 
-                _centroid_raw = numpy.mean(_raw, axis=0)
-                _best_match_key = None
-                _min_dist = float("inf")
+                for _i in range(n_faces):
+                    _raw = kpss_5[_i]
 
-                # Match current face to previous faces spatially
-                for _k, _prev_kps in self._smoothed_kps.items():
-                    _centroid_prev = numpy.mean(_prev_kps, axis=0)
-                    _dist = numpy.linalg.norm(_centroid_raw - _centroid_prev)
-                    if _dist < 50.0 and _dist < _min_dist:
-                        _min_dist = _dist
-                        _best_match_key = _k
+                    if (
+                        _raw is None
+                        or _raw.size == 0
+                        or numpy.any(numpy.isnan(_raw))
+                        or numpy.any(numpy.isinf(_raw))
+                    ):
+                        continue
+                    if (
+                        numpy.any(_raw[:, 0] < 0)
+                        or numpy.any(_raw[:, 0] >= img_w_for_kps)
+                        or numpy.any(_raw[:, 1] < 0)
+                        or numpy.any(_raw[:, 1] >= img_h_for_kps)
+                    ):
+                        continue
 
-                if _best_match_key is not None:
-                    new_smoothed_kps[_i] = (
-                        self._KPS_EMA_ALPHA * _raw
-                        + (1.0 - self._KPS_EMA_ALPHA)
-                        * self._smoothed_kps[_best_match_key]
-                    )
-                    del self._smoothed_kps[_best_match_key]
-                else:
-                    new_smoothed_kps[_i] = _raw.copy()
+                    _centroid_raw = numpy.mean(_raw, axis=0)
+                    _best_match_key = None
+                    _min_dist = float("inf")
 
-                kpss_5[_i] = new_smoothed_kps[_i]
+                    # Match current face to previous faces spatially
+                    for _k, _prev_kps in self._smoothed_kps.items():
+                        _centroid_prev = numpy.mean(_prev_kps, axis=0)
+                        _dist = numpy.linalg.norm(_centroid_raw - _centroid_prev)
+                        if _dist < 50.0 and _dist < _min_dist:
+                            _min_dist = _dist
+                            _best_match_key = _k
 
-            self._smoothed_kps = new_smoothed_kps
+                    if _best_match_key is not None:
+                        # Adaptive Alpha (Smart EMA)
+                        base_alpha = self._KPS_EMA_ALPHA
+                        movement_factor = min(1.0, _min_dist / 15.0)
+                        dynamic_alpha = base_alpha + movement_factor * (
+                            1.0 - base_alpha
+                        )
+
+                        # Smoothing on KPS 5
+                        new_smoothed_kps[_i] = (
+                            dynamic_alpha * _raw
+                            + (1.0 - dynamic_alpha)
+                            * self._smoothed_kps[_best_match_key]
+                        )
+                        del self._smoothed_kps[_best_match_key]
+
+                        # Smoothing on Dense KPS
+                        if has_dense_kps:
+                            if _best_match_key in self._smoothed_dense_kps:
+                                new_smoothed_dense_kps[_i] = (
+                                    dynamic_alpha * kpss[_i]
+                                    + (1.0 - dynamic_alpha)
+                                    * self._smoothed_dense_kps[_best_match_key]
+                                )
+                                del self._smoothed_dense_kps[_best_match_key]
+                            else:
+                                new_smoothed_dense_kps[_i] = kpss[_i].copy()
+
+                    else:
+                        new_smoothed_kps[_i] = _raw.copy()
+                        if has_dense_kps:
+                            new_smoothed_dense_kps[_i] = kpss[_i].copy()
+
+                    kpss_5[_i] = new_smoothed_kps[_i]
+                    if has_dense_kps:
+                        kpss[_i] = new_smoothed_dense_kps[_i]
+
+                self._smoothed_kps = new_smoothed_kps
+                self._smoothed_dense_kps = new_smoothed_dense_kps
+        else:
+            # If not enabled, clear both dicts
+            self._smoothed_kps.clear()
+            if hasattr(self, "_smoothed_dense_kps"):
+                self._smoothed_dense_kps.clear()
 
         return bboxes, kpss_5, kpss
 
@@ -736,7 +812,8 @@ class VideoProcessor(QObject):
                 # Send poison pills to unblock all waiting worker threads immediately.
                 for _ in self.worker_threads:
                     try:
-                        self.frame_queue.put(None, timeout=0.1)
+                        # Use block=False instead of false timeout
+                        self.frame_queue.put(None, block=False)
                     except queue.Full:
                         pass
 

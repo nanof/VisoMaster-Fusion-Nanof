@@ -185,12 +185,15 @@ class FaceEditors:
             )
 
         try:
-            # Ensure CUDA stream is synchronized before running the model.
+            # PRE-INFERENCE SYNC: Ensure PyTorch has finished preparing the memory
+            # before ONNX Runtime starts reading from the IOBinding pointers.
             if self.models_processor.device == "cuda":
                 torch.cuda.current_stream().synchronize()
             elif self.models_processor.device != "cpu":
                 self.models_processor.syncvec.cpu()
+
             model.run_with_iobinding(io_binding)
+
         finally:
             if is_lazy_build:
                 self.models_processor.hide_build_dialog.emit()

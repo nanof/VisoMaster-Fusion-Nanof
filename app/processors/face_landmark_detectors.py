@@ -267,7 +267,8 @@ class FaceLandmarkDetectors:
     ) -> List[np.ndarray]:
         """
         A centralized helper function to execute an ONNX model using efficient I/O binding.
-        This avoids data copies between CPU and GPU.
+        This avoids data copies between CPU and GPU and includes critical synchronization
+        steps for safe memory access.
 
         Args:
             model_name (str): The name of the model to execute.
@@ -317,15 +318,27 @@ class FaceLandmarkDetectors:
             )
 
         try:
-            # Synchronize the CUDA stream before execution.
+            # PRE-INFERENCE SYNC: Ensure PyTorch has finished preparing the memory
+            # before ONNX Runtime starts reading from the IOBinding pointers.
             if self.models_processor.device == "cuda":
                 torch.cuda.current_stream().synchronize()
             elif self.models_processor.device != "cpu":
                 self.models_processor.syncvec.cpu()
 
-            # Run inference and copy results back to CPU.
+            # Run inference
             model.run_with_iobinding(io_binding)
+
+            # POST-INFERENCE SYNC : Ensure the GPU has completed all
+            # calculations before ONNX Runtime attempts to copy the result back to CPU RAM.
+            # Without this, copy_outputs_to_cpu() might grab an incomplete tensor.
+            if self.models_processor.device == "cuda":
+                torch.cuda.current_stream().synchronize()
+            elif self.models_processor.device != "cpu":
+                self.models_processor.syncvec.cpu()
+
+            # Copy results back to CPU safely
             net_outs = io_binding.copy_outputs_to_cpu()
+
         finally:
             if is_lazy_build:
                 self.models_processor.hide_build_dialog.emit()

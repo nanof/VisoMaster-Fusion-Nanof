@@ -413,7 +413,7 @@ class FaceDetectors:
         """
         Runs the ONNX session with IOBinding, handling TensorRT lazy build dialogs.
         This centralizes the try/finally logic for showing/hiding the build progress dialog
-        and includes the critical CUDA synchronization step.
+        and includes the critical CUDA synchronization steps (Pre and Post inference).
 
         Args:
             model_name (str): The name of the model being run.
@@ -431,11 +431,23 @@ class FaceDetectors:
             )
 
         try:
-            # ⚠️ This is a critical synchronization point for CUDA execution.
+            # PRE-INFERENCE SYNC: Ensure PyTorch has finished preparing the memory
+            # before ONNX Runtime starts reading from the IOBinding pointers.
             if self.models_processor.device == "cuda":
                 torch.cuda.current_stream().synchronize()
+            elif self.models_processor.device != "cpu":
+                self.models_processor.syncvec.cpu()
 
             ort_session.run_with_iobinding(io_binding)
+
+            # POST-INFERENCE SYNC : Ensure the GPU has completed all
+            # calculations before ONNX Runtime attempts to copy the result back to CPU RAM.
+            # Without this, copy_outputs_to_cpu() might grab an incomplete tensor.
+            if self.models_processor.device == "cuda":
+                torch.cuda.current_stream().synchronize()
+            elif self.models_processor.device != "cpu":
+                self.models_processor.syncvec.cpu()
+
             net_outs = io_binding.copy_outputs_to_cpu()
 
         finally:

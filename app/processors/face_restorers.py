@@ -76,6 +76,7 @@ class FaceRestorers:
 
         try:
             # ⚠️ This is a critical synchronization point.
+            # PRE-INFERENCE SYNC
             if self.models_processor.device == "cuda":
                 torch.cuda.current_stream().synchronize()
             elif self.models_processor.device != "cpu":
@@ -104,13 +105,8 @@ class FaceRestorers:
         if not model_name_to_load:
             return swapped_face_upscaled
 
-        # The model state (active_model_slot1/2) is now managed by
-        # control_actions.handle_restorer_state_change and handle_model_selection_change.
-
-        temp = swapped_face_upscaled
-
         # If using a separate detection mode
-        if restorer_det_type == "Blend" or restorer_det_type == "Reference":
+        if restorer_det_type in ["Blend", "Reference"]:
             if restorer_det_type == "Blend":
                 # Set up Transformation
                 dst = self.models_processor.arcface_dst * 4.0
@@ -136,6 +132,7 @@ class FaceRestorers:
                     tform.estimate(dst, self.models_processor.FFHQ_kps)
             except Exception:
                 return swapped_face_upscaled
+
             # OPTIMIZED: Direct GPU Affine Warp with Kornia, skipping torchvision crop/affine
             M_tensor = (
                 torch.from_numpy(tform.params[0:2])
@@ -149,6 +146,7 @@ class FaceRestorers:
                 else swapped_face_upscaled
             )
 
+            # Kornia allocates a new tensor here, so we own this memory space.
             temp = kgm.warp_affine(
                 img_b.float(),
                 M_tensor,
@@ -156,9 +154,16 @@ class FaceRestorers:
                 mode="bilinear",
                 align_corners=True,
             ).squeeze(0)
+            # Safe to perform math operations since 'temp' is a brand new tensor
+            temp = temp.float() / 255.0
 
-        # OPTIMIZED: In-place division and functional normalize to save VRAM allocations
-        temp = temp.float().div_(255.0)
+        else:
+            # If we did not warp the image, we MUST clone the original tensor
+            # before applying division. Using .div_(255.0) on the original reference corrupts
+            # memory for other threads (Race Condition).
+            temp = swapped_face_upscaled.clone().float() / 255.0
+
+        # Now safe to use inplace normalization as we definitely own the 'temp' memory footprint
         temp = v2.functional.normalize(
             temp, (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True
         )
@@ -257,7 +262,7 @@ class FaceRestorers:
             outpred = v2.functional.resize(outpred, [512, 512], antialias=True)
 
         # Invert Transform
-        if restorer_det_type == "Blend" or restorer_det_type == "Reference":
+        if restorer_det_type in ["Blend", "Reference"]:
             # OPTIMIZED: Direct Inverse GPU Affine Warp with Kornia
             M_inv_tensor = (
                 torch.from_numpy(tform.inverse.params[0:2])
@@ -397,12 +402,9 @@ class FaceRestorers:
         if not ort_session:
             # Enhanced error reporting
             error_messages = [
-                f"[ERROR] UNet model '{model_name}' not loaded when run_ref_ldm_unet was called."
+                f"[ERROR] UNet model '{model_name}' not loaded when run_ref_ldm_unet was called.",
+                "  This model should be loaded by ModelsProcessor.apply_denoiser_unet or a similar setup routine.",
             ]
-            error_messages.append(
-                "  This model should be loaded by ModelsProcessor.apply_denoiser_unet or a similar setup routine."
-            )
-            # ... (error reporting details omitted for brevity) ...
             print("\n".join(error_messages))
             return
 
@@ -725,7 +727,7 @@ class FaceRestorers:
             raise ValueError(
                 f"fidelity_ratio_value must be in [0,1], got {fidelity_ratio_value}"
             )
-        fidelity_ratio = torch.tensor(fidelity_ratio_value).to(
+        fidelity_ratio = torch.tensor(fidelity_ratio_value, dtype=torch.float32).to(
             self.models_processor.device
         )
 

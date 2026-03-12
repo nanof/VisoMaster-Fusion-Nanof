@@ -92,6 +92,7 @@ class FaceSwappers:
 
         try:
             # ⚠️ This is a critical synchronization point.
+            # PRE-INFERENCE SYNC
             if self.models_processor.device == "cuda":
                 torch.cuda.current_stream().synchronize()
             elif self.models_processor.device != "cpu":
@@ -214,6 +215,11 @@ class FaceSwappers:
         # Ensure float format
         if img.dtype == torch.uint8:
             img = img.float()
+
+        # We MUST clone the image before doing in-place math if we are
+        # not strictly sure that we own a brand new Kornia tensor.
+        # "Optimal" mode might pass a reference, causing Race Conditions across threads.
+        img = img.clone()
 
         # OPTIMIZED: In-Place math operations (.sub_ and .div_) to save VRAM fragmentation
         if arcface_model == "Inswapper128ArcFace":

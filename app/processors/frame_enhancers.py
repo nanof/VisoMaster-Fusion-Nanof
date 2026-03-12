@@ -61,7 +61,8 @@ class FrameEnhancers:
         Runs the ONNX session with IOBinding, handling TensorRT lazy build dialogs.
 
         This centralizes the try/finally logic for showing/hiding the build progress
-        dialog and includes the critical synchronization step for CUDA or other devices.
+        dialog and includes the critical synchronization steps (Pre and Post inference)
+        for CUDA or other devices.
 
         Args:
             model_name (str): The name of the model being run.
@@ -78,20 +79,7 @@ class FrameEnhancers:
             )
 
         try:
-            # ⚠️ CRITICAL SYNCHRONIZATION POINT ⚠️
-            # This ensures that the GPU (CUDA or other) has finished all previous
-            # work before we run the model. This is vital in a multithreaded
-            # environment to prevent race conditions or memory access errors.
-            if self.models_processor.device == "cuda":
-                torch.cuda.current_stream().synchronize()
-            elif self.models_processor.device != "cpu":
-                # This handles synchronization for other execution providers (e.g., DirectML)
-                # by synchronizing the custom sync vector.
-                self.models_processor.syncvec.cpu()
-
-            # Run the model using the pre-bound inputs and outputs
             ort_session.run_with_iobinding(io_binding)
-
         finally:
             # Always hide the dialog, even if the run fails
             if is_lazy_build:

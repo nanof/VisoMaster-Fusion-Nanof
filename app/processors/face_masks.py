@@ -98,11 +98,14 @@ class FaceMasks:
             )
 
         try:
+            # PRE-INFERENCE SYNC: Ensure PyTorch memory is ready
             if self.models_processor.device == "cuda":
                 torch.cuda.current_stream().synchronize()
             elif self.models_processor.device != "cpu":
                 self.models_processor.syncvec.cpu()
+
             ort_session.run_with_iobinding(io)
+
         finally:
             if is_lazy_build:
                 self.models_processor.hide_build_dialog.emit()
@@ -852,11 +855,14 @@ class FaceMasks:
             )
 
         try:
+            # PRE-INFERENCE SYNC
             if self.models_processor.device == "cuda":
                 torch.cuda.current_stream().synchronize()
             elif self.models_processor.device != "cpu":
                 self.models_processor.syncvec.cpu()
+
             ort_session.run_with_iobinding(io_binding)
+
         finally:
             if is_lazy_build:
                 self.models_processor.hide_build_dialog.emit()
@@ -1063,11 +1069,14 @@ class FaceMasks:
             )
 
         try:
+            # PRE-INFERENCE SYNC
             if self.models_processor.device == "cuda":
                 torch.cuda.current_stream().synchronize()
             elif self.models_processor.device != "cpu":
                 self.models_processor.syncvec.cpu()
+
             ort_session.run_with_iobinding(io_binding)
+
         finally:
             if is_lazy_build:
                 self.models_processor.hide_build_dialog.emit()
@@ -1113,12 +1122,14 @@ class FaceMasks:
             )
 
         try:
+            # PRE-INFERENCE SYNC
             if self.models_processor.device == "cuda":
                 torch.cuda.current_stream().synchronize()
-            else:
+            elif self.models_processor.device != "cpu":
                 self.models_processor.syncvec.cpu()
 
             sess.run_with_iobinding(io_binding)
+
         finally:
             if is_lazy_build:
                 self.models_processor.hide_build_dialog.emit()

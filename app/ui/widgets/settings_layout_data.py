@@ -420,6 +420,12 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "default": False,
             "help": "Draw bounding boxes to all detected faces in the frame",
         },
+        "KPSSmoothingEnableToggle": {
+            "level": 1,
+            "label": "Enable KPS Smoothing",
+            "default": True,  # Activé par défaut pour garder la stabilité
+            "help": "Enable temporal smoothing for facial keypoints (KPS) to reduce jittering and stabilize the face.",
+        },
     },
     "Face Tracking": {
         "FaceTrackingEnableToggle": {

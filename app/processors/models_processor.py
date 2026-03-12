@@ -674,10 +674,18 @@ class ModelsProcessor(QtCore.QObject):
                                     probe_process.start()
                                     build_was_triggered = True
 
-                                    # CRITICAL FIX: Removed the while loop with QtCore.QCoreApplication.processEvents()
-                                    # Calling processEvents in a worker thread causes re-entrancy and crashes the app.
-                                    # Using standard synchronous join instead.
-                                    probe_process.join()
+                                    # Force timeout at 15Min if the compilator silently crashed, enabling app to stay alive
+                                    probe_process.join(timeout=900)
+
+                                    if probe_process.is_alive():
+                                        print(
+                                            f"[ERROR] Probe process for {model_name} timed out! Terminating."
+                                        )
+                                        probe_process.terminate()
+                                        probe_process.join()
+                                        raise RuntimeError(
+                                            "TensorRT Engine build timed out."
+                                        )
                                 except Exception as e:
                                     print(f"[ERROR] Process execution failed: {e}")
 
@@ -746,7 +754,8 @@ class ModelsProcessor(QtCore.QObject):
                 # engine build, before we try to load it.
                 if build_was_triggered:
                     if torch.cuda.is_available():
-                        torch.cuda.synchronize()
+                        # Only synchronise current stream
+                        torch.cuda.current_stream().synchronize()
 
                     # Check cache AGAIN.
                     # If the probe succeeded BUT the cache STILL doesn't exist,
@@ -1899,390 +1908,421 @@ class ModelsProcessor(QtCore.QObject):
 
         with self.model_lock:
             self.ensure_denoiser_models_loaded()
-            if not (
-                self.models.get(unet_model_name)
-                and self.models.get(vae_encoder_name)
-                and self.models.get(vae_decoder_name)
-            ):
-                print(
-                    "[ERROR] Denoiser: Critical models (UNet/VAEs) not loaded. Skipping."
-                )
+            unet_session = self.models.get(unet_model_name)
+            vae_enc_session = self.models.get(vae_encoder_name)
+            vae_dec_session = self.models.get(vae_decoder_name)
+
+            if not (unet_session and vae_enc_session and vae_dec_session):
                 return image_cxhxw_uint8
 
-            kv_tensor_map_for_this_run: Dict[str, Dict[str, torch.Tensor]] | None = None
-            if reference_kv_map:
-                try:
-                    kv_tensor_map_for_this_run = {
-                        layer: {
-                            "k": tens_dict["k"].clone().to(self.device),
-                            "v": tens_dict["v"].clone().to(self.device),
-                        }
-                        for layer, tens_dict in reference_kv_map.items()
-                        if tens_dict
-                        and isinstance(tens_dict.get("k"), torch.Tensor)
-                        and isinstance(tens_dict.get("v"), torch.Tensor)
+        kv_tensor_map_for_this_run: Dict[str, Dict[str, torch.Tensor]] | None = None
+        if reference_kv_map:
+            try:
+                kv_tensor_map_for_this_run = {
+                    layer: {
+                        # OPTIMISATION PCIe : non_blocking=True for async
+                        "k": tens_dict["k"].clone().to(self.device, non_blocking=True),
+                        "v": tens_dict["v"].clone().to(self.device, non_blocking=True),
                     }
-                except Exception as e:
-                    print(
-                        f"[ERROR] Denoiser: Error deep copying K/V map: {e}. Skipping."
-                    )
-                    return image_cxhxw_uint8
-
-            if (
-                denoiser_mode == "Full Restore (DDIM)"
-                and use_reference_exclusive_path
-                and not kv_tensor_map_for_this_run
-            ):
-                print(
-                    "[ERROR] Denoiser (Full Restore): Reference K/V tensor file selected for use, but K/V map is empty. Skipping."
-                )
-                return image_cxhxw_uint8
-            if (
-                denoiser_mode == "Single Step (Fast)"
-                and use_reference_exclusive_path
-                and not kv_tensor_map_for_this_run
-            ):
-                print(
-                    "[ERROR] Denoiser (Single Step): Reference K/V tensor file selected for use, but K/V map is empty. Skipping."
-                )
+                    for layer, tens_dict in reference_kv_map.items()
+                    if tens_dict
+                    and isinstance(tens_dict.get("k"), torch.Tensor)
+                    and isinstance(tens_dict.get("v"), torch.Tensor)
+                }
+            except Exception as e:
+                print(f"[ERROR] Denoiser: Error deep copying K/V map: {e}. Skipping.")
                 return image_cxhxw_uint8
 
-            target_proc_dim = 512
-            _, h_input, w_input = image_cxhxw_uint8.shape
-            if h_input != target_proc_dim or w_input != target_proc_dim:
-                # OPTIMIZED: Functional resize avoids slow class instantiation
-                image_to_process_cxhxw_uint8 = v2.functional.resize(
-                    image_cxhxw_uint8,
-                    [target_proc_dim, target_proc_dim],
-                    interpolation=v2.InterpolationMode.BILINEAR,
-                    antialias=True,
-                )
-            else:
-                image_to_process_cxhxw_uint8 = image_cxhxw_uint8
+        if (
+            denoiser_mode == "Full Restore (DDIM)"
+            and use_reference_exclusive_path
+            and not kv_tensor_map_for_this_run
+        ):
+            print(
+                "[ERROR] Denoiser (Full Restore): Reference K/V tensor file selected for use, but K/V map is empty. Skipping."
+            )
+            return image_cxhxw_uint8
+        if (
+            denoiser_mode == "Single Step (Fast)"
+            and use_reference_exclusive_path
+            and not kv_tensor_map_for_this_run
+        ):
+            print(
+                "[ERROR] Denoiser (Single Step): Reference K/V tensor file selected for use, but K/V map is empty. Skipping."
+            )
+            return image_cxhxw_uint8
 
-            h_proc, w_proc = (
-                image_to_process_cxhxw_uint8.shape[1],
-                image_to_process_cxhxw_uint8.shape[2],
+        target_proc_dim = 512
+        _, h_input, w_input = image_cxhxw_uint8.shape
+        if h_input != target_proc_dim or w_input != target_proc_dim:
+            # OPTIMIZED: Functional resize avoids slow class instantiation
+            image_to_process_cxhxw_uint8 = v2.functional.resize(
+                image_cxhxw_uint8,
+                [target_proc_dim, target_proc_dim],
+                interpolation=v2.InterpolationMode.BILINEAR,
+                antialias=True,
+            )
+        else:
+            image_to_process_cxhxw_uint8 = image_cxhxw_uint8
+
+        h_proc, w_proc = (
+            image_to_process_cxhxw_uint8.shape[1],
+            image_to_process_cxhxw_uint8.shape[2],
+        )
+
+        image_srgb_float_minus1_1 = (image_to_process_cxhxw_uint8.float() / 127.5) - 1.0
+        image_srgb_float_minus1_1_batched = image_srgb_float_minus1_1.unsqueeze(
+            0
+        ).contiguous()
+
+        latent_h, latent_w = h_proc // 8, w_proc // 8
+        encoded_latent_direct_vae_out_bchw = torch.empty(
+            (1, 8, latent_h, latent_w), dtype=torch.float32, device=self.device
+        ).contiguous()
+
+        self.face_restorers.run_vae_encoder(
+            image_srgb_float_minus1_1_batched, encoded_latent_direct_vae_out_bchw
+        )
+
+        lq_latent_x0_scaled_for_unet = (
+            encoded_latent_direct_vae_out_bchw * self.vae_scale_factor
+        )
+        # MP-16: del encoded latent buffer and input image float as soon as done
+        del encoded_latent_direct_vae_out_bchw
+        del image_srgb_float_minus1_1_batched
+        final_denoised_latent_x0_scaled = None
+
+        # OPTIMISATION PCIe : non_blocking=True
+        is_ref_flag_tensor_for_unet = (
+            torch.tensor([use_reference_exclusive_path], dtype=torch.bool)
+            .to(self.device, non_blocking=True)
+            .contiguous()
+        )
+
+        actual_use_exclusive_path_tensor_for_unet = (
+            torch.tensor([use_reference_exclusive_path], dtype=torch.bool)
+            .to(self.device, non_blocking=True)
+            .contiguous()
+        )
+
+        rng = torch.Generator(device=self.device)
+        rng.manual_seed(base_seed)
+
+        # --- PROCESS: Single Step ---
+        if denoiser_mode == "Single Step (Fast)":
+            rng.manual_seed(base_seed + denoiser_single_step_t)
+            noise_sample = torch.randn(
+                lq_latent_x0_scaled_for_unet.shape,
+                device=self.device,
+                dtype=lq_latent_x0_scaled_for_unet.dtype,
+                generator=rng,
             )
 
-            image_srgb_float_minus1_1 = (
-                image_to_process_cxhxw_uint8.float() / 127.5
-            ) - 1.0
-            image_srgb_float_minus1_1_batched = image_srgb_float_minus1_1.unsqueeze(
-                0
-            ).contiguous()
+            current_t_idx = min(
+                max(0, denoiser_single_step_t), len(self.alphas_cumprod_np) - 1
+            )
+            alpha_t_bar_val = self.alphas_cumprod_np[current_t_idx]
 
-            latent_h, latent_w = h_proc // 8, w_proc // 8
-            encoded_latent_direct_vae_out_bchw = torch.empty(
+            # OPTIMISATION PCIe
+            sqrt_alpha_bar_t_torch = torch.sqrt(
+                torch.tensor(alpha_t_bar_val, dtype=torch.float32).to(
+                    self.device, non_blocking=True
+                )
+            )
+            sqrt_one_minus_alpha_bar_t_torch = torch.sqrt(
+                1.0
+                - torch.tensor(alpha_t_bar_val, dtype=torch.float32).to(
+                    self.device, non_blocking=True
+                )
+            )
+
+            xt_noisy_scaled_8_channel = (
+                lq_latent_x0_scaled_for_unet * sqrt_alpha_bar_t_torch
+                + noise_sample * sqrt_one_minus_alpha_bar_t_torch
+            )
+            unet_input_16_channel = torch.cat(
+                (xt_noisy_scaled_8_channel, lq_latent_x0_scaled_for_unet), dim=1
+            )
+
+            # OPTIMISATION PCIe
+            timesteps_tensor_unet = torch.tensor([current_t_idx], dtype=torch.int64).to(
+                self.device, non_blocking=True
+            )
+
+            predicted_noise_from_unet = torch.empty(
                 (1, 8, latent_h, latent_w), dtype=torch.float32, device=self.device
             ).contiguous()
 
-            self.face_restorers.run_vae_encoder(
-                image_srgb_float_minus1_1_batched, encoded_latent_direct_vae_out_bchw
+            # CUDA Stream Sync: Ensure all non-blocking PCIe transfers are complete
+            # before ONNX/TensorRT execution begins to prevent race conditions.
+            if torch.cuda.is_available():
+                torch.cuda.current_stream().synchronize()
+
+            self.face_restorers.run_ref_ldm_unet(
+                x_noisy_plus_lq_latent=unet_input_16_channel,
+                timesteps_tensor=timesteps_tensor_unet,
+                is_ref_flag_tensor=is_ref_flag_tensor_for_unet,
+                use_reference_exclusive_path_globally_tensor=actual_use_exclusive_path_tensor_for_unet,
+                kv_tensor_map=kv_tensor_map_for_this_run,
+                output_unet_tensor=predicted_noise_from_unet,
+            )
+            final_denoised_latent_x0_scaled = (
+                xt_noisy_scaled_8_channel
+                - sqrt_one_minus_alpha_bar_t_torch * predicted_noise_from_unet
+            ) / sqrt_alpha_bar_t_torch
+
+        # --- PROCESS: Full Restore (DDIM) ---
+        elif denoiser_mode == "Full Restore (DDIM)":
+            # Removed the redundant and wrong cuda stream sync here as the worker are now in a separate global stream
+            num_ddpm_timesteps = self.alphas_cumprod_np.shape[0]
+
+            _ddim_raw_ddpm_timesteps_np = ModelsProcessor.make_ddim_timesteps(
+                ddim_discr_method="uniform",
+                num_ddim_timesteps=denoiser_ddim_steps,
+                num_ddpm_timesteps=num_ddpm_timesteps,
+                verbose=DEBUG_DENOISER,
+            )
+            _ddim_sigmas_np, _ddim_alphas_np, _ddim_alphas_prev_np = (
+                ModelsProcessor.make_ddim_sampling_parameters(
+                    alphacums=self.alphas_cumprod_np,
+                    ddim_timesteps=_ddim_raw_ddpm_timesteps_np,
+                    eta=denoiser_ddim_eta,
+                    verbose=DEBUG_DENOISER,
+                )
             )
 
-            lq_latent_x0_scaled_for_unet = (
-                encoded_latent_direct_vae_out_bchw * self.vae_scale_factor
+            # OPTIMISATION PCIe : Numpy -> Tensor async
+            ddim_sigmas = (
+                torch.from_numpy(_ddim_sigmas_np)
+                .float()
+                .to(self.device, non_blocking=True)
             )
-            # MP-16: del encoded latent buffer and input image float as soon as done
-            del encoded_latent_direct_vae_out_bchw
-            del image_srgb_float_minus1_1_batched
-            final_denoised_latent_x0_scaled = None
+            ddim_alphas = (
+                torch.from_numpy(_ddim_alphas_np)
+                .float()
+                .to(self.device, non_blocking=True)
+            )
+            ddim_alphas_prev = (
+                torch.from_numpy(_ddim_alphas_prev_np)
+                .float()
+                .to(self.device, non_blocking=True)
+            )
+            ddim_sqrt_one_minus_alphas = torch.sqrt(
+                torch.clamp(1.0 - ddim_alphas, min=0.0)
+            )
 
-            is_ref_flag_tensor_for_unet = torch.tensor(
-                [use_reference_exclusive_path], dtype=torch.bool, device=self.device
-            ).contiguous()
-            actual_use_exclusive_path_tensor_for_unet = torch.tensor(
-                [use_reference_exclusive_path], dtype=torch.bool, device=self.device
-            ).contiguous()
+            current_latent_xt_scaled = torch.randn(
+                lq_latent_x0_scaled_for_unet.shape,
+                device=self.device,
+                dtype=lq_latent_x0_scaled_for_unet.dtype,
+                generator=rng,
+            )
+            time_range_ddpm_indices = np.flip(_ddim_raw_ddpm_timesteps_np).copy()
+            total_steps = len(time_range_ddpm_indices)
 
-            rng = torch.Generator(device=self.device)
-            rng.manual_seed(base_seed)
+            pred_x0_scaled_current_step = torch.empty_like(lq_latent_x0_scaled_for_unet)
 
-            # --- PROCESS: Single Step ---
-            if denoiser_mode == "Single Step (Fast)":
-                rng.manual_seed(base_seed + denoiser_single_step_t)
-                noise_sample = torch.randn(
-                    lq_latent_x0_scaled_for_unet.shape,
-                    device=self.device,
-                    dtype=lq_latent_x0_scaled_for_unet.dtype,
-                    generator=rng,
-                )
+            # Pre-allocate tensor
+            false_tensor_for_unet = (
+                torch.tensor([False], dtype=torch.bool)
+                .to(self.device, non_blocking=True)
+                .contiguous()
+            )
 
-                current_t_idx = min(
-                    max(0, denoiser_single_step_t), len(self.alphas_cumprod_np) - 1
-                )
-                alpha_t_bar_val = self.alphas_cumprod_np[current_t_idx]
-                sqrt_alpha_bar_t_torch = torch.sqrt(
-                    torch.tensor(
-                        alpha_t_bar_val, device=self.device, dtype=torch.float32
-                    )
-                )
-                sqrt_one_minus_alpha_bar_t_torch = torch.sqrt(
-                    1.0
-                    - torch.tensor(
-                        alpha_t_bar_val, device=self.device, dtype=torch.float32
-                    )
+            for i, step_ddpm_idx in enumerate(time_range_ddpm_indices):
+                index_for_schedules = total_steps - 1 - i
+
+                # OPTIMISATION PCIe
+                ts_unet = torch.full((1,), step_ddpm_idx, dtype=torch.int64).to(
+                    self.device, non_blocking=True
                 )
 
-                xt_noisy_scaled_8_channel = (
-                    lq_latent_x0_scaled_for_unet * sqrt_alpha_bar_t_torch
-                    + noise_sample * sqrt_one_minus_alpha_bar_t_torch
+                unet_input_cond = torch.cat(
+                    [current_latent_xt_scaled, lq_latent_x0_scaled_for_unet],
+                    dim=1,
                 )
-                unet_input_16_channel = torch.cat(
-                    (xt_noisy_scaled_8_channel, lq_latent_x0_scaled_for_unet), dim=1
-                )
-                timesteps_tensor_unet = torch.tensor(
-                    [current_t_idx], dtype=torch.int64, device=self.device
-                )
-                predicted_noise_from_unet = torch.empty(
-                    (1, 8, latent_h, latent_w), dtype=torch.float32, device=self.device
-                ).contiguous()
+                e_t_cond = torch.empty_like(lq_latent_x0_scaled_for_unet)
+
+                # CUDA Stream Sync: Wait for the async timestep tensor transfer
+                # before running the UNet in the conditional pass.
+                if torch.cuda.is_available():
+                    torch.cuda.current_stream().synchronize()
 
                 self.face_restorers.run_ref_ldm_unet(
-                    x_noisy_plus_lq_latent=unet_input_16_channel,
-                    timesteps_tensor=timesteps_tensor_unet,
+                    x_noisy_plus_lq_latent=unet_input_cond,
+                    timesteps_tensor=ts_unet,
                     is_ref_flag_tensor=is_ref_flag_tensor_for_unet,
                     use_reference_exclusive_path_globally_tensor=actual_use_exclusive_path_tensor_for_unet,
                     kv_tensor_map=kv_tensor_map_for_this_run,
-                    output_unet_tensor=predicted_noise_from_unet,
+                    output_unet_tensor=e_t_cond,
                 )
-                final_denoised_latent_x0_scaled = (
-                    xt_noisy_scaled_8_channel
-                    - sqrt_one_minus_alpha_bar_t_torch * predicted_noise_from_unet
-                ) / sqrt_alpha_bar_t_torch
+                e_t = e_t_cond
 
-            # --- PROCESS: Full Restore (DDIM) ---
-            elif denoiser_mode == "Full Restore (DDIM)":
-                with torch.cuda.stream(torch.cuda.current_stream()):
-                    num_ddpm_timesteps = self.alphas_cumprod_np.shape[0]
-
-                    # CRITICAL FIX: Removed the faulty _ddim_schedule_cache.
-                    # Caching CUDA tensors globally across multiple thread inferences causes memory corruption
-                    # and device mismatch errors if the stream or context changes.
-                    _ddim_raw_ddpm_timesteps_np = ModelsProcessor.make_ddim_timesteps(
-                        ddim_discr_method="uniform",
-                        num_ddim_timesteps=denoiser_ddim_steps,
-                        num_ddpm_timesteps=num_ddpm_timesteps,
-                        verbose=DEBUG_DENOISER,
+                if denoiser_cfg_scale != 1.0:
+                    unet_input_uncond = torch.cat(
+                        [
+                            current_latent_xt_scaled,
+                            lq_latent_x0_scaled_for_unet,
+                        ],
+                        dim=1,
                     )
-                    _ddim_sigmas_np, _ddim_alphas_np, _ddim_alphas_prev_np = (
-                        ModelsProcessor.make_ddim_sampling_parameters(
-                            alphacums=self.alphas_cumprod_np,
-                            ddim_timesteps=_ddim_raw_ddpm_timesteps_np,
-                            eta=denoiser_ddim_eta,
-                            verbose=DEBUG_DENOISER,
-                        )
+                    e_t_uncond = torch.empty_like(lq_latent_x0_scaled_for_unet)
+
+                    # Optional secondary sync if there are any other async operations between calls.
+                    if torch.cuda.is_available():
+                        torch.cuda.current_stream().synchronize()
+
+                    self.face_restorers.run_ref_ldm_unet(
+                        x_noisy_plus_lq_latent=unet_input_uncond,
+                        timesteps_tensor=ts_unet,
+                        is_ref_flag_tensor=is_ref_flag_tensor_for_unet,
+                        use_reference_exclusive_path_globally_tensor=false_tensor_for_unet,
+                        kv_tensor_map=None,
+                        output_unet_tensor=e_t_uncond,
                     )
-                    ddim_sigmas = (
-                        torch.from_numpy(_ddim_sigmas_np).float().to(self.device)
-                    )
-                    ddim_alphas = (
-                        torch.from_numpy(_ddim_alphas_np).float().to(self.device)
-                    )
-                    ddim_alphas_prev = (
-                        torch.from_numpy(_ddim_alphas_prev_np).float().to(self.device)
-                    )
-                    ddim_sqrt_one_minus_alphas = torch.sqrt(
-                        torch.clamp(1.0 - ddim_alphas, min=0.0)
-                    )
+                    e_t = e_t_uncond + denoiser_cfg_scale * (e_t_cond - e_t_uncond)
 
-                    current_latent_xt_scaled = torch.randn(
-                        lq_latent_x0_scaled_for_unet.shape,
-                        device=self.device,
-                        dtype=lq_latent_x0_scaled_for_unet.dtype,
-                        generator=rng,
-                    )
-                    time_range_ddpm_indices = np.flip(_ddim_raw_ddpm_timesteps_np)
-                    total_steps = len(time_range_ddpm_indices)
+                # OPTIMISATION PCIe
+                schedule_idx_tensor = torch.tensor(
+                    [index_for_schedules], dtype=torch.long
+                ).to(self.device, non_blocking=True)
 
-                    # CRITICAL FIX: Reverted to out-of-place memory allocation.
-                    # In-place assignments combined with TensorRT async execution causes severe
-                    # CUDA memory corruption resulting in visual artifacts and lagging.
-                    pred_x0_scaled_current_step = torch.empty_like(
-                        lq_latent_x0_scaled_for_unet
-                    )
-
-                    for i, step_ddpm_idx in enumerate(time_range_ddpm_indices):
-                        index_for_schedules = total_steps - 1 - i
-                        ts_unet = torch.full(
-                            (1,), step_ddpm_idx, device=self.device, dtype=torch.int64
-                        )
-
-                        # CRITICAL FIX: Use torch.cat to create clean tensors instead of reusing buffers (MP-10 issue).
-                        unet_input_cond = torch.cat(
-                            [current_latent_xt_scaled, lq_latent_x0_scaled_for_unet],
-                            dim=1,
-                        )
-                        e_t_cond = torch.empty_like(lq_latent_x0_scaled_for_unet)
-
-                        self.face_restorers.run_ref_ldm_unet(
-                            x_noisy_plus_lq_latent=unet_input_cond,
-                            timesteps_tensor=ts_unet,
-                            is_ref_flag_tensor=is_ref_flag_tensor_for_unet,
-                            use_reference_exclusive_path_globally_tensor=actual_use_exclusive_path_tensor_for_unet,
-                            kv_tensor_map=kv_tensor_map_for_this_run,
-                            output_unet_tensor=e_t_cond,
-                        )
-                        e_t = e_t_cond
-
-                        if denoiser_cfg_scale != 1.0:
-                            unet_input_uncond = torch.cat(
-                                [
-                                    current_latent_xt_scaled,
-                                    lq_latent_x0_scaled_for_unet,
-                                ],
-                                dim=1,
-                            )
-                            e_t_uncond = torch.empty_like(lq_latent_x0_scaled_for_unet)
-                            self.face_restorers.run_ref_ldm_unet(
-                                x_noisy_plus_lq_latent=unet_input_uncond,
-                                timesteps_tensor=ts_unet,
-                                is_ref_flag_tensor=is_ref_flag_tensor_for_unet,
-                                use_reference_exclusive_path_globally_tensor=torch.tensor(
-                                    [False], dtype=torch.bool, device=self.device
-                                ).contiguous(),
-                                kv_tensor_map=None,
-                                output_unet_tensor=e_t_uncond,
-                            )
-                            e_t = e_t_uncond + denoiser_cfg_scale * (
-                                e_t_cond - e_t_uncond
-                            )
-
-                        schedule_idx_tensor = torch.tensor(
-                            [index_for_schedules], device=self.device, dtype=torch.long
-                        )
-                        a_t = ModelsProcessor.extract_into_tensor_torch(
-                            ddim_alphas,
-                            schedule_idx_tensor,
-                            current_latent_xt_scaled.shape,
-                        )
-                        a_prev = ModelsProcessor.extract_into_tensor_torch(
-                            ddim_alphas_prev,
-                            schedule_idx_tensor,
-                            current_latent_xt_scaled.shape,
-                        )
-                        sigma_t = ModelsProcessor.extract_into_tensor_torch(
-                            ddim_sigmas,
-                            schedule_idx_tensor,
-                            current_latent_xt_scaled.shape,
-                        )
-                        sqrt_one_minus_a_t = ModelsProcessor.extract_into_tensor_torch(
-                            ddim_sqrt_one_minus_alphas,
-                            schedule_idx_tensor,
-                            current_latent_xt_scaled.shape,
-                        )
-
-                        pred_x0_scaled_current_step = (
-                            current_latent_xt_scaled - sqrt_one_minus_a_t * e_t
-                        ) / torch.sqrt(a_t).clamp(min=1e-8)
-
-                        dir_xt = (
-                            torch.sqrt(torch.clamp(1.0 - a_prev - sigma_t**2, min=1e-8))
-                            * e_t
-                        )
-                        noise_ddim = sigma_t * torch.randn(
-                            current_latent_xt_scaled.shape,
-                            device=self.device,
-                            dtype=current_latent_xt_scaled.dtype,
-                            generator=rng,
-                        )
-                        current_latent_xt_scaled = (
-                            torch.sqrt(a_prev) * pred_x0_scaled_current_step
-                            + dir_xt
-                            + noise_ddim
-                        )
-
-                    final_denoised_latent_x0_scaled = pred_x0_scaled_current_step
-            else:
-                print(
-                    f"[ERROR] Denoiser: Unknown mode '{denoiser_mode}'. Skipping denoiser pass."
+                a_t = ModelsProcessor.extract_into_tensor_torch(
+                    ddim_alphas,
+                    schedule_idx_tensor,
+                    current_latent_xt_scaled.shape,
                 )
-                return image_cxhxw_uint8
+                a_prev = ModelsProcessor.extract_into_tensor_torch(
+                    ddim_alphas_prev,
+                    schedule_idx_tensor,
+                    current_latent_xt_scaled.shape,
+                )
+                sigma_t = ModelsProcessor.extract_into_tensor_torch(
+                    ddim_sigmas,
+                    schedule_idx_tensor,
+                    current_latent_xt_scaled.shape,
+                )
+                sqrt_one_minus_a_t = ModelsProcessor.extract_into_tensor_torch(
+                    ddim_sqrt_one_minus_alphas,
+                    schedule_idx_tensor,
+                    current_latent_xt_scaled.shape,
+                )
 
-            if final_denoised_latent_x0_scaled is None:
-                return image_cxhxw_uint8
+                pred_x0_scaled_current_step = (
+                    current_latent_xt_scaled - sqrt_one_minus_a_t * e_t
+                ) / torch.sqrt(a_t).clamp(min=1e-8)
 
-            latent_for_vae_decoder = (
-                final_denoised_latent_x0_scaled / self.vae_scale_factor
+                dir_xt = (
+                    torch.sqrt(torch.clamp(1.0 - a_prev - sigma_t**2, min=1e-8)) * e_t
+                )
+                noise_ddim = sigma_t * torch.randn(
+                    current_latent_xt_scaled.shape,
+                    device=self.device,
+                    dtype=current_latent_xt_scaled.dtype,
+                    generator=rng,
+                )
+                current_latent_xt_scaled = (
+                    torch.sqrt(a_prev) * pred_x0_scaled_current_step
+                    + dir_xt
+                    + noise_ddim
+                )
+
+            final_denoised_latent_x0_scaled = pred_x0_scaled_current_step
+        else:
+            print(
+                f"[ERROR] Denoiser: Unknown mode '{denoiser_mode}'. Skipping denoiser pass."
             )
-            # MP-16: del denoised latent once VAE decoder input is computed
-            del final_denoised_latent_x0_scaled
-            decoded_image_normalized_bchw = torch.empty(
-                (1, 3, h_proc, w_proc), dtype=torch.float32, device=self.device
-            ).contiguous()
+            return image_cxhxw_uint8
 
-            self.face_restorers.run_vae_decoder(
-                latent_for_vae_decoder, decoded_image_normalized_bchw
-            )
-            # MP-16: del VAE decoder input latent after use
-            del latent_for_vae_decoder
+        if final_denoised_latent_x0_scaled is None:
+            return image_cxhxw_uint8
 
-            decoded_image_soft_clamped_bchw = torch.tanh(decoded_image_normalized_bchw)
-            # MP-16: del raw decoder output after soft-clamping
-            del decoded_image_normalized_bchw
+        latent_for_vae_decoder = final_denoised_latent_x0_scaled / self.vae_scale_factor
+        # MP-16: del denoised latent once VAE decoder input is computed
+        del final_denoised_latent_x0_scaled
+        decoded_image_normalized_bchw = torch.empty(
+            (1, 3, h_proc, w_proc), dtype=torch.float32, device=self.device
+        ).contiguous()
+
+        self.face_restorers.run_vae_decoder(
+            latent_for_vae_decoder, decoded_image_normalized_bchw
+        )
+        # MP-16: del VAE decoder input latent after use
+        del latent_for_vae_decoder
+
+        decoded_image_soft_clamped_bchw = torch.tanh(decoded_image_normalized_bchw)
+        # MP-16: del raw decoder output after soft-clamping
+        del decoded_image_normalized_bchw
+        image_after_postproc_float_0_1 = (
+            decoded_image_soft_clamped_bchw.squeeze(0) + 1.0
+        ) / 2.0
+        image_after_postproc_float_0_1 = torch.clamp(
+            image_after_postproc_float_0_1, 0.0, 1.0
+        )
+
+        # --- IMPROVEMENT A: Pixel Sharpening (Unsharp Mask) ---
+        if ENABLE_PIXEL_SHARPENING:
+            # OPTIMIZED: Functional gaussian blur avoids class instantiation
+            blurred = v2.functional.gaussian_blur(
+                image_after_postproc_float_0_1.unsqueeze(0), [5, 5], [1.0, 1.0]
+            ).squeeze(0)
+            detail = image_after_postproc_float_0_1 - blurred
             image_after_postproc_float_0_1 = (
-                decoded_image_soft_clamped_bchw.squeeze(0) + 1.0
-            ) / 2.0
-            image_after_postproc_float_0_1 = torch.clamp(
-                image_after_postproc_float_0_1, 0.0, 1.0
+                image_after_postproc_float_0_1 + detail * PIXEL_SHARPEN_STRENGTH
             )
+            image_after_postproc_float_0_1 = image_after_postproc_float_0_1.clamp(
+                0.0, 1.0
+            )
+        # --- END IMPROVEMENT A ---
 
-            # --- IMPROVEMENT A: Pixel Sharpening (Unsharp Mask) ---
-            if ENABLE_PIXEL_SHARPENING:
-                # OPTIMIZED: Functional gaussian blur avoids class instantiation
-                blurred = v2.functional.gaussian_blur(
-                    image_after_postproc_float_0_1.unsqueeze(0), [5, 5], [1.0, 1.0]
-                ).squeeze(0)
-                detail = image_after_postproc_float_0_1 - blurred
-                image_after_postproc_float_0_1 = (
-                    image_after_postproc_float_0_1 + detail * PIXEL_SHARPEN_STRENGTH
+        # --- IMPROVEMENT B: Color Matching (DFL Orig - LAB Reinhard) ---
+        if ENABLE_COLOR_MATCH:
+            # DFL_Orig expects inputs in [0..255] range.
+            # Ref is already uint8 [0..255] (but tensor)
+            ref_tensor = image_to_process_cxhxw_uint8
+            # Res (denoised) is float [0..1], scale to [0..255]
+            res_tensor = image_after_postproc_float_0_1 * 255.0
+
+            # Create a mask to exclude black padding from stats (Sum of channels > 0)
+            # This is critical for DFL_Orig to calculate correct Mean/Std
+            mask = (ref_tensor.sum(dim=0) > 0).float()
+
+            try:
+                # Apply DFL_Orig Transfer
+                # blend=100 means full transfer. DFL_Orig uses LAB space and is robust.
+                matched_result = faceutil.histogram_matching_DFL_Orig(
+                    ref_tensor,
+                    res_tensor,
+                    mask,
+                    100,  # Blend strength 100%
                 )
-                image_after_postproc_float_0_1 = image_after_postproc_float_0_1.clamp(
-                    0.0, 1.0
-                )
-            # --- END IMPROVEMENT A ---
 
-            # --- IMPROVEMENT B: Color Matching (DFL Orig - LAB Reinhard) ---
-            if ENABLE_COLOR_MATCH:
-                # DFL_Orig expects inputs in [0..255] range.
-                # Ref is already uint8 [0..255] (but tensor)
-                ref_tensor = image_to_process_cxhxw_uint8
-                # Res (denoised) is float [0..1], scale to [0..255]
-                res_tensor = image_after_postproc_float_0_1 * 255.0
+                # Convert back to [0..1] for consistency
+                image_after_postproc_float_0_1 = matched_result / 255.0
 
-                # Create a mask to exclude black padding from stats (Sum of channels > 0)
-                # This is critical for DFL_Orig to calculate correct Mean/Std
-                mask = (ref_tensor.sum(dim=0) > 0).float()
+            except Exception as e:
+                print(f"[WARN] Color matching failed: {e}")
+        # --- END IMPROVEMENT B ---
 
-                try:
-                    # Apply DFL_Orig Transfer
-                    # blend=100 means full transfer. DFL_Orig uses LAB space and is robust.
-                    matched_result = faceutil.histogram_matching_DFL_Orig(
-                        ref_tensor,
-                        res_tensor,
-                        mask,
-                        100,  # Blend strength 100%
-                    )
+        final_image_uint8 = (image_after_postproc_float_0_1 * 255.0).byte()
 
-                    # Convert back to [0..1] for consistency
-                    image_after_postproc_float_0_1 = matched_result / 255.0
+        if h_proc != h_input or w_proc != w_input:
+            # OPTIMIZED: Functional resize avoids slow class instantiation
+            output_image_cxhxw_uint8 = v2.functional.resize(
+                final_image_uint8,
+                [h_input, w_input],
+                interpolation=v2.InterpolationMode.BILINEAR,
+                antialias=True,
+            )
+        else:
+            output_image_cxhxw_uint8 = final_image_uint8
 
-                except Exception as e:
-                    print(f"[WARN] Color matching failed: {e}")
-            # --- END IMPROVEMENT B ---
+        # VRAM Leak Prevention: Explicitly delete the massive cloned K/V map
+        # and other large tensors to free GPU memory before the GC cycle.
+        if kv_tensor_map_for_this_run is not None:
+            del kv_tensor_map_for_this_run
 
-            final_image_uint8 = (image_after_postproc_float_0_1 * 255.0).byte()
+        del image_after_postproc_float_0_1
+        del final_image_uint8
 
-            if h_proc != h_input or w_proc != w_input:
-                # OPTIMIZED: Functional resize avoids slow class instantiation
-                output_image_cxhxw_uint8 = v2.functional.resize(
-                    final_image_uint8,
-                    [h_input, w_input],
-                    interpolation=v2.InterpolationMode.BILINEAR,
-                    antialias=True,
-                )
-            else:
-                output_image_cxhxw_uint8 = final_image_uint8
-
-            return output_image_cxhxw_uint8
+        return output_image_cxhxw_uint8

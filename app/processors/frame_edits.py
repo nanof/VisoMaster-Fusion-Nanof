@@ -59,6 +59,44 @@ class FrameEdits:
             interpolation_expression_faceeditor_back
         )
 
+    def _apply_kornia_warp(
+        self, out: torch.Tensor, M_c2o: np.ndarray, dsize: tuple
+    ) -> torch.Tensor:
+        """
+        Internal helper to warp and paste the processed face back into the original frame using Kornia.
+        Optimized to reduce code duplication and improve PCIe transfer latency.
+
+        Args:
+            out: The processed face tensor (C, H, W).
+            M_c2o: Transformation matrix (Crop to Original).
+            dsize: Destination size (Height, Width) of the full frame.
+
+        Returns:
+            torch.Tensor: The warped tensor ready for blending.
+        """
+        out = faceutil.pad_image_by_size(out, dsize)
+
+        # OPTIMIZED: non_blocking=True prevents the CPU thread from stalling while waiting
+        # for the RAM-to-VRAM transfer to complete via the PCIe bus.
+        M_c2o_tensor = (
+            torch.from_numpy(M_c2o)
+            .float()
+            .unsqueeze(0)
+            .to(out.device, non_blocking=True)
+        )
+
+        out_b = out.unsqueeze(0) if out.dim() == 3 else out
+        out = kgm.warp_affine(
+            out_b,
+            M_c2o_tensor,
+            dsize=(dsize[0], dsize[1]),
+            mode="bilinear",
+            padding_mode="zeros",
+            align_corners=True,
+        ).squeeze(0)
+
+        return out
+
     def apply_face_expression_restorer(
         self,
         driving: torch.Tensor,
@@ -83,9 +121,20 @@ class FrameEdits:
             torch.Tensor: The expression-restored face image.
         """
         # SETUP THE ASYNCHRONOUS CONTEXT
-        current_stream = torch.cuda.current_stream()
+        import contextlib
 
-        with torch.cuda.stream(current_stream):
+        # VRAM Leak: Creating a new cuda.Stream() per frame fragments the Caching Allocator
+        # and explodes VRAM. We use the current stream (inherited from FrameWorker) instead.
+        local_stream = (
+            torch.cuda.current_stream() if torch.cuda.is_available() else None
+        )
+        stream_context = (
+            torch.cuda.stream(local_stream)
+            if local_stream
+            else contextlib.nullcontext()
+        )
+
+        with stream_context:
             # --- CONFIGURATION ---
             use_mean_eyes = parameters.get("LandmarkMeanEyesToggle", False)
             # Sanitized Mode Selection
@@ -198,9 +247,6 @@ class FrameEdits:
             default_delta_exp = default_delta_raw[..., :-2].reshape(x_s.shape[0], 21, 3)
 
             # --- INDICES DEFINITION ---
-            # IMPORTANT: LivePortrait uses *implicit* keypoints learned by the AI.
-            # They don't have perfect 1:1 anatomical definitions, but empirical
-
             brow_indices = [1, 2]  # Eyebrows (elevation, frowning)
             eye_indices = [11, 13, 15, 16, 18]  # Eyes (blinking, gaze direction)
             lip_indices = [3, 6, 12, 14, 17, 19, 20]  # Mouth (lips, smiling, opening)
@@ -248,8 +294,6 @@ class FrameEdits:
             ):
                 """
                 Helper to calculate motion with 'Smart Dynamic Boost' and 'Neutral Factor'.
-                Args:
-                    use_boost: If True, applies the Micro-Expression Logic.
                 """
                 delta_local = x_s_info["exp"].clone()
 
@@ -265,8 +309,6 @@ class FrameEdits:
                     raw_diff = driving_exp[:, indices, :] - ref_part
 
                     # --- SMART DYNAMIC BOOST ---
-                    # Logic: If boost > 1.0, only enhance small signals (micro-expressions).
-                    # Large signals are kept closer to 1.0 to avoid distortion.
                     boost_val = micro_expression_boost if use_boost else 1.0
 
                     if use_boost and boost_val > 1.0:
@@ -278,13 +320,11 @@ class FrameEdits:
                         diff = raw_diff * boost_val
 
                     # --- NEUTRAL FACTOR (Anti-Surenchère) ---
-                    # Scales down the final added expression based on user slider
-                    # If neutral_factor is 0, diff becomes 0 (no LivePortrait motion added)
                     diff = diff * neutral_factor
 
                     delta_local[:, indices, :] = x_s_info["exp"][:, indices, :] + diff
                 else:
-                    # Absolute Motion (Rarely used, but dampened for safety)
+                    # Absolute Motion
                     target_exp = driving_exp[:, indices, :]
                     current_exp = x_s_info["exp"][:, indices, :]
 
@@ -306,12 +346,11 @@ class FrameEdits:
 
             # --- MODE PROCESSING ---
             if mode == "Simple":
-                # SIMPLE MODE: Explicitly enabled features, ignoring Advanced Toggles
+                # SIMPLE MODE
                 driving_multiplier = parameters.get(
                     "FaceExpressionFriendlyFactorDecimalSlider", 1.0
                 )
 
-                # Logic: "all" means Eyes+Lips. "Face" is ignored in UI logic.
                 animation_region = parameters.get(
                     "FaceExpressionAnimationRegionSelection", "all"
                 )
@@ -330,7 +369,6 @@ class FrameEdits:
                 )
                 lips_retarget_delta = 0
                 if flag_normalize_lip and source_lmk is not None:
-                    # Use measured lip ratio (computed earlier in the function)
                     combined_lip_ratio = faceutil.calc_combined_lip_ratio(
                         c_d_lip_lst, source_lmk, device=self.models_processor.device
                     )
@@ -339,7 +377,6 @@ class FrameEdits:
                             x_s, combined_lip_ratio
                         )
 
-                # Execute logic (Relative for Eyes, Relative for Lips in Simple Mode)
                 if has_eyes:
                     accumulated_motion += get_component_motion(
                         eye_indices,
@@ -395,7 +432,6 @@ class FrameEdits:
                     "FaceExpressionRelativeGeneralToggle", False
                 )
 
-                # --- Normalization Config ---
                 flag_normalize_eyes = parameters.get(
                     "FaceExpressionNormalizeEyesBothEnableToggle", True
                 )
@@ -407,9 +443,8 @@ class FrameEdits:
                 )
                 combined_eyes_ratio_normalize = None
 
-                # Calculate Normalized Eye Ratio using SMOOTHED list
                 if flag_normalize_eyes and source_lmk is not None:
-                    c_d_eyes_normalize = c_d_eyes_lst  # Already smoothed above
+                    c_d_eyes_normalize = c_d_eyes_lst
                     eyes_ratio = np.array([c_d_eyes_normalize[0][0]], dtype=np.float32)
                     eyes_ratio_normalize = max(eyes_ratio, 0.10)
                     eyes_ratio_l = min(c_d_eyes_normalize[0][0], eyes_normalize_max)
@@ -451,7 +486,6 @@ class FrameEdits:
                         ):
                             target_eye_ratio = combined_eyes_ratio_normalize
                         else:
-                            # Use Smoothed Ratios
                             target_eye_ratio = faceutil.calc_combined_eye_ratio(
                                 c_d_eyes_lst,
                                 source_lmk,
@@ -481,7 +515,6 @@ class FrameEdits:
                             "FaceExpressionRetargetingLipsMultiplierBothDecimalSlider",
                             1.0,
                         )
-                        # Use Smoothed Ratios
                         c_d_lip = faceutil.calc_combined_lip_ratio(
                             c_d_lip_lst, source_lmk, device=self.models_processor.device
                         )
@@ -529,21 +562,12 @@ class FrameEdits:
 
             # --- PASTE BACK ---
             dsize = (target.shape[1], target.shape[2])
-
-            out = faceutil.pad_image_by_size(out, dsize)
-            # OPTIMIZED: Replaced scikit-image and torchvision affine with Kornia GPU direct warp.
-            M_c2o_tensor = torch.from_numpy(M_c2o).float().unsqueeze(0).to(out.device)
-            out_b = out.unsqueeze(0) if out.dim() == 3 else out
-            out = kgm.warp_affine(
-                out_b,
-                M_c2o_tensor,
-                dsize=(dsize[0], dsize[1]),
-                mode="bilinear",
-                padding_mode="zeros",
-                align_corners=True,
-            ).squeeze(0)
-
+            out = self._apply_kornia_warp(out, M_c2o, dsize)
             out = out.mul_(255.0).clamp_(0, 255)
+
+        # Sync the stream safely
+        if local_stream:
+            local_stream.synchronize()
 
         return out.type(torch.float32)
 
@@ -557,18 +581,17 @@ class FrameEdits:
     ) -> torch.Tensor:
         """
         Applies Face Editor manipulations (Pose, Gaze, Expression) to the face via manual sliders.
-        Optimized: Removed explicit CPU/GPU sync.
+        Optimized: Centralized GPU warp pasting.
 
         Args:
             img: The original image/frame.
-            swap_restorecalc: The reference face for detection (usually detection happens earlier).
+            swap_restorecalc: The reference face for detection.
             parameters: Global parameters dictionary.
             control: UI control dictionary.
 
         Returns:
             torch.Tensor: The manipulated face image.
         """
-
         use_mean_eyes = parameters.get("LandmarkMeanEyesToggle", False)
         interp_mode = (
             self.interpolation_expression_faceeditor_back
@@ -577,10 +600,20 @@ class FrameEdits:
         )
 
         if parameters["FaceEditorEnableToggle"]:
-            # 1. SETUP THE ASYNCHRONOUS CONTEXT
-            current_stream = torch.cuda.current_stream()
+            # SETUP THE ASYNCHRONOUS CONTEXT
+            import contextlib
 
-            with torch.cuda.stream(current_stream):
+            # VRAM Leak: Reuse current stream instead of creating a new one per frame.
+            local_stream = (
+                torch.cuda.current_stream() if torch.cuda.is_available() else None
+            )
+            stream_context = (
+                torch.cuda.stream(local_stream)
+                if local_stream
+                else contextlib.nullcontext()
+            )
+
+            with stream_context:
                 init_source_eye_ratio = 0.0
                 init_source_lip_ratio = 0.0
 
@@ -634,7 +667,6 @@ class FrameEdits:
                 # --- Create Tensors from Manual Sliders ---
                 device = self.models_processor.device
 
-                # Position
                 mov_x = torch.tensor(parameters["XAxisMovementDecimalSlider"]).to(
                     device
                 )
@@ -645,7 +677,6 @@ class FrameEdits:
                     device
                 )
 
-                # Eyes/Gaze
                 eyeball_direction_x = torch.tensor(
                     parameters["EyeGazeHorizontalDecimalSlider"]
                 ).to(device)
@@ -657,7 +688,6 @@ class FrameEdits:
                     device
                 )
 
-                # Mouth
                 smile = torch.tensor(parameters["MouthSmileDecimalSlider"]).to(device)
                 lip_variation_zero = torch.tensor(
                     parameters["MouthPoutingDecimalSlider"]
@@ -780,23 +810,16 @@ class FrameEdits:
                 out = torch.squeeze(out)
                 out = out.clamp_(0, 1)
 
-            # --- POST-PROCESSING (Paste Back) ---
-            dsize = (img.shape[1], img.shape[2])
-            out = faceutil.pad_image_by_size(out, dsize)
-            # OPTIMIZED: Replaced scikit-image and torchvision affine with Kornia GPU direct warp.
-            M_c2o_tensor = torch.from_numpy(M_c2o).float().unsqueeze(0).to(out.device)
-            out_b = out.unsqueeze(0) if out.dim() == 3 else out
-            out = kgm.warp_affine(
-                out_b,
-                M_c2o_tensor,
-                dsize=(dsize[0], dsize[1]),
-                mode="bilinear",
-                padding_mode="zeros",
-                align_corners=True,
-            ).squeeze(0)
+                # --- POST-PROCESSING (Paste Back) ---
+                dsize = (img.shape[1], img.shape[2])
+                out = self._apply_kornia_warp(out, M_c2o, dsize)
 
-            img = out
-            img = img.mul_(255.0).clamp_(0, 255).type(torch.float32)
+                img = out
+                img = img.mul_(255.0).clamp_(0, 255).type(torch.float32)
+
+            # Sync the stream safely
+            if local_stream:
+                local_stream.synchronize()
 
         return img
 
@@ -863,6 +886,10 @@ class FrameEdits:
             gauss = v2.GaussianBlur(kernel_size=5 * 2 + 1, sigma=(5 + 1) * 0.2)
             out = torch.clamp(torch.div(out, 255.0), 0, 1).type(torch.float32)
             mask_crop = gauss(self.models_processor.lp_mask_crop)
+
+            # Note: We keep faceutil.paste_back_adv here instead of _apply_kornia_warp
+            # because this specific paste operation requires complex alpha blending
+            # based on the generated makeup mask_crop, which the generic helper doesn't support yet.
             img = faceutil.paste_back_adv(out, M_c2o, img, mask_crop)
 
         return img

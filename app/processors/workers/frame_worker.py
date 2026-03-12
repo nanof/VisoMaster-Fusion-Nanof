@@ -228,6 +228,9 @@ class FrameWorker(threading.Thread):
         ).view(1, 1, 3, 3)
         self.kernel_sobel_y = self.kernel_sobel_x.transpose(2, 3)
 
+        # Thread-safety. Create a frame_worker stream as cpu uses multithreaded streams but GPU makes a queue.
+        self.worker_stream = None  # torch.cuda.Stream() if self.models_processor.device == "cuda" else None
+
     def set_scaling_transforms(self, control_params):
         """Initializes the torchvision transforms based on user interpolation settings."""
         (
@@ -361,54 +364,68 @@ class FrameWorker(threading.Thread):
         # always has a valid fallback regardless of where the exception is thrown.
         _fallback_frame_rgb = self.frame
         try:
-            local_control_state = self.local_control_state_from_feeder
+            import contextlib
 
-            # FW-RACE-04: use local variables instead of instance-level assignments
-            # to prevent cross-frame data races in the pool worker.
-            is_view_face_compare = self.main_window.faceCompareCheckBox.isChecked()
-            is_view_face_mask = self.main_window.faceMaskCheckBox.isChecked()
-            # Keep instance attrs consistent so downstream helpers that still reference
-            # them (e.g. swap_core) see the same values.
-            self.is_view_face_compare = is_view_face_compare
-            self.is_view_face_mask = is_view_face_mask
-
-            # FW-RACE-02: snapshot Qt button states into the feeder dict so worker
-            # threads never call .isChecked() concurrently on the same Qt object.
-            local_control_state["swap_enabled"] = (
-                self.main_window.swapfacesButton.isChecked()
-            )
-            local_control_state["edit_enabled"] = (
-                self.main_window.editFacesButton.isChecked()
+            # Setup the dedicated asynchronous context for HPC parallel processing
+            stream_context = (
+                torch.cuda.stream(self.worker_stream)
+                if self.worker_stream
+                else contextlib.nullcontext()
             )
 
-            # Determine if processing is needed
-            needs_processing = (
-                local_control_state.get("swap_enabled", True)
-                or local_control_state.get("edit_enabled", True)
-                or local_control_state.get("FrameEnhancerEnableToggle", False)
-                or local_control_state.get(
-                    "ModeEnableToggle", False
-                )  # Always processes in this mode
-                or is_view_face_compare
-                or is_view_face_mask
-            )
+            with stream_context:
+                local_control_state = self.local_control_state_from_feeder
 
-            if needs_processing:
-                # Ensure input frame is C-contiguous for PyTorch/OpenCV compatibility
-                if not self.frame.flags["C_CONTIGUOUS"]:
-                    self.frame = np.ascontiguousarray(self.frame)
+                # FW-RACE-04: use local variables instead of instance-level assignments
+                # to prevent cross-frame data races in the pool worker.
+                is_view_face_compare = self.main_window.faceCompareCheckBox.isChecked()
+                is_view_face_mask = self.main_window.faceMaskCheckBox.isChecked()
+                # Keep instance attrs consistent so downstream helpers that still reference
+                # them (e.g. swap_core) see the same values.
+                self.is_view_face_compare = is_view_face_compare
+                self.is_view_face_mask = is_view_face_mask
 
-                # Process Frame (returns BGR, uint8)
-                processed_frame_bgr_np_uint8 = self.process_frame(
-                    local_control_state, self.stop_event
+                # FW-RACE-02: snapshot Qt button states into the feeder dict so worker
+                # threads never call .isChecked() concurrently on the same Qt object.
+                local_control_state["swap_enabled"] = (
+                    self.main_window.swapfacesButton.isChecked()
+                )
+                local_control_state["edit_enabled"] = (
+                    self.main_window.editFacesButton.isChecked()
                 )
 
-                # Ensure output is C-contiguous for Qt display
-                self.frame = np.ascontiguousarray(processed_frame_bgr_np_uint8)
-            else:
-                # If no processing, just convert RGB to BGR for display
-                self.frame = self.frame[..., ::-1]
-                self.frame = np.ascontiguousarray(self.frame)
+                # Determine if processing is needed
+                needs_processing = (
+                    local_control_state.get("swap_enabled", True)
+                    or local_control_state.get("edit_enabled", True)
+                    or local_control_state.get("FrameEnhancerEnableToggle", False)
+                    or local_control_state.get(
+                        "ModeEnableToggle", False
+                    )  # Always processes in this mode
+                    or is_view_face_compare
+                    or is_view_face_mask
+                )
+
+                if needs_processing:
+                    # Ensure input frame is C-contiguous for PyTorch/OpenCV compatibility
+                    if not self.frame.flags["C_CONTIGUOUS"]:
+                        self.frame = np.ascontiguousarray(self.frame)
+
+                    # Process Frame (returns BGR, uint8)
+                    processed_frame_bgr_np_uint8 = self.process_frame(
+                        local_control_state, self.stop_event
+                    )
+
+                    # Ensure output is C-contiguous for Qt display
+                    self.frame = np.ascontiguousarray(processed_frame_bgr_np_uint8)
+                else:
+                    # If no processing, just convert RGB to BGR for display
+                    self.frame = self.frame[..., ::-1]
+                    self.frame = np.ascontiguousarray(self.frame)
+
+                # Sync thread before returning to cpu
+                if self.worker_stream:
+                    self.worker_stream.synchronize()
 
             # Check stop event again
             if self.stop_event.is_set():
@@ -2022,8 +2039,10 @@ class FrameWorker(threading.Thread):
                     # FW-ROBUST-04: use .get() with default_parameters as fallback
                     with self.lock:
                         _default_params = dict(self.main_window.default_parameters.data)
+                    # FIX: Force face_id as string to prevent silent parameter fallback
+                    face_id_str = str(target_face.face_id)
                     params = ParametersDict(
-                        self.parameters.get(target_face.face_id, _default_params),
+                        self.parameters.get(face_id_str, _default_params),
                         _default_params,
                     )
                     best_fface, best_score = None, -1.0
@@ -2110,8 +2129,12 @@ class FrameWorker(threading.Thread):
                             target_face,
                             face_bbox=best_fface["bbox"],
                         )
-                        img, best_fface["original_face"], best_fface["swap_mask"] = (
-                            self.swap_core(
+                        try:
+                            (
+                                img,
+                                best_fface["original_face"],
+                                best_fface["swap_mask"],
+                            ) = self.swap_core(
                                 img,
                                 best_fface["kps_5"],
                                 best_fface["kps_all"],
@@ -2122,19 +2145,23 @@ class FrameWorker(threading.Thread):
                                 dfm_model_name=params["DFMModelSelection"],
                                 kv_map=_reaging_kv,
                             )
-                        )
-                        if edit_button_is_checked_global and any(
-                            params[f]
-                            for f in (
-                                "FaceMakeupEnableToggle",
-                                "HairMakeupEnableToggle",
-                                "EyeBrowsMakeupEnableToggle",
-                                "LipsMakeupEnableToggle",
+                            if edit_button_is_checked_global and any(
+                                params[f]
+                                for f in (
+                                    "FaceMakeupEnableToggle",
+                                    "HairMakeupEnableToggle",
+                                    "EyeBrowsMakeupEnableToggle",
+                                    "LipsMakeupEnableToggle",
+                                )
+                            ):
+                                img = self.frame_edits.swap_edit_face_core_makeup(
+                                    img, best_fface["kps_all"], params.data, control
+                                )
+                        except Exception as e:
+                            print(
+                                f"[ERROR] Standard mode swap_core failed for best face: {e}"
                             )
-                        ):
-                            img = self.frame_edits.swap_edit_face_core_makeup(
-                                img, best_fface["kps_all"], params.data, control
-                            )
+                            continue  # Ignore this face but save the frame
 
             else:
                 # --- Branch: Swap All Matches ---
@@ -2216,31 +2243,37 @@ class FrameWorker(threading.Thread):
                             best_target,
                             face_bbox=fface["bbox"],
                         )
-                        img, fface["original_face"], fface["swap_mask"] = (
-                            self.swap_core(
-                                img,
-                                fface["kps_5"],
-                                fface["kps_all"],
-                                s_e=s_e,
-                                t_e=best_target.get_embedding(arcface_model),
-                                parameters=_params_for_swap_b,
-                                control=control,
-                                dfm_model_name=params["DFMModelSelection"],
-                                kv_map=_reaging_kv,
+                        try:
+                            img, fface["original_face"], fface["swap_mask"] = (
+                                self.swap_core(
+                                    img,
+                                    fface["kps_5"],
+                                    fface["kps_all"],
+                                    s_e=s_e,
+                                    t_e=best_target.get_embedding(arcface_model),
+                                    parameters=_params_for_swap_b,
+                                    control=control,
+                                    dfm_model_name=params["DFMModelSelection"],
+                                    kv_map=_reaging_kv,
+                                )
                             )
-                        )
-                        if edit_button_is_checked_global and any(
-                            params[f]
-                            for f in (
-                                "FaceMakeupEnableToggle",
-                                "HairMakeupEnableToggle",
-                                "EyeBrowsMakeupEnableToggle",
-                                "LipsMakeupEnableToggle",
+                            if edit_button_is_checked_global and any(
+                                params[f]
+                                for f in (
+                                    "FaceMakeupEnableToggle",
+                                    "HairMakeupEnableToggle",
+                                    "EyeBrowsMakeupEnableToggle",
+                                    "LipsMakeupEnableToggle",
+                                )
+                            ):
+                                img = self.frame_edits.swap_edit_face_core_makeup(
+                                    img, fface["kps_all"], params.data, control
+                                )
+                        except Exception as e:
+                            print(
+                                f"[ERROR] Standard mode swap_core failed for a face: {e}"
                             )
-                        ):
-                            img = self.frame_edits.swap_edit_face_core_makeup(
-                                img, fface["kps_all"], params.data, control
-                            )
+                            continue
 
         # Undo Rotation / Scaling
         if control["ManualRotationEnableToggle"]:
@@ -2582,10 +2615,14 @@ class FrameWorker(threading.Thread):
             return False
         if np.any(np.isnan(kps)) or np.any(np.isinf(kps)):
             return False
+
+        """
+        # WE DO NOT CHECK image bounds here anymore.
         if np.any(kps[:, 0] < 0) or np.any(kps[:, 0] >= img_w):
             return False
         if np.any(kps[:, 1] < 0) or np.any(kps[:, 1] >= img_h):
             return False
+        """
         return True
 
     @staticmethod
