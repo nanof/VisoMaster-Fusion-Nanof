@@ -2404,6 +2404,191 @@ class VideoProcessor(QObject):
             print("[ERROR] FFmpeg not found. Cannot concatenate audio.")
             return None
 
+    def _write_video_only_output(self, source_video: str, output_video: str) -> bool:
+        """Fallback writer: produce a playable video-only output when audio handling fails."""
+        if not source_video or not os.path.exists(source_video):
+            print(f"[ERROR] Video-only fallback source missing: {source_video}")
+            return False
+
+        if output_video and os.path.exists(output_video):
+            try:
+                os.remove(output_video)
+            except OSError:
+                pass
+
+        args = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            source_video,
+            "-map",
+            "0:v:0",
+            "-c:v",
+            "copy",
+            "-an",
+            "-y",
+            output_video,
+        ]
+
+        try:
+            subprocess.run(args, check=True)
+            print(
+                f"[WARN] Audio processing failed; emitted video-only output: {output_video}"
+            )
+            return True
+        except Exception as e:
+            print(f"[ERROR] Video-only remux fallback failed: {e}")
+            return False
+
+    def _concatenate_segments_video_only(
+        self, list_file_path: str, final_file_path: str
+    ) -> bool:
+        """Fallback concatenation for segment mode when audio concat fails."""
+        args = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            list_file_path,
+            "-map",
+            "0:v:0",
+            "-c:v",
+            "copy",
+            "-an",
+            "-y",
+            final_file_path,
+        ]
+
+        try:
+            subprocess.run(args, check=True)
+            print(
+                f"[WARN] Segment audio concat failed; emitted video-only output: {final_file_path}"
+            )
+            return True
+        except Exception as e:
+            print(f"[ERROR] Segment video-only fallback concat failed: {e}")
+            return False
+
+    def _attempt_segment_video_only_fallback(
+        self, list_file_path: str, final_file_path: str, failure_message: str
+    ) -> bool:
+        """Try segment video-only concat fallback and show UI error if it fails."""
+        print("[WARN] Attempting segment video-only fallback concatenation...")
+        if self._concatenate_segments_video_only(list_file_path, final_file_path):
+            return True
+
+        self.main_window.display_messagebox_signal.emit(
+            "Recording Error",
+            failure_message,
+            self.main_window,
+        )
+        return False
+
+    def _rebuild_segment_audio_if_needed(self, segment_num: int) -> None:
+        """Rebuild current segment audio from kept frame ranges when frames were skipped."""
+        if not (
+            self.total_skipped_frames > 0
+            and self.temp_segment_files
+            and self.current_segment_index >= 0
+            and self.current_segment_index < len(self.segments_to_process)
+        ):
+            return
+
+        current_segment_path = self.temp_segment_files[-1]
+        if not (
+            os.path.exists(current_segment_path)
+            and os.path.getsize(current_segment_path) > 0
+            and self.segment_temp_dir
+        ):
+            return
+
+        start_frame, end_frame = self.segments_to_process[self.current_segment_index]
+        actual_end_frame = (
+            self.last_displayed_frame
+            if self.last_displayed_frame is not None
+            else end_frame
+        )
+
+        if actual_end_frame < start_frame:
+            print(
+                f"[WARN] Segment {segment_num}: invalid frame range for audio correction ({start_frame}..{actual_end_frame})."
+            )
+            return
+
+        temp_audio_dir = os.path.join(
+            self.segment_temp_dir,
+            f"segment_audio_{self.current_segment_index:03d}_{uuid.uuid4().hex}",
+        )
+        os.makedirs(temp_audio_dir, exist_ok=True)
+
+        previous_start_frame = getattr(self, "processing_start_frame", 0)
+        try:
+            self.processing_start_frame = start_frame
+            keep_segments = self._identify_frame_segments(actual_end_frame)
+        finally:
+            self.processing_start_frame = previous_start_frame
+
+        try:
+            audio_ok, audio_files = self._extract_audio_segments(
+                keep_segments, temp_audio_dir
+            )
+            if not (audio_ok and audio_files):
+                print(
+                    f"[WARN] Segment {segment_num}: audio extraction failed during skip correction, keeping original segment audio."
+                )
+                return
+
+            corrected_audio = self._concatenate_audio_segments(audio_files, temp_audio_dir)
+            if not corrected_audio:
+                print(
+                    f"[WARN] Segment {segment_num}: corrected audio concatenation failed, keeping original segment audio."
+                )
+                return
+
+            remuxed_segment_path = os.path.join(
+                self.segment_temp_dir,
+                f"segment_{self.current_segment_index:03d}_synced.mp4",
+            )
+            args = [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                current_segment_path,
+                "-i",
+                corrected_audio,
+                "-c:v",
+                "copy",
+                "-c:a",
+                "copy",
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                "-shortest",
+                "-y",
+                remuxed_segment_path,
+            ]
+            subprocess.run(args, check=True)
+            os.replace(remuxed_segment_path, current_segment_path)
+            print(
+                f"[INFO] Segment {segment_num}: rebuilt audio after skipping {self.total_skipped_frames} frame(s)."
+            )
+        except Exception as e:
+            print(
+                f"[WARN] Segment {segment_num}: failed to rebuild synced audio ({e}), keeping original segment audio."
+            )
+        finally:
+            shutil.rmtree(temp_audio_dir, ignore_errors=True)
+
     def _finalize_default_style_recording(self):
         """Finalizes a successful default-style recording (adds audio, cleans up)."""
         print("[INFO] Finalizing default-style recording...")
@@ -2652,6 +2837,18 @@ class VideoProcessor(QObject):
                     )
                 except Exception as e:
                     print(f"[ERROR] Audio merge failed: {e}")
+                    if self.temp_file and os.path.exists(self.temp_file):
+                        print(
+                            "[WARN] Falling back to video-only output for default-style recording."
+                        )
+                        if not self._write_video_only_output(
+                            self.temp_file, final_file_path
+                        ):
+                            self.main_window.display_messagebox_signal.emit(
+                                "Recording Error",
+                                f"Audio merge failed and video-only fallback also failed:\n{e}",
+                                self.main_window,
+                            )
                 finally:
                     if self.temp_file and os.path.exists(self.temp_file):
                         try:
@@ -3113,6 +3310,10 @@ class VideoProcessor(QObject):
                 f"[ERROR] Segment file '{self.temp_segment_files[-1]}' not found after processing segment {segment_num}."
             )
 
+        # If corrupted frames were skipped in this segment, rebuild segment audio
+        # from valid frame ranges so concatenated output stays in sync.
+        self._rebuild_segment_audio_if_needed(segment_num)
+
         # 4. Process the *next* segment
         self.process_next_segment()
 
@@ -3306,11 +3507,12 @@ class VideoProcessor(QObject):
         except subprocess.CalledProcessError as e:
             print(f"[ERROR] FFmpeg command failed during final concatenation: {e}")
             print(f"FFmpeg arguments: {' '.join(concat_args)}")
-            self.main_window.display_messagebox_signal.emit(
-                "Recording Error",
+            if self._attempt_segment_video_only_fallback(
+                list_file_path,
+                final_file_path,
                 f"FFmpeg command failed during concatenation:\n{e}\nCould not create final video.",
-                self.main_window,
-            )
+            ):
+                concatenation_successful = True
         except FileNotFoundError:
             print("[ERROR] FFmpeg not found. Ensure it's in your system PATH.")
             self.main_window.display_messagebox_signal.emit(
@@ -3318,11 +3520,12 @@ class VideoProcessor(QObject):
             )
         except Exception as e:
             print(f"[ERROR] An unexpected error occurred during finalization: {e}")
-            self.main_window.display_messagebox_signal.emit(
-                "Recording Error",
+            if self._attempt_segment_video_only_fallback(
+                list_file_path,
+                final_file_path,
                 f"An unexpected error occurred:\n{e}",
-                self.main_window,
-            )
+            ):
+                concatenation_successful = True
 
         finally:
             # 6. Cleanup
