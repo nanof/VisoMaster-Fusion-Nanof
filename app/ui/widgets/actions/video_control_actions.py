@@ -490,8 +490,8 @@ def advance_video_slider_by_n_frames(main_window: "MainWindow", n=30):
     """
     Advances the seek slider forward by *n* frames (clamped to the last frame).
 
-    For single-frame steps (n=1) the pipeline runs synchronously to prevent a
-    visible flash between the raw preview and the processed result.
+    Relies on the slider's valueChanged signal to handle raw frame reading and
+    post-seek actions natively, avoiding duplicated heavy processing.
     """
     video_processor = main_window.video_processor
     if video_processor.media_capture:
@@ -499,14 +499,16 @@ def advance_video_slider_by_n_frames(main_window: "MainWindow", n=30):
         new_position = current_position + n
         if new_position > video_processor.max_frame_number:
             new_position = video_processor.max_frame_number
+
+        # 1. Setting the value triggers 'on_change_video_seek_slider' automatically.
+        # Since the slider is not being dragged (isSliderDown() == False),
+        # that slot will naturally execute 'run_post_seek_actions' ONCE.
         main_window.videoSeekSlider.setValue(new_position)
 
-        # Execute post seek (Markers, Autoswap)
-        run_post_seek_actions(main_window, new_position)
-
-        # Check if this is a single frame step (like 'V' key)
+        # 2. Check if this is a single frame step (like 'V' key)
         is_single_frame_step = n == 1
-        # Run synchronously only for single frame steps to prevent "flash"
+
+        # 3. Run AI models. Runs synchronously only for single steps to prevent "flash".
         main_window.video_processor.process_current_frame(
             synchronous=is_single_frame_step
         )
@@ -516,8 +518,8 @@ def rewind_video_slider_by_n_frames(main_window: "MainWindow", n=30):
     """
     Rewinds the seek slider backward by *n* frames (clamped to frame 0).
 
-    For single-frame steps (n=1) the pipeline runs synchronously to prevent a
-    visible flash between the raw preview and the processed result.
+    Relies on the slider's valueChanged signal to handle raw frame reading and
+    post-seek actions natively, avoiding duplicated heavy processing.
     """
     video_processor = main_window.video_processor
     if video_processor.media_capture:
@@ -525,14 +527,15 @@ def rewind_video_slider_by_n_frames(main_window: "MainWindow", n=30):
         new_position = current_position - n
         if new_position < 0:
             new_position = 0
+
+        # 1. Setting the value triggers 'on_change_video_seek_slider' automatically.
+        # Prevents double execution of heavy Face Detection.
         main_window.videoSeekSlider.setValue(new_position)
 
-        # Execute post seek (Markers, Autoswap)
-        run_post_seek_actions(main_window, new_position)
-
-        # Check if this is a single frame step (like 'C' key)
+        # 2. Check if this is a single frame step (like 'C' key)
         is_single_frame_step = n == 1
-        # Run synchronously only for single frame steps to prevent "flash"
+
+        # 3. Run AI models. Runs synchronously only for single steps to prevent "flash".
         main_window.video_processor.process_current_frame(
             synchronous=is_single_frame_step
         )
@@ -1727,3 +1730,244 @@ def toggle_live_sound(main_window: "MainWindow", toggle_value: bool):
     if was_processing:
         main_window.buttonMediaPlay.click()
         main_window.buttonMediaPlay.click()
+
+
+def _set_media_controls_visible(main_window: "MainWindow", visible: bool):
+    """
+    Role: Recursively shows/hides media control widgets and safely manages layout spacers.
+    Impact: Avoids blank spaces (cadres) by cleanly detaching spacers using takeAt()
+            instead of forcing their sizes to 0.
+    """
+    if not hasattr(main_window, "_media_controls_currently_visible"):
+        main_window._media_controls_currently_visible = True
+
+    if main_window._media_controls_currently_visible == visible:
+        return  # State unchanged
+
+    main_window._media_controls_currently_visible = visible
+
+    if not visible:
+        main_window._media_spacers_storage = []
+
+        def hide_and_remove(layout):
+            # Iterate backwards to safely use takeAt() without breaking layout indices
+            for i in reversed(range(layout.count())):
+                item = layout.itemAt(i)
+                if item.widget():
+                    item.widget().hide()
+                elif item.spacerItem():
+                    spacer = layout.takeAt(i)
+                    main_window._media_spacers_storage.append((layout, i, spacer))
+                elif item.layout():
+                    hide_and_remove(item.layout())
+
+        hide_and_remove(main_window.verticalLayoutMediaControls)
+    else:
+        # Restore spacers safely in the exact original order
+        storage = getattr(main_window, "_media_spacers_storage", [])
+        for layout, i, spacer in reversed(storage):
+            layout.insertItem(i, spacer)
+        main_window._media_spacers_storage = []
+
+        def show_widgets(layout):
+            for i in range(layout.count()):
+                item = layout.itemAt(i)
+                if item.widget():
+                    item.widget().show()
+                elif item.layout():
+                    show_widgets(item.layout())
+
+        show_widgets(main_window.verticalLayoutMediaControls)
+
+    main_window.verticalLayout.invalidate()
+
+
+def toggle_theatre_mode(main_window: "MainWindow"):
+    """
+    Role: Activates Theatre Mode by safely detaching UI elements and preventing layout crushing.
+    Impact: Solves the "squashed text" bug and preserves exact QDockWidget sizes using saveState/restoreState.
+    """
+    is_theatre = getattr(main_window, "is_theatre_mode", False)
+
+    if not is_theatre:
+        # --- ENTER THEATRE MODE ---
+        main_window.is_theatre_mode = True
+
+        # 0. Save the exact state of all docks and toolbars (sizes, proportions, splitters)
+        main_window._saved_window_state = main_window.saveState()
+
+        # 1. Save state and hide Docks, MenuBar
+        main_window._saved_dock_states = {
+            "input_Target_DockWidget": main_window.input_Target_DockWidget.isVisible(),
+            "input_Faces_DockWidget": main_window.input_Faces_DockWidget.isVisible(),
+            "jobManagerDockWidget": main_window.jobManagerDockWidget.isVisible(),
+            "controlOptionsDockWidget": main_window.controlOptionsDockWidget.isVisible(),
+            "menuBar": main_window.menuBar().isVisible(),
+            "facesPanelGroupBox": main_window.facesPanelGroupBox.isVisible(),
+        }
+
+        main_window.input_Target_DockWidget.hide()
+        main_window.input_Faces_DockWidget.hide()
+        main_window.jobManagerDockWidget.hide()
+        main_window.controlOptionsDockWidget.hide()
+        main_window.menuBar().hide()
+        main_window.facesPanelGroupBox.hide()
+
+        # 2. Save and remove layout margins/spacings (Removes borders)
+        main_window._saved_layout_props = {
+            "h_margin": main_window.horizontalLayout.contentsMargins(),
+            "v_margin": main_window.verticalLayout.contentsMargins(),
+            "h_spacing": main_window.horizontalLayout.spacing(),
+            "v_spacing": main_window.verticalLayout.spacing(),
+            "frame_shape": main_window.graphicsViewFrame.frameShape(),
+        }
+
+        main_window.horizontalLayout.setContentsMargins(0, 0, 0, 0)
+        main_window.verticalLayout.setContentsMargins(0, 0, 0, 0)
+        main_window.horizontalLayout.setSpacing(0)
+        main_window.verticalLayout.setSpacing(0)
+
+        # 3. Safely detach spacers and hide Top Bar widgets
+        main_window._top_bar_spacers = []
+        main_window._top_bar_widgets_state = {}
+
+        for i in reversed(range(main_window.panelVisibilityCheckBoxLayout.count())):
+            item = main_window.panelVisibilityCheckBoxLayout.itemAt(i)
+            if item.widget():
+                main_window._top_bar_widgets_state[item.widget()] = (
+                    item.widget().isVisible()
+                )
+                item.widget().hide()
+            elif item.spacerItem():
+                spacer = main_window.panelVisibilityCheckBoxLayout.takeAt(i)
+                main_window._top_bar_spacers.append(
+                    (main_window.panelVisibilityCheckBoxLayout, i, spacer)
+                )
+
+        # Detach main layout stray spacers (top/bottom empty spaces)
+        main_window._main_v_spacers = []
+        for i in reversed(range(main_window.verticalLayout.count())):
+            item = main_window.verticalLayout.itemAt(i)
+            if item.spacerItem():
+                spacer = main_window.verticalLayout.takeAt(i)
+                main_window._main_v_spacers.append(
+                    (main_window.verticalLayout, i, spacer)
+                )
+
+        # 4. Hide media controls safely
+        main_window._media_controls_currently_visible = True
+        _set_media_controls_visible(main_window, False)
+
+        # 5. Clean GraphicsView Frame for edge-to-edge video
+        main_window.graphicsViewFrame.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        main_window.graphicsViewFrame.setStyleSheet("background-color: black;")
+        main_window.graphicsViewFrame.setVerticalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        main_window.graphicsViewFrame.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+
+        # 6. Switch to Fullscreen
+        main_window.showFullScreen()
+
+        # 7. Activate Hover Timer for media controls overlay
+        if not hasattr(main_window, "theatre_hover_timer"):
+            main_window.theatre_hover_timer = QtCore.QTimer(main_window)
+            main_window.theatre_hover_timer.setInterval(100)
+
+            def check_mouse_pos():
+                if not getattr(main_window, "is_theatre_mode", False):
+                    return
+                mouse_pos = main_window.mapFromGlobal(QtGui.QCursor.pos())
+                if mouse_pos.y() > main_window.height() * 0.85:
+                    _set_media_controls_visible(main_window, True)
+                else:
+                    _set_media_controls_visible(main_window, False)
+
+            main_window.theatre_hover_timer.timeout.connect(check_mouse_pos)
+
+        main_window.theatre_hover_timer.start()
+
+    else:
+        # --- EXIT THEATRE MODE ---
+        main_window.is_theatre_mode = False
+
+        if hasattr(main_window, "theatre_hover_timer"):
+            main_window.theatre_hover_timer.stop()
+
+        # 1. Force media controls to become visible and restore their spacers
+        _set_media_controls_visible(main_window, True)
+
+        # 2. Re-attach main layout stray spacers
+        for layout, i, spacer in reversed(getattr(main_window, "_main_v_spacers", [])):
+            layout.insertItem(i, spacer)
+        main_window._main_v_spacers = []
+
+        # 3. Re-attach top bar spacers and restore widget visibility
+        for layout, i, spacer in reversed(getattr(main_window, "_top_bar_spacers", [])):
+            layout.insertItem(i, spacer)
+        main_window._top_bar_spacers = []
+
+        for i in range(main_window.panelVisibilityCheckBoxLayout.count()):
+            item = main_window.panelVisibilityCheckBoxLayout.itemAt(i)
+            if item.widget():
+                was_visible = getattr(main_window, "_top_bar_widgets_state", {}).get(
+                    item.widget(), True
+                )
+                item.widget().setVisible(was_visible)
+
+        # 4. Restore Main Layout Props (restores spaces and margins)
+        props = getattr(main_window, "_saved_layout_props", {})
+        if "h_margin" in props:
+            main_window.horizontalLayout.setContentsMargins(props["h_margin"])
+        if "v_margin" in props:
+            main_window.verticalLayout.setContentsMargins(props["v_margin"])
+        if "h_spacing" in props:
+            main_window.horizontalLayout.setSpacing(props["h_spacing"])
+        if "v_spacing" in props:
+            main_window.verticalLayout.setSpacing(props["v_spacing"])
+        if "frame_shape" in props:
+            main_window.graphicsViewFrame.setFrameShape(props["frame_shape"])
+
+        main_window.graphicsViewFrame.setStyleSheet("")
+        main_window.graphicsViewFrame.setVerticalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        main_window.graphicsViewFrame.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+
+        # 5. Restore Docks & Panels
+        states = getattr(main_window, "_saved_dock_states", {})
+        if states.get("input_Target_DockWidget"):
+            main_window.input_Target_DockWidget.show()
+        if states.get("input_Faces_DockWidget"):
+            main_window.input_Faces_DockWidget.show()
+        if states.get("jobManagerDockWidget"):
+            main_window.jobManagerDockWidget.show()
+        if states.get("controlOptionsDockWidget"):
+            main_window.controlOptionsDockWidget.show()
+        if states.get("menuBar"):
+            main_window.menuBar().show()
+        if states.get("facesPanelGroupBox"):
+            main_window.facesPanelGroupBox.show()
+            hint_height = main_window.facesPanelGroupBox.sizeHint().height()
+            main_window.facesPanelGroupBox.setMinimumHeight(hint_height)
+
+        # Exit Fullscreen mode
+        main_window.showNormal()
+
+        # Restores the exact layout state of docks (fixes the Input Faces / Target Video sizing)
+        if hasattr(main_window, "_saved_window_state"):
+            main_window.restoreState(main_window._saved_window_state)
+
+        # Force the application layout engine to process the new geometry immediately
+        QtWidgets.QApplication.processEvents()
+        main_window.verticalLayout.invalidate()
+
+        # Release the minimum height lock so the UI is dynamically responsive again
+        if states.get("facesPanelGroupBox"):
+            main_window.facesPanelGroupBox.setMinimumHeight(0)
+
+    layout_actions.fit_image_to_view_onchange(main_window)

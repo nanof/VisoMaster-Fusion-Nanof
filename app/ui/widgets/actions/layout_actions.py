@@ -565,13 +565,17 @@ def show_hide_parameters_panel(main_window: "MainWindow", checked):
 
 
 def show_hide_theatre_mode_panels(main_window: "MainWindow", checked):
+    # Collects the current state of all UI panel checkboxes
     def collect_states():
         return {
             "TargetMediaCheckBox": main_window.TargetMediaCheckBox.isChecked(),
             "facesPanelCheckBox": main_window.facesPanelCheckBox.isChecked(),
             "parametersPanelCheckBox": main_window.parametersPanelCheckBox.isChecked(),
+            "InputFacesCheckBox": main_window.InputFacesCheckBox.isChecked(),
+            "JobsCheckBox": main_window.JobsCheckBox.isChecked(),
         }
 
+    # Applies the saved states to the UI panel checkboxes
     def apply_states(states):
         main_window.TargetMediaCheckBox.setChecked(
             states.get("TargetMediaCheckBox", True)
@@ -582,8 +586,13 @@ def show_hide_theatre_mode_panels(main_window: "MainWindow", checked):
         main_window.parametersPanelCheckBox.setChecked(
             states.get("parametersPanelCheckBox", True)
         )
+        main_window.InputFacesCheckBox.setChecked(
+            states.get("InputFacesCheckBox", True)
+        )
+        main_window.JobsCheckBox.setChecked(states.get("JobsCheckBox", True))
 
     if checked:
+        # Entering Theatre Mode: Save normal states and apply theatre states (default all False/Hidden)
         main_window._theatre_normal_panel_states = collect_states()
         apply_states(
             main_window._theatre_mode_panel_states
@@ -591,9 +600,12 @@ def show_hide_theatre_mode_panels(main_window: "MainWindow", checked):
                 "TargetMediaCheckBox": False,
                 "facesPanelCheckBox": False,
                 "parametersPanelCheckBox": False,
+                "InputFacesCheckBox": False,
+                "JobsCheckBox": False,
             }
         )
     else:
+        # Exiting Theatre Mode: Save theatre states and restore normal states (default all True/Visible)
         main_window._theatre_mode_panel_states = collect_states()
         apply_states(
             main_window._theatre_normal_panel_states
@@ -601,9 +613,12 @@ def show_hide_theatre_mode_panels(main_window: "MainWindow", checked):
                 "TargetMediaCheckBox": True,
                 "facesPanelCheckBox": True,
                 "parametersPanelCheckBox": True,
+                "InputFacesCheckBox": True,
+                "JobsCheckBox": True,
             }
         )
         main_window._theatre_normal_panel_states = None
+
     fit_image_to_view_onchange(main_window)
 
 

@@ -456,6 +456,7 @@ def show_shortcuts(main_window: "MainWindow"):
     shortcuts_text = (
         "<b><u>Actions:</u></b><br>"
         "<b>F11</b> : View fullscreen<br>"
+        "<b>T</b> : Theatre Mode<br>"
         "<b>Space</b> : Play/Stop<br>"
         "<b>R</b> : Record start/stop<br>"
         "<b>S</b> : Swap face"

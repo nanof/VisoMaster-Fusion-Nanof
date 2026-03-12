@@ -354,9 +354,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.JobsCheckBox.toggled.connect(
             partial(layout_actions.show_hide_input_jobs_panel, self)
         )
-        self.theatreModeButton.clicked.connect(self._toggle_theatre_mode_from_button)
-        self.theatreModeCheckBox.toggled.connect(
-            partial(layout_actions.show_hide_theatre_mode_panels, self)
+        self.theatreModeButton.clicked.connect(
+            partial(video_control_actions.toggle_theatre_mode, self)
         )
 
         self.faceMaskCheckBox.clicked.connect(
@@ -719,6 +718,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         match event.key():
             case QtCore.Qt.Key_F11:
                 video_control_actions.view_fullscreen(self)
+            case QtCore.Qt.Key_T:
+                video_control_actions.toggle_theatre_mode(self)
             case QtCore.Qt.Key_V:
                 video_control_actions.advance_video_slider_by_n_frames(self, n=1)
             case QtCore.Qt.Key_C:
@@ -780,9 +781,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
     def save_last_workspace(self):
         pass
-
-    def _toggle_theatre_mode_from_button(self, *_):
-        self.theatreModeCheckBox.setChecked(not self.theatreModeCheckBox.isChecked())
 
     @QtCore.Slot(bool)
     def _on_faces_panel_toggled(self, checked: bool):

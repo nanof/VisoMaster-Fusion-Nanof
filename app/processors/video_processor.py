@@ -226,9 +226,15 @@ class VideoProcessor(QObject):
     @Slot(int, QPixmap, numpy.ndarray)
     def store_frame_to_display(self, frame_number, pixmap, frame):
         """Slot to store a processed video/image frame from a worker."""
+
+        # Drop stale frames arriving late from slower threads if we already scrubbed or played past them.
+        # This prevents VRAM bloat and keeps the metronome buffer clean.
+        if self.file_type == "video" and frame_number < self.next_frame_to_display:
+            return
+
         self.frames_to_display[frame_number] = (pixmap, frame)
         # VP-22: Evict stale frames (already past next_frame_to_display) when the
-        # buffer exceeds the soft cap.  NEVER evict frames that the metronome still
+        # buffer exceeds the soft cap. NEVER evict frames that the metronome still
         # needs — doing so causes a permanent stall (metronome waits for a frame
         # that no longer exists → recording freezes).
         while len(self.frames_to_display) > self.max_frames_to_display_size:
@@ -261,6 +267,14 @@ class VideoProcessor(QObject):
         Slot to display a single, specific frame.
         Used after seeking or loading new media. NOT part of the metronome loop.
         """
+
+        # During fast scrubbing with AI workers enabled, an older thread might finish processing
+        # a frame AFTER the user has already seeked to a newer frame.
+        # We must reject these "ghost" frames to prevent the UI from jumping backward.
+        if self.file_type == "video" and frame_number != self.next_frame_to_display:
+            # print(f"[WARN] Rejected stale frame {frame_number} (Expected {self.next_frame_to_display}).")
+            return
+
         if self.main_window.loading_new_media:
             graphics_view_actions.update_graphics_view(
                 self.main_window, pixmap, frame_number, reset_fit=True
@@ -2061,7 +2075,9 @@ class VideoProcessor(QObject):
                             try:
                                 if _stale_audio_file.stat().st_mtime < _cutoff:
                                     if _stale_audio_file.is_dir():
-                                        shutil.rmtree(_stale_audio_file, ignore_errors=True)
+                                        shutil.rmtree(
+                                            _stale_audio_file, ignore_errors=True
+                                        )
                                     else:
                                         _stale_audio_file.unlink()
                                     print(
@@ -2767,7 +2783,9 @@ class VideoProcessor(QObject):
                 )
                 return
 
-            corrected_audio = self._concatenate_audio_segments(audio_files, temp_audio_dir)
+            corrected_audio = self._concatenate_audio_segments(
+                audio_files, temp_audio_dir
+            )
             if not corrected_audio:
                 print(
                     f"[WARN] Segment {segment_num}: corrected audio concatenation failed, keeping original segment audio."
