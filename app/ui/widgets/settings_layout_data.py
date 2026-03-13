@@ -437,6 +437,17 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "default": True,  # Activé par défaut pour garder la stabilité
             "help": "Enable temporal smoothing for facial keypoints (KPS) to reduce jittering and stabilize the face.",
         },
+        "KPSEmaAlphaSlider": {
+            "level": 2,
+            "label": "EMA Alpha",
+            "min_value": "1",
+            "max_value": "100",
+            "default": "35",
+            "step": 1,
+            "parentToggle": "KPSSmoothingEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Controls the smoothing rigidity. Lower = more stable but lags, Higher = more responsive but may jitter. Default: 35.",
+        },
     },
     "Face Tracking": {
         "FaceTrackingEnableToggle": {

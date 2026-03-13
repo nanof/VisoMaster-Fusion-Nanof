@@ -19,7 +19,6 @@ import numpy as np
 import torch.nn.functional as F
 
 from app.processors.utils import faceutil
-import app.ui.widgets.actions.common_actions as common_widget_actions
 from app.helpers.miscellaneous import (
     ParametersDict,
     get_scaling_transforms,
@@ -432,22 +431,16 @@ class FrameWorker(threading.Thread):
                 print(f"[WARN] {self.name} cancelled during process_frame.")
                 return
 
-            # Create Pixmap and Emit Signals
-            pixmap = common_widget_actions.get_pixmap_from_frame(
-                self.main_window, self.frame
-            )
-
+            # Emit Signals directly with numpy.ndarray (JIT QPixmap creation is now handled by the GUI Thread)
             if self.video_processor.file_type == "webcam" and not self.is_single_frame:
-                self.video_processor.webcam_frame_processed_signal.emit(
-                    pixmap, self.frame
-                )
+                self.video_processor.webcam_frame_processed_signal.emit(self.frame)
             elif not self.is_single_frame:
                 self.video_processor.frame_processed_signal.emit(
-                    self.frame_number, pixmap, self.frame
+                    self.frame_number, self.frame
                 )
             else:  # Single frame processing (image or paused video)
                 self.video_processor.single_frame_processed_signal.emit(
-                    self.frame_number, pixmap, self.frame
+                    self.frame_number, self.frame
                 )
 
         except Exception as e:
@@ -465,11 +458,8 @@ class FrameWorker(threading.Thread):
             ):
                 try:
                     fallback_bgr = np.ascontiguousarray(_fallback_frame_rgb[..., ::-1])
-                    fallback_pixmap = common_widget_actions.get_pixmap_from_frame(
-                        self.main_window, fallback_bgr
-                    )
                     self.video_processor.frame_processed_signal.emit(
-                        self.frame_number, fallback_pixmap, fallback_bgr
+                        self.frame_number, fallback_bgr
                     )
                 except Exception as fb_err:
                     print(
@@ -2472,7 +2462,10 @@ class FrameWorker(threading.Thread):
         tform = self.get_face_similarity_tform(parameters["SwapModelSelection"], kps_5)
 
         M_tensor = (
-            torch.from_numpy(tform.params[0:2]).float().unsqueeze(0).to(img.device)
+            torch.from_numpy(cast(np.ndarray, tform.params)[0:2])
+            .float()
+            .unsqueeze(0)
+            .to(img.device)
         )
 
         # Cast to float32 for Kornia
@@ -2571,7 +2564,10 @@ class FrameWorker(threading.Thread):
             Tuple ``(face_512, face_384, face_256, face_128)``, all CHW uint8 tensors.
         """
         M_tensor = (
-            torch.from_numpy(tform.params[0:2]).float().unsqueeze(0).to(img.device)
+            torch.from_numpy(cast(np.ndarray, tform.params)[0:2])
+            .float()
+            .unsqueeze(0)
+            .to(img.device)
         )
 
         # Cast to float32 for Kornia's grid_sample compatibility on CUDA
@@ -3772,6 +3768,15 @@ class FrameWorker(threading.Thread):
 
         tform = self.get_face_similarity_tform(swapper_model, kps_5)
 
+        # OPTIMIZATION: Transform full-frame smoothed keypoints to the 512x512 crop space
+        kps_all_crop = None
+        if kps is not None and len(kps) == 203:
+            raw_kps_crop = tform(kps)
+            kps_all_crop = np.array(raw_kps_crop, dtype=np.float32)
+
+        # STATE TRACKER: Suit si le tenseur 'swap' a subi une modification géométrique
+        is_geometry_altered = False
+
         # FW-PERF-5: use promoted instance-attribute transforms (initialized in
         # set_scaling_transforms) instead of constructing new objects each call
         t512_mask = self.t512_mask
@@ -3951,7 +3956,7 @@ class FrameWorker(threading.Thread):
         calc_mask_dill = BgExclude.clone()  # consumed by VGG/masking before overwrite
         mask_forcalc_512 = BgExclude.clone()  # consumed by _apply_restorer_with_auto
 
-        M_ref = tform.params[0:2]
+        M_ref = cast(np.ndarray, tform.params)[0:2]
         ones_column_ref = np.ones((kps_5.shape[0], 1), dtype=np.float32)
         kps_ref = np.hstack([kps_5, ones_column_ref]) @ M_ref.T
 
@@ -3971,8 +3976,13 @@ class FrameWorker(threading.Thread):
             and parameters["FaceExpressionBeforeTypeSelection"] == "Beginning"
         ):
             swap = self.frame_edits.apply_face_expression_restorer(
-                original_face_512, swap, cast(dict, parameters)
+                original_face_512,
+                swap,
+                cast(dict, parameters),
+                driving_kps=kps_all_crop,
+                target_kps=None if is_geometry_altered else kps_all_crop,
             )
+            is_geometry_altered = True
 
         # Face editor beginning
         if (
@@ -3984,7 +3994,14 @@ class FrameWorker(threading.Thread):
         ):
             editor_mask = swap_mask.clone()
             swap = swap * editor_mask + original_face_512 * (1 - editor_mask)
-            swap = self.frame_edits.swap_edit_face_core(swap, swap, parameters, control)
+            swap = self.frame_edits.swap_edit_face_core(
+                swap,
+                swap,
+                parameters,
+                control,
+                kps_all=None if is_geometry_altered else kps_all_crop,
+            )
+            is_geometry_altered = True
 
         # First Denoiser pass - Before Restorers
         if control.get("DenoiserUNetEnableBeforeRestorersToggle", False):
@@ -4127,7 +4144,7 @@ class FrameWorker(threading.Thread):
         if parameters.get("RestoreMouthEnableToggle", False) or parameters.get(
             "RestoreEyesEnableToggle", False
         ):
-            M = tform.params[0:2]
+            M = cast(np.ndarray, tform.params)[0:2]
             ones_column = np.ones((kps_5.shape[0], 1), dtype=np.float32)
             dst_kps_5 = np.hstack([kps_5, ones_column]) @ M.T
 
@@ -4323,8 +4340,13 @@ class FrameWorker(threading.Thread):
             == "After First Restorer"
         ):
             swap = self.frame_edits.apply_face_expression_restorer(
-                original_face_512, swap, cast(dict, parameters)
+                original_face_512,
+                swap,
+                cast(dict, parameters),
+                driving_kps=kps_all_crop,
+                target_kps=None if is_geometry_altered else kps_all_crop,
             )
+            is_geometry_altered = True
 
         # Face Editor (After First)
         if (
@@ -4337,8 +4359,13 @@ class FrameWorker(threading.Thread):
             editor_mask = swap_mask.clone()
             swap = swap * editor_mask + original_face_512 * (1 - editor_mask)
             swap = self.frame_edits.swap_edit_face_core(
-                swap, swap_restorecalc, parameters, control
+                swap,
+                swap_restorecalc,
+                parameters,
+                control,
+                kps_all=None if is_geometry_altered else kps_all_crop,
             )
+            is_geometry_altered = True
             if swap_mask_noFP.shape[-1] != swap.shape[-1]:
                 swap_mask = v2.Resize((swap.shape[-2], swap.shape[-1]), antialias=True)(
                     swap_mask_noFP
@@ -4394,8 +4421,13 @@ class FrameWorker(threading.Thread):
             == "After Second Restorer"
         ):
             swap = self.frame_edits.apply_face_expression_restorer(
-                original_face_512, swap, cast(dict, parameters)
+                original_face_512,
+                swap,
+                cast(dict, parameters),
+                driving_kps=kps_all_crop,
+                target_kps=None if is_geometry_altered else kps_all_crop,
             )
+            is_geometry_altered = True
 
         # Editor (After Second)
         if (
@@ -4407,7 +4439,14 @@ class FrameWorker(threading.Thread):
         ):
             editor_mask = t512_mask(swap_mask).clone()
             swap = swap * editor_mask + original_face_512 * (1 - editor_mask)
-            swap = self.frame_edits.swap_edit_face_core(swap, swap, parameters, control)
+            swap = self.frame_edits.swap_edit_face_core(
+                swap,
+                swap,
+                parameters,
+                control,
+                kps_all=None if is_geometry_altered else kps_all_crop,
+            )
+            is_geometry_altered = True
             if swap_mask_noFP.shape[-1] != swap.shape[-1]:
                 swap_mask = v2.Resize((swap.shape[-2], swap.shape[-1]), antialias=True)(
                     swap_mask_noFP
@@ -4742,7 +4781,14 @@ class FrameWorker(threading.Thread):
                 swap = t512_mask(swap)
 
             swap = swap * editor_mask + original_face_512 * (1 - editor_mask)
-            swap = self.frame_edits.swap_edit_face_core(swap, swap, parameters, control)
+            swap = self.frame_edits.swap_edit_face_core(
+                swap,
+                swap,
+                parameters,
+                control,
+                kps_all=None if is_geometry_altered else kps_all_crop,
+            )
+            is_geometry_altered = True
 
             if swap_mask_noFP.shape[-1] != swap.shape[-1]:
                 swap_mask = v2.Resize((swap.shape[-2], swap.shape[-1]), antialias=True)(
@@ -5041,7 +5087,7 @@ class FrameWorker(threading.Thread):
         # Warps directly to the full frame resolution in one highly optimized GPU pass.
 
         M_inv = (
-            torch.from_numpy(tform.inverse.params[0:2])
+            torch.from_numpy(cast(np.ndarray, tform.inverse.params)[0:2])
             .float()
             .unsqueeze(0)
             .to(self.models_processor.device)

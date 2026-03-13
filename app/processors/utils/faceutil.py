@@ -2878,52 +2878,84 @@ def apply_adain_color_transfer(
     target: torch.Tensor,
     mask: torch.Tensor,
     blend_amount: float = 100.0,
+    calc_mask: torch.Tensor = None,
 ) -> torch.Tensor:
     """
     Applies statistical color transfer (AdaIN) from the target to the source,
-    restricted to the masked area. Avoids color banding issues of histogram matching
-    by transferring only the mean (tone) and variance (contrast).
+    using a restricted core mask for calculating statistics, and the full soft mask
+    for the final blending. Prevents color banding, edge pollution, and teeth coloration.
 
     Args:
         source: Tensor [C, H, W] in Float (0.0 - 255.0).
         target: Tensor [C, H, W] in Float (0.0 - 255.0).
-        mask: Tensor [1, H, W] boolean or float.
+        mask: Tensor [1, H, W] boolean or float (Used for BLENDING).
         blend_amount: Float 0.0 to 100.0.
+        calc_mask: Optional Tensor [1, H, W]. If None, auto-generates an eroded core mask.
     """
+    import torch.nn.functional as F
+
     eps = 1e-6
 
     # Ensure tensors are float
     src_f = source.float()
     tgt_f = target.float()
 
-    # Format mask
+    # Format blending mask
     if mask.dtype == torch.bool:
         mask = mask.float()
     if mask.dim() == 2:
         mask = mask.unsqueeze(0)
 
-    mask_sum = torch.sum(mask, dim=(1, 2), keepdim=True) + eps
+    # 1. PREPARE THE CALCULATION MASK (Statistics Core)
+    if calc_mask is None:
+        # Auto-generate a safe core mask by heavily eroding the soft mask.
+        # Negative max_pool2d is a highly optimized mathematical erosion trick.
+        # Kernel 31 erodes ~15 pixels inward, completely removing blurry edges.
+        core_mask = -F.max_pool2d(
+            -mask.unsqueeze(0), kernel_size=31, stride=1, padding=15
+        ).squeeze(0)
 
-    # 1. Compute Means (Color/Brightness)
-    src_mean = torch.sum(src_f * mask, dim=(1, 2), keepdim=True) / mask_sum
-    tgt_mean = torch.sum(tgt_f * mask, dim=(1, 2), keepdim=True) / mask_sum
+        # Binarize to ensure no semi-transparent background pixels corrupt the math
+        calc_mask_ready = (core_mask > 0.8).float()
 
-    # 2. Compute Variances (Contrast)
+        # Failsafe: If the face is so small that erosion destroyed the mask, revert to original
+        if torch.sum(calc_mask_ready) < 100:
+            calc_mask_ready = mask
+    else:
+        if calc_mask.dtype == torch.bool:
+            calc_mask = calc_mask.float()
+        if calc_mask.dim() == 2:
+            calc_mask = calc_mask.unsqueeze(0)
+        calc_mask_ready = calc_mask
+
+    calc_mask_sum = torch.sum(calc_mask_ready, dim=(1, 2), keepdim=True) + eps
+
+    # 2. Compute Means (Color/Brightness) strictly on the Core Mask
+    src_mean = (
+        torch.sum(src_f * calc_mask_ready, dim=(1, 2), keepdim=True) / calc_mask_sum
+    )
+    tgt_mean = (
+        torch.sum(tgt_f * calc_mask_ready, dim=(1, 2), keepdim=True) / calc_mask_sum
+    )
+
+    # 3. Compute Variances (Contrast) strictly on the Core Mask
     src_var = (
-        torch.sum(mask * (src_f - src_mean) ** 2, dim=(1, 2), keepdim=True) / mask_sum
+        torch.sum(calc_mask_ready * (src_f - src_mean) ** 2, dim=(1, 2), keepdim=True)
+        / calc_mask_sum
     )
     tgt_var = (
-        torch.sum(mask * (tgt_f - tgt_mean) ** 2, dim=(1, 2), keepdim=True) / mask_sum
+        torch.sum(calc_mask_ready * (tgt_f - tgt_mean) ** 2, dim=(1, 2), keepdim=True)
+        / calc_mask_sum
     )
 
     src_std = torch.sqrt(src_var + eps)
     tgt_std = torch.sqrt(tgt_var + eps)
 
-    # 3. Apply AdaIN transformation
+    # 4. Apply AdaIN transformation to the ENTIRE source image
     src_normalized = (src_f - src_mean) / src_std
     src_matched = (src_normalized * tgt_std) + tgt_mean
 
-    # 4. Blend based on user amount and mask
+    # 5. Blend based on user amount and the SOFT APPLICATION MASK
     alpha = blend_amount / 100.0
     result = (src_matched * mask * alpha) + (src_f * (1.0 - (mask * alpha)))
 

@@ -102,6 +102,8 @@ class FrameEdits:
         driving: torch.Tensor,
         target: torch.Tensor,
         parameters: dict,
+        driving_kps: np.ndarray = None,
+        target_kps: np.ndarray = None,
     ) -> torch.Tensor:
         """
         Restores the expression of the face using the LivePortrait model pipeline.
@@ -151,16 +153,18 @@ class FrameEdits:
             neutral_factor = parameters.get("FaceExpressionNeutralDecimalSlider", 1.0)
 
             # --- DRIVING FACE PROCESSING ---
-            # Detect landmarks on the driving face
-            _, driving_lmk_crop, _ = self.models_processor.run_detect_landmark(
-                driving,
-                bbox=np.array([0, 0, 512, 512]),
-                det_kpss=[],
-                detect_mode="203",
-                score=0.5,
-                from_points=False,
-                use_mean_eyes=use_mean_eyes,
-            )
+            if driving_kps is not None:
+                driving_lmk_crop = driving_kps
+            else:
+                _, driving_lmk_crop, _ = self.models_processor.run_detect_landmark(
+                    driving,
+                    bbox=np.array([0, 0, 512, 512]),
+                    det_kpss=[],
+                    detect_mode="203",
+                    score=0.5,
+                    from_points=False,
+                    use_mean_eyes=use_mean_eyes,
+                )
 
             if driving_lmk_crop is None or (
                 hasattr(driving_lmk_crop, "__len__") and len(driving_lmk_crop) == 0
@@ -198,15 +202,19 @@ class FrameEdits:
 
             # --- TARGET FACE ---
             target = target.clamp(0, 255).type(torch.uint8)
-            _, source_lmk, _ = self.models_processor.run_detect_landmark(
-                target,
-                bbox=np.array([0, 0, 512, 512]),
-                det_kpss=[],
-                detect_mode="203",
-                score=0.5,
-                from_points=False,
-                use_mean_eyes=use_mean_eyes,
-            )
+
+            if target_kps is not None:
+                source_lmk = target_kps
+            else:
+                _, source_lmk, _ = self.models_processor.run_detect_landmark(
+                    target,
+                    bbox=np.array([0, 0, 512, 512]),
+                    det_kpss=[],
+                    detect_mode="203",
+                    score=0.5,
+                    from_points=False,
+                    use_mean_eyes=use_mean_eyes,
+                )
 
             if source_lmk is None or (
                 hasattr(source_lmk, "__len__") and len(source_lmk) == 0
@@ -577,6 +585,7 @@ class FrameEdits:
         swap_restorecalc: torch.Tensor,
         parameters: dict,
         control: dict,
+        kps_crop: np.ndarray = None,
         **kwargs,
     ) -> torch.Tensor:
         """
@@ -603,7 +612,6 @@ class FrameEdits:
             # SETUP THE ASYNCHRONOUS CONTEXT
             import contextlib
 
-            # VRAM Leak: Reuse current stream instead of creating a new one per frame.
             local_stream = (
                 torch.cuda.current_stream() if torch.cuda.is_available() else None
             )
@@ -618,15 +626,18 @@ class FrameEdits:
                 init_source_lip_ratio = 0.0
 
                 # Detection
-                _, lmk_crop, _ = self.models_processor.run_detect_landmark(
-                    swap_restorecalc,
-                    bbox=np.array([0, 0, 512, 512]),
-                    det_kpss=[],
-                    detect_mode="203",
-                    score=0.5,
-                    from_points=False,
-                    use_mean_eyes=use_mean_eyes,
-                )
+                if kps_crop is not None:
+                    lmk_crop = kps_crop
+                else:
+                    _, lmk_crop, _ = self.models_processor.run_detect_landmark(
+                        swap_restorecalc,
+                        bbox=np.array([0, 0, 512, 512]),
+                        det_kpss=[],
+                        detect_mode="203",
+                        score=0.5,
+                        from_points=False,
+                        use_mean_eyes=use_mean_eyes,
+                    )
                 source_eye_ratio = faceutil.calc_eye_close_ratio(lmk_crop[None])
                 source_lip_ratio = faceutil.calc_lip_close_ratio(lmk_crop[None])
                 init_source_eye_ratio = round(float(source_eye_ratio.mean()), 2)
@@ -851,15 +862,18 @@ class FrameEdits:
             or parameters["EyeBrowsMakeupEnableToggle"]
             or parameters["LipsMakeupEnableToggle"]
         ):
-            _, lmk_crop, _ = self.models_processor.run_detect_landmark(
-                img,
-                bbox=[],
-                det_kpss=kps,
-                detect_mode="203",
-                score=0.5,
-                from_points=False,
-                use_mean_eyes=use_mean_eyes,
-            )
+            if kps is not None and len(kps) > 5:
+                lmk_crop = kps
+            else:
+                _, lmk_crop, _ = self.models_processor.run_detect_landmark(
+                    img,
+                    bbox=[],
+                    det_kpss=kps,
+                    detect_mode="203",
+                    score=0.5,
+                    from_points=False,
+                    use_mean_eyes=use_mean_eyes,
+                )
 
             # Use the interpolation mode passed from FrameWorker, or default to BILINEAR
             interp_mode = (

@@ -18,7 +18,6 @@ import pyvirtualcam
 import math
 import copy
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
-from PySide6.QtGui import QPixmap
 
 # Internal project imports
 from app.processors.workers.frame_worker import FrameWorker
@@ -63,9 +62,10 @@ class VideoProcessor(QObject):
     """
 
     # --- Signals ---
-    frame_processed_signal = Signal(int, QPixmap, numpy.ndarray)
-    webcam_frame_processed_signal = Signal(QPixmap, numpy.ndarray)
-    single_frame_processed_signal = Signal(int, QPixmap, numpy.ndarray)
+    # Removed QPixmap to ensure thread safety. GUI thread will handle conversion.
+    frame_processed_signal = Signal(int, numpy.ndarray)
+    webcam_frame_processed_signal = Signal(numpy.ndarray)
+    single_frame_processed_signal = Signal(int, numpy.ndarray)
     processing_started_signal = Signal()  # Unified signal for any processing start
     processing_stopped_signal = Signal()  # Unified signal for any processing stop
     processing_heartbeat_signal = Signal()  # Emits periodically to show liveness
@@ -121,9 +121,9 @@ class VideoProcessor(QObject):
         )
 
         # --- Sequential Detection State ---
-        self.last_detected_faces = []
-        self._smoothed_kps = {}
-        self._KPS_EMA_ALPHA = 0.35
+        self.last_detected_faces: list[dict] = []
+        self._smoothed_kps: dict[int, numpy.ndarray] = {}
+        self._smoothed_dense_kps: dict[int, numpy.ndarray] = {}
 
         # --- Processing State Flags ---
         self.processing = False  # MASTER flag: True if playback, recording, or webcam stream is active
@@ -207,13 +207,12 @@ class VideoProcessor(QObject):
 
         # --- Frame Display/Storage ---
         self.next_frame_to_display = 0  # The next frame number the UI should display
-        self.frames_to_display: Dict[
-            int, Tuple[QPixmap, numpy.ndarray]
-        ] = {}  # Processed video frames
+        # Changed to store ONLY numpy arrays to prevent VRAM memory bloat
+        self.frames_to_display: Dict[int, numpy.ndarray] = {}  # Processed video frames
         # Fallback frame cached during slider seek preview so process_current_frame()
         # can use it when the near-EOF re-read fails (OpenCV seek unreliability).
         self._seek_cached_frame: Optional[Tuple[int, numpy.ndarray]] = None
-        self.webcam_frames_to_display: queue.Queue[Tuple[QPixmap, numpy.ndarray]] = (
+        self.webcam_frames_to_display: queue.Queue[numpy.ndarray] = (
             queue.Queue()
         )  # Processed webcam frames
 
@@ -223,30 +222,29 @@ class VideoProcessor(QObject):
         self.single_frame_processed_signal.connect(self.display_current_frame)
         self.single_frame_processed_signal.connect(self.store_frame_to_display)
 
-    @Slot(int, QPixmap, numpy.ndarray)
-    def store_frame_to_display(self, frame_number, pixmap, frame):
+    @Slot(int, numpy.ndarray)
+    def store_frame_to_display(self, frame_number, frame):
         """Slot to store a processed video/image frame from a worker."""
 
         # Drop stale frames arriving late from slower threads if we already scrubbed or played past them.
-        # This prevents VRAM bloat and keeps the metronome buffer clean.
+        # This prevents RAM bloat and keeps the metronome buffer clean.
         if self.file_type == "video" and frame_number < self.next_frame_to_display:
             return
 
-        self.frames_to_display[frame_number] = (pixmap, frame)
+        self.frames_to_display[frame_number] = frame
         # VP-22: Evict stale frames (already past next_frame_to_display) when the
         # buffer exceeds the soft cap. NEVER evict frames that the metronome still
-        # needs — doing so causes a permanent stall (metronome waits for a frame
-        # that no longer exists → recording freezes).
+        # needs — doing so causes a permanent stall.
         while len(self.frames_to_display) > self.max_frames_to_display_size:
             oldest = min(self.frames_to_display)
             if oldest >= self.next_frame_to_display:
                 # All stored frames are still needed; cannot evict safely.
                 break
-            pix, arr = self.frames_to_display.pop(oldest)
-            del pix, arr
+            arr = self.frames_to_display.pop(oldest)
+            del arr
 
-    @Slot(QPixmap, numpy.ndarray)
-    def store_webcam_frame_to_display(self, pixmap, frame):
+    @Slot(numpy.ndarray)
+    def store_webcam_frame_to_display(self, frame):
         """
         Slot to store a processed webcam frame from a worker.
         For live webcam, we only want the *latest* frame.
@@ -259,10 +257,10 @@ class VideoProcessor(QObject):
                 break
 
         # Put the new, latest frame in the now-empty queue
-        self.webcam_frames_to_display.put((pixmap, frame))
+        self.webcam_frames_to_display.put(frame)
 
-    @Slot(int, QPixmap, numpy.ndarray)
-    def display_current_frame(self, frame_number, pixmap, frame):
+    @Slot(int, numpy.ndarray)
+    def display_current_frame(self, frame_number, frame):
         """
         Slot to display a single, specific frame.
         Used after seeking or loading new media. NOT part of the metronome loop.
@@ -272,8 +270,10 @@ class VideoProcessor(QObject):
         # a frame AFTER the user has already seeked to a newer frame.
         # We must reject these "ghost" frames to prevent the UI from jumping backward.
         if self.file_type == "video" and frame_number != self.next_frame_to_display:
-            # print(f"[WARN] Rejected stale frame {frame_number} (Expected {self.next_frame_to_display}).")
             return
+
+        # Create QPixmap Just-In-Time strictly inside the GUI Thread
+        pixmap = common_widget_actions.get_pixmap_from_frame(self.main_window, frame)
 
         if self.main_window.loading_new_media:
             graphics_view_actions.update_graphics_view(
@@ -403,7 +403,10 @@ class VideoProcessor(QObject):
             return None
 
     def _run_sequential_detection(
-        self, frame_rgb: numpy.ndarray, local_control_for_worker: dict
+        self,
+        frame_rgb: numpy.ndarray,
+        local_control_for_worker: dict,
+        local_params_for_worker: dict | None = None,
     ):
         """
         Runs face detection sequentially in the feeder thread to guarantee
@@ -433,11 +436,42 @@ class VideoProcessor(QObject):
             )
             from_points = local_control_for_worker.get("DetectFromPointsToggle", False)
 
-            # If edit/swap is enabled globally, UI typically forces landmark
+            # Check if LivePortrait or Makeup features are enabled (they strictly require 203 landmarks)
+            requires_203 = False
+
+            # 1. Check global control fallback
             if local_control_for_worker.get(
+                "FaceEditorEnableToggle", False
+            ) or local_control_for_worker.get("FaceExpressionEnableBothToggle", False):
+                requires_203 = True
+
+            # 2. Check per-face parameters (where these settings actually live)
+            if not requires_203 and local_params_for_worker:
+                for face_id, face_params in local_params_for_worker.items():
+                    if isinstance(face_params, dict):
+                        if (
+                            face_params.get("FaceEditorEnableToggle", False)
+                            or face_params.get("FaceExpressionEnableBothToggle", False)
+                            or face_params.get("AutoMouthExpressionEnableToggle", False)
+                            or face_params.get("FaceMakeupEnableToggle", False)
+                            or face_params.get("HairMakeupEnableToggle", False)
+                            or face_params.get("EyeBrowsMakeupEnableToggle", False)
+                            or face_params.get("LipsMakeupEnableToggle", False)
+                        ):
+                            requires_203 = True
+                            break
+
+            if requires_203:
+                # Force 203 and from_points to ensure LivePortrait does not crash
+                use_landmark = True
+                landmark_mode = "203"
+                from_points = True
+            elif local_control_for_worker.get(
                 "edit_enabled", True
             ) or local_control_for_worker.get("swap_enabled", True):
-                use_landmark, landmark_mode, from_points = True, "203", True
+                # Standard swap/edit still needs landmarks for basic face alignment,
+                # but we respect the user's choice for the landmark model and from_points.
+                use_landmark = True
 
             detection_interval = int(
                 local_control_for_worker.get("FaceDetectionIntervalSlider", 1)
@@ -461,10 +495,8 @@ class VideoProcessor(QObject):
             # 1. Run Detection
             bboxes, kpss_5, kpss = self.main_window.models_processor.run_detect(
                 frame_tensor,
-                local_control_for_worker.get(
-                    "DetectorModelSelection", "retinaface_10g"
-                ),
-                max_num=local_control_for_worker.get("MaxFacesToDetectSlider", 1),
+                local_control_for_worker.get("DetectorModelSelection", "RetinaFace"),
+                max_num=int(local_control_for_worker.get("MaxFacesToDetectSlider", 20)),
                 score=local_control_for_worker.get("DetectorScoreSlider", 50) / 100.0,
                 input_size=(512, 512),
                 use_landmark_detection=use_landmark,
@@ -541,10 +573,6 @@ class VideoProcessor(QObject):
                 kpss_5 = kpss_5.copy()
                 n_faces = kpss_5.shape[0]
                 new_smoothed_kps = {}
-
-                # Initialize Dense KPS Dict
-                if not hasattr(self, "_smoothed_dense_kps"):
-                    self._smoothed_dense_kps = {}
                 new_smoothed_dense_kps = {}
 
                 has_dense_kps = isinstance(kpss, numpy.ndarray) and kpss.shape[0] > 0
@@ -582,8 +610,12 @@ class VideoProcessor(QObject):
                             _best_match_key = _k
 
                     if _best_match_key is not None:
-                        # Adaptive Alpha (Smart EMA)
-                        base_alpha = self._KPS_EMA_ALPHA
+                        # Adaptive Alpha (Smart EMA) using slider value
+                        base_alpha = (
+                            local_control_for_worker.get("KPSEmaAlphaSlider", 35)
+                            / 100.0
+                        )
+
                         movement_factor = min(1.0, _min_dist / 15.0)
                         dynamic_alpha = base_alpha + movement_factor * (
                             1.0 - base_alpha
@@ -608,7 +640,6 @@ class VideoProcessor(QObject):
                                 del self._smoothed_dense_kps[_best_match_key]
                             else:
                                 new_smoothed_dense_kps[_i] = kpss[_i].copy()
-
                     else:
                         new_smoothed_kps[_i] = _raw.copy()
                         if has_dense_kps:
@@ -621,10 +652,9 @@ class VideoProcessor(QObject):
                 self._smoothed_kps = new_smoothed_kps
                 self._smoothed_dense_kps = new_smoothed_dense_kps
         else:
-            # If not enabled, clear both dicts
+            # Safe Clear if disabled
             self._smoothed_kps.clear()
-            if hasattr(self, "_smoothed_dense_kps"):
-                self._smoothed_dense_kps.clear()
+            self._smoothed_dense_kps.clear()
 
         return bboxes, kpss_5, kpss
 
@@ -828,7 +858,7 @@ class VideoProcessor(QObject):
 
                 # --- Inject Sequential Detection ---
                 bboxes, kpss_5, kpss = self._run_sequential_detection(
-                    frame_rgb, local_control_for_worker
+                    frame_rgb, local_control_for_worker, local_params_for_worker
                 )
 
                 # The worker will use the feeder's state *from this exact moment*
@@ -901,7 +931,7 @@ class VideoProcessor(QObject):
 
                 # --- Inject Sequential Detection ---
                 bboxes, kpss_5, kpss = self._run_sequential_detection(
-                    frame_rgb, local_control_for_worker
+                    frame_rgb, local_control_for_worker, local_params_for_worker
                 )
 
                 # Create the 7-tuple task
@@ -1007,7 +1037,6 @@ class VideoProcessor(QObject):
             self.precise_metronome.start(wait_ms)
 
         # --- 6. Get the frame to display (if ready) ---
-        pixmap = None
         frame = None
         frame_number_to_display = 0  # Used for UI update
 
@@ -1015,7 +1044,7 @@ class VideoProcessor(QObject):
             # --- Webcam Logic (Queue) ---
             if self.webcam_frames_to_display.empty():
                 return  # Frame not ready, skip display
-            pixmap, frame = self.webcam_frames_to_display.get()
+            frame = self.webcam_frames_to_display.get()
             frame_number_to_display = 0  # Not relevant for webcam
 
         else:
@@ -1042,7 +1071,7 @@ class VideoProcessor(QObject):
             if frame_number_to_display not in self.frames_to_display:
                 # Frame not ready.
                 return
-            pixmap, frame = self.frames_to_display.pop(frame_number_to_display)
+            frame = self.frames_to_display.pop(frame_number_to_display)
 
         # --- 7. Frame is ready: Process and Display ---
         self.current_frame = frame  # Update current frame state
@@ -1103,6 +1132,9 @@ class VideoProcessor(QObject):
                     video_control_actions.update_widget_values_from_markers(
                         self.main_window, frame_number_to_display
                     )
+
+        # CREATE QPIXMAP JUST-IN-TIME (GUI Thread)
+        pixmap = common_widget_actions.get_pixmap_from_frame(self.main_window, frame)
 
         graphics_view_actions.update_graphics_view(
             self.main_window, pixmap, frame_number_to_display
