@@ -408,6 +408,7 @@ class VideoProcessor(QObject):
         """
         Runs face detection sequentially in the feeder thread to guarantee
         flawless Temporal EMA smoothing and tracking (ByteTrack).
+        Includes a rigorous Sanitization Shield to prevent dtype('O') crashes.
         """
         # VR180 requires specialized spherical detection in the FrameWorker, skip sequential here.
         if local_control_for_worker.get("VR180ModeEnableToggle", False):
@@ -488,9 +489,41 @@ class VideoProcessor(QObject):
             if local_stream:
                 local_stream.synchronize()
 
+        # Ensure 'bboxes' and keypoints are strictly valid float32 arrays and not 'object'.
+        if isinstance(bboxes, numpy.ndarray):
+            if bboxes.dtype == object:
+                try:
+                    bboxes = bboxes.astype(numpy.float32)
+                except Exception:
+                    # If conversion fails (ragged array), purge the corrupted detections
+                    bboxes = numpy.empty((0, 4), dtype=numpy.float32)
+
+            # Filter out NaNs, Infs, and validate shape integrity
+            if bboxes.size > 0 and bboxes.ndim == 2 and bboxes.shape[1] == 4:
+                valid_mask = numpy.isfinite(bboxes).all(axis=1)
+
+                # If there are any corrupted rows, filter them across all arrays
+                if not valid_mask.all():
+                    bboxes = bboxes[valid_mask]
+                    # Safely align kpss_5 if dimensions match
+                    if isinstance(kpss_5, numpy.ndarray) and kpss_5.shape[0] == len(
+                        valid_mask
+                    ):
+                        kpss_5 = kpss_5[valid_mask]
+                    # Safely align dense kpss if dimensions match
+                    if isinstance(kpss, numpy.ndarray) and kpss.shape[0] == len(
+                        valid_mask
+                    ):
+                        kpss = kpss[valid_mask]
+            else:
+                bboxes = numpy.empty((0, 4), dtype=numpy.float32)
+        else:
+            bboxes = numpy.empty((0, 4), dtype=numpy.float32)
+
         # 2. Update tracking state for the next sequential frame
         detected_for_state = []
-        if isinstance(bboxes, numpy.ndarray) and bboxes.shape[0] > 0:
+        # Updated condition to use the sanitized bboxes array instead of checking isinstance again
+        if bboxes.shape[0] > 0:
             for i in range(len(bboxes)):
                 detected_for_state.append({"bbox": bboxes[i], "score": 1.0})
         self.last_detected_faces = detected_for_state
