@@ -847,8 +847,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             (self.editFacesButton, "Edit"),
         ]
 
-        # Save original texts once
-        if getattr(self, "_faceButtonsOriginalTexts", None) is None:
+        if not self._faceButtonsOriginalTexts:
             self._faceButtonsOriginalTexts = {
                 btn.objectName(): btn.text() for btn, _ in btns
             }
