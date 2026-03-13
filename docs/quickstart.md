@@ -1,97 +1,100 @@
 # Quick Start Guide
 
-> Your first face swap, step by step.
+> Your first successful face swap in a few minutes.
 
 ---
 
 ## Before You Begin
 
-**What you will need:**
+You will need:
 
 - VisoMaster Fusion installed and running
-- A target video or image — the footage you want to swap faces in
-- One or more source images — clear, well-lit photos of the face you want to swap in (front-facing, no glasses, no heavy shadows)
-- A reasonably capable GPU — Nvidia with 8 GB+ VRAM is recommended
+- A target image or video
+- At least one clear source face image
+- A reasonably capable Nvidia GPU
 
-> **Tip:** More source images = better results. Three to ten varied photos of the same person (different angles, expressions, lighting) will produce a more robust and consistent swap than a single image.
+For best results, use a clear source face with good lighting, a mostly visible face, and minimal heavy shadows or obstructions.
 
----
-
-## Step 1 — Load Your Target Media
-
-1. Click the **open file** button in the top-left toolbar and select your target video or image
-2. The video will appear in the centre preview
-3. Scrub through it to confirm it loaded correctly
-
-> Use **`C`** and **`V`** on your keyboard to step through the video one frame at a time.
+> **Tip:** One good source image is enough for a first test. If you have several photos of the same person, you can combine them into an embedding later for more consistent results.
 
 ---
 
-## Step 2 — Load Your Source Face(s)
+## Step 1 - Load Your Target Media
 
-1. In the left panel, click **Add Face** and select your source image(s)
-2. Each image becomes a face card — VisoMaster will auto-detect the face in it
-3. Your face card is now ready to be assigned to a face in the target
+1. Open a target image or video in the main window.
+2. Confirm it appears in the center preview.
+3. If you loaded a video, scrub through a few frames to make sure it opened correctly.
 
-### Using multiple source images (Embeddings)
-
-If you have three or more photos of the same person, combine them into a single embedding for a more accurate and consistent result:
-
-1. Hold **Ctrl** and click to select multiple face cards
-2. **Right-click** and choose **Create Embedding**
-3. The embedding replaces the individual cards and represents a combined identity
-
-Aim for 3–10 varied images.
+> **Tip:** You can also drag and drop target files directly into the target media area.
 
 ---
 
-## Step 3 — Detect and Assign Faces
+## Step 2 - Load Your Source Face
 
-1. Click **Detect Faces** — VisoMaster scans the current frame and draws boxes around each detected face
-2. Click the face box in the preview that you want to swap
-3. Click your source face card to assign it — the card and the face box are now linked
-4. Repeat for any additional faces, assigning a different card to each
+1. Add one or more source face images in the **Input Faces** area on the left.
+2. Each source image becomes a face card.
+3. Use a clear front-facing image for the fastest first success.
 
-> **Tip:** If you only need to swap one person in a scene with multiple faces, right-click the other detected faces and remove them. Fewer active faces means faster processing and fewer conflicts.
-
----
-
-## Step 4 — Use Markers for Changing Scenes
-
-If your video has multiple scenes or the settings need to change partway through, markers let you apply different settings at different points in the timeline.
-
-- Navigate to the frame where you want a settings change
-- Adjust your settings
-- Click **Add Marker** — it stores the current settings at that timecode
-- Settings stay active until the next marker; the last marker applies to the end of the video
-- Use the **Previous / Next Marker** buttons to jump between them quickly
+> **Tip:** You can also drag and drop source face images directly into the **Input Faces** area.
 
 ---
 
-## Step 5 — Record
+## Step 3 - Detect and Assign the Face
 
-1. Once you are happy with the preview, click **Record**
-2. VisoMaster processes every frame and saves the output
-3. The finished file lands in your `outputs` folder
+1. Detect the face or faces in the target media.
+2. Select the target face you want to swap.
+3. Assign your source face card to that target face.
+
+> **Tip:** If the scene contains several people and you only want to swap one of them, remove or ignore the other detected faces before recording.
 
 ---
 
-## Performance Tips
+## Step 4 - Use Safe Starter Settings
 
-- Set the backend to **TensorRT-Engine** for best performance on Nvidia GPUs — on first activation, models take a few minutes to compile, this is normal
-- Set **Thread Count to 1** if you run into VRAM issues or crashes during recording
-- After changing settings, click **Clear VRAM** and re-enable face swap before recording
+For a reliable first result, start with these settings:
+
+- In **Face Swap**, set **Swapper Model** to **Inswapper128**
+- Turn on **Enable Auto Resolution**
+- Leave **Similarity Threshold** at its default value for the first test
+- In **Face Restorer**, turn on **Enable Face Restorer**
+- Set **Restorer Type** to **GFPGAN-v1.4**
+
+This gives most users a good starting point without needing advanced tuning.
+
+> **Tip:** For a first pass, do not worry about markers, denoiser passes, or advanced masks unless you already know you need them.
+
+---
+
+## Step 5 - Set Your Output Folder
+
+Before saving or recording, make sure an output folder is selected.
+
+Set this in the **Settings** tab before you use **Save Image** or **Record**.
+
+- Use **Save Image** for images
+- Use **Record** for videos
+
+> **Tip:** If saving or recording does not work, one of the first things to check is whether the output folder has been set.
+
+---
+
+## Step 6 - Preview and Record
+
+1. Preview the result in the main window.
+2. If you are working with video, play a short section first.
+3. When you are happy with the result, use **Save Image** or **Record**.
+
+---
+
+## If Something Looks Wrong
+
+- Wrong person is being swapped: raise **Similarity Threshold**
+- Result looks soft or blurry: keep **Inswapper128**, leave **Enable Auto Resolution** on, and enable **Face Restorer**
+- Face identity jumps between people in video: enable **Enable Face Tracking (ByteTrack)**
+- Saving or recording does not work: check that an output folder is selected
 
 ---
 
 ## Going Further
 
-For a full explanation of every setting and what it does, see the [User Manual](./user_manual.md).
-
-For workflow tips, advanced settings, and community presets, join the [Discord](https://discord.gg/5rx4SQuDbp).
-
----
-
-## Optional Post-Processing
-
-A common community workflow for video is to halve the frame rate before swapping to speed up processing, then restore it afterward using AI frame interpolation — [Topaz Video AI](https://www.topazlabs.com/topaz-video-ai) or [FlowFrames](https://www.fcportables.com/flowframes-portable/) both work well. This is entirely optional.
+For full explanations of settings, workflows, masks, restorers, markers, jobs, and advanced tools, see the [User Manual](./user_manual.md).
