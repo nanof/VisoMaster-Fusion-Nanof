@@ -659,16 +659,35 @@ class FrameEdits:
                 x_s_info = self.models_processor.lp_motion_extractor(
                     original_face_256, parameters["FaceEditorTypeSelection"]
                 )
-                x_d_info_user_pitch = x_s_info["pitch"] + parameters["HeadPitchSlider"]
-                x_d_info_user_yaw = x_s_info["yaw"] + parameters["HeadYawSlider"]
-                x_d_info_user_roll = x_s_info["roll"] + parameters["HeadRollSlider"]
 
-                R_s_user = faceutil.get_rotation_matrix(
+                # --- OPTIMIZED 3D ROTATION COMPOSITION ---
+                # 1. Get the original 3D rotation matrix of the target face
+                R_s_original = faceutil.get_rotation_matrix(
                     x_s_info["pitch"], x_s_info["yaw"], x_s_info["roll"]
                 )
-                R_d_user = faceutil.get_rotation_matrix(
-                    x_d_info_user_pitch, x_d_info_user_yaw, x_d_info_user_roll
+
+                # 2. Extract slider deltas as tensors
+                device = self.models_processor.device
+                delta_pitch = torch.tensor(
+                    [[parameters["HeadPitchSlider"]]],
+                    dtype=torch.float32,
+                    device=device,
                 )
+                delta_yaw = torch.tensor(
+                    [[parameters["HeadYawSlider"]]], dtype=torch.float32, device=device
+                )
+                delta_roll = torch.tensor(
+                    [[parameters["HeadRollSlider"]]], dtype=torch.float32, device=device
+                )
+
+                # 3. Create a rotation matrix strictly for the user's manual adjustments
+                R_sliders = faceutil.get_rotation_matrix(
+                    delta_pitch, delta_yaw, delta_roll
+                )
+
+                # 4. Compose rotations via Matrix Multiplication (R_new = R_sliders @ R_original)
+                # This completely eliminates Euler addition distortion (Gimbal Lock) on extreme angles.
+                R_d_new = R_sliders @ R_s_original
 
                 f_s_user = self.models_processor.lp_appearance_feature_extractor(
                     original_face_256, parameters["FaceEditorTypeSelection"]
@@ -676,8 +695,6 @@ class FrameEdits:
                 x_s_user = faceutil.transform_keypoint(x_s_info)
 
                 # --- Create Tensors from Manual Sliders ---
-                device = self.models_processor.device
-
                 mov_x = torch.tensor(parameters["XAxisMovementDecimalSlider"]).to(
                     device
                 )
@@ -719,7 +736,7 @@ class FrameEdits:
                 t_new = x_s_info["t"]
 
                 # Calculate New Rotation Matrix
-                R_d_new = (R_d_user @ R_s_user.permute(0, 2, 1)) @ R_s_user
+                # R_d_new = (R_d_user @ R_s_user.permute(0, 2, 1)) @ R_s_user
 
                 # --- Apply Modifications to Expression Delta ---
                 if eyeball_direction_x != 0 or eyeball_direction_y != 0:

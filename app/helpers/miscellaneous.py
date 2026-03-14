@@ -18,8 +18,6 @@ import torch
 from PIL import Image
 from skimage import transform as trans
 
-lock = threading.Lock()
-
 # --- Global Scope ---
 
 # Scaling transforms cache — bounded LRU so long sessions with many interpolation
@@ -712,6 +710,20 @@ def benchmark(func):
     return wrapper
 
 
+# --- OPTIMIZED MULTI-THREADING VIDEO LOCKS ---
+_capture_locks: Dict[int, threading.Lock] = {}
+_locks_mutex = threading.Lock()
+
+
+def _get_capture_lock(capture_obj: cv2.VideoCapture) -> threading.Lock:
+    """Retrieves or creates a unique thread lock for a specific VideoCapture instance."""
+    obj_id = id(capture_obj)
+    with _locks_mutex:
+        if obj_id not in _capture_locks:
+            _capture_locks[obj_id] = threading.Lock()
+        return _capture_locks[obj_id]
+
+
 def read_frame(
     capture_obj: cv2.VideoCapture,
     media_rotation: int = 0,
@@ -724,8 +736,9 @@ def read_frame(
     The 'lock' (Point 5) is critical as 'capture_obj' is a shared resource.
     It prevents race conditions between the feeder thread and seek operations.
     """
-    with lock:
-        # This is the only operation that needs to be locked
+    capture_lock = _get_capture_lock(capture_obj)
+
+    with capture_lock:
         ret, frame = capture_obj.read()
 
     if not ret:
@@ -777,8 +790,8 @@ def seek_frame(capture_obj: cv2.VideoCapture, frame_number: int) -> bool:
     Returns:
         bool: The result of capture_obj.set().
     """
-    with lock:
-        # This is the only operation that needs to be locked
+    capture_lock = _get_capture_lock(capture_obj)
+    with capture_lock:
         return capture_obj.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
 
 
@@ -787,9 +800,18 @@ def release_capture(capture_obj: cv2.VideoCapture):
     Releases the OpenCV capture object in a thread-safe manner.
     Uses the same global lock as read_frame to prevent deadlocks.
     """
-    with lock:
-        if capture_obj and capture_obj.isOpened():
+    if capture_obj is None:
+        return
+
+    obj_id = id(capture_obj)
+    capture_lock = _get_capture_lock(capture_obj)
+
+    with capture_lock:
+        if capture_obj.isOpened():
             capture_obj.release()
+
+    with _locks_mutex:
+        _capture_locks.pop(obj_id, None)
 
 
 def read_image_file(image_path):
@@ -914,6 +936,10 @@ def keypoints_adjustments(
 ) -> np.ndarray:
     """
     Adjusts facial keypoints for morphing and manual alignments.
+    Uses a Local Anisotropic Alignment strategy. This separates horizontal (Yaw)
+    and vertical (Pitch) perspective compression by flat-rotating the face,
+    scaling axes independently, and rotating back. It perfectly preserves
+    inter-ocular distance while allowing jaw compression.
     """
     kps_5_adj = kps_5.copy()
 
@@ -925,30 +951,59 @@ def keypoints_adjustments(
 
         if morph_amount > 0.0:
             try:
-                # Check if from_estimate exists (scikit-image >= 0.26) to avoid DeprecationWarning.
-                # from_estimate returns a valid transform object, or a FailedEstimation object (evaluates to False).
-                if hasattr(trans.SimilarityTransform, "from_estimate"):
-                    tform = trans.SimilarityTransform.from_estimate(
-                        source_kps, kps_5_adj
-                    )
-                    success = bool(tform)
-                else:
-                    # Fallback for older scikit-image versions (< 0.26)
-                    tform = trans.SimilarityTransform()
-                    success = tform.estimate(source_kps, kps_5_adj)
+                # 1. Isolate Translation: Center the keypoints
+                tgt_centroid = np.mean(kps_5_adj, axis=0)
+                src_centroid = np.mean(source_kps, axis=0)
 
-                if success:
-                    # Apply the transformation to align source points rigidly to target
-                    source_kps_aligned = tform(source_kps)
+                tgt_centered = kps_5_adj - tgt_centroid
+                src_centered = source_kps - src_centroid
 
-                    # Apply linear interpolation (Morphing)
-                    kps_5_adj = (
-                        kps_5_adj + morph_amount * (source_kps_aligned - kps_5_adj)
-                    ).astype(np.float32)
-                else:
-                    print(
-                        "[WARNING] Skimage SimilarityTransform alignment failed. Bypassing."
-                    )
+                # 2. Find Roll Angles based strictly on the eyes (Indices 0 and 1)
+                # This gives us the true intrinsic tilt axis of the face
+                angle_tgt = np.arctan2(
+                    kps_5_adj[1, 1] - kps_5_adj[0, 1], kps_5_adj[1, 0] - kps_5_adj[0, 0]
+                )
+                angle_src = np.arctan2(
+                    source_kps[1, 1] - source_kps[0, 1],
+                    source_kps[1, 0] - source_kps[0, 0],
+                )
+
+                # 3. Rotate both faces to be perfectly upright/horizontal (Roll = 0)
+                cos_tgt, sin_tgt = np.cos(-angle_tgt), np.sin(-angle_tgt)
+                R_flat_tgt = np.array([[cos_tgt, -sin_tgt], [sin_tgt, cos_tgt]])
+                tgt_flat = tgt_centered @ R_flat_tgt.T
+
+                cos_src, sin_src = np.cos(-angle_src), np.sin(-angle_src)
+                R_flat_src = np.array([[cos_src, -sin_src], [sin_src, cos_src]])
+                src_flat = src_centered @ R_flat_src.T
+
+                # 4. Local Anisotropic Scale (Independent X and Y)
+                # X std-dev is primarily dictated by eye distance (Width).
+                # Y std-dev is primarily dictated by eye-to-mouth distance (Height).
+                eps = 1e-6
+                std_tgt = np.std(tgt_flat, axis=0) + eps
+                std_src = np.std(src_flat, axis=0) + eps
+
+                scale_x = std_tgt[0] / std_src[0]
+                scale_y = std_tgt[1] / std_src[1]
+
+                # 5. Apply Independent Scaling
+                # If target looks down -> scale_y compresses, scale_x is kept intact!
+                src_flat_scaled = src_flat * np.array([scale_x, scale_y])
+
+                # 6. Rotate back to the Target's original Roll angle
+                cos_inv, sin_inv = np.cos(angle_tgt), np.sin(angle_tgt)
+                R_unflat = np.array([[cos_inv, -sin_inv], [sin_inv, cos_inv]])
+
+                src_aligned = src_flat_scaled @ R_unflat.T
+
+                # 7. Final translation
+                source_kps_aligned = src_aligned + tgt_centroid
+
+                # 8. Apply linear interpolation (Morphing)
+                kps_5_adj = (
+                    kps_5_adj + morph_amount * (source_kps_aligned - kps_5_adj)
+                ).astype(np.float32)
 
             except Exception as e:
                 print(f"[WARNING] Face Keypoints Morphing bypassed: {e}")
@@ -982,6 +1037,12 @@ def keypoints_adjustments(
     return kps_5_adj
 
 
+# Cache for static target grids to prevent massive VRAM reallocation per frame
+_static_grid_cache: Dict[
+    Tuple[int, int, torch.device], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+] = {}
+
+
 def get_grid_for_pasting(
     tform_target_to_source: trans.SimilarityTransform,
     target_h: int,
@@ -991,18 +1052,29 @@ def get_grid_for_pasting(
     device: torch.device,
 ):
     """
-    OPTIMIZED: Generates a sampling grid for grid_sample.
-    Eliminated memory-heavy meshgrid, cat, and massive matmul operations.
-    Uses fast 1D tensor broadcasting instead, saving massive amounts of VRAM.
+    ULTRA-OPTIMIZED: Generates a sampling grid for grid_sample.
+    Uses 1D tensor broadcasting and caches the static target grids to save
+    massive amounts of VRAM allocation/deallocation overhead per face/frame.
     """
+    grid_key = (target_h, target_w, device)
+
+    # Fetch from cache or create 1D coordinate tensors and target grid once
+    if grid_key not in _static_grid_cache:
+        y = torch.arange(target_h, device=device, dtype=torch.float32).view(-1, 1)
+        x = torch.arange(target_w, device=device, dtype=torch.float32).view(1, -1)
+
+        grid_y = y.expand(target_h, target_w)
+        grid_x = x.expand(target_h, target_w)
+        target_grid_yx_pixels = torch.stack((grid_y, grid_x), dim=-1).unsqueeze(0)
+
+        _static_grid_cache[grid_key] = (x, y, target_grid_yx_pixels)
+
+    x, y, target_grid_yx_pixels = _static_grid_cache[grid_key]
+
     # Transformation matrix from tform_target_to_source (2x3)
     M = torch.tensor(
         tform_target_to_source.params[0:2, :], dtype=torch.float32, device=device
     )
-
-    # Create 1D vectors for coordinates (H, 1) and (1, W)
-    y = torch.arange(target_h, device=device, dtype=torch.float32).view(-1, 1)
-    x = torch.arange(target_w, device=device, dtype=torch.float32).view(1, -1)
 
     # Apply affine transformation using automatic broadcasting -> results in (H, W)
     src_x = x * M[0, 0] + y * M[0, 1] + M[0, 2]
@@ -1016,11 +1088,6 @@ def get_grid_for_pasting(
     source_grid_normalized_xy = torch.stack((src_x_norm, src_y_norm), dim=-1).unsqueeze(
         0
     )
-
-    # Recreate target_grid_yx_pixels (returned for completeness)
-    grid_y = y.expand(target_h, target_w)
-    grid_x = x.expand(target_h, target_w)
-    target_grid_yx_pixels = torch.stack((grid_y, grid_x), dim=-1).unsqueeze(0)
 
     return target_grid_yx_pixels, source_grid_normalized_xy
 
