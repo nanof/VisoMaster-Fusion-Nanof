@@ -251,6 +251,7 @@ class FaceMasks:
     def _enhance_and_align_original_mouth(
         self,
         img_orig: torch.Tensor,
+        img_swap: torch.Tensor,
         labels_orig: torch.Tensor,
         labels_swap: torch.Tensor,
         parameters: dict,
@@ -262,7 +263,7 @@ class FaceMasks:
         inner_orig = labels_orig == 11
         inner_swap = labels_swap == 11
 
-        # CRITICAL FIX 1: We strictly require the inner mouth.
+        # We strictly require the inner mouth.
         # If the mouth is closed, we cannot restore original teeth/tongue.
         if inner_orig.sum() == 0 or inner_swap.sum() == 0:
             return None, None
@@ -354,10 +355,36 @@ class FaceMasks:
             **affine_kwargs,
         ).squeeze(0)
 
-        # Build mask STRICTLY from the inner mouth intersection
-        overlay_mask = inner_swap.float()
-        overlay_mask = torch.minimum(overlay_mask, inner_orig_transformed)
-        overlay_mask = self._dilate_binary(overlay_mask, 1, mode="conv")
+        # 1. Isolate the real content we want to keep (Original teeth/tongue)
+        content_mask = torch.minimum(inner_swap.float(), inner_orig_transformed)
+
+        content_mask_blurred = v2.functional.gaussian_blur(
+            content_mask.unsqueeze(0), kernel_size=5, sigma=1.0
+        ).squeeze(0)
+
+        # 2. Destroy the fake teeth with blur (Controlled by UI Slider)
+        cavity_blur_pct = parameters.get("MouthOriginalCavityBlurSlider", 15) / 100.0
+        # Calculate dynamic kernel size based on mouth width and user slider
+        blur_kernel = int(w_s.item() * cavity_blur_pct) | 1
+        # Clamp to prevent PyTorch crash (min 3) and extreme VRAM usage (max 121)
+        blur_kernel = max(3, min(121, blur_kernel))
+
+        blurred_swap = v2.functional.gaussian_blur(
+            img_swap.clone().float(), kernel_size=blur_kernel, sigma=blur_kernel / 3.0
+        )
+
+        # DARKENING: Non-linear Gamma Correction (Controlled by UI Slider)
+        cavity_gamma = parameters.get("MouthOriginalCavityDarkenDecimalSlider", 1.5)
+        blurred_swap_norm = blurred_swap / 255.0
+        dark_cavity = torch.pow(blurred_swap_norm, cavity_gamma) * 255.0
+
+        # 3. Composite the overlay
+        overlay = overlay * content_mask_blurred + dark_cavity * (
+            1.0 - content_mask_blurred
+        )
+
+        # 4. WIDEN THE MASK to catch persistent edge pixels
+        overlay_mask = self._dilate_binary(inner_swap.float(), 3, mode="conv")
 
         dynamic_kernel = int(w_s.item() * 0.15) | 1
         dynamic_kernel = max(5, min(31, dynamic_kernel))
@@ -368,8 +395,21 @@ class FaceMasks:
             sigma=dynamic_kernel / 3.0,
         ).squeeze(0)
 
-        # Multiply by inner_swap to prevent blur from bleeding onto the lips
-        final_mask = blurred_mask * inner_swap.float()
+        # Restrict strictly to inner_swap to prevent bleeding onto the swapped lips
+        # 1. Allow a maximum physical expansion of exactly 2 pixels onto the lips
+        base_inner = inner_swap.float()
+        allowed_bleed_region = self._dilate_binary(base_inner, 2, mode="conv")
+
+        # 2. Blur this strict boundary slightly so it acts as a smooth braking gradient
+        soft_limit = v2.functional.gaussian_blur(
+            allowed_bleed_region.unsqueeze(0), kernel_size=3, sigma=2.0
+        ).squeeze(0)
+
+        # 3. Force the absolute inner mouth to remain strictly untouched (100% opaque)
+        soft_limit = torch.maximum(soft_limit, base_inner)
+
+        # 4. Multiply the final mask by this soft limit to gently but rapidly fade out any excess blur
+        final_mask = blurred_mask * soft_limit
 
         return overlay, final_mask
 
@@ -387,7 +427,7 @@ class FaceMasks:
             # The user wants the ORIGINAL mouth (with Alignment and Zoom)
             labels_orig = self._faceparser_labels(original_img)
             return self._enhance_and_align_original_mouth(
-                original_img, labels_orig, labels_swap, parameters
+                original_img, swap_img, labels_orig, labels_swap, parameters
             )
         else:
             # The user wants the SWAPPED mouth (with Upscale and Zoom)

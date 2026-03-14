@@ -511,6 +511,13 @@ def get_video_rotation(media_path: str) -> int:
     This is robust against variations in JSON structure (tags vs side_data_list).
     Returns 0, 90, 180, or 270.
     """
+
+    # If OpenCV (>= 4.8.0) supports auto-rotation, we let it handle the rotation natively.
+    # Returning 0 bypasses the slow ffprobe subprocess entirely, which massively
+    # speeds up directory scanning and thumbnail generation!
+    if hasattr(cv2, "CAP_PROP_ORIENTATION_AUTO"):
+        return 0
+
     print(
         f"[INFO] Checking video rotation metadata for: {os.path.basename(media_path)}..."
     )
@@ -613,6 +620,81 @@ def _apply_frame_rotation(frame: np.ndarray, angle: int) -> np.ndarray:
     elif angle == 270:
         return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
     return frame
+
+
+def check_and_warn_vfr(file_path: str) -> bool:
+    """
+    Samples the first 200 frames using ffprobe to accurately detect Variable Frame Rate (VFR).
+    Headers are often inaccurate, so analyzing actual packet durations is the safest method.
+
+    Args:
+        file_path (str): The absolute path to the video file.
+
+    Returns:
+        bool: True if VFR is detected, False otherwise.
+    """
+    if not file_path or not os.path.isfile(file_path):
+        return False
+
+    try:
+        # We read the packet duration of the first 200 frames.
+        # This is virtually instantaneous as it only reads container metadata, not pixel data.
+        args = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "frame=pkt_duration_time",
+            "-read_intervals",
+            "%+#200",  # Read only the first 200 frames
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            file_path,
+        ]
+        result = subprocess.run(args, capture_output=True, text=True, timeout=10)
+
+        if result.returncode != 0:
+            return False
+
+        durations = set()
+        for line in result.stdout.strip().split("\n"):
+            line = line.strip()
+            if line and line != "N/A":
+                try:
+                    # Round to 3 decimal places to ignore floating point inaccuracies
+                    durations.add(round(float(line), 3))
+                except ValueError:
+                    pass
+
+        # If we have more than one distinct frame duration, the video is Variable Frame Rate.
+        is_vfr = len(durations) > 1
+
+        if is_vfr:
+            print(
+                "[WARN] -------------------------------------------------------------"
+            )
+            print("[WARN] VARIABLE FRAME RATE (VFR) DETECTED IN SOURCE VIDEO!")
+            print("[WARN] The original media does not maintain a constant framerate.")
+            print(
+                "[WARN] Audio sync drift may occur during long recordings. For flawless"
+            )
+            print("[WARN] results, please transcode your video to Constant Frame Rate")
+            print("[WARN] (CFR) using a tool like Handbrake before processing it here.")
+            print(
+                "[WARN] -------------------------------------------------------------"
+            )
+        else:
+            print(
+                "[INFO] Video framerate is Constant (CFR). Audio sync should be perfect."
+            )
+
+        return is_vfr
+
+    except Exception as e:
+        print(f"[WARN] Could not probe VFR status for {file_path}: {e}")
+        return False
 
 
 def benchmark(func):
@@ -832,9 +914,6 @@ def keypoints_adjustments(
 ) -> np.ndarray:
     """
     Adjusts facial keypoints for morphing and manual alignments.
-    Upgraded to use OpenCV's robust Partial Affine Transform (LMEDS) to estimate
-    rotation, translation, and uniform scaling while actively ignoring outliers
-    caused by blur or obstruction (prevents frame-to-frame ghosting).
     """
     kps_5_adj = kps_5.copy()
 
@@ -846,21 +925,21 @@ def keypoints_adjustments(
 
         if morph_amount > 0.0:
             try:
-                # --- ROBUST SIMILARITY ALIGNMENT (OpenCV) ---
-                # Computes optimal similarity transform (Translation, Rotation, Uniform Scale).
-                # LMEDS is used over manual SVD to ignore corrupted keypoints (blur/occlusion)
-                # and strictly prevent the determinant flipping that causes doubling.
-                tform_matrix, _ = cv2.estimateAffinePartial2D(
-                    source_kps, kps_5_adj, method=cv2.LMEDS
-                )
+                # Check if from_estimate exists (scikit-image >= 0.26) to avoid DeprecationWarning.
+                # from_estimate returns a valid transform object, or a FailedEstimation object (evaluates to False).
+                if hasattr(trans.SimilarityTransform, "from_estimate"):
+                    tform = trans.SimilarityTransform.from_estimate(
+                        source_kps, kps_5_adj
+                    )
+                    success = bool(tform)
+                else:
+                    # Fallback for older scikit-image versions (< 0.26)
+                    tform = trans.SimilarityTransform()
+                    success = tform.estimate(source_kps, kps_5_adj)
 
-                if tform_matrix is not None:
-                    # Pad source keypoints with ones for matrix multiplication: [x, y] -> [x, y, 1]
-                    ones = np.ones((source_kps.shape[0], 1), dtype=source_kps.dtype)
-                    src_padded = np.hstack([source_kps, ones])
-
-                    # Apply transformation: Matrix (2x3) dot Padded_Points (3x5) -> Transpose to (5x2)
-                    source_kps_aligned = np.dot(tform_matrix, src_padded.T).T
+                if success:
+                    # Apply the transformation to align source points rigidly to target
+                    source_kps_aligned = tform(source_kps)
 
                     # Apply linear interpolation (Morphing)
                     kps_5_adj = (
@@ -868,7 +947,7 @@ def keypoints_adjustments(
                     ).astype(np.float32)
                 else:
                     print(
-                        "[WARNING] Alignment failed due to severe keypoint corruption. Bypassing."
+                        "[WARNING] Skimage SimilarityTransform alignment failed. Bypassing."
                     )
 
             except Exception as e:

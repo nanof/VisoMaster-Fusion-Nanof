@@ -551,6 +551,9 @@ def extract_frame_as_image(
         rotation_angle = get_video_rotation(media_file_path)
         cap = cv2.VideoCapture(media_file_path)
         if cap.isOpened():
+            # Explicitly enable OpenCV's auto-rotation ---
+            if hasattr(cv2, "CAP_PROP_ORIENTATION_AUTO"):
+                cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, 1)
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             middle_frame_no = total_frames // 2
             cap.set(cv2.CAP_PROP_POS_FRAMES, middle_frame_no)

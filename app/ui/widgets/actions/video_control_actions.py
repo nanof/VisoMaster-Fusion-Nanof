@@ -851,7 +851,8 @@ def record_video(main_window: "MainWindow", checked: bool):
                     main_window.buttonMediaRecord.setChecked(False)
                     return  # Stop if invalid
                 else:
-                    valid_pairs.append(pair)
+                    # Force cast to tuple of ints.
+                    valid_pairs.append((int(pair[0]), int(pair[1])))
 
             # Proceed if we have valid marker pairs
             if valid_pairs:
@@ -1477,6 +1478,9 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
                     rotation_angle = get_video_rotation(media_path)
                     main_window.video_processor.media_rotation = rotation_angle
                     media_capture = cv2.VideoCapture(media_path)
+                    # Explicitly enable OpenCV's auto-rotation ---
+                    if hasattr(cv2, "CAP_PROP_ORIENTATION_AUTO"):
+                        media_capture.set(cv2.CAP_PROP_ORIENTATION_AUTO, 1)
                     if not media_capture.isOpened():
                         raise Exception(f"Could not open video file: {media_path}")
 
@@ -1681,6 +1685,9 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
                 # --- Re-open the original video capture ---
                 print(f"[INFO] Restoring original video capture: {original_media_path}")
                 new_capture = cv2.VideoCapture(original_media_path)
+                # Explicitly enable OpenCV's auto-rotation ---
+                if hasattr(cv2, "CAP_PROP_ORIENTATION_AUTO"):
+                    new_capture.set(cv2.CAP_PROP_ORIENTATION_AUTO, 1)
                 if new_capture and new_capture.isOpened():
                     main_window.video_processor.media_capture = new_capture
                     # Set the slider max back to the original video's max

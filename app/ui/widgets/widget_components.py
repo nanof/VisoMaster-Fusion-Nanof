@@ -208,10 +208,15 @@ class TargetMediaCardButton(CardButton):
         rotation_angle = 0  # MODIFICATION: Added rotation variable
 
         if self.file_type == "video":
-            # MODIFICATION: Get video rotation metadata before loading
+            # Get video rotation metadata before loading
             rotation_angle = get_video_rotation(self.media_path)
+            # Check for Variable Frame Rate (VFR) and warn the user
+            misc_helpers.check_and_warn_vfr(self.media_path)
             main_window.video_processor.media_rotation = rotation_angle
             media_capture = cv2.VideoCapture(self.media_path)
+            # Explicitly enable OpenCV's auto-rotation to let it handle metadata natively
+            if hasattr(cv2, "CAP_PROP_ORIENTATION_AUTO"):
+                media_capture.set(cv2.CAP_PROP_ORIENTATION_AUTO, 1)
             if not media_capture.isOpened():
                 print(f"[ERROR] Error opening video {self.media_path}")
                 return  # If the video cannot be opened, exit the function

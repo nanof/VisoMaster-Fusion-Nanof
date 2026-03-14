@@ -521,6 +521,15 @@ class VideoProcessor(QObject):
             if local_stream:
                 local_stream.synchronize()
 
+        # TensorRT and ONNX reuse memory buffers for maximum performance.
+        # If we do not copy these arrays, the feeder thread will overwrite the memory
+        # of the frames waiting in the queue, causing erratic swap loss!
+        if isinstance(bboxes, numpy.ndarray):
+            bboxes = bboxes.copy()
+        if isinstance(kpss_5, numpy.ndarray):
+            kpss_5 = kpss_5.copy()
+        if isinstance(kpss, numpy.ndarray):
+            kpss = kpss.copy()
         # Ensure 'bboxes' and keypoints are strictly valid float32 arrays and not 'object'.
         if isinstance(bboxes, numpy.ndarray):
             if bboxes.dtype == object:
@@ -551,6 +560,13 @@ class VideoProcessor(QObject):
                 bboxes = numpy.empty((0, 4), dtype=numpy.float32)
         else:
             bboxes = numpy.empty((0, 4), dtype=numpy.float32)
+        # If the sanitization purged the bboxes, we MUST purge the keypoints too.
+        # Otherwise, the FrameWorker receives mismatched arrays and skips the face.
+        if bboxes.shape[0] == 0:
+            if isinstance(kpss_5, numpy.ndarray):
+                kpss_5 = numpy.empty((0, 5, 2), dtype=numpy.float32)
+            if isinstance(kpss, numpy.ndarray):
+                kpss = numpy.empty((0, 68, 2), dtype=numpy.float32)
 
         # 2. Update tracking state for the next sequential frame
         detected_for_state = []
@@ -1881,6 +1897,9 @@ class VideoProcessor(QObject):
                     self.media_capture = None
 
                 self.media_capture = cv2.VideoCapture(self.media_path)
+                # Explicitly enable OpenCV's auto-rotation to let it handle metadata natively
+                if hasattr(cv2, "CAP_PROP_ORIENTATION_AUTO"):
+                    self.media_capture.set(cv2.CAP_PROP_ORIENTATION_AUTO, 1)
                 if self.media_capture and self.media_capture.isOpened():
                     # PERFORM TEST READ: essential on Windows to detect silent handle failures
                     misc_helpers.seek_frame(self.media_capture, seek_frame)
@@ -2229,7 +2248,7 @@ class VideoProcessor(QObject):
                     "-map",
                     "1:a:0?",  # Map audio from media_path (if exists)
                     "-c:a",
-                    "copy",
+                    "aac",
                     "-shortest",
                 ]
             )
@@ -3126,13 +3145,14 @@ class VideoProcessor(QObject):
                             self.media_path,
                             "-c:v",
                             "copy",
+                            "-c:a",
+                            "aac",
                             "-map",
                             "0:v:0",
                             "-map",
                             "1:a:0?",
                             "-shortest",
-                            "-af",
-                            "aresample=async=1000",
+                            # REMOVED: "-af", "aresample=async=1000" (Breaks CFR sync and incompatible with -c:a copy)
                             final_file_path,
                         ]
 
@@ -3364,7 +3384,16 @@ class VideoProcessor(QObject):
         self.processing = True  # Master flag
         self.triggered_by_job_manager = triggered_by_job_manager
         self.stopped_by_error_limit = False  # Reset error limit flag for new processing
-        self.segments_to_process = sorted(segments)
+        # Ensure all elements in 'segments' are strictly tuples of integers.
+        sanitized_segments = []
+        for seg in segments:
+            try:
+                # Convert list to tuple and ensure elements are ints
+                sanitized_segments.append((int(seg[0]), int(seg[1])))
+            except (IndexError, TypeError, ValueError) as e:
+                print(f"[WARN] Ignoring malformed segment {seg}: {e}")
+
+        self.segments_to_process = sorted(sanitized_segments)
         self.current_segment_index = -1
         self.temp_segment_files = []
         self.segment_temp_dir = None
@@ -3798,8 +3827,9 @@ class VideoProcessor(QObject):
                 list_file_path,
                 "-c:v",
                 "copy",
-                "-af",
-                "aresample=async=1000",
+                "-c:a",
+                "copy",
+                # REMOVED: "-af", "aresample=async=1000" (Breaks CFR sync and incompatible with -c:a copy)
                 final_file_path,
             ]
             subprocess.run(concat_args, check=True)

@@ -19,6 +19,7 @@ import numpy as np
 import torch.nn.functional as F
 
 from app.processors.utils import faceutil
+
 from app.helpers.miscellaneous import (
     ParametersDict,
     get_scaling_transforms,
@@ -1928,6 +1929,35 @@ class FrameWorker(threading.Thread):
                 )
             img = self._resize_cache[_up_key](img)
             scale_applied = True
+            # Upscale Feeder KPS if necessary
+            if getattr(self, "precomputed_bboxes", None) is not None:
+                ratio_w = new_w / img_w
+                ratio_h = new_h / img_h
+
+                self.precomputed_bboxes = [b.copy() for b in self.precomputed_bboxes]
+                for b in self.precomputed_bboxes:
+                    b[0] *= ratio_w
+                    b[2] *= ratio_w
+                    b[1] *= ratio_h
+                    b[3] *= ratio_h
+
+                if getattr(self, "precomputed_kpss_5", None) is not None:
+                    self.precomputed_kpss_5 = [
+                        k.copy() for k in self.precomputed_kpss_5
+                    ]
+                    for k in self.precomputed_kpss_5:
+                        k[:, 0] *= ratio_w
+                        k[:, 1] *= ratio_h
+
+                if getattr(self, "precomputed_kpss", None) is not None:
+                    self.precomputed_kpss = [
+                        k.copy() if k is not None else None
+                        for k in self.precomputed_kpss
+                    ]
+                    for k in self.precomputed_kpss:
+                        if k is not None:
+                            k[:, 0] *= ratio_w
+                            k[:, 1] *= ratio_h
 
         # Manual Rotation
         if control["ManualRotationEnableToggle"]:
