@@ -83,9 +83,8 @@ class FaceDetectors:
         # BT-06/BT-07: dedicated lock for BYTETracker instance and frame_id to prevent
         # concurrent workers from corrupting Kalman filter state
         self._tracker_lock = threading.Lock()
-        self._custom_inference_lock = (
-            threading.Lock()
-        )  # serialises parallel inference for CUDA-graph runners
+        self._custom_inference_lock = threading.Lock()
+        self._runner_locks: Dict[int, threading.Lock] = {}
         self.lambda_s = 0.3  # Smoothing factor for cumulative scores
 
         # This map links a detector name (from the UI) to its model file and processing function.
@@ -98,6 +97,13 @@ class FaceDetectors:
             "Yolov8": {"model_name": "YoloFace8n", "function": self.detect_yoloface},
             "Yunet": {"model_name": "YunetN", "function": self.detect_yunet},
         }
+
+    def _get_runner_lock(self, runner):
+        with self._custom_inference_lock:
+            r_id = id(runner)
+            if r_id not in self._runner_locks:
+                self._runner_locks[r_id] = threading.Lock()
+            return self._runner_locks[r_id]
 
     def _prepare_detection_image(
         self, img: torch.Tensor, input_size: tuple, normalization_mode: str
@@ -1073,7 +1079,7 @@ class FaceDetectors:
                     with torch.no_grad():
                         # FD-LOCK-01: CUDA graphrunners with static buffers are not thread-safe.
                         # Lock ensures only one FrameWorker thread uses the runner at a time.
-                        with self._custom_inference_lock:
+                        with self._get_runner_lock(runner):
                             pt_outs = runner(aimg)
                     net_outs = [t.cpu().numpy() for t in pt_outs]
                 else:
@@ -1484,7 +1490,7 @@ class FaceDetectors:
                     with torch.no_grad():
                         # FD-LOCK-02: CUDA graphrunners with static buffers are not thread-safe.
                         # Lock ensures only one FrameWorker thread uses the runner at a time.
-                        with self._custom_inference_lock:
+                        with self._get_runner_lock(runner):
                             net_outs = runner(aimg_prepared).cpu().numpy()
                 else:
                     # Custom kernel unavailable — fall back to ORT

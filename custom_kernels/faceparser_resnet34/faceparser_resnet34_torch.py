@@ -414,9 +414,14 @@ class _CapturedGraph:
             for _ in range(3):
                 model(self._inp)
 
+        self._stream = torch.cuda.Stream()
+        torch.cuda.synchronize()
         self._graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self._graph):
+        with torch.cuda.graph(
+            self._graph, stream=self._stream, capture_error_mode="thread_local"
+        ):
             self._out = model(self._inp)  # (1, 19, 512, 512) float32
+        torch.cuda.synchronize()
 
     def __call__(self, inp: torch.Tensor) -> torch.Tensor:
         self._inp.copy_(inp)

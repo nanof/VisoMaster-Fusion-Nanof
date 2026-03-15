@@ -170,9 +170,9 @@ class VggComboCUDAGraphRunner:
     """
     Wraps VggComboTorch in a CUDA graph for minimal kernel-launch overhead.
 
-    A single (1, 3, 512, 512) graph is captured.  Two runners are kept as
-    separate instances so that two concurrent inferences (swapped / original)
-    each have their own input buffer without clobbering each other.
+    A single (1, 3, 512, 512) graph is captured.  The runner is called twice
+    sequentially (swapped then original) under a lock in face_masks.py; the
+    static input buffer is rewritten and replayed for each call.
     """
 
     def __init__(
@@ -192,10 +192,15 @@ class VggComboCUDAGraphRunner:
         torch.cuda.synchronize()
 
         # Capture
+        self._stream = torch.cuda.Stream()
+        torch.cuda.synchronize()
         self._graph = torch.cuda.CUDAGraph()
         with torch.no_grad():
-            with torch.cuda.graph(self._graph):
+            with torch.cuda.graph(
+                self._graph, stream=self._stream, capture_error_mode="thread_local"
+            ):
                 self._out = model(self._x_buf)  # (1, 512, 128, 128) float32
+        torch.cuda.synchronize()
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         """

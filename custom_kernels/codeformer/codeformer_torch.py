@@ -967,9 +967,15 @@ class CUDAGraphRunner:
         # that mode already captures CUDA graphs internally and the two
         # contexts would conflict (double-capture = crash).
         print("[CodeFormerTorch] Capturing CUDA graph...")
+        self._capture_stream = torch.cuda.Stream(device=device)
         self._graph = torch.cuda.CUDAGraph()
+        torch.cuda.synchronize(device)
         with torch.no_grad():
-            with torch.cuda.graph(self._graph):
+            with torch.cuda.graph(
+                self._graph,
+                stream=self._capture_stream,
+                capture_error_mode="thread_local",
+            ):
                 self._static_out = self._module(self._static_in)
         torch.cuda.synchronize(device)
         print("[CodeFormerTorch] CUDA graph captured.")

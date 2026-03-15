@@ -164,6 +164,24 @@ class IResNet50Torch(nn.Module):
         model = model.to(compute_dtype)
         model.eval()
 
+        # FIX: keep BatchNorm running statistics in FP32 regardless of compute dtype.
+        # model.to(fp16) converts ALL buffers including running_mean / running_var,
+        # which only have 10-bit mantissa in FP16.  The BN normalisation
+        # (x - mean) / sqrt(var + eps) then suffers catastrophic cancellation for
+        # similar activation values, making the per-frame ArcFace embedding less
+        # stable and causing visible colour flickering in the swap output.
+        # Restoring them to FP32 has zero performance cost: BN eval is a single
+        # fused CUDA kernel and the dtype cast is done once at load time.
+        if compute_dtype != torch.float32:
+            for m in model.modules():
+                if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d)):
+                    m.running_mean = m.running_mean.float()
+                    m.running_var = m.running_var.float()
+                    if m.weight is not None:
+                        m.weight = nn.Parameter(m.weight.float())
+                    if m.bias is not None:
+                        m.bias = nn.Parameter(m.bias.float())
+
         total_params = sum(p.numel() for p in model.parameters())
         print(
             f"[IResNet50Torch] Loaded {total_params:,} parameters"
@@ -343,12 +361,17 @@ class _CapturedGraph:
         self._stream = torch.cuda.Stream()
 
         torch.cuda.synchronize()
-        with torch.no_grad(), torch.cuda.graph(self._graph, stream=self._stream):
+        with (
+            torch.no_grad(),
+            torch.cuda.graph(
+                self._graph, stream=self._stream, capture_error_mode="thread_local"
+            ),
+        ):
             self._out = model(self._inp)
         torch.cuda.synchronize()
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        self._inp.copy_(x, non_blocking=True)
+        self._inp.copy_(x)
         self._graph.replay()
         return self._out.clone()
 

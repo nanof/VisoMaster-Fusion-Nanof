@@ -34,10 +34,10 @@ class FaceRestorers:
         self._codeformer_runner: Optional[object] = None  # CUDA graph runner
         self._restoreformer_torch: Optional[object] = None  # RestoreFormerPlusPlusTorch
         self._restoreformer_runner: Optional[object] = None  # CUDA graph runner
-        self._custom_inference_lock = (
-            threading.Lock()
-        )  # serialises parallel inference for CUDA-graph runners
+        self._custom_inference_lock = threading.Lock()
+        self._runner_locks: Dict[int, threading.Lock] = {}
         self._custom_init_lock = threading.Lock()  # serialises Custom-kernel lazy inits
+
         self.model_map = {
             "GFPGAN-v1.4": "GFPGANv1.4",
             "GFPGAN-1024": "GFPGAN1024",
@@ -49,6 +49,13 @@ class FaceRestorers:
             "RestoreFormer++": "RestoreFormerPlusPlus",
             "VQFR-v2": "VQFRv2",
         }
+
+    def _get_runner_lock(self, runner):
+        with self._custom_inference_lock:
+            r_id = id(runner)
+            if r_id not in self._runner_locks:
+                self._runner_locks[r_id] = threading.Lock()
+            return self._runner_locks[r_id]
 
     def unload_models(self):
         """Unloads the restorer models held in both slots and resets state."""
@@ -598,7 +605,7 @@ class FaceRestorers:
             if runner is not None:
                 with torch.no_grad():
                     # FR-LOCK-03: CUDA graphrunners with static buffers are not thread-safe.
-                    with self._custom_inference_lock:
+                    with self._get_runner_lock(runner):
                         result = runner(image_input_tensor)
                 output_latent_tensor.copy_(result)
                 return
@@ -656,7 +663,7 @@ class FaceRestorers:
             if runner is not None:
                 with torch.no_grad():
                     # FR-LOCK-04: CUDA graphrunners with static buffers are not thread-safe.
-                    with self._custom_inference_lock:
+                    with self._get_runner_lock(runner):
                         result = runner(latent_input_tensor)
                 output_image_tensor.copy_(result)
                 return
@@ -721,7 +728,7 @@ class FaceRestorers:
                 )
                 with torch.no_grad():
                     # FR-LOCK-05: CUDA graphrunners with static buffers are not thread-safe.
-                    with self._custom_inference_lock:
+                    with self._get_runner_lock(unet):
                         result = unet(
                             x_noisy_plus_lq_latent,
                             timesteps_tensor,
@@ -868,7 +875,7 @@ class FaceRestorers:
             if runner is not None:
                 with torch.no_grad():
                     # FR-LOCK-01: CUDA graph runners with static buffers are not thread-safe.
-                    with self._custom_inference_lock:
+                    with self._get_runner_lock(runner):
                         result = runner(image)
                 output.copy_(result)
                 return
@@ -906,7 +913,7 @@ class FaceRestorers:
             if runner is not None:
                 with torch.no_grad():
                     # FR-LOCK-07: CUDA graph runners with static buffers are not thread-safe.
-                    with self._custom_inference_lock:
+                    with self._get_runner_lock(runner):
                         result = runner(image)
                 output.copy_(result)
                 return
@@ -1169,7 +1176,7 @@ class FaceRestorers:
                 with torch.no_grad():
                     # CF-LOCK-01: Although CodeFormer doesn't use CUDA graphs (due to dynamic w),
                     # serialising GPU access for custom kernels is safer.
-                    with self._custom_inference_lock:
+                    with self._get_runner_lock(model):
                         result = model(
                             image, fidelity_weight=float(fidelity_weight_value)
                         )
@@ -1257,7 +1264,7 @@ class FaceRestorers:
             if runner is not None:
                 with torch.no_grad():
                     # FR-LOCK-06: CUDA graphrunners with static buffers are not thread-safe.
-                    with self._custom_inference_lock:
+                    with self._get_runner_lock(runner):
                         result = runner(image)
                 output.copy_(result)
                 return

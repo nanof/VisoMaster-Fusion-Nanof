@@ -121,9 +121,8 @@ class FaceLandmarkDetectors:
         self._cache_lock = (
             threading.Lock()
         )  # Added lock to prevent dictionary Race Conditions
-        self._custom_inference_lock = (
-            threading.Lock()
-        )  # serialises parallel inference for CUDA-graph runners
+        self._custom_inference_lock = threading.Lock()
+        self._runner_locks: Dict[int, threading.Lock] = {}
         self._custom_init_lock = threading.Lock()  # serialises Custom-kernel lazy inits
 
         # A dictionary to map a string identifier (e.g., '68') to the corresponding
@@ -159,6 +158,13 @@ class FaceLandmarkDetectors:
                 "function": self.detect_face_landmark_478,
             },
         }
+
+    def _get_runner_lock(self, runner):
+        with self._custom_inference_lock:
+            r_id = id(runner)
+            if r_id not in self._runner_locks:
+                self._runner_locks[r_id] = threading.Lock()
+            return self._runner_locks[r_id]
 
     def run_detect_landmark(
         self,
@@ -838,7 +844,7 @@ class FaceLandmarkDetectors:
                 with torch.no_grad():
                     # FL-LOCK-01: CUDA graphrunners with static buffers are not thread-safe.
                     # Lock ensures only one FrameWorker thread uses the runner at a time.
-                    with self._custom_inference_lock:
+                    with self._get_runner_lock(runner):
                         conf, landmarks = runner(image)
                 # conf: (1,10752,2) float32 GPU — already softmax-applied
                 # landmarks: (1,10752,10) float32 GPU
@@ -929,7 +935,7 @@ class FaceLandmarkDetectors:
             if runner is not None:
                 with torch.no_grad():
                     # FL-LOCK-02: CUDA graphrunners with static buffers are not thread-safe.
-                    with self._custom_inference_lock:
+                    with self._get_runner_lock(runner):
                         lmk_xyscore, heatmaps_t = runner(crop_image)
                 face_landmark_68 = (
                     lmk_xyscore[:, :, :2][0].cpu().numpy() / 64.0
@@ -1007,7 +1013,7 @@ class FaceLandmarkDetectors:
             if runner is not None:
                 with torch.no_grad():
                     # FL-LOCK-03: CUDA graphrunners with static buffers are not thread-safe.
-                    with self._custom_inference_lock:
+                    with self._get_runner_lock(runner):
                         out = runner(aimg)  # (1, 3309) float32
                 pred = out[0].cpu().numpy()
             else:
@@ -1076,7 +1082,7 @@ class FaceLandmarkDetectors:
             if runner is not None:
                 with torch.no_grad():
                     # FL-LOCK-04: CUDA graphrunners with static buffers are not thread-safe.
-                    with self._custom_inference_lock:
+                    with self._get_runner_lock(runner):
                         out_t = runner(crop_image)  # (1, 98, 3)
                 landmarks_xyscore = out_t.cpu()
             else:
@@ -1139,7 +1145,7 @@ class FaceLandmarkDetectors:
             if runner is not None:
                 with torch.no_grad():
                     # FL-LOCK-05: CUDA graphrunners with static buffers are not thread-safe.
-                    with self._custom_inference_lock:
+                    with self._get_runner_lock(runner):
                         out_t = runner(aimg)  # (1, 212)
                 pred = out_t[0].cpu().numpy().reshape((-1, 2))
             else:
@@ -1218,7 +1224,7 @@ class FaceLandmarkDetectors:
             if runner is not None:
                 with torch.no_grad():
                     # FL-LOCK-06: CUDA graphrunners with static buffers are not thread-safe.
-                    with self._custom_inference_lock:
+                    with self._get_runner_lock(runner):
                         _, _, out_pts_t = runner(aimg)  # (1, 406) float32
                 out_pts = out_pts_t[0].cpu().numpy().reshape((-1, 2)) * 224.0
             else:
@@ -1284,7 +1290,7 @@ class FaceLandmarkDetectors:
             if runner is not None:
                 with torch.no_grad():
                     # FL-LOCK-07: CUDA graphrunners with static buffers are not thread-safe.
-                    with self._custom_inference_lock:
+                    with self._get_runner_lock(runner):
                         lmk_t, _vis, _score = runner(aimg)  # (1,1,1,1434)
                 landmarks = lmk_t.cpu().numpy().reshape((1, 478, 3))
             else:
@@ -1315,27 +1321,33 @@ class FaceLandmarkDetectors:
             landmark_for_score = torch.from_numpy(
                 np.expand_dims(landmark_for_score, axis=0).astype(np.float32)
             ).to(self.models_processor.device)
+            landmark_score = []
             if self.models_processor.provider_name == "Custom":
                 bs_runner = self._get_blendshapes_runner()
                 if bs_runner is not None:
                     with torch.no_grad():
                         # FL-LOCK-08: CUDA graphrunners with static buffers are not thread-safe.
-                        with self._custom_inference_lock:
-                            bs_runner(landmark_for_score)
+                        with self._get_runner_lock(bs_runner):
+                            bs_out = bs_runner(landmark_for_score)
+                            landmark_score = bs_out.cpu().numpy().flatten()
                 else:
-                    self._run_onnx_binding(
+                    net_outs = self._run_onnx_binding(
                         "FaceBlendShapes",
                         {"input_points": landmark_for_score},
                         ["output"],
                     )
+                    if net_outs and len(net_outs) > 0:
+                        landmark_score = net_outs[0].flatten()
             else:
-                self._run_onnx_binding(
+                net_outs = self._run_onnx_binding(
                     "FaceBlendShapes", {"input_points": landmark_for_score}, ["output"]
                 )
+                if net_outs and len(net_outs) > 0:
+                    landmark_score = net_outs[0].flatten()
 
             # Pass 'use_mean_eyes' to the converter.
             landmark_5 = faceutil.convert_face_landmark_478_to_5(
                 landmark, use_mean_eyes=use_mean_eyes
             )
-            return landmark_5, landmark, []
+            return landmark_5, landmark, landmark_score
         return [], [], []

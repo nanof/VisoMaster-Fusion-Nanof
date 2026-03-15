@@ -1400,6 +1400,13 @@ class ModelsProcessor(QtCore.QObject):
     def ensure_denoiser_models_loaded(self):
         """Loads the UNet and VAE models if they are not already loaded."""
         with self.model_lock:
+            # Custom provider uses PyTorch kernel runners (loaded by
+            # warm_up_custom_provider_runners / lazy on first use).
+            # Loading the ONNX sessions too would waste ~300–500 MB of VRAM
+            # for models that are never accessed via ORT in Custom mode.
+            if self.provider_name == "Custom":
+                return
+
             unet_model_name = self.main_window.fixed_unet_model_name
             vae_encoder_name = "RefLDMVAEEncoder"
             vae_decoder_name = "RefLDMVAEDecoder"

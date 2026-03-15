@@ -22,12 +22,8 @@ class FaceSwappers:
         self._inswapper_init_lock = (
             threading.Lock()
         )  # serialises lazy-init + CUDA graph capture
-        self._custom_inference_lock = (
-            threading.Lock()
-        )  # serialises parallel inference for CUDA-graph runners (B=1 CUDA graph path)
-        self._batched_inference_lock = (
-            threading.Lock()
-        )  # serialises concurrent eager forward() calls in run_inswapper_batched
+        self._w600k_lock = threading.Lock()
+        self._inswapper_b1_lock = threading.Lock()
         self._inswapper_torch = (
             None  # InSwapperTorch instance (PyTorch-native inference)
         )
@@ -333,7 +329,7 @@ class FaceSwappers:
                     # BUG-C06 fix: .cpu() transfer must be inside the lock — the static output
                     # buffer must not be read after releasing the lock (another thread could
                     # begin a new replay immediately, overwriting the static buffer).
-                    with self._custom_inference_lock:
+                    with self._w600k_lock:
                         embedding = runner(img)
                         embedding_np = embedding.cpu().numpy().flatten()
                 return embedding_np, cropped_image
@@ -665,7 +661,7 @@ class FaceSwappers:
             with torch.no_grad():
                 # FS-LOCK-02: CUDA graphrunners with static buffers are not thread-safe.
                 # Lock ensures only one FrameWorker thread uses the runner at a time.
-                with self._custom_inference_lock:
+                with self._inswapper_b1_lock:
                     result = runner(image, embedding)  # [1, 3, 128, 128] float32
             output.copy_(result)
             return
@@ -745,10 +741,9 @@ class FaceSwappers:
 
         torch_model = self._get_inswapper_torch()
         with torch.no_grad():
-            # FS-LOCK-03: _batched_inference_lock prevents concurrent eager
-            # forward() calls on the same module from racing on GPU memory.
-            with self._batched_inference_lock:
-                result = torch_model(images, embedding)  # [B, 3, 128, 128] float32
+            # Batched Custom inference is now thread-safe due to per-call workspace
+            # allocation in the cuBLASLt Phase 3 extension.
+            result = torch_model(images, embedding)  # [B, 3, 128, 128] float32
         output.copy_(result)
 
     def calc_swapper_latent_ghost(self, source_embedding):

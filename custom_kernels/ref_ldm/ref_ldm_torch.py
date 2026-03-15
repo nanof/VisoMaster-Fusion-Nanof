@@ -1036,7 +1036,12 @@ class CUDAGraphRunner:
         self._stream = torch.cuda.Stream()
         torch.cuda.synchronize()
 
-        with torch.no_grad(), torch.cuda.graph(self._graph, stream=self._stream):
+        with (
+            torch.no_grad(),
+            torch.cuda.graph(
+                self._graph, stream=self._stream, capture_error_mode="thread_local"
+            ),
+        ):
             self._out = model(self._inp)
 
         torch.cuda.synchronize()
@@ -1123,9 +1128,15 @@ class UNetCUDAGraphRunner:
 
         # --- Capture ---
         print("[UNetCUDAGraph] Capturing CUDA graph...")
+        self._capture_stream = torch.cuda.Stream(device=device)
         self._graph = torch.cuda.CUDAGraph()
+        torch.cuda.synchronize(device)
         with torch.no_grad():
-            with torch.cuda.graph(self._graph):
+            with torch.cuda.graph(
+                self._graph,
+                stream=self._capture_stream,
+                capture_error_mode="thread_local",
+            ):
                 self._static_out = model(
                     self._static_x,
                     self._static_ts,

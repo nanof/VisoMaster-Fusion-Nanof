@@ -35,7 +35,10 @@ class FaceMasks:
         self._kernel_cache_lock = threading.Lock()
         self._meshgrid_cache_lock = threading.Lock()
         self._clip_load_lock = threading.Lock()
-        self._custom_inference_lock = threading.Lock()  # serialises parallel inference for CUDA-graph runners (shared across all mask runners)
+        self._custom_inference_lock = (
+            threading.Lock()
+        )  # serialises lock dictionary access
+        self._runner_locks = {}
         # FM-INIT: per-model init locks so that one model's ONNX loading does not
         # block another model's ONNX loading (CPU-only work that can overlap).
         # The global cuda_graph_capture_lock still serialises GPU captures.
@@ -62,6 +65,13 @@ class FaceMasks:
         # Custom-kernel instances for VggCombo (lazy-loaded on first use)
         self._vgg_combo_torch: Optional[object] = None  # VggComboTorch
         self._vgg_combo_runner: Optional[object] = None  # VggComboCUDAGraphRunner
+
+    def _get_runner_lock(self, runner):
+        with self._custom_inference_lock:
+            r_id = id(runner)
+            if r_id not in self._runner_locks:
+                self._runner_locks[r_id] = threading.Lock()
+            return self._runner_locks[r_id]
 
     def unload_models(self):
         """Unloads all models managed by this class via the processor."""
@@ -294,7 +304,7 @@ class FaceMasks:
             if runner is not None:
                 with torch.no_grad():
                     # FM-LOCK-01: CUDA graphrunners with static buffers are not thread-safe.
-                    with self._custom_inference_lock:
+                    with self._get_runner_lock(runner):
                         out = runner(x)
                 return out.argmax(dim=1).squeeze(0).to(torch.long)
             # Custom runner unavailable — fall through to ORT
@@ -1104,7 +1114,7 @@ class FaceMasks:
             if runner is not None:
                 with torch.no_grad():
                     # FM-LOCK-02: CUDA graphrunners with static buffers are not thread-safe.
-                    with self._custom_inference_lock:
+                    with self._get_runner_lock(runner):
                         result = runner(image)
                 output.copy_(result.squeeze())
                 return
@@ -1334,7 +1344,7 @@ class FaceMasks:
             if runner is not None:
                 with torch.no_grad():
                     # FM-LOCK-03: CUDA graphrunners with static buffers are not thread-safe.
-                    with self._custom_inference_lock:
+                    with self._get_runner_lock(runner):
                         result = runner(image)
                 output.copy_(result.view(256, 256))
                 return
@@ -1771,7 +1781,7 @@ class FaceMasks:
             if vgg_runner is not None:
                 with torch.no_grad():
                     # FM-LOCK-04: CUDA graphrunners with static buffers are not thread-safe.
-                    with self._custom_inference_lock:
+                    with self._get_runner_lock(vgg_runner):
                         swapped_feat = vgg_runner(swapped)
                         original_feat = vgg_runner(original)
             else:

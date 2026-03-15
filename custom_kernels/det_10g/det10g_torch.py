@@ -250,19 +250,24 @@ class Det10gTorch(nn.Module):
             x = x.to(memory_format=torch.channels_last)
         c4, c5, c6 = self.backbone(x)
         p8, p16, p32 = self.neck(c4, c5, c6)
-        s8, b8, k8 = self.head8(p8)
-        s16, b16, k16 = self.head16(p16)
-        s32, b32, k32 = self.head32(p32)
+        # Cast neck outputs to float32 before detection heads so that scores,
+        # bbox offsets and keypoint coordinates are computed in full FP32
+        # precision.  The backbone and neck run in FP16 for speed; the heads
+        # are kept in FP32 (see from_onnx) so keypoints fed to the Reference
+        # alignment warp have no FP16 sub-pixel bias.
+        s8, b8, k8 = self.head8(p8.float())
+        s16, b16, k16 = self.head16(p16.float())
+        s32, b32, k32 = self.head32(p32.float())
         return (
-            s8.float(),
-            s16.float(),
-            s32.float(),
-            b8.float(),
-            b16.float(),
-            b32.float(),
-            k8.float(),
-            k16.float(),
-            k32.float(),
+            s8,
+            s16,
+            s32,
+            b8,
+            b16,
+            b32,
+            k8,
+            k16,
+            k32,
         )
 
     @classmethod
@@ -278,11 +283,19 @@ class Det10gTorch(nn.Module):
         model = cls(compute_dtype=torch.float32, channels_last=channels_last)
         _load_all_params(model, onnx_model, torch.float32)
         model._compute_dtype = compute_dtype
-        model = model.to(compute_dtype)
+        # Only convert backbone and neck to compute_dtype (FP16).  The three
+        # detection heads (head8/head16/head32) stay in FP32 so keypoint
+        # coordinates are produced at full precision — preventing the sub-pixel
+        # bias that shifts face boxes in Reference-alignment mode.
+        if compute_dtype != torch.float32:
+            model.backbone = model.backbone.to(compute_dtype)
+            model.neck = model.neck.to(compute_dtype)
         if channels_last:
-            # Convert all 4-D weight tensors to channels_last so cuDNN dispatches
-            # to its native NHWC convolution path on every layer.
-            model = model.to(memory_format=torch.channels_last)
+            # Convert backbone+neck 4-D weight tensors to channels_last so
+            # cuDNN dispatches to its native NHWC convolution path.
+            model.backbone = model.backbone.to(memory_format=torch.channels_last)
+            model.neck = model.neck.to(memory_format=torch.channels_last)
+        model.eval()
         return model
 
 
@@ -415,7 +428,12 @@ class _CapturedGraph:
         self._graph = torch.cuda.CUDAGraph()
         stream = torch.cuda.Stream()
         torch.cuda.synchronize()
-        with torch.no_grad(), torch.cuda.graph(self._graph, stream=stream):
+        with (
+            torch.no_grad(),
+            torch.cuda.graph(
+                self._graph, stream=stream, capture_error_mode="thread_local"
+            ),
+        ):
             self._outs = model(self._inp)
         torch.cuda.synchronize()
 

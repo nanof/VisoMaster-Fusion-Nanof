@@ -696,7 +696,12 @@ class CUDAGraphRunner:
         self._graph = torch.cuda.CUDAGraph()
         self._stream = torch.cuda.Stream()
         torch.cuda.synchronize()
-        with torch.no_grad(), torch.cuda.graph(self._graph, stream=self._stream):
+        with (
+            torch.no_grad(),
+            torch.cuda.graph(
+                self._graph, stream=self._stream, capture_error_mode="thread_local"
+            ),
+        ):
             self._out = model(self._inp)
         torch.cuda.synchronize()
 

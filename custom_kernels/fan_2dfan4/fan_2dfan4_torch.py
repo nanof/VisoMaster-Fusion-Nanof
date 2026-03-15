@@ -439,10 +439,15 @@ class FAN2dfan4CUDAGraphRunner:
         torch.cuda.synchronize()
 
         # Capture
+        self._stream = torch.cuda.Stream()
         self._graph = torch.cuda.CUDAGraph()
+        torch.cuda.synchronize()
         with torch.no_grad():
-            with torch.cuda.graph(self._graph):
+            with torch.cuda.graph(
+                self._graph, stream=self._stream, capture_error_mode="thread_local"
+            ):
                 self._out = model(self._x_buf)  # (lmk_xyscore, heatmaps)
+        torch.cuda.synchronize()
 
     def __call__(self, x: torch.Tensor):
         """

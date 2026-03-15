@@ -709,6 +709,71 @@ if TRITON_AVAILABLE:
                 out = tl.maximum(out, 0.0)
             tl.store(y_ptr + base + offs * C + c, out.to(tl.float16), mask=mask)
 
+    @triton.jit
+    def _adain_nhwc_batched_with_residual_fwd(
+        x_ptr,
+        sc_ptr,
+        bi_ptr,
+        y_ptr,
+        res_ptr,
+        HW,
+        C,
+        eps: tl.constexpr,
+        fuse_relu: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        """Single-pass Welford AdaIN + residual add for channels-last (NHWC), any batch size B.
+
+        Grid: (B*C,) — one program per (batch_item, channel).
+        scale/bias are indexed by channel only (broadcast over batch).
+        Memory layout: element (b, hw, c) lives at  b*HW*C + hw*C + c.
+        """
+        bc = tl.program_id(0)
+        b = bc // C
+        c = bc % C
+        base = b * HW * C
+
+        mean = 0.0
+        m2 = 0.0
+        count = 0.0
+        for start in range(0, HW, BLOCK):
+            offs = start + tl.arange(0, BLOCK)
+            mask = offs < HW
+            v = tl.load(x_ptr + base + offs * C + c, mask=mask, other=0.0).to(
+                tl.float32
+            )
+            batch_cnt = tl.sum(tl.where(mask, 1.0, 0.0), axis=0)
+            batch_mean = tl.sum(tl.where(mask, v, 0.0), axis=0) / tl.where(
+                batch_cnt > 0, batch_cnt, 1.0
+            )
+            batch_m2 = tl.sum(
+                tl.where(mask, (v - batch_mean) * (v - batch_mean), 0.0), axis=0
+            )
+            delta = batch_mean - mean
+            new_count = count + batch_cnt
+            safe_nc = tl.where(new_count > 0, new_count, 1.0)
+            mean = mean + delta * (batch_cnt / safe_nc)
+            m2 = m2 + batch_m2 + delta * delta * count * (batch_cnt / safe_nc)
+            count = new_count
+
+        inv_std = tl.rsqrt(m2 / HW + eps)
+        sc = tl.load(sc_ptr + c).to(tl.float32) * inv_std
+        bi = tl.load(bi_ptr + c).to(tl.float32) - sc * mean
+
+        for start in range(0, HW, BLOCK):
+            offs = start + tl.arange(0, BLOCK)
+            mask = offs < HW
+            v = tl.load(x_ptr + base + offs * C + c, mask=mask, other=0.0).to(
+                tl.float32
+            )
+            r = tl.load(res_ptr + base + offs * C + c, mask=mask, other=0.0).to(
+                tl.float32
+            )
+            out = v * sc + bi + r
+            if fuse_relu:
+                out = tl.maximum(out, 0.0)
+            tl.store(y_ptr + base + offs * C + c, out.to(tl.float16), mask=mask)
+
     def triton_adain(
         x: torch.Tensor,
         scale: torch.Tensor,
@@ -725,7 +790,7 @@ if TRITON_AVAILABLE:
         * NCHW, any B            → _adain_fwd_batched
         * NHWC, B=1              → _adain_nhwc_fwd  (stride-C coalesced access)
         * NHWC, B>1              → _adain_nhwc_batched_fwd (native NHWC)
-        * NHWC + residual        → NHWC AdaIN kernel then separate add (simple fallback)
+        * NHWC + residual        → _adain_nhwc_batched_with_residual_fwd
 
         ``residual`` must have the same shape/dtype/device as ``x``.  When provided,
         the kernel computes ``y = adain(x) + residual`` in a single memory pass,
@@ -741,7 +806,21 @@ if TRITON_AVAILABLE:
         num_warps = 8 if HW > 4096 else 4
 
         if x.is_contiguous(memory_format=torch.channels_last):
-            if B == 1:
+            if residual is not None:
+                _adain_nhwc_batched_with_residual_fwd[B * C,](
+                    x,
+                    sc,
+                    bi,
+                    y,
+                    residual,
+                    HW,
+                    C,
+                    eps=eps,
+                    fuse_relu=fuse_relu,
+                    BLOCK=BLOCK,
+                    num_warps=num_warps,
+                )
+            elif B == 1:
                 _adain_nhwc_fwd[C,](
                     x,
                     sc,
@@ -767,9 +846,6 @@ if TRITON_AVAILABLE:
                     BLOCK=BLOCK,
                     num_warps=num_warps,
                 )
-            # Residual fused kernel not yet available for NHWC — apply separately
-            if residual is not None:
-                y = y + residual
         else:
             # NCHW path — use residual-fused kernel when residual is provided
             if residual is not None:

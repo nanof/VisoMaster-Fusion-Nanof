@@ -772,9 +772,17 @@ def build_cuda_graph_runner(model: GFPGANTorch, inp_shape: tuple = (1, 3, 512, 5
         for _ in range(3):
             model(static_inp)
 
+    capture_stream = torch.cuda.Stream(device=dev)
+    torch.cuda.synchronize(dev)
     graph = torch.cuda.CUDAGraph()
-    with torch.no_grad(), torch.cuda.graph(graph):
+    with (
+        torch.no_grad(),
+        torch.cuda.graph(
+            graph, stream=capture_stream, capture_error_mode="thread_local"
+        ),
+    ):
         static_out = model(static_inp)
+    torch.cuda.synchronize(dev)
 
     def runner(x: torch.Tensor) -> torch.Tensor:
         static_inp.copy_(x)
