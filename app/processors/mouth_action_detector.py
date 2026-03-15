@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 
@@ -54,12 +54,12 @@ class MouthActionDetector:
 
     # ------------------------------------------------------------------
     def __init__(self) -> None:
-        self._graph = None  # tf.Graph once loaded
-        self._session = None  # tf.compat.v1.Session once loaded
-        self._inp_tensor = None
-        self._boxes_tensor = None
-        self._scores_tensor = None
-        self._classes_tensor = None
+        self._graph: Optional[Any] = None  # tf.Graph once loaded
+        self._session: Optional[Any] = None  # tf.compat.v1.Session once loaded
+        self._inp_tensor: Optional[Any] = None
+        self._boxes_tensor: Optional[Any] = None
+        self._scores_tensor: Optional[Any] = None
+        self._classes_tensor: Optional[Any] = None
         self._infer_lock = threading.Lock()  # serialise concurrent inference calls
         self._load_error: Optional[str] = None
 
@@ -168,6 +168,7 @@ class MouthActionDetector:
             resized = cv2.resize(hwc_bgr, _DETECTION_INPUT_SIZE).astype(np.float32)
             batch = resized[np.newaxis, ...]  # (1, H, W, 3)
 
+            assert self._session is not None  # guarded by self.available check above
             with self._infer_lock:
                 _, scores, classes = self._session.run(
                     [self._boxes_tensor, self._scores_tensor, self._classes_tensor],

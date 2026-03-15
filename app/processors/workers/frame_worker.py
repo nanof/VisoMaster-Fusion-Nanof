@@ -1172,6 +1172,8 @@ class FrameWorker(threading.Thread):
         self.VR_PERSPECTIVE_RENDER_SIZE = int(
             control.get("VR180CropResolutionSelection", "512")
         )
+        # VR-15: ensure scaling transforms are set for this resolution
+        self.set_scaling_transforms(control)
 
         # Detection interval / previous-detections setup (mirrors standard-mode logic).
         _vr_detection_interval = int(control.get("FaceDetectionIntervalSlider", 1))
@@ -2021,7 +2023,7 @@ class FrameWorker(threading.Thread):
             for i in range(len(kpss_5)):
                 if not self._is_kps_valid(kpss_5[i], img_h_for_kps, img_w_for_kps):
                     continue
-                _bbox_i = bboxes[i]
+                _bbox_i = bboxes[i]  # type: ignore[index]
                 if (
                     min(_bbox_i[2] - _bbox_i[0], _bbox_i[3] - _bbox_i[1])
                     < self._MIN_FACE_PIXELS
@@ -2040,7 +2042,7 @@ class FrameWorker(threading.Thread):
                         "kps_5": kpss_5[i],
                         "kps_all": kps_all_i,
                         "embedding": face_emb,
-                        "bbox": bboxes[i],
+                        "bbox": bboxes[i],  # type: ignore[index]
                         "original_face": None,
                         "swap_mask": None,
                         "matched_target": None,  # FW-BUG-09: cache slot
@@ -3051,74 +3053,145 @@ class FrameWorker(threading.Thread):
         use_mode_2 = parameters.get("StrengthMode2EnableToggle", False)
 
         if swapper_model == "Inswapper128":
+            # Batched pixel-shift path: for Custom provider with dim>1, stack all
+            # dim×dim independent tiles into a single [B,3,128,128] batch and run
+            # one forward pass instead of dim*dim sequential calls.
+            _use_batched = self.models_processor.provider_name == "Custom" and dim > 1
+
             for k in range(itex):
                 prev_face = (
                     input_face_affined.clone()
                 )  # save N-1 result before this pass
-                # Lists to hold independent memory buffers for this iteration
-                tile_inputs = []
-                tile_outputs = []
-                tile_coords = []
 
-                for j in range(dim):
-                    for i in range(dim):
-                        tile = input_face_affined[j::dim, i::dim]
-                        t_in = tile.permute(2, 0, 1).contiguous().unsqueeze(0)
-                        t_out = torch.empty_like(t_in)
+                if _use_batched:
+                    # ------ BATCHED PATH (Custom provider, dim > 1) ------
+                    # Stack all tiles into [B, 3, 128, 128] with one GPU kernel.
+                    tiles_list = []
+                    tile_coords = []
+                    for j in range(dim):
+                        for i in range(dim):
+                            tiles_list.append(
+                                input_face_affined[j::dim, i::dim]
+                                .permute(2, 0, 1)
+                                .contiguous()
+                            )
+                            tile_coords.append((j, i))
+                    batch_input = torch.stack(tiles_list, dim=0)  # [B, 3, 128, 128]
+                    batch_output = torch.empty_like(batch_input)
 
-                        tile_inputs.append(t_in)
-                        tile_outputs.append(t_out)
-                        tile_coords.append((j, i))
+                    self.models_processor.run_inswapper_batched(
+                        batch_input, latent, batch_output
+                    )
 
-                with torch.no_grad():
-                    for idx in range(len(tile_inputs)):
-                        self.models_processor.run_inswapper(
-                            tile_inputs[idx], latent, tile_outputs[idx]
-                        )
+                    if self.models_processor.device == "cuda":
+                        torch.cuda.current_stream().synchronize()
 
-                if self.models_processor.device == "cuda":
-                    torch.cuda.current_stream().synchronize()
+                    # Fallback: replace any near-zero output tile with the input tile
+                    tile_sums = batch_output.abs().sum(dim=(1, 2, 3))  # [B]
+                    zero_mask = tile_sums < 1.0
+                    if zero_mask.any():
+                        batch_output[zero_mask] = batch_input[zero_mask]
 
-                # --- MODE 2 ---
-                if use_mode_2:
-                    temp_output = input_face_affined.clone()
-                    for idx, (j, i) in enumerate(tile_coords):
-                        res = (
-                            tile_inputs[idx]
-                            if tile_outputs[idx].sum() < 1.0
-                            else tile_outputs[idx]
-                        )
-                        temp_output[j::dim, i::dim] = res.squeeze(0).permute(1, 2, 0)
+                    # --- MODE 2 ---
+                    if use_mode_2:
+                        temp_output = input_face_affined.clone()
+                        for idx, (j, i) in enumerate(tile_coords):
+                            temp_output[j::dim, i::dim] = batch_output[idx].permute(
+                                1, 2, 0
+                            )
 
-                    curr_chw = temp_output.permute(2, 0, 1)
-                    if k == 0:
-                        first_pass_face = curr_chw.clone()
-                    else:
-                        prev_chw = prev_face.permute(2, 0, 1)
-                        curr_chw = self._fix_drift_and_texture(
-                            curr_chw, prev_chw, first_pass_face
-                        )
-                        temp_output = curr_chw.permute(1, 2, 0)
-
-                    prev_face = input_face_affined.clone()
-                    input_face_affined = temp_output.clone()
-                    output = torch.clamp(temp_output * 255.0, 0, 255)
-
-                # --- NORMAL MODE ---
-                else:
-                    for idx, (j, i) in enumerate(tile_coords):
-                        if tile_outputs[idx].sum() < 1.0:
-                            res = tile_inputs[idx]
+                        curr_chw = temp_output.permute(2, 0, 1)
+                        if k == 0:
+                            first_pass_face = curr_chw.clone()
                         else:
-                            res = tile_outputs[idx]
+                            prev_chw = prev_face.permute(2, 0, 1)
+                            curr_chw = self._fix_drift_and_texture(
+                                curr_chw, prev_chw, first_pass_face
+                            )
+                            temp_output = curr_chw.permute(1, 2, 0)
 
-                        res_hwc = res.squeeze(0).permute(1, 2, 0)
-                        output[j::dim, i::dim] = res_hwc
+                        prev_face = input_face_affined.clone()
+                        input_face_affined = temp_output.clone()
+                        output = torch.clamp(temp_output * 255.0, 0, 255)
 
-                    prev_face = input_face_affined.clone()
-                    input_face_affined = output.clone()
-                    output = torch.mul(output, 255)
-                    output = torch.clamp(output, 0, 255)
+                    # --- NORMAL MODE ---
+                    else:
+                        for idx, (j, i) in enumerate(tile_coords):
+                            output[j::dim, i::dim] = batch_output[idx].permute(1, 2, 0)
+
+                        prev_face = input_face_affined.clone()
+                        input_face_affined = output.clone()
+                        output = torch.mul(output, 255)
+                        output = torch.clamp(output, 0, 255)
+
+                else:
+                    # ------ SEQUENTIAL PATH (ORT providers or dim==1) ------
+                    # Lists to hold independent memory buffers for this iteration
+                    tile_inputs = []
+                    tile_outputs = []
+                    tile_coords = []
+
+                    for j in range(dim):
+                        for i in range(dim):
+                            tile = input_face_affined[j::dim, i::dim]
+                            t_in = tile.permute(2, 0, 1).contiguous().unsqueeze(0)
+                            t_out = torch.empty_like(t_in)
+
+                            tile_inputs.append(t_in)
+                            tile_outputs.append(t_out)
+                            tile_coords.append((j, i))
+
+                    with torch.no_grad():
+                        for idx in range(len(tile_inputs)):
+                            self.models_processor.run_inswapper(
+                                tile_inputs[idx], latent, tile_outputs[idx]
+                            )
+
+                    if self.models_processor.device == "cuda":
+                        torch.cuda.current_stream().synchronize()
+
+                    # --- MODE 2 ---
+                    if use_mode_2:
+                        temp_output = input_face_affined.clone()
+                        for idx, (j, i) in enumerate(tile_coords):
+                            res = (
+                                tile_inputs[idx]
+                                if tile_outputs[idx].sum() < 1.0
+                                else tile_outputs[idx]
+                            )
+                            temp_output[j::dim, i::dim] = res.squeeze(0).permute(
+                                1, 2, 0
+                            )
+
+                        curr_chw = temp_output.permute(2, 0, 1)
+                        if k == 0:
+                            first_pass_face = curr_chw.clone()
+                        else:
+                            prev_chw = prev_face.permute(2, 0, 1)
+                            curr_chw = self._fix_drift_and_texture(
+                                curr_chw, prev_chw, first_pass_face
+                            )
+                            temp_output = curr_chw.permute(1, 2, 0)
+
+                        prev_face = input_face_affined.clone()
+                        input_face_affined = temp_output.clone()
+                        output = torch.clamp(temp_output * 255.0, 0, 255)
+
+                    # --- NORMAL MODE ---
+                    else:
+                        for idx, (j, i) in enumerate(tile_coords):
+                            if tile_outputs[idx].sum() < 1.0:
+                                res = tile_inputs[idx]
+                            else:
+                                res = tile_outputs[idx]
+
+                            res_hwc = res.squeeze(0).permute(1, 2, 0)
+                            output[j::dim, i::dim] = res_hwc
+
+                        prev_face = input_face_affined.clone()
+                        input_face_affined = output.clone()
+                        output = torch.mul(output, 255)
+                        output = torch.clamp(output, 0, 255)
 
         elif swapper_model in (
             "InStyleSwapper256 Version A",

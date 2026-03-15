@@ -1,3 +1,4 @@
+import threading
 from typing import TYPE_CHECKING, Dict, Optional
 
 import torch
@@ -16,6 +17,25 @@ class FaceRestorers:
         self.active_model_slot1: Optional[str] = None
         self.active_model_slot2: Optional[str] = None
         self._warned_models: set[str] = set()  # To track warnings
+        self._gfpgan_torch: Optional[object] = None  # GFPGANTorch (v1.4)
+        self._gfpgan1024_torch: Optional[object] = None  # GFPGANTorch (1024)
+        self._gpen_torch: Dict[int, Optional[object]] = {}  # GPENTorch per size
+        self._gpen_runner: Dict[
+            int, Optional[object]
+        ] = {}  # CUDA graph runner per size
+        self._ref_ldm_encoder_torch: Optional[object] = None  # RefLDMEncoderTorch
+        self._ref_ldm_encoder_runner: Optional[object] = None  # CUDA graph runner
+        self._ref_ldm_decoder_torch: Optional[object] = None  # RefLDMDecoderTorch
+        self._ref_ldm_decoder_runner: Optional[object] = None  # CUDA graph runner
+        self._ref_ldm_unet_torch: Optional[object] = None  # RefLDMUNetTorch
+        self._codeformer_torch: Optional[object] = None  # CodeFormerTorch
+        self._codeformer_runner: Optional[object] = None  # CUDA graph runner
+        self._restoreformer_torch: Optional[object] = None  # RestoreFormerPlusPlusTorch
+        self._restoreformer_runner: Optional[object] = None  # CUDA graph runner
+        self._custom_inference_lock = (
+            threading.Lock()
+        )  # serialises parallel inference for CUDA-graph runners
+        self._custom_init_lock = threading.Lock()  # serialises Custom-kernel lazy inits
         self.model_map = {
             "GFPGAN-v1.4": "GFPGANv1.4",
             "GFPGAN-1024": "GFPGAN1024",
@@ -36,6 +56,208 @@ class FaceRestorers:
         if self.active_model_slot2:
             self.models_processor.unload_model(self.active_model_slot2)
             self.active_model_slot2 = None
+        with self._custom_init_lock:
+            self._gfpgan_torch = None
+            self._gfpgan1024_torch = None
+            self._gpen_torch = {}
+            self._gpen_runner = {}
+            self._ref_ldm_encoder_torch = None
+            self._ref_ldm_encoder_runner = None
+            self._ref_ldm_decoder_torch = None
+            self._ref_ldm_decoder_runner = None
+            self._ref_ldm_unet_torch = None
+            self._codeformer_torch = None
+            self._codeformer_runner = None
+            self._restoreformer_torch = None
+            self._restoreformer_runner = None
+
+    def _get_gfpgan_torch(self, is_1024: bool = False):
+        """Lazily load the custom GFPGANTorch model (FP16 PyTorch kernel)."""
+        attr = "_gfpgan1024_torch" if is_1024 else "_gfpgan_torch"
+        model = getattr(self, attr)
+        if model is not None:
+            return model
+        with self._custom_init_lock:
+            model = getattr(self, attr)
+            if model is None:
+                try:
+                    from custom_kernels.gfpgan_v1_4.gfpgan_torch import GFPGANTorch
+
+                    onnx_name = "gfpgan-1024.onnx" if is_1024 else "GFPGANv1.4.onnx"
+                    import pathlib
+
+                    onnx_path = str(
+                        pathlib.Path(__file__).parent.parent.parent
+                        / "model_assets"
+                        / onnx_name
+                    )
+                    print(
+                        f"[GFPGANTorch] Loading PyTorch {'1024' if is_1024 else 'v1.4'} model..."
+                    )
+                    m = GFPGANTorch.from_onnx(onnx_path).cuda().eval()
+                    setattr(self, attr, m)
+                    model = m
+                except Exception as e:
+                    print(f"[GFPGANTorch] Failed to load custom kernel: {e}")
+        return model
+
+    def _get_gpen_runner(self, size: int):
+        """
+        Lazily load GPENTorch + CUDA graph runner for GPEN-BFR-{size}.
+        Returns the CUDA graph runner (callable) or None on failure.
+        Falls back to direct model if CUDA graph build fails.
+        """
+        if size in self._gpen_runner:
+            return self._gpen_runner.get(size)
+        with self._custom_init_lock:
+            if size in self._gpen_runner:
+                return self._gpen_runner.get(size)
+            model = self._gpen_torch.get(size)
+            if model is None:
+                try:
+                    from custom_kernels.gpen_bfr.gpen_torch import GPENTorch
+                    import pathlib
+
+                    onnx_path = str(
+                        pathlib.Path(__file__).parent.parent.parent
+                        / "model_assets"
+                        / f"GPEN-BFR-{size}.onnx"
+                    )
+                    print(f"[GPENTorch] Loading GPEN-BFR-{size} model...")
+                    model = (
+                        GPENTorch.from_onnx(onnx_path, compute_dtype=torch.float16)
+                        .cuda()
+                        .eval()
+                    )
+                    self._gpen_torch[size] = model
+                except Exception as e:
+                    print(f"[GPENTorch] Failed to load GPEN-BFR-{size}: {e}")
+                    self._gpen_torch[size] = None
+                    self._gpen_runner[size] = None
+                    return None
+            try:
+                from custom_kernels.gpen_bfr.gpen_torch import build_cuda_graph_runner
+
+                inp_hw = model.in_size  # type: ignore[attr-defined]
+                runner = build_cuda_graph_runner(
+                    model,  # type: ignore[arg-type]
+                    inp_shape=(1, 3, inp_hw, inp_hw),
+                )
+                self._gpen_runner[size] = runner
+            except Exception as e:
+                print(
+                    f"[GPENTorch] CUDA graph build failed for GPEN-{size}, using direct inference: {e}"
+                )
+                self._gpen_runner[size] = model  # fallback: direct model call
+        return self._gpen_runner.get(size)
+
+    def _run_gpen_custom(self, size: int, image: torch.Tensor, output: torch.Tensor):
+        """Run GPEN via Custom provider (GPENTorch + CUDA graph)."""
+        runner = self._get_gpen_runner(size)
+        if runner is None:
+            return False
+        with torch.no_grad():
+            # FR-LOCK-02: CUDA graphrunners with static buffers are not thread-safe.
+            with self._custom_inference_lock:
+                result = runner(image)
+        output.copy_(result)
+        return True
+
+    def _get_ref_ldm_encoder_runner(self):
+        """Lazily load RefLDMEncoderTorch + CUDA graph runner."""
+        if self._ref_ldm_encoder_runner is not None:
+            return self._ref_ldm_encoder_runner
+        with self._custom_init_lock:
+            if self._ref_ldm_encoder_runner is not None:
+                return self._ref_ldm_encoder_runner
+            if self._ref_ldm_encoder_torch is None:
+                try:
+                    import pathlib
+                    from custom_kernels.ref_ldm.ref_ldm_torch import RefLDMEncoderTorch
+
+                    onnx_path = str(
+                        pathlib.Path(__file__).parent.parent.parent
+                        / "model_assets"
+                        / "ref_ldm_vae_encoder.onnx"
+                    )
+                    print("[RefLDMTorch] Loading VAE encoder...")
+                    m = RefLDMEncoderTorch.from_onnx(onnx_path).cuda().eval()
+                    self._ref_ldm_encoder_torch = m
+                except Exception as e:
+                    print(f"[RefLDMTorch] Failed to load VAE encoder: {e}")
+                    return None
+            try:
+                from custom_kernels.ref_ldm.ref_ldm_torch import build_cuda_graph_runner
+
+                runner = build_cuda_graph_runner(
+                    self._ref_ldm_encoder_torch, inp_shape=(1, 3, 512, 512)
+                )
+                self._ref_ldm_encoder_runner = runner
+            except Exception as e:
+                print(
+                    f"[RefLDMTorch] CUDA graph build failed for encoder, using direct inference: {e}"
+                )
+                self._ref_ldm_encoder_runner = self._ref_ldm_encoder_torch
+        return self._ref_ldm_encoder_runner
+
+    def _get_ref_ldm_decoder_runner(self):
+        """Lazily load RefLDMDecoderTorch + CUDA graph runner."""
+        if self._ref_ldm_decoder_runner is not None:
+            return self._ref_ldm_decoder_runner
+        with self._custom_init_lock:
+            if self._ref_ldm_decoder_runner is not None:
+                return self._ref_ldm_decoder_runner
+            if self._ref_ldm_decoder_torch is None:
+                try:
+                    import pathlib
+                    from custom_kernels.ref_ldm.ref_ldm_torch import RefLDMDecoderTorch
+
+                    onnx_path = str(
+                        pathlib.Path(__file__).parent.parent.parent
+                        / "model_assets"
+                        / "ref_ldm_vae_decoder.onnx"
+                    )
+                    print("[RefLDMTorch] Loading VAE decoder...")
+                    m = RefLDMDecoderTorch.from_onnx(onnx_path).cuda().eval()
+                    self._ref_ldm_decoder_torch = m
+                except Exception as e:
+                    print(f"[RefLDMTorch] Failed to load VAE decoder: {e}")
+                    return None
+            try:
+                from custom_kernels.ref_ldm.ref_ldm_torch import build_cuda_graph_runner
+
+                runner = build_cuda_graph_runner(
+                    self._ref_ldm_decoder_torch, inp_shape=(1, 8, 64, 64)
+                )
+                self._ref_ldm_decoder_runner = runner
+            except Exception as e:
+                print(
+                    f"[RefLDMTorch] CUDA graph build failed for decoder, using direct inference: {e}"
+                )
+                self._ref_ldm_decoder_runner = self._ref_ldm_decoder_torch
+        return self._ref_ldm_decoder_runner
+
+    def _get_ref_ldm_unet_torch(self):
+        """Lazily load RefLDMUNetTorch."""
+        if self._ref_ldm_unet_torch is not None:
+            return self._ref_ldm_unet_torch
+        with self._custom_init_lock:
+            if self._ref_ldm_unet_torch is None:
+                try:
+                    import pathlib
+                    from custom_kernels.ref_ldm.ref_ldm_torch import RefLDMUNetTorch
+
+                    onnx_path = str(
+                        pathlib.Path(__file__).parent.parent.parent
+                        / "model_assets"
+                        / "ref_ldm_unet_external_kv.onnx"
+                    )
+                    print("[RefLDMTorch] Loading UNet...")
+                    m = RefLDMUNetTorch.from_onnx(onnx_path).cuda().eval()
+                    self._ref_ldm_unet_torch = m
+                except Exception as e:
+                    print(f"[RefLDMTorch] Failed to load UNet: {e}")
+        return self._ref_ldm_unet_torch
 
     def _get_model_session(self, model_name: str):
         """
@@ -296,6 +518,16 @@ class FaceRestorers:
         image_input_tensor: Batch x 3 x Height x Width, float32, normalized to [-1, 1]
         output_latent_tensor: Placeholder for Batch x 8 x LatentH x LatentW, float32
         """
+        if self.models_processor.provider_name == "Custom":
+            runner = self._get_ref_ldm_encoder_runner()
+            if runner is not None:
+                with torch.no_grad():
+                    # FR-LOCK-03: CUDA graphrunners with static buffers are not thread-safe.
+                    with self._custom_inference_lock:
+                        result = runner(image_input_tensor)
+                output_latent_tensor.copy_(result)
+                return
+
         model_name = "RefLDMVAEEncoder"
         # FR-BUG-04: use .get() to avoid KeyError when model is not yet loaded
         ort_session = self.models_processor.models.get(model_name)
@@ -344,6 +576,16 @@ class FaceRestorers:
         latent_input_tensor: Batch x 8 x LatentH x LatentW, float32
         output_image_tensor: Placeholder for Batch x 3 x H x W, float32, normalized to [-1, 1]
         """
+        if self.models_processor.provider_name == "Custom":
+            runner = self._get_ref_ldm_decoder_runner()
+            if runner is not None:
+                with torch.no_grad():
+                    # FR-LOCK-04: CUDA graphrunners with static buffers are not thread-safe.
+                    with self._custom_inference_lock:
+                        result = runner(latent_input_tensor)
+                output_image_tensor.copy_(result)
+                return
+
         model_name = "RefLDMVAEDecoder"
         # FR-BUG-04: use .get() to avoid KeyError when model is not yet loaded
         ort_session = self.models_processor.models.get(model_name)
@@ -396,6 +638,24 @@ class FaceRestorers:
         """
         Runs the UNet denoiser model with external K/V inputs.
         """
+        if self.models_processor.provider_name == "Custom":
+            unet = self._get_ref_ldm_unet_torch()
+            if unet is not None:
+                use_exclusive = bool(
+                    use_reference_exclusive_path_globally_tensor.item()
+                )
+                with torch.no_grad():
+                    # FR-LOCK-05: CUDA graphrunners with static buffers are not thread-safe.
+                    with self._custom_inference_lock:
+                        result = unet(
+                            x_noisy_plus_lq_latent,
+                            timesteps_tensor,
+                            kv_map=kv_tensor_map,
+                            use_exclusive=use_exclusive,
+                        )
+                output_unet_tensor.copy_(result)
+                return
+
         model_name = self.models_processor.main_window.fixed_unet_model_name
         ort_session = self.models_processor.models.get(model_name)
 
@@ -527,6 +787,17 @@ class FaceRestorers:
 
     def run_GFPGAN(self, image, output):
         model_name = "GFPGANv1.4"
+
+        if self.models_processor.provider_name == "Custom":
+            torch_model = self._get_gfpgan_torch(is_1024=False)
+            if torch_model is not None:
+                with torch.no_grad():
+                    # FR-LOCK-01: CUDA graphrunners with static buffers are not thread-safe.
+                    with self._custom_inference_lock:
+                        result = torch_model(image)
+                output.copy_(result)
+                return
+
         ort_session = self._get_model_session(model_name)
         if not ort_session:
             return  # Silently skip if model failed to load
@@ -554,6 +825,17 @@ class FaceRestorers:
 
     def run_GFPGAN1024(self, image, output):
         model_name = "GFPGAN1024"
+
+        if self.models_processor.provider_name == "Custom":
+            torch_model = self._get_gfpgan_torch(is_1024=True)
+            if torch_model is not None:
+                with torch.no_grad():
+                    # FR-LOCK-07: CUDA graphrunners with static buffers are not thread-safe.
+                    with self._custom_inference_lock:
+                        result = torch_model(image)
+                output.copy_(result)
+                return
+
         ort_session = self._get_model_session(model_name)
         if not ort_session:
             return  # Silently skip
@@ -581,6 +863,11 @@ class FaceRestorers:
 
     def run_GPEN_256(self, image, output):
         model_name = "GPENBFR256"
+
+        if self.models_processor.provider_name == "Custom":
+            if self._run_gpen_custom(256, image, output):
+                return
+
         ort_session = self._get_model_session(model_name)
         if not ort_session:
             return  # Silently skip
@@ -608,6 +895,11 @@ class FaceRestorers:
 
     def run_GPEN_512(self, image, output):
         model_name = "GPENBFR512"
+
+        if self.models_processor.provider_name == "Custom":
+            if self._run_gpen_custom(512, image, output):
+                return
+
         ort_session = self._get_model_session(model_name)
         if not ort_session:
             return  # Silently skip
@@ -635,6 +927,11 @@ class FaceRestorers:
 
     def run_GPEN_1024(self, image, output):
         model_name = "GPENBFR1024"
+
+        if self.models_processor.provider_name == "Custom":
+            if self._run_gpen_custom(1024, image, output):
+                return
+
         ort_session = self._get_model_session(model_name)
         if not ort_session:
             return  # Silently skip
@@ -662,6 +959,11 @@ class FaceRestorers:
 
     def run_GPEN_2048(self, image, output):
         model_name = "GPENBFR2048"
+
+        if self.models_processor.provider_name == "Custom":
+            if self._run_gpen_custom(2048, image, output):
+                return
+
         ort_session = self._get_model_session(model_name)
         if not ort_session:
             return  # Silently skip
@@ -687,7 +989,100 @@ class FaceRestorers:
         # Run the model with lazy build handling
         self._run_model_with_lazy_build_check(model_name, ort_session, io_binding)
 
+    def _get_restoreformer_runner(self):
+        """
+        Lazily load RestoreFormerPlusPlusTorch + CUDA graph runner.
+        Returns the runner (callable) or None on failure.
+        Falls back to direct model call if CUDA graph build fails.
+        """
+        if self._restoreformer_runner is not None:
+            return self._restoreformer_runner
+        with self._custom_init_lock:
+            if self._restoreformer_runner is not None:
+                return self._restoreformer_runner
+            if self._restoreformer_torch is None:
+                try:
+                    import pathlib
+                    from custom_kernels.restoreformer.restoreformer_torch import (
+                        RestoreFormerPlusPlusTorch,
+                    )
+
+                    onnx_path = str(
+                        pathlib.Path(__file__).parent.parent.parent
+                        / "model_assets"
+                        / "RestoreFormerPlusPlus.fp16.onnx"
+                    )
+                    print("[RFP++Torch] Loading RestoreFormerPlusPlus model...")
+                    m = (
+                        RestoreFormerPlusPlusTorch.from_onnx(onnx_path)
+                        .to(self.models_processor.device)
+                        .eval()
+                    )
+                    self._restoreformer_torch = m
+                except Exception as e:
+                    print(f"[RFP++Torch] Failed to load model: {e}")
+                    return None
+            try:
+                from custom_kernels.restoreformer.restoreformer_torch import (
+                    build_cuda_graph_runner,
+                )
+
+                runner = build_cuda_graph_runner(
+                    self._restoreformer_torch, inp_shape=(1, 3, 512, 512)
+                )
+                self._restoreformer_runner = runner
+            except Exception as e:
+                print(
+                    f"[RFP++Torch] CUDA graph build failed, using direct inference: {e}"
+                )
+                self._restoreformer_runner = self._restoreformer_torch
+        return self._restoreformer_runner
+
+    def _get_codeformer_torch(self):
+        """Lazily load CodeFormerTorch (FP16 PyTorch kernel).
+
+        Note: CUDA graph is NOT used here because fidelity_weight is dynamic
+        (changes per-frame). The FP16+Triton path still provides ~1.8x speedup
+        over ORT FP32 CUDA EP without graph capture.
+        """
+        if self._codeformer_torch is not None:
+            return self._codeformer_torch
+        with self._custom_init_lock:
+            if self._codeformer_torch is None:
+                try:
+                    import pathlib
+                    from custom_kernels.codeformer.codeformer_torch import (
+                        CodeFormerTorch,
+                    )
+
+                    onnx_path = str(
+                        pathlib.Path(__file__).parent.parent.parent
+                        / "model_assets"
+                        / "codeformer_fp16.onnx"
+                    )
+                    self._codeformer_torch = (
+                        CodeFormerTorch.from_onnx(onnx_path)
+                        .to(self.models_processor.device)
+                        .eval()
+                    )
+                except Exception as e:
+                    print(f"[Custom] CodeFormerTorch load failed: {e}")
+        return self._codeformer_torch
+
     def run_codeformer(self, image, output, fidelity_weight_value=0.9):
+        if self.models_processor.provider_name == "Custom":
+            model = self._get_codeformer_torch()
+            if model is not None:
+                import torch
+
+                with torch.no_grad():
+                    # CF-LOCK-01: Although CodeFormer doesn't use CUDA graphs (due to dynamic w),
+                    # serialising GPU access for custom kernels is safer.
+                    with self._custom_inference_lock:
+                        result = model(image, fidelity_weight=float(fidelity_weight_value))
+                output.copy_(result)
+                return
+
         model_name = "CodeFormer"
         ort_session = self._get_model_session(model_name)
         if not ort_session:
@@ -764,6 +1159,16 @@ class FaceRestorers:
         self._run_model_with_lazy_build_check(model_name, ort_session, io_binding)
 
     def run_RestoreFormerPlusPlus(self, image, output):
+        if self.models_processor.provider_name == "Custom":
+            runner = self._get_restoreformer_runner()
+            if runner is not None:
+                with torch.no_grad():
+                    # FR-LOCK-06: CUDA graphrunners with static buffers are not thread-safe.
+                    with self._custom_inference_lock:
+                        result = runner(image)
+                output.copy_(result)
+                return
+
         model_name = "RestoreFormerPlusPlus"
         ort_session = self._get_model_session(model_name)
         if not ort_session:

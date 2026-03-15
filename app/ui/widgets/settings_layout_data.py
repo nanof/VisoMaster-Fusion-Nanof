@@ -28,9 +28,9 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
         "ProvidersPrioritySelection": {
             "level": 1,
             "label": "Providers Priority",
-            "options": ["CUDA", "TensorRT", "TensorRT-Engine", "CPU"],
+            "options": ["CUDA", "TensorRT", "TensorRT-Engine", "Custom", "CPU"],
             "default": "TensorRT",
-            "help": "Select the providers priority to be used with the system.",
+            "help": "Select the providers priority to be used with the system. 'Custom' uses TensorRT for all models except those with a custom CUDA kernel (e.g. Inswapper128).",
             "exec_function": control_actions.change_execution_provider,
             "exec_function_args": [],
         },

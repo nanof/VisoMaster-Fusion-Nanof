@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Dict
+from typing import TYPE_CHECKING, Dict, Optional
 
 import torch
 import threading
@@ -35,9 +35,31 @@ class FaceMasks:
         self._kernel_cache_lock = threading.Lock()
         self._meshgrid_cache_lock = threading.Lock()
         self._clip_load_lock = threading.Lock()
+        self._custom_inference_lock = (
+            threading.Lock()
+        )  # serialises parallel inference for CUDA-graph runners
+        self._custom_init_lock = (
+            threading.Lock()
+        )  # serialises all Custom-kernel lazy inits
 
         self.clip_model_loaded = False
         self.active_models: set[str] = set()
+
+        # Custom-kernel instances for FaceParser (lazy-loaded on first use)
+        self._faceparser_torch: Optional[object] = None  # FaceParserResnet34Torch
+        self._faceparser_runner: Optional[object] = None  # _CapturedGraph or model
+
+        # Custom-kernel instances for XSeg (lazy-loaded on first use)
+        self._xseg_torch: Optional[object] = None  # XSegTorch
+        self._xseg_runner: Optional[object] = None  # _CapturedGraph or model
+
+        # Custom-kernel instances for Occluder (lazy-loaded on first use)
+        self._occluder_torch: Optional[object] = None  # OccluderTorch
+        self._occluder_runner: Optional[object] = None  # _CapturedGraph or model
+
+        # Custom-kernel instances for VggCombo (lazy-loaded on first use)
+        self._vgg_combo_torch: Optional[object] = None  # VggComboTorch
+        self._vgg_combo_runner: Optional[object] = None  # VggComboCUDAGraphRunner
 
     def unload_models(self):
         """Unloads all models managed by this class via the processor."""
@@ -46,7 +68,170 @@ class FaceMasks:
                 self.models_processor.unload_model(model_name)
             self.active_models.clear()
 
+        # Release Custom-kernel instances so they rebuild on next use.
+        with self._custom_init_lock:
+            self._faceparser_torch = None
+            self._faceparser_runner = None
+            self._xseg_torch = None
+            self._xseg_runner = None
+            self._occluder_torch = None
+            self._occluder_runner = None
+            self._vgg_combo_torch = None
+            self._vgg_combo_runner = None
+
     # --- Inference Helpers ---
+
+    def _get_faceparser_runner(self):
+        """Lazy-load the FaceParserResnet34Torch Custom-kernel runner."""
+        if self._faceparser_runner is not None:
+            return self._faceparser_runner
+        with self._custom_init_lock:
+            if self._faceparser_runner is not None:
+                return self._faceparser_runner
+            if self._faceparser_torch is None:
+                try:
+                    import pathlib
+                    from custom_kernels.faceparser_resnet34.faceparser_resnet34_torch import (
+                        FaceParserResnet34Torch,
+                    )
+
+                    onnx_path = str(
+                        pathlib.Path(__file__).parent.parent.parent
+                        / "model_assets"
+                        / "faceparser_resnet34.onnx"
+                    )
+                    m = (
+                        FaceParserResnet34Torch.from_onnx(onnx_path)
+                        .to(self.models_processor.device)
+                        .eval()
+                    )
+                    self._faceparser_torch = m
+                except Exception as e:
+                    print(f"[Custom] faceparser_resnet34 load failed: {e}")
+                    return None
+            try:
+                from custom_kernels.faceparser_resnet34.faceparser_resnet34_torch import (
+                    build_cuda_graph_runner,
+                )
+
+                self._faceparser_runner = build_cuda_graph_runner(
+                    self._faceparser_torch
+                )
+            except Exception as e:
+                print(
+                    f"[Custom] faceparser_resnet34 graph runner failed, using eager: {e}"
+                )
+                self._faceparser_runner = self._faceparser_torch
+        return self._faceparser_runner
+
+    def _get_xseg_runner(self):
+        """Lazy-load the XSegTorch Custom-kernel runner."""
+        if self._xseg_runner is not None:
+            return self._xseg_runner
+        with self._custom_init_lock:
+            if self._xseg_runner is not None:
+                return self._xseg_runner
+            if self._xseg_torch is None:
+                try:
+                    import pathlib
+                    from custom_kernels.xseg.xseg_torch import XSegTorch
+
+                    onnx_path = str(
+                        pathlib.Path(__file__).parent.parent.parent
+                        / "model_assets"
+                        / "XSeg_model.onnx"
+                    )
+                    m = (
+                        XSegTorch.from_onnx(onnx_path)
+                        .to(self.models_processor.device)
+                        .eval()
+                    )
+                    self._xseg_torch = m
+                except Exception as e:
+                    print(f"[Custom] xseg load failed: {e}")
+                    return None
+            try:
+                from custom_kernels.xseg.xseg_torch import build_cuda_graph_runner
+
+                self._xseg_runner = build_cuda_graph_runner(self._xseg_torch)
+            except Exception as e:
+                print(f"[Custom] xseg graph runner failed, using eager: {e}")
+                self._xseg_runner = self._xseg_torch
+        return self._xseg_runner
+
+    def _get_occluder_runner(self):
+        """Lazy-load the OccluderTorch Custom-kernel runner."""
+        if self._occluder_runner is not None:
+            return self._occluder_runner
+        with self._custom_init_lock:
+            if self._occluder_runner is not None:
+                return self._occluder_runner
+            if self._occluder_torch is None:
+                try:
+                    import pathlib
+                    from custom_kernels.occluder.occluder_torch import OccluderTorch
+
+                    onnx_path = str(
+                        pathlib.Path(__file__).parent.parent.parent
+                        / "model_assets"
+                        / "occluder.onnx"
+                    )
+                    m = (
+                        OccluderTorch.from_onnx(onnx_path)
+                        .to(self.models_processor.device)
+                        .eval()
+                    )
+                    self._occluder_torch = m
+                except Exception as e:
+                    print(f"[Custom] occluder load failed: {e}")
+                    return None
+            try:
+                from custom_kernels.occluder.occluder_torch import (
+                    build_cuda_graph_runner,
+                )
+
+                self._occluder_runner = build_cuda_graph_runner(self._occluder_torch)
+            except Exception as e:
+                print(f"[Custom] occluder graph runner failed, using eager: {e}")
+                self._occluder_runner = self._occluder_torch
+        return self._occluder_runner
+
+    def _get_vgg_combo_runner(self):
+        """Lazy-load the VggComboTorch Custom-kernel runner."""
+        if self._vgg_combo_runner is not None:
+            return self._vgg_combo_runner
+        with self._custom_init_lock:
+            if self._vgg_combo_runner is not None:
+                return self._vgg_combo_runner
+            if self._vgg_combo_torch is None:
+                try:
+                    import pathlib
+                    from custom_kernels.vgg_combo.vgg_combo_torch import VggComboTorch
+
+                    onnx_path = str(
+                        pathlib.Path(__file__).parent.parent.parent
+                        / "model_assets"
+                        / "vgg_combo_relu3_3_relu3_1.onnx"
+                    )
+                    m = (
+                        VggComboTorch.from_onnx(onnx_path)
+                        .to(self.models_processor.device)
+                        .eval()
+                    )
+                    self._vgg_combo_torch = m
+                except Exception as e:
+                    print(f"[Custom] vgg_combo load failed: {e}")
+                    return None
+            try:
+                from custom_kernels.vgg_combo.vgg_combo_torch import (
+                    build_cuda_graph_runner,
+                )
+
+                self._vgg_combo_runner = build_cuda_graph_runner(self._vgg_combo_torch)
+            except Exception as e:
+                print(f"[Custom] vgg_combo CUDA graph failed, using eager: {e}")
+                self._vgg_combo_runner = self._vgg_combo_torch
+        return self._vgg_combo_runner
 
     def _faceparser_labels(self, img_uint8_3x512x512: torch.Tensor) -> torch.Tensor:
         """
@@ -54,6 +239,24 @@ class FaceMasks:
         Returns: NATIVE 512x512 label tensor (Long).
         """
         model_name = "FaceParser"
+
+        # Preprocessing: [0..255] -> [0..1] -> Normalize (shared by all paths)
+        x = img_uint8_3x512x512.float().div(255.0)
+        x = v2.functional.normalize(x, (0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+        x = x.unsqueeze(0).contiguous()
+
+        # Custom path: bypass ORT entirely
+        if self.models_processor.provider_name == "Custom":
+            runner = self._get_faceparser_runner()
+            if runner is not None:
+                with torch.no_grad():
+                    # FM-LOCK-01: CUDA graphrunners with static buffers are not thread-safe.
+                    with self._custom_inference_lock:
+                        out = runner(x)
+                return out.argmax(dim=1).squeeze(0).to(torch.long)
+            # Custom runner unavailable — fall through to ORT
+
+        # ORT path
         ort_session = self.models_processor.models.get(model_name)
         if not ort_session:
             ort_session = self.models_processor.load_model(model_name)
@@ -63,11 +266,6 @@ class FaceMasks:
             return torch.zeros(
                 (512, 512), dtype=torch.long, device=img_uint8_3x512x512.device
             )
-
-        # Preprocessing: [0..255] -> [0..1] -> Normalize
-        x = img_uint8_3x512x512.float().div(255.0)
-        x = v2.functional.normalize(x, (0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
-        x = x.unsqueeze(0).contiguous()
 
         # Binding I/O
         out = torch.empty((1, 19, 512, 512), device=self.models_processor.device)
@@ -857,6 +1055,18 @@ class FaceMasks:
         return outpred
 
     def run_occluder(self, image, output):
+        # Custom provider: use PyTorch OccluderTorch
+        if self.models_processor.provider_name == "Custom":
+            runner = self._get_occluder_runner()
+            if runner is not None:
+                with torch.no_grad():
+                    # FM-LOCK-02: CUDA graphrunners with static buffers are not thread-safe.
+                    with self._custom_inference_lock:
+                        result = runner(image)
+                output.copy_(result.squeeze())
+                return
+            # runner unavailable — fall through to ORT
+
         model_name = "Occluder"
         ort_session = self.models_processor.models.get(model_name)
 
@@ -1075,6 +1285,18 @@ class FaceMasks:
         return outpred, outpred_calc, outpred_calc_dill, outpred_noFP
 
     def run_dfl_xseg(self, image, output):
+        # Custom provider: use PyTorch XSegTorch
+        if self.models_processor.provider_name == "Custom":
+            runner = self._get_xseg_runner()
+            if runner is not None:
+                with torch.no_grad():
+                    # FM-LOCK-03: CUDA graphrunners with static buffers are not thread-safe.
+                    with self._custom_inference_lock:
+                        result = runner(image)
+                output.copy_(result.view(256, 256))
+                return
+            # runner unavailable — fall through to ORT
+
         model_name = "XSeg"
         ort_session = self.models_processor.models.get(model_name)
         if not ort_session:
@@ -1498,12 +1720,30 @@ class FaceMasks:
         swapped = preprocess(swapped_face)
         original = preprocess(original_face)
 
-        shape = feature_shapes[feature_layer]
-        outpred = torch.empty(shape, dtype=torch.float32, device=swapped.device)
-        outpred2 = torch.empty_like(outpred)
-
-        swapped_feat = self.run_onnx(swapped, outpred, model_key)
-        original_feat = self.run_onnx(original, outpred2, model_key)
+        if (
+            self.models_processor.provider_name == "Custom"
+            and feature_layer == "combo_relu3_3_relu3_1"
+        ):
+            vgg_runner = self._get_vgg_combo_runner()
+            if vgg_runner is not None:
+                with torch.no_grad():
+                    # FM-LOCK-04: CUDA graphrunners with static buffers are not thread-safe.
+                    with self._custom_inference_lock:
+                        swapped_feat = vgg_runner(swapped)
+                        original_feat = vgg_runner(original)
+            else:
+                # Custom runner unavailable — fall through to ORT
+                shape = feature_shapes[feature_layer]
+                outpred = torch.empty(shape, dtype=torch.float32, device=swapped.device)
+                outpred2 = torch.empty_like(outpred)
+                swapped_feat = self.run_onnx(swapped, outpred, model_key)
+                original_feat = self.run_onnx(original, outpred2, model_key)
+        else:
+            shape = feature_shapes[feature_layer]
+            outpred = torch.empty(shape, dtype=torch.float32, device=swapped.device)
+            outpred2 = torch.empty_like(outpred)
+            swapped_feat = self.run_onnx(swapped, outpred, model_key)
+            original_feat = self.run_onnx(original, outpred2, model_key)
 
         diff_map = torch.abs(swapped_feat - original_feat).mean(dim=1)[0]
         diff_map = diff_map * swap_mask.squeeze(0)

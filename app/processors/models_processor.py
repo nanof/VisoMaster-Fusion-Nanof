@@ -611,6 +611,11 @@ class ModelsProcessor(QtCore.QObject):
                 (p[0] if isinstance(p, tuple) else p) == "TensorrtExecutionProvider"
                 for p in self.providers
             )
+            # Under "Custom" provider the primary inference path is the PyTorch
+            # custom kernel; the ONNX session is only a fallback.  Skip the
+            # blocking TRT cache probe — the fallback can lazily use CUDA EP.
+            if self.provider_name == "Custom":
+                is_tensorrt_load = False
 
             if onnx_path.lower().endswith(".onnx"):
                 # Only run the isolated probe if TensorRT is the target provider
@@ -1082,6 +1087,28 @@ class ModelsProcessor(QtCore.QObject):
                         "[WARN] TensorRT-Engine provider cannot be used when TensorRT version is lower than 10.2.0."
                     )
                     provider_name = "TensorRT"
+
+            case "Custom":
+                # Custom provider: ONNX models use TensorRT EP when available,
+                # falling back to CUDA EP otherwise.  Models that have a dedicated
+                # custom CUDA kernel (e.g. Inswapper128) bypass ONNX Runtime
+                # entirely and run through their PyTorch implementation instead.
+                if TENSORRT_AVAILABLE and trt is not None:
+                    providers = [
+                        ("TensorrtExecutionProvider", self.trt_ep_options),
+                        ("CUDAExecutionProvider"),
+                        ("CPUExecutionProvider"),
+                    ]
+                else:
+                    print(
+                        "[INFO] Custom provider: TensorRT not available, "
+                        "using CUDA EP for ONNX models."
+                    )
+                    providers = [
+                        ("CUDAExecutionProvider"),
+                        ("CPUExecutionProvider"),
+                    ]
+                self.device = "cuda"
 
             case "CPU":
                 providers = [("CPUExecutionProvider")]
@@ -1589,6 +1616,9 @@ class ModelsProcessor(QtCore.QObject):
 
     def run_inswapper(self, image, embedding, output):
         self.face_swappers.run_inswapper(image, embedding, output)
+
+    def run_inswapper_batched(self, images, embedding, output):
+        self.face_swappers.run_inswapper_batched(images, embedding, output)
 
     def calc_swapper_latent_iss(self, source_embedding, version="A"):
         return self.face_swappers.calc_swapper_latent_iss(source_embedding, version)

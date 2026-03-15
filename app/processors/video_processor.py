@@ -622,7 +622,7 @@ class VideoProcessor(QObject):
                         _centroid_prev = numpy.mean(_prev_kps, axis=0)
                         _dist = numpy.linalg.norm(_centroid_raw - _centroid_prev)
                         if _dist < 50.0 and _dist < _min_dist:
-                            _min_dist = _dist
+                            _min_dist = float(_dist)
                             _best_match_key = _k
 
                     if _best_match_key is not None:

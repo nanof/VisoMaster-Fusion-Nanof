@@ -20,6 +20,25 @@ class FaceLandmarkDetectors:
     helper methods for image preparation and filtering of detection results.
     """
 
+    # Class-level declarations so mypy knows these types before unload_models is processed
+    _custom_init_lock: threading.Lock
+    _landmark5_torch: Optional[object]
+    _landmark5_runner: Optional[object]
+    _1k3d68_torch: Optional[object]
+    _1k3d68_runner: Optional[object]
+    _landmark203_torch: Optional[object]
+    _landmark203_runner: Optional[object]
+    _fan2dfan4_torch: Optional[object]
+    _fan2dfan4_runner: Optional[object]
+    _landmark478_torch: Optional[object]
+    _landmark478_runner: Optional[object]
+    _det106_torch: Optional[object]
+    _det106_runner: Optional[object]
+    _peppapig98_torch: Optional[object]
+    _peppapig98_runner: Optional[object]
+    _blendshapes_torch: Optional[object]
+    _blendshapes_runner: Optional[object]
+
     def unload_models(self, keep_essential: bool = False):
         """
         Unloads landmark models.
@@ -44,6 +63,25 @@ class FaceLandmarkDetectors:
         # emptied by the per-model remove() calls in the loop above; no extra
         # .clear() is needed here.
 
+        # Release Custom-kernel instances so they are rebuilt on next use.
+        with self._custom_init_lock:
+            self._landmark5_torch = None
+            self._landmark5_runner = None
+            self._1k3d68_torch = None
+            self._1k3d68_runner = None
+            self._landmark203_torch = None
+            self._landmark203_runner = None
+            self._fan2dfan4_torch = None
+            self._fan2dfan4_runner = None
+            self._landmark478_torch = None
+            self._landmark478_runner = None
+            self._det106_torch = None
+            self._det106_runner = None
+            self._peppapig98_torch = None
+            self._peppapig98_runner = None
+            self._blendshapes_torch = None
+            self._blendshapes_runner = None
+
     def __init__(self, models_processor: "ModelsProcessor"):
         """
         Initializes the FaceLandmarkDetectors.
@@ -59,10 +97,34 @@ class FaceLandmarkDetectors:
         self.landmark_5_anchors: list = []
         self.landmark_5_scale1_cache: Dict[tuple, torch.Tensor] = {}
         self.landmark_5_priors = None
+        self._landmark5_torch: Optional[object] = None  # Res50Torch
+        self._landmark5_runner: Optional[object] = None  # Res50CUDAGraphRunner
+        self._1k3d68_torch: Optional[object] = None  # Landmark1k3d68Torch
+        self._1k3d68_runner: Optional[object] = None  # Landmark1k3d68CUDAGraphRunner
+        self._landmark203_torch: Optional[object] = None  # Landmark203Torch
+        self._landmark203_runner: Optional[object] = None  # Landmark203CUDAGraphRunner
+        self._fan2dfan4_torch: Optional[object] = None  # FAN2dfan4
+        self._fan2dfan4_runner: Optional[object] = None  # FAN2dfan4CUDAGraphRunner
+        self._landmark478_torch: Optional[object] = None  # FaceLandmark478Torch
+        self._landmark478_runner: Optional[object] = (
+            None  # FaceLandmark478CUDAGraphRunner
+        )
+        self._det106_torch: Optional[object] = None  # Det106Torch
+        self._det106_runner: Optional[object] = None  # Det106CUDAGraphRunner
+        self._peppapig98_torch: Optional[object] = None  # PeppaPig98Torch
+        self._peppapig98_runner: Optional[object] = None  # PeppaPig98CUDAGraphRunner
+        self._blendshapes_torch: Optional[object] = None  # FaceBlendShapesTorch
+        self._blendshapes_runner: Optional[object] = (
+            None  # FaceBlendShapesCUDAGraphRunner
+        )
         self._anchor_lock = threading.Lock()
         self._cache_lock = (
             threading.Lock()
         )  # Added lock to prevent dictionary Race Conditions
+        self._custom_inference_lock = (
+            threading.Lock()
+        )  # serialises parallel inference for CUDA-graph runners
+        self._custom_init_lock = threading.Lock()  # serialises Custom-kernel lazy inits
 
         # A dictionary to map a string identifier (e.g., '68') to the corresponding
         # model name and the specific function that processes its output.
@@ -207,6 +269,316 @@ class FaceLandmarkDetectors:
                 .view(-1, 4)
                 .to(self.models_processor.device)
             )
+
+    def _get_landmark5_runner(self):
+        """Lazy-load the Res50Torch Custom-kernel runner for FaceLandmark5."""
+        if self._landmark5_runner is not None:
+            return self._landmark5_runner
+        with self._custom_init_lock:
+            if self._landmark5_runner is not None:
+                return self._landmark5_runner
+            if self._landmark5_torch is None:
+                try:
+                    import pathlib
+                    from custom_kernels.res50.res50_torch import Res50Torch
+
+                    onnx_path = str(
+                        pathlib.Path(__file__).parent.parent.parent
+                        / "model_assets"
+                        / "res50.onnx"
+                    )
+                    m = (
+                        Res50Torch.from_onnx(onnx_path)
+                        .to(self.models_processor.device)
+                        .eval()
+                    )
+                    self._landmark5_torch = m
+                except Exception as e:
+                    print(f"[Custom] res50 load failed: {e}")
+                    return None
+            try:
+                from custom_kernels.res50.res50_torch import build_cuda_graph_runner
+
+                self._landmark5_runner = build_cuda_graph_runner(self._landmark5_torch)
+            except Exception as e:
+                print(f"[Custom] res50 CUDA graph failed, using eager: {e}")
+                self._landmark5_runner = self._landmark5_torch
+        return self._landmark5_runner
+
+    def _get_1k3d68_runner(self):
+        """Lazy-load the Landmark1k3d68Torch Custom-kernel runner for FaceLandmark3d68."""
+        if self._1k3d68_runner is not None:
+            return self._1k3d68_runner
+        with self._custom_init_lock:
+            if self._1k3d68_runner is not None:
+                return self._1k3d68_runner
+            if self._1k3d68_torch is None:
+                try:
+                    import pathlib
+                    from custom_kernels.landmark_1k3d68.landmark_1k3d68_torch import (
+                        Landmark1k3d68Torch,
+                    )
+
+                    onnx_path = str(
+                        pathlib.Path(__file__).parent.parent.parent
+                        / "model_assets"
+                        / "1k3d68.onnx"
+                    )
+                    m = (
+                        Landmark1k3d68Torch.from_onnx(onnx_path)
+                        .to(self.models_processor.device)
+                        .eval()
+                    )
+                    self._1k3d68_torch = m
+                except Exception as e:
+                    print(f"[Custom] 1k3d68 load failed: {e}")
+                    return None
+            try:
+                from custom_kernels.landmark_1k3d68.landmark_1k3d68_torch import (
+                    build_cuda_graph_runner,
+                )
+
+                self._1k3d68_runner = build_cuda_graph_runner(self._1k3d68_torch)
+            except Exception as e:
+                print(f"[Custom] 1k3d68 CUDA graph failed, using eager: {e}")
+                self._1k3d68_runner = self._1k3d68_torch
+        return self._1k3d68_runner
+
+    def _get_landmark203_runner(self):
+        """Lazy-load the Landmark203Torch Custom-kernel runner for FaceLandmark203."""
+        if self._landmark203_runner is not None:
+            return self._landmark203_runner
+        with self._custom_init_lock:
+            if self._landmark203_runner is not None:
+                return self._landmark203_runner
+            if self._landmark203_torch is None:
+                try:
+                    import pathlib
+                    from custom_kernels.landmark_203.landmark_203_torch import (
+                        Landmark203Torch,
+                    )
+
+                    onnx_path = str(
+                        pathlib.Path(__file__).parent.parent.parent
+                        / "model_assets"
+                        / "landmark.onnx"
+                    )
+                    m = (
+                        Landmark203Torch.from_onnx(onnx_path)
+                        .to(self.models_processor.device)
+                        .eval()
+                    )
+                    self._landmark203_torch = m
+                except Exception as e:
+                    print(f"[Custom] landmark_203 load failed: {e}")
+                    return None
+            try:
+                from custom_kernels.landmark_203.landmark_203_torch import (
+                    build_cuda_graph_runner,
+                )
+
+                self._landmark203_runner = build_cuda_graph_runner(
+                    self._landmark203_torch
+                )
+            except Exception as e:
+                print(f"[Custom] landmark_203 CUDA graph failed, using eager: {e}")
+                self._landmark203_runner = self._landmark203_torch
+        return self._landmark203_runner
+
+    def _get_fan2dfan4_runner(self):
+        """Lazy-load the FAN2dfan4 Custom-kernel runner for FaceLandmark68."""
+        if self._fan2dfan4_runner is not None:
+            return self._fan2dfan4_runner
+        with self._custom_init_lock:
+            if self._fan2dfan4_runner is not None:
+                return self._fan2dfan4_runner
+            if self._fan2dfan4_torch is None:
+                try:
+                    import pathlib
+                    from custom_kernels.fan_2dfan4.fan_2dfan4_torch import FAN2dfan4
+
+                    onnx_path = str(
+                        pathlib.Path(__file__).parent.parent.parent
+                        / "model_assets"
+                        / "2dfan4.onnx"
+                    )
+                    m = (
+                        FAN2dfan4.from_onnx(onnx_path)
+                        .to(self.models_processor.device)
+                        .eval()
+                    )
+                    self._fan2dfan4_torch = m
+                except Exception as e:
+                    print(f"[Custom] fan_2dfan4 load failed: {e}")
+                    return None
+            try:
+                from custom_kernels.fan_2dfan4.fan_2dfan4_torch import (
+                    build_cuda_graph_runner,
+                )
+
+                self._fan2dfan4_runner = build_cuda_graph_runner(self._fan2dfan4_torch)
+            except Exception as e:
+                print(f"[Custom] fan_2dfan4 CUDA graph failed, using eager: {e}")
+                self._fan2dfan4_runner = self._fan2dfan4_torch
+        return self._fan2dfan4_runner
+
+    def _get_landmark478_runner(self):
+        """Lazy-load the FaceLandmark478Torch Custom-kernel runner for FaceLandmark478."""
+        if self._landmark478_runner is not None:
+            return self._landmark478_runner
+        with self._custom_init_lock:
+            if self._landmark478_runner is not None:
+                return self._landmark478_runner
+            if self._landmark478_torch is None:
+                try:
+                    import pathlib
+                    from custom_kernels.face_landmark478.face_landmark478_torch import (
+                        FaceLandmark478Torch,
+                    )
+
+                    onnx_path = str(
+                        pathlib.Path(__file__).parent.parent.parent
+                        / "model_assets"
+                        / "face_landmarks_detector_Nx3x256x256.onnx"
+                    )
+                    m = (
+                        FaceLandmark478Torch.from_onnx(onnx_path)
+                        .to(self.models_processor.device)
+                        .eval()
+                    )
+                    self._landmark478_torch = m
+                except Exception as e:
+                    print(f"[Custom] face_landmark478 load failed: {e}")
+                    return None
+            try:
+                from custom_kernels.face_landmark478.face_landmark478_torch import (
+                    build_cuda_graph_runner,
+                )
+
+                self._landmark478_runner = build_cuda_graph_runner(
+                    self._landmark478_torch
+                )
+            except Exception as e:
+                print(f"[Custom] face_landmark478 CUDA graph failed, using eager: {e}")
+                self._landmark478_runner = self._landmark478_torch
+        return self._landmark478_runner
+
+    def _get_blendshapes_runner(self):
+        """Lazy-load the FaceBlendShapesTorch Custom-kernel runner."""
+        if self._blendshapes_runner is not None:
+            return self._blendshapes_runner
+        with self._custom_init_lock:
+            if self._blendshapes_runner is not None:
+                return self._blendshapes_runner
+            if self._blendshapes_torch is None:
+                try:
+                    import pathlib
+                    from custom_kernels.face_blendshapes.face_blendshapes_torch import (
+                        FaceBlendShapesTorch,
+                    )
+
+                    onnx_path = str(
+                        pathlib.Path(__file__).parent.parent.parent
+                        / "model_assets"
+                        / "face_blendshapes_Nx146x2.onnx"
+                    )
+                    m = (
+                        FaceBlendShapesTorch.from_onnx(onnx_path)
+                        .to(self.models_processor.device)
+                        .eval()
+                    )
+                    self._blendshapes_torch = m
+                except Exception as e:
+                    print(f"[Custom] face_blendshapes load failed: {e}")
+                    return None
+            try:
+                from custom_kernels.face_blendshapes.face_blendshapes_torch import (
+                    build_cuda_graph_runner,
+                )
+
+                self._blendshapes_runner = build_cuda_graph_runner(
+                    self._blendshapes_torch
+                )
+            except Exception as e:
+                print(f"[Custom] face_blendshapes CUDA graph failed, using eager: {e}")
+                self._blendshapes_runner = self._blendshapes_torch
+        return self._blendshapes_runner
+
+    def _get_det106_runner(self):
+        """Lazy-load the Det106Torch Custom-kernel runner for FaceLandmark106."""
+        if self._det106_runner is not None:
+            return self._det106_runner
+        with self._custom_init_lock:
+            if self._det106_runner is not None:
+                return self._det106_runner
+            if self._det106_torch is None:
+                try:
+                    import pathlib
+                    from custom_kernels.det_106.det_106_torch import Det106Torch
+
+                    onnx_path = str(
+                        pathlib.Path(__file__).parent.parent.parent
+                        / "model_assets"
+                        / "2d106det.onnx"
+                    )
+                    m = (
+                        Det106Torch.from_onnx(onnx_path)
+                        .to(self.models_processor.device)
+                        .eval()
+                    )
+                    self._det106_torch = m
+                except Exception as e:
+                    print(f"[Custom] det_106 load failed: {e}")
+                    return None
+            try:
+                from custom_kernels.det_106.det_106_torch import build_cuda_graph_runner
+
+                self._det106_runner = build_cuda_graph_runner(self._det106_torch)
+            except Exception as e:
+                print(f"[Custom] det_106 CUDA graph failed, using eager: {e}")
+                self._det106_runner = self._det106_torch
+        return self._det106_runner
+
+    def _get_peppapig98_runner(self):
+        """Lazy-load the PeppaPig98Torch Custom-kernel runner for FaceLandmark98."""
+        if self._peppapig98_runner is not None:
+            return self._peppapig98_runner
+        with self._custom_init_lock:
+            if self._peppapig98_runner is not None:
+                return self._peppapig98_runner
+            if self._peppapig98_torch is None:
+                try:
+                    import pathlib
+                    from custom_kernels.peppapig_98.peppapig_98_torch import (
+                        PeppaPig98Torch,
+                    )
+
+                    onnx_path = str(
+                        pathlib.Path(__file__).parent.parent.parent
+                        / "model_assets"
+                        / "peppapig_teacher_Nx3x256x256.onnx"
+                    )
+                    m = (
+                        PeppaPig98Torch(onnx_path)
+                        .to(self.models_processor.device)
+                        .eval()
+                    )
+                    self._peppapig98_torch = m
+                except Exception as e:
+                    print(f"[Custom] peppapig_98 load failed: {e}")
+                    return None
+            try:
+                from custom_kernels.peppapig_98.peppapig_98_torch import (
+                    build_cuda_graph_runner,
+                )
+
+                self._peppapig98_runner = build_cuda_graph_runner(
+                    self._peppapig98_torch
+                )
+            except Exception as e:
+                print(f"[Custom] peppapig_98 CUDA graph failed, using eager: {e}")
+                self._peppapig98_runner = self._peppapig98_torch
+        return self._peppapig98_runner
 
     def _prepare_crop(
         self,
@@ -382,13 +754,35 @@ class FaceLandmarkDetectors:
             scale1 = self.landmark_5_scale1_cache[(width, height)]
 
         # Run inference.
-        net_outs = self._run_onnx_binding(
-            "FaceLandmark5", {"input": image}, ["conf", "landmarks"]
-        )
-        if not net_outs or len(net_outs) < 2:
-            return [], [], []
-        conf = torch.from_numpy(net_outs[0]).to(self.models_processor.device)
-        landmarks = torch.from_numpy(net_outs[1]).to(self.models_processor.device)
+        if self.models_processor.provider_name == "Custom":
+            runner = self._get_landmark5_runner()
+            if runner is not None:
+                with torch.no_grad():
+                    # FL-LOCK-01: CUDA graphrunners with static buffers are not thread-safe.
+                    # Lock ensures only one FrameWorker thread uses the runner at a time.
+                    with self._custom_inference_lock:
+                        conf, landmarks = runner(image)
+                # conf: (1,10752,2) float32 GPU — already softmax-applied
+                # landmarks: (1,10752,10) float32 GPU
+            else:
+                # Fall back to ORT if Custom kernel unavailable
+                net_outs = self._run_onnx_binding(
+                    "FaceLandmark5", {"input": image}, ["conf", "landmarks"]
+                )
+                if not net_outs or len(net_outs) < 2:
+                    return [], [], []
+                conf = torch.from_numpy(net_outs[0]).to(self.models_processor.device)
+                landmarks = torch.from_numpy(net_outs[1]).to(
+                    self.models_processor.device
+                )
+        else:
+            net_outs = self._run_onnx_binding(
+                "FaceLandmark5", {"input": image}, ["conf", "landmarks"]
+            )
+            if not net_outs or len(net_outs) < 2:
+                return [], [], []
+            conf = torch.from_numpy(net_outs[0]).to(self.models_processor.device)
+            landmarks = torch.from_numpy(net_outs[1]).to(self.models_processor.device)
 
         # Post-process the raw model output.
         scores = torch.squeeze(conf)[:, 1]
@@ -452,17 +846,42 @@ class FaceLandmarkDetectors:
             .contiguous()
         )
 
-        net_outs = self._run_onnx_binding(
-            "FaceLandmark68", {"input": crop_image}, ["landmarks_xyscore", "heatmaps"]
-        )
-        if not net_outs or len(net_outs) < 2:
-            return [], [], []
-        face_landmark_68, face_heatmap = net_outs[0], net_outs[1]
-
-        # Post-process: scale, transform, and reshape landmarks.
-        face_landmark_68 = (face_landmark_68[:, :, :2][0] / 64.0).reshape(
-            1, -1, 2
-        ) * 256.0
+        if self.models_processor.provider_name == "Custom":
+            runner = self._get_fan2dfan4_runner()
+            if runner is not None:
+                with torch.no_grad():
+                    # FL-LOCK-02: CUDA graphrunners with static buffers are not thread-safe.
+                    with self._custom_inference_lock:
+                        lmk_xyscore, heatmaps_t = runner(crop_image)
+                face_landmark_68 = (
+                    lmk_xyscore[:, :, :2][0].cpu().numpy() / 64.0
+                ).reshape(1, -1, 2) * 256.0
+                face_heatmap = heatmaps_t.cpu().numpy()  # (1, 68, 64, 64)
+            else:
+                # Custom kernel unavailable — fall back to ORT
+                net_outs = self._run_onnx_binding(
+                    "FaceLandmark68",
+                    {"input": crop_image},
+                    ["landmarks_xyscore", "heatmaps"],
+                )
+                if not net_outs or len(net_outs) < 2:
+                    return [], [], []
+                face_landmark_68 = (net_outs[0][:, :, :2][0] / 64.0).reshape(
+                    1, -1, 2
+                ) * 256.0
+                face_heatmap = net_outs[1]
+        else:
+            net_outs = self._run_onnx_binding(
+                "FaceLandmark68",
+                {"input": crop_image},
+                ["landmarks_xyscore", "heatmaps"],
+            )
+            if not net_outs or len(net_outs) < 2:
+                return [], [], []
+            face_landmark_68 = (net_outs[0][:, :, :2][0] / 64.0).reshape(
+                1, -1, 2
+            ) * 256.0
+            face_heatmap = net_outs[1]
 
         # OPTIMIZATION: Bypassed heavy cv2 CPU instanciation.
         # Using internal faceutil math directly on the Numpy points.
@@ -504,12 +923,30 @@ class FaceLandmarkDetectors:
             .unsqueeze(0)
             .contiguous()
         )
-        net_outs_3d68 = self._run_onnx_binding(
-            "FaceLandmark3d68", {"data": aimg}, ["fc1"]
-        )
-        if not net_outs_3d68 or len(net_outs_3d68) < 1:
-            return [], [], []
-        pred = net_outs_3d68[0][0]
+
+        if self.models_processor.provider_name == "Custom":
+            runner = self._get_1k3d68_runner()
+            if runner is not None:
+                with torch.no_grad():
+                    # FL-LOCK-03: CUDA graphrunners with static buffers are not thread-safe.
+                    with self._custom_inference_lock:
+                        out = runner(aimg)  # (1, 3309) float32
+                pred = out[0].cpu().numpy()
+            else:
+                # Custom kernel unavailable — fall back to ORT
+                net_outs_3d68 = self._run_onnx_binding(
+                    "FaceLandmark3d68", {"data": aimg}, ["fc1"]
+                )
+                if not net_outs_3d68 or len(net_outs_3d68) < 1:
+                    return [], [], []
+                pred = net_outs_3d68[0][0]
+        else:
+            net_outs_3d68 = self._run_onnx_binding(
+                "FaceLandmark3d68", {"data": aimg}, ["fc1"]
+            )
+            if not net_outs_3d68 or len(net_outs_3d68) < 1:
+                return [], [], []
+            pred = net_outs_3d68[0][0]
 
         # Post-process the 1D prediction array into 3D/2D coordinates.
         # 68 * 3 = 204 means the model returned (x, y, z) triples; otherwise (x, y) pairs.
@@ -555,12 +992,30 @@ class FaceLandmarkDetectors:
             .unsqueeze(0)
             .contiguous()
         )
-        net_outs_98 = self._run_onnx_binding(
-            "FaceLandmark98", {"input": crop_image}, ["landmarks_xyscore"]
-        )
-        if not net_outs_98 or len(net_outs_98) < 1:
-            return [], [], []
-        landmarks_xyscore = net_outs_98[0]
+
+        if self.models_processor.provider_name == "Custom":
+            runner = self._get_peppapig98_runner()
+            if runner is not None:
+                with torch.no_grad():
+                    # FL-LOCK-04: CUDA graphrunners with static buffers are not thread-safe.
+                    with self._custom_inference_lock:
+                        out_t = runner(crop_image)  # (1, 98, 3)
+                landmarks_xyscore = out_t.cpu()
+            else:
+                # Custom kernel unavailable — fall back to ORT
+                net_outs_98 = self._run_onnx_binding(
+                    "FaceLandmark98", {"input": crop_image}, ["landmarks_xyscore"]
+                )
+                if not net_outs_98 or len(net_outs_98) < 1:
+                    return [], [], []
+                landmarks_xyscore = net_outs_98[0]
+        else:
+            net_outs_98 = self._run_onnx_binding(
+                "FaceLandmark98", {"input": crop_image}, ["landmarks_xyscore"]
+            )
+            if not net_outs_98 or len(net_outs_98) < 1:
+                return [], [], []
+            landmarks_xyscore = net_outs_98[0]
 
         if len(landmarks_xyscore) > 0:
             one_face_landmarks = landmarks_xyscore[0]
@@ -600,19 +1055,46 @@ class FaceLandmarkDetectors:
             .unsqueeze(0)
             .contiguous()
         )
-        net_outs_106 = self._run_onnx_binding(
-            "FaceLandmark106", {"data": aimg}, ["fc1"]
-        )
-        if not net_outs_106 or len(net_outs_106) < 1:
-            return [], [], []
-        pred = net_outs_106[0][0]
 
-        # 106 * 3 = 318 means the model returned (x, y, z) triples; otherwise (x, y) pairs.
-        # CRITICAL FIX: Restored strict Tensor structure verification
-        pred = pred.reshape((-1, 3)) if pred.shape[0] >= 3000 else pred.reshape((-1, 2))
-
-        if 106 < pred.shape[0]:
-            pred = pred[-106:]
+        if self.models_processor.provider_name == "Custom":
+            runner = self._get_det106_runner()
+            if runner is not None:
+                with torch.no_grad():
+                    # FL-LOCK-05: CUDA graphrunners with static buffers are not thread-safe.
+                    with self._custom_inference_lock:
+                        out_t = runner(aimg)  # (1, 212)
+                pred = out_t[0].cpu().numpy().reshape((-1, 2))
+            else:
+                # Custom kernel unavailable — fall back to ORT
+                net_outs_106 = self._run_onnx_binding(
+                    "FaceLandmark106", {"data": aimg}, ["fc1"]
+                )
+                if not net_outs_106 or len(net_outs_106) < 1:
+                    return [], [], []
+                pred = net_outs_106[0][0]
+                pred = (
+                    pred.reshape((-1, 3))
+                    if pred.shape[0] >= 3000
+                    else pred.reshape((-1, 2))
+                )
+                if 106 < pred.shape[0]:
+                    pred = pred[-106:]
+        else:
+            net_outs_106 = self._run_onnx_binding(
+                "FaceLandmark106", {"data": aimg}, ["fc1"]
+            )
+            if not net_outs_106 or len(net_outs_106) < 1:
+                return [], [], []
+            pred = net_outs_106[0][0]
+            # 106 * 3 = 318 means the model returned (x, y, z) triples; otherwise (x, y) pairs.
+            # CRITICAL FIX: Restored strict Tensor structure verification
+            pred = (
+                pred.reshape((-1, 3))
+                if pred.shape[0] >= 3000
+                else pred.reshape((-1, 2))
+            )
+            if 106 < pred.shape[0]:
+                pred = pred[-106:]
 
         pred[:, :2] = (pred[:, :2] + 1) * 96.0
         if pred.shape[1] == 3:
@@ -653,14 +1135,31 @@ class FaceLandmarkDetectors:
 
         aimg = torch.div(aimg.to(dtype=torch.float32), 255.0).unsqueeze(0).contiguous()
 
-        out_lst = self._run_onnx_binding(
-            "FaceLandmark203", {"input": aimg}, ["output", "853", "856"]
-        )
-        if not out_lst or len(out_lst) < 3:
-            return [], [], []
-        out_pts = (
-            out_lst[2].reshape((-1, 2)) * 224.0
-        )  # The third output contains the landmarks.
+        if self.models_processor.provider_name == "Custom":
+            runner = self._get_landmark203_runner()
+            if runner is not None:
+                with torch.no_grad():
+                    # FL-LOCK-06: CUDA graphrunners with static buffers are not thread-safe.
+                    with self._custom_inference_lock:
+                        _, _, out_pts_t = runner(aimg)  # (1, 406) float32
+                out_pts = out_pts_t[0].cpu().numpy().reshape((-1, 2)) * 224.0
+            else:
+                # Custom kernel unavailable — fall back to ORT
+                out_lst = self._run_onnx_binding(
+                    "FaceLandmark203", {"input": aimg}, ["output", "853", "856"]
+                )
+                if not out_lst or len(out_lst) < 3:
+                    return [], [], []
+                out_pts = out_lst[2].reshape((-1, 2)) * 224.0
+        else:
+            out_lst = self._run_onnx_binding(
+                "FaceLandmark203", {"input": aimg}, ["output", "853", "856"]
+            )
+            if not out_lst or len(out_lst) < 3:
+                return [], [], []
+            out_pts = (
+                out_lst[2].reshape((-1, 2)) * 224.0
+            )  # The third output contains the landmarks.
 
         out_pts = faceutil.trans_points(out_pts, IM)
         # Pass 'use_mean_eyes' to the converter.
@@ -702,14 +1201,33 @@ class FaceLandmarkDetectors:
 
         aimg = torch.div(aimg.to(dtype=torch.float32), 255.0).unsqueeze(0).contiguous()
 
-        net_outs = self._run_onnx_binding(
-            "FaceLandmark478",
-            {"input_12": aimg},
-            ["Identity", "Identity_1", "Identity_2"],
-        )
-        if not net_outs or len(net_outs) < 1:
-            return [], [], []
-        landmarks = net_outs[0].reshape((1, 478, 3))
+        if self.models_processor.provider_name == "Custom":
+            runner = self._get_landmark478_runner()
+            if runner is not None:
+                with torch.no_grad():
+                    # FL-LOCK-07: CUDA graphrunners with static buffers are not thread-safe.
+                    with self._custom_inference_lock:
+                        lmk_t, _vis, _score = runner(aimg)  # (1,1,1,1434)
+                landmarks = lmk_t.cpu().numpy().reshape((1, 478, 3))
+            else:
+                # Custom kernel unavailable — fall back to ORT
+                net_outs = self._run_onnx_binding(
+                    "FaceLandmark478",
+                    {"input_12": aimg},
+                    ["Identity", "Identity_1", "Identity_2"],
+                )
+                if not net_outs or len(net_outs) < 1:
+                    return [], [], []
+                landmarks = net_outs[0].reshape((1, 478, 3))
+        else:
+            net_outs = self._run_onnx_binding(
+                "FaceLandmark478",
+                {"input_12": aimg},
+                ["Identity", "Identity_1", "Identity_2"],
+            )
+            if not net_outs or len(net_outs) < 1:
+                return [], [], []
+            landmarks = net_outs[0].reshape((1, 478, 3))
 
         if len(landmarks) > 0:
             landmark = faceutil.trans_points3d(landmarks[0], IM)[:, :2].reshape(-1, 2)
@@ -719,9 +1237,23 @@ class FaceLandmarkDetectors:
             landmark_for_score = torch.from_numpy(
                 np.expand_dims(landmark_for_score, axis=0).astype(np.float32)
             ).to(self.models_processor.device)
-            self._run_onnx_binding(
-                "FaceBlendShapes", {"input_points": landmark_for_score}, ["output"]
-            )
+            if self.models_processor.provider_name == "Custom":
+                bs_runner = self._get_blendshapes_runner()
+                if bs_runner is not None:
+                    with torch.no_grad():
+                        # FL-LOCK-08: CUDA graphrunners with static buffers are not thread-safe.
+                        with self._custom_inference_lock:
+                            bs_runner(landmark_for_score)
+                else:
+                    self._run_onnx_binding(
+                        "FaceBlendShapes",
+                        {"input_points": landmark_for_score},
+                        ["output"],
+                    )
+            else:
+                self._run_onnx_binding(
+                    "FaceBlendShapes", {"input_points": landmark_for_score}, ["output"]
+                )
 
             # Pass 'use_mean_eyes' to the converter.
             landmark_5 = faceutil.convert_face_landmark_478_to_5(
