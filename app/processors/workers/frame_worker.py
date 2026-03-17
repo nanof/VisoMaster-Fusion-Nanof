@@ -2928,8 +2928,20 @@ class FrameWorker(threading.Thread):
             input_face_affined = original_face_256
 
         # --- DFM Logic ---
-        if swapper_model == "DeepFaceLive (DFM)" and dfm_model_name:
+        elif swapper_model == "DeepFaceLive (DFM)" and dfm_model_name:
+            # Explicitly notify FaceSwappers to unload the previous ONNX model
+            # This prevents VRAM leaks when switching to heavy DFM models.
+            self.models_processor.face_swappers._manage_model("DeepFaceLive (DFM)")
+            self.models_processor.face_swappers.current_swapper_model = (
+                "DeepFaceLive (DFM)"
+            )
+
             dfm_model_instance = self.models_processor.load_dfm_model(dfm_model_name)
+
+            # FIX: Attach the filename to the instance so we can robustly extract its resolution later
+            if dfm_model_instance is not None:
+                dfm_model_instance._dfm_filename_fallback = dfm_model_name
+
             latent = []
             input_face_affined = original_face_512
             dim = 4
@@ -2946,6 +2958,8 @@ class FrameWorker(threading.Thread):
         """
         Corrects spatial drift via Phase Correlation and restores skin textures
         (high frequency) to prevent the plastic effect from multiple iterations.
+        Includes an improved LAB-space Adaptive Instance Normalization (AdaIN)
+        to lock color and contrast without destroying white balance.
         Expected tensors in [C, H, W] format as Floats (0.0 - 1.0).
         """
         device = current_face.device
@@ -2999,32 +3013,44 @@ class FrameWorker(threading.Thread):
 
         # --- 2. TEXTURE & COLOR PRESERVATION ---
         if blend_texture and first_face is not None:
-            # --- Color & Luminance Lock (AdaIN) ---
-            # Compute colour statistics of the very first pass and force the
-            # current iteration to match that same distribution.
-            # Cela bloque totalement l'effondrement vers des visages pâles/yeux bleus.
-            mean_first = first_face.mean(dim=(1, 2), keepdim=True)
-            std_first = first_face.std(dim=(1, 2), keepdim=True) + 1e-6
+            # --- Improved Color & Luminance Lock (LAB AdaIN) ---
+            # Operating in LAB color space prevents the destruction of white balance
+            # and contrast that happens when normalizing RGB channels independently.
 
-            mean_curr = current_face.mean(dim=(1, 2), keepdim=True)
-            std_curr = current_face.std(dim=(1, 2), keepdim=True) + 1e-6
+            # Convert to LAB (requires [B, C, H, W] shape)
+            curr_bchw = current_face.unsqueeze(0).clamp(0.0, 1.0)
+            first_bchw = first_face.unsqueeze(0).clamp(0.0, 1.0)
 
-            # Application de l'Adaptive Instance Normalization
-            current_face = (current_face - mean_curr) * (
-                std_first / std_curr
-            ) + mean_first
-            current_face = torch.clamp(current_face, 0.0, 1.0)
+            curr_lab = kc.rgb_to_lab(curr_bchw)
+            first_lab = kc.rgb_to_lab(first_bchw)
 
-            # --- Frequency Separation (Micro-détails) ---
+            # Calculate Mean and Std for each LAB channel independently
+            mean_curr = curr_lab.mean(dim=(2, 3), keepdim=True)
+            std_curr = curr_lab.std(dim=(2, 3), keepdim=True) + 1e-6
+
+            mean_first = first_lab.mean(dim=(2, 3), keepdim=True)
+            std_first = first_lab.std(dim=(2, 3), keepdim=True) + 1e-6
+
+            # Apply Adaptive Instance Normalization
+            matched_lab = (curr_lab - mean_curr) * (std_first / std_curr) + mean_first
+
+            # Convert back to RGB and remove batch dimension
+            current_face = kc.lab_to_rgb(matched_lab).squeeze(0).clamp(0.0, 1.0)
+
+            # --- Frequency Separation (Micro-details) ---
             k = max(3, (H // 32) * 2 + 1)
             sigma = k * 0.3
             blur_tex = v2.GaussianBlur(kernel_size=k, sigma=sigma)
 
             low_pass_first = blur_tex(first_face)
             high_pass_first = first_face - low_pass_first
+
+            # Dampen the high frequencies slightly to avoid over-sharpening noise
             high_pass_first = torch.clamp(high_pass_first, -0.3, 0.3) * 0.75
 
             low_pass_curr = blur_tex(current_face)
+
+            # Reconstruct the image: New structural shape (low freq) + Original skin texture (high freq)
             current_face = low_pass_curr + high_pass_first
 
         return torch.clamp(current_face, 0.0, 1.0)
@@ -3466,22 +3492,89 @@ class FrameWorker(threading.Thread):
                     output = torch.clamp(output, 0, 255)
 
         elif swapper_model == "DeepFaceLive (DFM)" and dfm_model:
-            # convert() expects CHW uint8; returns HWC float32 [0,1]
-            out_celeb, _, _ = dfm_model.convert(
-                original_face_512,
-                parameters["DFMAmpMorphSlider"] / 100,
-                rct=parameters["DFMRCTColorToggle"],
-            )
-            assert out_celeb.ndim == 3 and out_celeb.shape[2] == 3, (
-                f"DFM model must return HWC RGB tensor, got shape {out_celeb.shape}"
-            )
-            # DFM is a single pass — prev_face fallback set before the if/elif chain is used
-            input_face_affined = (
-                out_celeb.clone()
-            )  # HWC float [0,1] — becomes prev_face; scaled ×255 later in swap_core
-            output = (
-                out_celeb * 255.0
-            )  # BUG-01 fix: scale [0,1]→[0,255] to match all other swapper outputs
+            # --- 1. DFM Resolution Detection (Deep Introspection) ---
+            dfm_res = 256  # Fallback
+
+            from collections import deque
+
+            queue = deque([dfm_model])
+            visited = set([id(dfm_model)])
+            found_res = None
+
+            while queue and not found_res:
+                current = queue.popleft()
+                if hasattr(current, "get_inputs") and callable(current.get_inputs):
+                    try:
+                        shape = current.get_inputs()[0].shape
+                        for s in shape:
+                            if isinstance(s, int) and s > 32 and s % 16 == 0:
+                                found_res = s
+                                break
+                    except Exception:
+                        pass
+
+                if not found_res and hasattr(current, "__dict__"):
+                    for k, v in current.__dict__.items():
+                        if id(v) not in visited and not k.startswith("__"):
+                            visited.add(id(v))
+                            queue.append(v)
+
+            if found_res:
+                dfm_res = found_res
+            elif hasattr(dfm_model, "_dfm_filename_fallback"):
+                import re
+
+                match = re.search(
+                    r"(128|192|224|256|320|384|448|512)",
+                    dfm_model._dfm_filename_fallback,
+                )
+                if match:
+                    dfm_res = int(match.group(1))
+
+            # --- 2. Strict Resize to preserve uint8 (Fixes CUDA White Square) ---
+            if dfm_res != 512:
+                dfm_input = v2.functional.resize(
+                    original_face_512.float(),
+                    [dfm_res, dfm_res],
+                    interpolation=v2.InterpolationMode.BILINEAR,
+                    antialias=True,
+                ).to(original_face_512.dtype)
+            else:
+                dfm_input = original_face_512.clone()
+
+            # --- 3. Synchronized DFM Inference ---
+            # We use the new dfm_inference_lock to ensure thread-safety
+            with self.models_processor.dfm_inference_lock:
+                # PRE-SYNC: Ensure GPU input is ready
+                if self.models_processor.device == "cuda":
+                    torch.cuda.current_stream().synchronize()
+
+                out_celeb, _, _ = dfm_model.convert(
+                    dfm_input,
+                    parameters["DFMAmpMorphSlider"] / 100,
+                    rct=parameters["DFMRCTColorToggle"],
+                )
+
+            # Format security
+            if isinstance(out_celeb, np.ndarray):
+                out_celeb = torch.from_numpy(out_celeb).to(original_face_512.device)
+
+            if getattr(out_celeb, "ndim", 0) != 3 or out_celeb.shape[2] != 3:
+                print(
+                    f"[WARN] DFM output shape unexpected: {out_celeb.shape}. Proceeding anyway."
+                )
+
+            # --- 4. Dynamic Value Scaling ---
+            if out_celeb.max() > 2.0:
+                out_celeb_float = out_celeb.float() / 255.0
+            else:
+                out_celeb_float = out_celeb.float()
+
+            input_face_affined = out_celeb_float.clone()
+
+            prev_face = out_celeb_float.clone()
+
+            output = out_celeb_float * 255.0
 
         # FW-QUAL-08: warn when all tiles produced zero output (model returned blank).
         # Threshold 30.0 works for the unified [0,255] scale used by all models (incl. DFM after fix above).

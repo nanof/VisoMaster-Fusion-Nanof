@@ -299,6 +299,7 @@ class ModelsProcessor(QtCore.QObject):
             }
 
         self.dfm_models: Dict[str, DFMModel] = {}
+        self.dfm_inference_lock = threading.Lock()
         self.force_unload_in_progress = False
 
         # Initialize TRT dicts
@@ -858,9 +859,51 @@ class ModelsProcessor(QtCore.QObject):
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
 
+                # --- Isolate TensorRT cache and bypass DFM internal garbage names ---
+                import copy
+                import re
+                import os
+
+                dfm_providers = copy.deepcopy(self.providers)
+
+                if (
+                    dfm_providers
+                    and isinstance(dfm_providers[0], tuple)
+                    and dfm_providers[0][0] == "TensorrtExecutionProvider"
+                ):
+                    trt_options = dict(dfm_providers[0][1])
+
+                    # 1. Clean the filename to create a safe string
+                    safe_name = re.sub(r"[^A-Za-z0-9_.-]", "", dfm_model)
+                    if safe_name.lower().endswith(".dfm"):
+                        safe_name = safe_name[:-4]
+
+                    # 2. Use absolute paths for the dedicated cache directory to avoid OS pathing bugs
+                    cache_base = os.path.abspath("tensorrt-engines")
+                    dedicated_cache_dir = os.path.join(
+                        cache_base, "dfm_caches", safe_name
+                    )
+                    os.makedirs(dedicated_cache_dir, exist_ok=True)
+
+                    # 3. Route cache paths
+                    trt_options["trt_engine_cache_path"] = dedicated_cache_dir
+                    trt_options["trt_timing_cache_path"] = os.path.join(
+                        dedicated_cache_dir, "timing.cache"
+                    )
+
+                    # 4. Override the internal ONNX model name.
+                    trt_options["trt_engine_cache_prefix"] = safe_name
+
+                    # 5. Disable Context dumping for DFM.
+                    trt_options["trt_dump_ep_context_model"] = False
+                    if "trt_ep_context_file_path" in trt_options:
+                        del trt_options["trt_ep_context_file_path"]
+
+                    dfm_providers[0] = ("TensorrtExecutionProvider", trt_options)
+
                 self.dfm_models[dfm_model] = DFMModel(
                     self.main_window.dfm_model_manager.get_models_data()[dfm_model],
-                    self.providers,
+                    dfm_providers,
                     self.device,
                 )
             except Exception:

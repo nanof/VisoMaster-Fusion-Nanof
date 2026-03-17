@@ -713,26 +713,26 @@ class TargetFaceCardButton(CardButton):
         self.kv_data_color_transferred = False
 
         if denoiser_on and self.assigned_input_faces:
-            first_input_face_id = list(self.assigned_input_faces.keys())[0]
-            input_face_button = main_window.input_faces.get(first_input_face_id)
+            all_kv_maps = []
 
-            if input_face_button:
-                # This lock ensures that only one thread (either the main thread
-                # during job loading, or a FrameWorker) can
-                # check the cache and generate the K/V map at a time.
+            # 1. Iterate through ALL selected faces instead of just the first one
+            for input_face_id in self.assigned_input_faces.keys():
+                input_face_button = main_window.input_faces.get(input_face_id)
+                if not input_face_button:
+                    continue
+
+                # This lock ensures that only one thread can check the cache and generate the K/V map at a time.
                 with main_window.models_processor.kv_extraction_lock:
-                    # 1. Check the cache *inside* the lock.
-                    # If another thread generated it while we were waiting,
-                    # we can use it directly.
+                    # Check the cache *inside* the lock.
                     if (
                         hasattr(input_face_button, "kv_map")
                         and input_face_button.kv_map is not None
+                        and len(input_face_button.kv_map) > 0
                     ):
-                        # Cache found! Assign and exit the lock.
-                        self.assigned_kv_map = input_face_button.kv_map
+                        # Cache found!
+                        all_kv_maps.append(input_face_button.kv_map)
                     else:
-                        # Cache missing. We are the first thread.
-                        # Generate, cache, and assign the map.
+                        # Cache missing. Generate, cache, and assign the map.
                         print(
                             f"[INFO] Generating K/V map for input face: {input_face_button.media_path}"
                         )
@@ -759,15 +759,56 @@ class TargetFaceCardButton(CardButton):
                             kv_map = models_processor.get_kv_map_for_face(pil_img)
 
                             # Cache and assign
-                            input_face_button.kv_map = kv_map
-                            self.assigned_kv_map = kv_map
-                            print("[INFO] Generated and cached K/V map.")
+                            if kv_map:
+                                input_face_button.kv_map = kv_map
+                                all_kv_maps.append(kv_map)
+                                print("[INFO] Generated and cached K/V map.")
+                            else:
+                                input_face_button.kv_map = {}
 
                         except Exception as e:
                             print(f"[ERROR] Error generating K/V map: {e}")
                             traceback.print_exc()
                             input_face_button.kv_map = {}  # Empty cache in case of error
-                            self.assigned_kv_map = {}
+
+            # 2. Merge all collected KV Maps
+            if all_kv_maps:
+                if len(all_kv_maps) == 1:
+                    self.assigned_kv_map = all_kv_maps[0]
+                else:
+                    print(
+                        f"[INFO] Merging K/V maps across {len(all_kv_maps)} input faces..."
+                    )
+                    merged_kv_map = {}
+                    first_map = all_kv_maps[0]
+
+                    # KV Maps are dictionaries of dictionaries containing PyTorch Tensors
+                    for layer_key, layer_dict in first_map.items():
+                        merged_kv_map[layer_key] = {}
+                        for kv_key in layer_dict.keys():
+                            tensors_to_merge = []
+                            for m in all_kv_maps:
+                                if layer_key in m and kv_key in m[layer_key]:
+                                    tensors_to_merge.append(m[layer_key][kv_key])
+
+                            if tensors_to_merge:
+                                # Stack all tensors along a new dimension (dim=0)
+                                stacked = torch.stack(tensors_to_merge, dim=0)
+
+                                # Use the same merging method as for embeddings (Mean or Median)
+                                if (
+                                    control.get("EmbMergeMethodSelection", "Mean")
+                                    == "Median"
+                                ):
+                                    merged_tensor = torch.median(stacked, dim=0).values
+                                else:
+                                    merged_tensor = torch.mean(stacked, dim=0)
+
+                                merged_kv_map[layer_key][kv_key] = merged_tensor
+
+                    self.assigned_kv_map = merged_kv_map
+            else:
+                self.assigned_kv_map = None
 
         if main_window.selected_target_face_id == self.face_id:
             main_window.current_kv_tensors_map = self.assigned_kv_map

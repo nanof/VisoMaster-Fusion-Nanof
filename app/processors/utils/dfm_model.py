@@ -199,6 +199,8 @@ class DFMModel:
                 buffer_ptr=binding_outputs[idx].data_ptr(),
             )
 
+        if self.device == "cuda":
+            torch.cuda.current_stream().synchronize()
         self._sess.run_with_iobinding(io_binding)
 
         # Process outputs (resize, clip channels, and convert back to original dtype)
