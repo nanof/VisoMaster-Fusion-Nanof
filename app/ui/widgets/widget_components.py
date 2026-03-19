@@ -643,6 +643,8 @@ class TargetFaceCardButton(CardButton):
 
         main_window.selected_target_face_id = self.face_id
         main_window.current_kv_tensors_map = self.assigned_kv_map
+        video_control_actions.refresh_issue_frames_for_selected_face(main_window)
+        video_control_actions.update_scan_review_button_states(main_window)
 
         common_widget_actions.set_widgets_values_using_face_id_parameters(
             main_window=main_window, face_id=self.face_id
@@ -873,6 +875,8 @@ class TargetFaceCardButton(CardButton):
         main_window.target_faces.pop(self.face_id)
         # Pop parameters using the target's face_id
         main_window.parameters.pop(self.face_id)
+        if hasattr(main_window, "issue_frames_by_face"):
+            main_window.issue_frames_by_face.pop(str(self.face_id), None)
         # Click and Select the first target face if target_faces are not empty
         if main_window.target_faces:
             list(main_window.target_faces.values())[0].click()
@@ -883,6 +887,8 @@ class TargetFaceCardButton(CardButton):
                 main_window, face_id=None
             )
             main_window.selected_target_face_id = None
+            video_control_actions.refresh_issue_frames_for_selected_face(main_window)
+        video_control_actions.update_scan_review_button_states(main_window)
 
         video_control_actions.remove_face_parameters_and_control_from_markers(
             main_window, self.face_id

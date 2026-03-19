@@ -29,7 +29,11 @@ from app.ui.widgets.actions import list_view_actions
 from app.ui.widgets.actions import save_load_actions
 from app.ui.widgets.settings_layout_data import CAMERA_BACKENDS
 import app.helpers.miscellaneous as misc_helpers
-from app.helpers.typing_helper import ControlTypes, FacesParametersTypes
+from app.helpers.typing_helper import (
+    ControlTypes,
+    FacesParametersTypes,
+    ParametersTypes,
+)
 
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
@@ -739,6 +743,17 @@ class VideoProcessor(QObject):
                 )
                 if in_flight_frames >= self.max_display_buffer_size:
                     time.sleep(0.005)  # Wait 5ms (buffer full)
+                    continue
+
+                if (
+                    is_segment_mode or self.recording
+                ) and self.current_frame_number in self.main_window.dropped_frames:
+                    self.skipped_frames.add(self.current_frame_number)
+                    self.total_skipped_frames += 1
+                    self.current_frame_number += 1
+                    misc_helpers.seek_frame(
+                        self.media_capture, self.current_frame_number
+                    )
                     continue
 
                 # 3. Determine Input Resolution (Global Resize)
@@ -2405,6 +2420,309 @@ class VideoProcessor(QObject):
         print(f"[INFO] Identified {len(segments)} continuous frame segment(s)")
 
         return segments
+
+    def _get_issue_scan_ranges(self) -> List[Tuple[int, int]]:
+        """Return the frame ranges that a scan should inspect."""
+        max_frame = int(self.max_frame_number)
+        complete_segments: List[Tuple[int, int]] = []
+        open_start_frame: Optional[int] = None
+
+        for start_frame, end_frame in self.main_window.job_marker_pairs:
+            if start_frame is None:
+                continue
+            normalized_start = int(start_frame)
+            if end_frame is None:
+                open_start_frame = normalized_start
+                continue
+
+            normalized_end = int(end_frame)
+            if normalized_end >= normalized_start:
+                complete_segments.append((normalized_start, normalized_end))
+
+        scan_ranges = sorted(complete_segments)
+        if open_start_frame is not None and open_start_frame <= max_frame:
+            scan_ranges.append((open_start_frame, max_frame))
+
+        if scan_ranges:
+            return scan_ranges
+
+        return [(0, max_frame)]
+
+    def describe_issue_scan_scope(
+        self, scan_ranges: Optional[List[Tuple[int, int]]] = None
+    ) -> str:
+        """Return a short human-readable description of the current scan scope."""
+        scan_ranges = scan_ranges or self._get_issue_scan_ranges()
+
+        complete_segments = 0
+        open_start_frame: Optional[int] = None
+        for start_frame, end_frame in self.main_window.job_marker_pairs:
+            if start_frame is None:
+                continue
+            if end_frame is None:
+                open_start_frame = int(start_frame)
+            elif int(end_frame) >= int(start_frame):
+                complete_segments += 1
+
+        if complete_segments and open_start_frame is not None:
+            range_label = "range" if complete_segments == 1 else "ranges"
+            return (
+                f"Scanning {complete_segments} marked {range_label} "
+                f"and record start frame {open_start_frame} to end"
+            )
+        if complete_segments:
+            range_label = "range" if complete_segments == 1 else "ranges"
+            return f"Scanning {complete_segments} marked {range_label}"
+        if open_start_frame is not None:
+            return f"Scanning from record start frame {open_start_frame}"
+        return "Scanning full clip"
+
+    @staticmethod
+    def _compute_longest_issue_run(issue_frames: list[int]) -> int:
+        longest_issue_run = 0
+        current_run = 0
+        previous_frame = None
+        for frame_number in sorted(set(issue_frames)):
+            if previous_frame is not None and frame_number == previous_frame + 1:
+                current_run += 1
+            else:
+                current_run = 1
+            longest_issue_run = max(longest_issue_run, current_run)
+            previous_frame = frame_number
+        return longest_issue_run
+
+    def _resolve_scan_state_for_frame(
+        self,
+        frame_number: int,
+        base_control: ControlTypes,
+        base_params: FacesParametersTypes,
+        target_faces_snapshot: Optional[dict] = None,
+    ) -> tuple[ControlTypes, FacesParametersTypes]:
+        """Resolve the effective control/parameter state for a scan frame.
+
+        This mirrors playback/render marker semantics: if a marker exists at or
+        before the frame, its parameter/control payload becomes the active state
+        for that frame; otherwise the scan-start state remains active.
+        """
+        marker_data = video_control_actions._get_marker_data_for_position(  # type: ignore[attr-defined]
+            self.main_window, frame_number
+        )
+        if not marker_data:
+            return (
+                cast(ControlTypes, copy.deepcopy(base_control)),
+                cast(FacesParametersTypes, copy.deepcopy(base_params)),
+            )
+
+        local_params = cast(
+            FacesParametersTypes, copy.deepcopy(marker_data.get("parameters", {}))
+        )
+        local_control: ControlTypes = cast(ControlTypes, {})
+        for widget_name, widget in self.main_window.parameter_widgets.items():
+            if widget_name in self.main_window.control:
+                local_control[widget_name] = widget.default_value
+
+        control_data = marker_data.get("control")
+        if isinstance(control_data, dict):
+            local_control.update(cast(ControlTypes, control_data).copy())
+
+        # Mirror the playback helper behavior by ensuring every current target
+        # face has a parameter dict, falling back to defaults when missing.
+        for face_id in (target_faces_snapshot or self.main_window.target_faces).keys():
+            face_id_str = str(face_id)
+            if face_id_str not in local_params:
+                local_params[face_id_str] = cast(
+                    ParametersTypes,
+                    copy.deepcopy(self.main_window.default_parameters.data),
+                )
+
+        return local_control, local_params
+
+    def scan_issue_frames(
+        self,
+        progress_callback=None,
+        is_cancelled=None,
+        scan_ranges: Optional[List[Tuple[int, int]]] = None,
+        target_height: Optional[int] = None,
+        base_control: Optional[dict] = None,
+        base_params: Optional[dict] = None,
+        target_faces_snapshot: Optional[dict] = None,
+        reset_frame_number: Optional[int] = None,
+    ) -> Optional[dict]:
+        """Run a full-frame detection scan and return issue-frame results."""
+        capture = cv2.VideoCapture(self.media_path)
+        if not capture or not capture.isOpened():
+            raise RuntimeError("Could not open the selected video for scanning.")
+
+        scan_ranges = scan_ranges or self._get_issue_scan_ranges()
+        total_frames = sum((end - start + 1) for start, end in scan_ranges)
+        target_height = (
+            target_height
+            if target_height is not None
+            else self._get_target_input_height()
+        )
+        base_control = cast(
+            ControlTypes, copy.deepcopy(base_control or self.main_window.control)
+        )
+        base_params = cast(
+            FacesParametersTypes,
+            copy.deepcopy(base_params or self.main_window.parameters),
+        )
+        target_faces_snapshot = dict(
+            target_faces_snapshot or self.main_window.target_faces
+        )
+        previous_last_detected_faces = copy.deepcopy(self.last_detected_faces)
+        previous_smoothed_kps = copy.deepcopy(self._smoothed_kps)
+        total_frames_scanned = 0
+        issue_frames_by_face: dict[str, set[int]] = {
+            str(face_id): set() for face_id in target_faces_snapshot.keys()
+        }
+
+        try:
+            self.last_detected_faces = []
+            self._smoothed_kps = {}
+
+            for start_frame, end_frame in scan_ranges:
+                misc_helpers.seek_frame(capture, start_frame)
+                self.current_frame_number = start_frame
+
+                for frame_number in range(start_frame, end_frame + 1):
+                    if is_cancelled and is_cancelled():
+                        return None
+                    ret, frame_bgr = misc_helpers.read_frame(
+                        capture,
+                        self.media_rotation,
+                        preview_target_height=target_height,
+                    )
+                    if not ret or not isinstance(frame_bgr, numpy.ndarray):
+                        for face_id in issue_frames_by_face:
+                            issue_frames_by_face[face_id].add(frame_number)
+                        self.current_frame_number = frame_number + 1
+                        misc_helpers.seek_frame(capture, self.current_frame_number)
+                        total_frames_scanned += 1
+                        if progress_callback:
+                            progress_callback(
+                                total_frames_scanned, total_frames, frame_number
+                            )
+                        continue
+
+                    frame_rgb = numpy.ascontiguousarray(frame_bgr[..., ::-1])
+                    local_control, local_params = self._resolve_scan_state_for_frame(
+                        frame_number,
+                        base_control,
+                        base_params,
+                        target_faces_snapshot,
+                    )
+                    self.current_frame_number = frame_number
+                    bboxes, kpss_5, _ = self._run_sequential_detection(
+                        frame_rgb, local_control, local_params
+                    )
+                    detected_embeddings: list[numpy.ndarray] = []
+                    if (
+                        isinstance(bboxes, numpy.ndarray)
+                        and bboxes.shape[0] > 0
+                        and isinstance(kpss_5, numpy.ndarray)
+                        and kpss_5.shape[0] > 0
+                    ):
+                        frame_tensor = (
+                            torch.from_numpy(frame_rgb.astype("uint8"))
+                            .to(self.main_window.models_processor.device)
+                            .permute(2, 0, 1)
+                        )
+                        recognition_model = str(
+                            local_control.get(
+                                "RecognitionModelSelection", "arcface_128"
+                            )
+                        )
+                        similarity_type = local_control.get(
+                            "SimilarityTypeSelection", "Opal"
+                        )
+                        for face_kps in kpss_5:
+                            face_emb, _ = (
+                                self.main_window.models_processor.run_recognize_direct(
+                                    frame_tensor,
+                                    face_kps,
+                                    similarity_type,
+                                    recognition_model,
+                                )
+                            )
+                            if (
+                                isinstance(face_emb, numpy.ndarray)
+                                and face_emb.size > 0
+                            ):
+                                detected_embeddings.append(face_emb)
+                        del frame_tensor
+
+                    matched_face_ids: set[str] = set()
+                    recognition_model = str(
+                        local_control.get("RecognitionModelSelection", "arcface_128")
+                    )
+                    default_params = dict(self.main_window.default_parameters.data)
+
+                    for detected_embedding in detected_embeddings:
+                        best_face_id = None
+                        best_score = -1.0
+                        for face_id, target_face in target_faces_snapshot.items():
+                            face_id_str = str(face_id)
+                            face_params_raw = local_params.get(face_id_str)
+                            face_params_mapping = (
+                                dict(face_params_raw)
+                                if isinstance(face_params_raw, dict)
+                                else cast(dict[str, object], {})
+                            )
+                            face_params_pd = misc_helpers.ParametersDict(
+                                face_params_mapping, default_params
+                            )
+                            target_embedding = target_face.get_embedding(
+                                recognition_model
+                            )
+                            if not (
+                                isinstance(target_embedding, numpy.ndarray)
+                                and target_embedding.size > 0
+                            ):
+                                continue
+                            score = (
+                                self.main_window.models_processor.findCosineDistance(
+                                    detected_embedding, target_embedding
+                                )
+                            )
+                            if (
+                                score >= face_params_pd["SimilarityThresholdSlider"]
+                                and score > best_score
+                            ):
+                                best_score = score
+                                best_face_id = face_id_str
+                        if best_face_id is not None:
+                            matched_face_ids.add(best_face_id)
+
+                    for face_id in issue_frames_by_face:
+                        if face_id not in matched_face_ids:
+                            issue_frames_by_face[face_id].add(frame_number)
+                    total_frames_scanned += 1
+                    if progress_callback:
+                        progress_callback(
+                            total_frames_scanned, total_frames, frame_number
+                        )
+
+            faces_with_issues = sum(
+                1 for frames in issue_frames_by_face.values() if frames
+            )
+            return {
+                "issue_frames_by_face": {
+                    face_id: sorted(frames)
+                    for face_id, frames in issue_frames_by_face.items()
+                },
+                "frames_scanned": total_frames_scanned,
+                "faces_with_issues": faces_with_issues,
+            }
+        finally:
+            self.last_detected_faces = previous_last_detected_faces
+            self._smoothed_kps = previous_smoothed_kps
+            self.current_frame_number = (
+                reset_frame_number
+                if reset_frame_number is not None
+                else int(self.main_window.videoSeekSlider.value())
+            )
+            misc_helpers.release_capture(capture)
 
     def _extract_audio_segments(
         self, segments: List[Tuple[int, int]], temp_audio_dir: str

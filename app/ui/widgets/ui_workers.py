@@ -3,6 +3,8 @@ from functools import partial
 from typing import TYPE_CHECKING, Dict
 import traceback
 import os
+import threading
+import time
 
 import torch
 import numpy
@@ -158,6 +160,59 @@ class TargetMediaLoaderWorker(qtc.QThread):
         self.wait(1000)
         if self.isRunning():
             self.terminate()
+
+
+class IssueScanWorker(qtc.QThread):
+    progress = qtc.Signal(int, int, int)
+    completed = qtc.Signal(object, int, int, str, float)
+    cancelled = qtc.Signal()
+    failed = qtc.Signal(str)
+
+    def __init__(self, main_window: "MainWindow", parent=None):
+        super().__init__(parent)
+        self.main_window = main_window
+        self._cancel_event = threading.Event()
+        self._scan_ranges = main_window.video_processor._get_issue_scan_ranges()
+        self._scan_scope_text = main_window.video_processor.describe_issue_scan_scope(
+            self._scan_ranges
+        )
+        self._target_height = main_window.video_processor._get_target_input_height()
+        self._base_control = main_window.control.copy()
+        self._base_params = {
+            face_id: params.copy() for face_id, params in main_window.parameters.items()
+        }
+        self._target_faces_snapshot = dict(main_window.target_faces)
+        self._reset_frame_number = int(main_window.videoSeekSlider.value())
+
+    def cancel(self):
+        self._cancel_event.set()
+
+    def run(self):
+        try:
+            start_time = time.monotonic()
+            result = self.main_window.video_processor.scan_issue_frames(
+                progress_callback=self.progress.emit,
+                is_cancelled=self._cancel_event.is_set,
+                scan_ranges=self._scan_ranges,
+                target_height=self._target_height,
+                base_control=self._base_control,
+                base_params=self._base_params,
+                target_faces_snapshot=self._target_faces_snapshot,
+                reset_frame_number=self._reset_frame_number,
+            )
+            if result is None:
+                self.cancelled.emit()
+                return
+            elapsed_seconds = time.monotonic() - start_time
+            self.completed.emit(
+                result["issue_frames_by_face"],
+                result["frames_scanned"],
+                result["faces_with_issues"],
+                self._scan_scope_text,
+                elapsed_seconds,
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 class InputFacesLoaderWorker(qtc.QThread):

@@ -511,11 +511,35 @@ def _load_job_markers(main_window: "MainWindow", data: dict):
             int(marker_position),
         )
 
+    loaded_issue_frames_by_face = data.get("issue_frames_by_face")
+    if loaded_issue_frames_by_face is not None:
+        video_control_actions.set_issue_frames_by_face(
+            main_window, loaded_issue_frames_by_face
+        )
+    else:
+        selected_face_id = getattr(main_window, "selected_target_face_id", None)
+        if selected_face_id is None and getattr(main_window, "target_faces", {}):
+            selected_face_id = str(next(iter(main_window.target_faces.keys())))
+        if selected_face_id is not None:
+            video_control_actions.set_issue_frames_for_face(
+                main_window, selected_face_id, data.get("issue_frames", [])
+            )
+        else:
+            video_control_actions.set_issue_frames_by_face(main_window, {})
+    video_control_actions.set_dropped_frames(
+        main_window, data.get("dropped_frames", [])
+    )
+
     # Load job marker pairs (segments)
     main_window.job_marker_pairs = data.get("job_marker_pairs", [])
 
     # Update slider visuals to show markers
     main_window.videoSeekSlider.update()
+    video_control_actions.update_drop_frame_button_label(main_window)
+    if hasattr(main_window, "scanToolsToggleButton"):
+        video_control_actions.set_scan_tools_expanded(
+            main_window, data.get("scan_tools_expanded", False)
+        )
 
 
 def _begin_batch_refresh_suppression(main_window: "MainWindow") -> bool:
@@ -1092,6 +1116,12 @@ def _serialize_job_data(main_window: "MainWindow") -> dict:
         "target_faces_data": target_faces_data,
         "control": control_to_save,
         "markers": markers_to_save,
+        "issue_frames_by_face": {
+            str(face_id): sorted(frames)
+            for face_id, frames in main_window.issue_frames_by_face.items()
+        },
+        "dropped_frames": sorted(main_window.dropped_frames),
+        "scan_tools_expanded": getattr(main_window, "scan_tools_expanded", False),
         "job_marker_pairs": copy.deepcopy(main_window.job_marker_pairs),
         "selected_media_id": selected_media_id,
         "swap_faces_enabled": main_window.swapfacesButton.isChecked(),

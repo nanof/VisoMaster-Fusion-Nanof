@@ -24,12 +24,23 @@ def clear_target_faces(main_window: "MainWindow", refresh_frame=True):
         target_face.deleteLater()
     main_window.target_faces.clear()
     main_window.parameters.clear()
+    if hasattr(main_window, "issue_frames_by_face"):
+        main_window.issue_frames_by_face.clear()
+    if hasattr(main_window, "issue_frames"):
+        main_window.issue_frames.clear()
+    if hasattr(main_window, "videoSeekSlider"):
+        main_window.videoSeekSlider.issue_markers = set()
+        main_window.videoSeekSlider.issue_markers_sorted = []
+        main_window.videoSeekSlider.update()
 
     main_window.selected_target_face_id = None
     # Set Parameter widget values to default
     common_widget_actions.set_widgets_values_using_face_id_parameters(
         main_window=main_window, face_id=None
     )
+    from app.ui.widgets.actions import video_control_actions
+
+    video_control_actions.update_scan_review_button_states(main_window)
     if refresh_frame:
         common_widget_actions.refresh_frame(main_window=main_window)
 
@@ -229,5 +240,8 @@ def find_target_faces(main_window: "MainWindow"):
     if main_window.video_processor.processing:
         main_window.video_processor.stop_processing()
     common_widget_actions.refresh_frame(main_window)
+    from app.ui.widgets.actions import video_control_actions
+
+    video_control_actions.update_scan_review_button_states(main_window)
 
     common_widget_actions.update_gpu_memory_progressbar(main_window)

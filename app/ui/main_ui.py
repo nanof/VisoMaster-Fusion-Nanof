@@ -123,6 +123,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.current_widget_parameters: ParametersTypes = {}
 
         self.markers: MarkerTypes = {}  # Video Markers (Contains parameters for each face)
+        self.issue_frames_by_face: dict[str, set[int]] = {}
+        self.issue_frames: set[int] = set()
+        self.dropped_frames: set[int] = set()
+        self.scan_tools_expanded = False
+        self.scan_issue_worker = None
         self.parameters_list = {}
         self.control: ControlTypes = {}
         self.parameter_widgets: ParametersWidgetTypes = {}
@@ -254,6 +259,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.previousMarkerButton.clicked.connect(
             partial(video_control_actions.move_slider_to_previous_nearest_marker, self)
         )
+        video_control_actions.add_scan_review_controls(self)
 
         self.viewFullScreenButton.clicked.connect(
             partial(video_control_actions.view_fullscreen, self)
@@ -500,6 +506,18 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         )
         self.build_progress_dialog.setRange(0, 0)  # Indeterminate (busy) mode
         self.build_progress_dialog.close()  # Ensure it's hidden on startup
+
+        self.scan_progress_dialog = QtWidgets.QProgressDialog(self)
+        scan_flags = self.scan_progress_dialog.windowFlags()
+        scan_flags &= ~QtCore.Qt.WindowCloseButtonHint
+        self.scan_progress_dialog.setWindowFlags(scan_flags)
+        self.scan_progress_dialog.setWindowModality(
+            QtCore.Qt.WindowModality.WindowModal
+        )
+        self.scan_progress_dialog.setCancelButtonText("Abort")
+        self.scan_progress_dialog.setAutoClose(False)
+        self.scan_progress_dialog.setAutoReset(False)
+        self.scan_progress_dialog.close()
 
     def update_denoiser_controls_visibility_for_pass(
         self, pass_suffix: str, current_mode_text: str

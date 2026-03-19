@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING, cast
 import copy
 from functools import partial
 import os
+from pathlib import Path
 import traceback
 
 from PySide6.QtCore import QPoint
@@ -23,6 +24,7 @@ from app.ui.widgets.actions import graphics_view_actions
 import app.ui.widgets.actions.layout_actions as layout_actions
 from app.ui.widgets.actions import card_actions
 from app.ui.widgets import widget_components
+from app.ui.widgets import ui_workers
 
 
 def set_up_video_seek_line_edit(main_window: "MainWindow"):
@@ -44,9 +46,13 @@ def set_up_video_seek_slider(main_window: "MainWindow"):
     """
     main_window.videoSeekSlider.markers = set()  # Store unique tick positions
     main_window.videoSeekSlider.markers_sorted = []  # Sorted list for iteration in paintEvent
+    main_window.videoSeekSlider.issue_markers = set()
+    main_window.videoSeekSlider.issue_markers_sorted = []
+    main_window.videoSeekSlider.dropped_markers = set()
+    main_window.videoSeekSlider.dropped_markers_sorted = []
     main_window.videoSeekSlider.setTickPosition(
         QtWidgets.QSlider.TickPosition.TicksBelow
-    )  # Default position for tick marks
+    )
 
     def add_marker_and_paint(self: QtWidgets.QSlider, value=None):
         """Add a tick mark at a specific slider value."""
@@ -67,6 +73,56 @@ def set_up_video_seek_slider(main_window: "MainWindow"):
             self.markers.remove(value)
             if value in self.markers_sorted:
                 self.markers_sorted.remove(value)
+            self.update()
+
+    def _add_sorted_marker(
+        marker_set: set[int], marker_list: list[int], value: int
+    ) -> bool:
+        if value not in marker_set:
+            marker_set.add(value)
+            marker_list.append(value)
+            marker_list.sort()
+            return True
+        return False
+
+    def _remove_sorted_marker(
+        marker_set: set[int], marker_list: list[int], value: int
+    ) -> bool:
+        if value in marker_set:
+            marker_set.remove(value)
+            if value in marker_list:
+                marker_list.remove(value)
+            return True
+        return False
+
+    def add_issue_marker_and_paint(self: QtWidgets.QSlider, value=None):
+        if value is None or isinstance(value, bool):
+            value = self.value()
+        if self.minimum() <= value <= self.maximum() and _add_sorted_marker(
+            self.issue_markers, self.issue_markers_sorted, value
+        ):
+            self.update()
+
+    def remove_issue_marker_and_paint(self: QtWidgets.QSlider, value=None):
+        if value is None or isinstance(value, bool):
+            value = self.value()
+        if _remove_sorted_marker(self.issue_markers, self.issue_markers_sorted, value):
+            self.update()
+
+    def add_dropped_marker_and_paint(self: QtWidgets.QSlider, value=None):
+        if value is None or isinstance(value, bool):
+            value = self.value()
+        if self.minimum() <= value <= self.maximum() and _add_sorted_marker(
+            self.dropped_markers, self.dropped_markers_sorted, value
+        ):
+            self.update()
+
+    def remove_dropped_marker_and_paint(self: QtWidgets.QSlider, value=None):
+        if value is None or isinstance(value, bool):
+            value = self.value()
+        if _remove_sorted_marker(
+            self.dropped_markers, self.dropped_markers_sorted, value
+        ):
             self.update()
 
     def paintEvent(self: QtWidgets.QSlider, event: QtGui.QPaintEvent):
@@ -123,61 +179,79 @@ def set_up_video_seek_slider(main_window: "MainWindow"):
         painter.setBrush(QtGui.QBrush(QtGui.QColor("white")))  # Handle fill color
         painter.drawRect(handle_rect)
 
-        # Draw markers (if any)
+        def marker_x_for_value(value: int) -> float:
+            marker_normalized_value = (value - self.minimum()) / (
+                self.maximum() - self.minimum()
+            )
+            return groove_start + marker_normalized_value * groove_width
+
+        # Draw issue markers underneath saved markers.
+        if self.issue_markers:
+            issue_pen = QtGui.QPen(QtGui.QColor("#ff9800"), 3)
+            issue_pen.setCapStyle(QtCore.Qt.PenCapStyle.SquareCap)
+            painter.setPen(issue_pen)
+            issue_top = groove_y - 2
+            issue_bottom = groove_y + 2
+            for value in self.issue_markers_sorted:
+                if value in self.dropped_markers:
+                    continue
+                marker_x = marker_x_for_value(value)
+                painter.drawLine(marker_x, issue_top, marker_x, issue_bottom)
+
+        # Draw standard markers (if any)
         if self.markers:
             painter.setPen(
                 QtGui.QPen(QtGui.QColor("#4090a3"), 3)
             )  # Marker color and thickness
             for value in self.markers_sorted:
-                # Calculate marker position
-                marker_normalized_value = (value - self.minimum()) / (
-                    self.maximum() - self.minimum()
-                )
-                marker_x = groove_start + marker_normalized_value * groove_width
+                marker_x = marker_x_for_value(value)
                 painter.drawLine(
                     marker_x, groove_rect.top(), marker_x, groove_rect.bottom()
                 )
+
+        # Draw dropped markers above all frame markers.
+        if self.dropped_markers:
+            painter.setPen(QtGui.QPen(QtGui.QColor("#e8483c"), 3))
+            for value in self.dropped_markers_sorted:
+                marker_x = marker_x_for_value(value)
+                painter.drawLine(
+                    marker_x, groove_rect.top(), marker_x, groove_rect.bottom()
+                )
+
         # Draw Job Start/End Brackets on the groove line
-        painter.setFont(
-            QtGui.QFont("Arial", 16, QtGui.QFont.Bold)
-        )  # Increased font size from 12 to 16
+        painter.setFont(QtGui.QFont("Arial", 16, QtGui.QFont.Bold))
         font_metrics = painter.fontMetrics()
         bracket_height = font_metrics.height()
         bracket_y_pos = groove_y + (bracket_height // 4)
 
-        # Iterate through all defined job marker pairs
         for start_frame, end_frame in main_window.job_marker_pairs:
             if start_frame is not None:
-                start_normalized_value = (start_frame - self.minimum()) / (
-                    self.maximum() - self.minimum()
-                )
-                start_x = groove_start + start_normalized_value * groove_width
-                # Draw the green start bracket
-                painter.setPen(
-                    QtGui.QPen(QtGui.QColor("#4CAF50"), 1)
-                )  # Green for start bracket
-                painter.drawText(
-                    int(start_x - 4), int(bracket_y_pos), "["
-                )  # Adjusted X offset slightly
+                start_x = marker_x_for_value(int(start_frame))
+                painter.setPen(QtGui.QPen(QtGui.QColor("#4CAF50"), 1))
+                painter.drawText(int(start_x - 4), int(bracket_y_pos), "[")
 
             if end_frame is not None:
-                end_normalized_value = (end_frame - self.minimum()) / (
-                    self.maximum() - self.minimum()
-                )
-                end_x = groove_start + end_normalized_value * groove_width
-                # Draw the red end bracket
-                painter.setPen(
-                    QtGui.QPen(QtGui.QColor("#e8483c"), 1)
-                )  # Red for end bracket
-                painter.drawText(
-                    int(end_x - 4), int(bracket_y_pos), "]"
-                )  # Adjusted X offset slightly
+                end_x = marker_x_for_value(int(end_frame))
+                painter.setPen(QtGui.QPen(QtGui.QColor("#e8483c"), 1))
+                painter.drawText(int(end_x - 4), int(bracket_y_pos), "]")
 
     main_window.videoSeekSlider.add_marker_and_paint = partial(
         add_marker_and_paint, main_window.videoSeekSlider
     )
     main_window.videoSeekSlider.remove_marker_and_paint = partial(
         remove_marker_and_paint, main_window.videoSeekSlider
+    )
+    main_window.videoSeekSlider.add_issue_marker_and_paint = partial(
+        add_issue_marker_and_paint, main_window.videoSeekSlider
+    )
+    main_window.videoSeekSlider.remove_issue_marker_and_paint = partial(
+        remove_issue_marker_and_paint, main_window.videoSeekSlider
+    )
+    main_window.videoSeekSlider.add_dropped_marker_and_paint = partial(
+        add_dropped_marker_and_paint, main_window.videoSeekSlider
+    )
+    main_window.videoSeekSlider.remove_dropped_marker_and_paint = partial(
+        remove_dropped_marker_and_paint, main_window.videoSeekSlider
     )
     main_window.videoSeekSlider.paintEvent = partial(
         paintEvent, main_window.videoSeekSlider
@@ -458,6 +532,520 @@ def move_slider_to_previous_nearest_marker(main_window: "MainWindow"):
     move_slider_to_nearest_marker(main_window, "previous")
 
 
+def add_scan_review_controls(main_window: "MainWindow"):
+    """Creates a collapsible second row of scan/review controls."""
+    if hasattr(main_window, "scanToolsToggleButton"):
+        return
+
+    def create_divider(parent, height: int = 16, margin: int = 12):
+        divider_container = QtWidgets.QWidget(parent)
+        divider_layout = QtWidgets.QHBoxLayout(divider_container)
+        divider_layout.setContentsMargins(margin, 0, margin, 0)
+        divider_layout.setSpacing(0)
+        divider = QtWidgets.QFrame(divider_container)
+        divider.setFrameShape(QtWidgets.QFrame.Shape.VLine)
+        divider.setFrameShadow(QtWidgets.QFrame.Shadow.Plain)
+        divider.setLineWidth(1)
+        divider.setMidLineWidth(0)
+        divider.setFixedHeight(height)
+        divider.setStyleSheet("color: rgba(180, 180, 180, 110);")
+        divider_layout.addWidget(divider)
+        return divider_container
+
+    toggle_button = QtWidgets.QPushButton("Scan Tools")
+    toggle_button.setCheckable(True)
+    toggle_button.setChecked(False)
+    toggle_button.setFlat(True)
+    toggle_button.setToolTip("Show or hide the scan tools.")
+    toggle_button.clicked.connect(
+        lambda checked: set_scan_tools_expanded(main_window, checked)
+    )
+    main_window.scanToolsToggleButton = toggle_button
+    media_layout = main_window.horizontalLayoutMediaButtons
+    media_layout.addWidget(toggle_button)
+
+    section = QtWidgets.QWidget(main_window)
+    section_layout = QtWidgets.QVBoxLayout(section)
+    section_layout.setContentsMargins(0, 0, 0, 0)
+    section_layout.setSpacing(4)
+
+    container = QtWidgets.QWidget(section)
+    container_layout = QtWidgets.QHBoxLayout(container)
+    container_layout.setContentsMargins(0, 0, 0, 0)
+    container_layout.setSpacing(6)
+    main_window.scanControlsLayout = container_layout
+    main_window.scanControlsContainer = container
+    left_group = QtWidgets.QWidget(container)
+    left_layout = QtWidgets.QHBoxLayout(left_group)
+    left_layout.setContentsMargins(0, 0, 0, 0)
+    left_layout.setSpacing(6)
+    navigation_group = QtWidgets.QWidget(container)
+    navigation_layout = QtWidgets.QHBoxLayout(navigation_group)
+    navigation_layout.setContentsMargins(0, 0, 0, 0)
+    navigation_layout.setSpacing(6)
+    frame_group = QtWidgets.QWidget(container)
+    frame_layout = QtWidgets.QHBoxLayout(frame_group)
+    frame_layout.setContentsMargins(0, 0, 0, 0)
+    frame_layout.setSpacing(6)
+    cleanup_group = QtWidgets.QWidget(container)
+    cleanup_layout = QtWidgets.QHBoxLayout(cleanup_group)
+    cleanup_layout.setContentsMargins(0, 0, 0, 0)
+    cleanup_layout.setSpacing(6)
+    main_window.scanControlsLeftGroup = left_group
+    main_window.scanControlsNavigationGroup = navigation_group
+    main_window.scanControlsFrameGroup = frame_group
+    main_window.scanControlsCleanupGroup = cleanup_group
+
+    run_scan_button = QtWidgets.QPushButton("Scan for Issues")
+    run_scan_button.setToolTip(
+        "Scans the current render range using your current settings.\n"
+        "If record markers exist, only those ranges are scanned.\n"
+        "Saved settings markers are applied during the scan.\n"
+        "Flags likely issue frames for the selected target face.\n"
+        "Single-frame preview may differ from playback on borderline frames."
+    )
+    run_scan_button.setFlat(True)
+    run_scan_button.setSizePolicy(
+        QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Fixed
+    )
+    run_scan_button.clicked.connect(lambda: run_issue_scan(main_window))
+    main_window.runScanButton = run_scan_button
+
+    button_specs = [
+        (
+            "prevIssueButton",
+            "Prev Issue",
+            "Move to the previous issue frame for the selected target face.",
+            lambda: move_slider_to_previous_issue(main_window),
+            "navigation",
+        ),
+        (
+            "nextIssueButton",
+            "Next Issue",
+            "Move to the next issue frame for the selected target face.",
+            lambda: move_slider_to_next_issue(main_window),
+            "navigation",
+        ),
+        (
+            "dropFrameButton",
+            "Drop Frame",
+            "Drops the current frame from render output.",
+            lambda: toggle_drop_frame(main_window),
+            "frame",
+        ),
+        (
+            "dropAllIssueFramesButton",
+            "Drop Issue Frames",
+            "Marks the selected target face's issue frames as dropped.\n"
+            "Dropped frames are excluded from render output.",
+            lambda: drop_all_issue_frames(main_window),
+            "frame",
+        ),
+        (
+            "clearScanResultsButton",
+            "Clear Issues",
+            "Removes the current scan issue markers.\nDoes not affect dropped frames.",
+            lambda: clear_scan_results(main_window),
+            "cleanup",
+        ),
+        (
+            "clearDroppedFramesButton",
+            "Restore Dropped",
+            "Restores all dropped frames to render output.",
+            lambda: clear_dropped_frames(main_window),
+            "cleanup",
+        ),
+    ]
+
+    left_layout.addWidget(run_scan_button)
+
+    for attr_name, text, tooltip, handler, group_name in button_specs:
+        button = QtWidgets.QPushButton(text)
+        button.setToolTip(tooltip)
+        button.setFlat(True)
+        button.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Fixed
+        )
+        button.clicked.connect(handler)
+        setattr(main_window, attr_name, button)
+        if group_name == "left":
+            target_layout = left_layout
+        elif group_name == "navigation":
+            target_layout = navigation_layout
+        elif group_name == "frame":
+            target_layout = frame_layout
+        else:
+            target_layout = cleanup_layout
+        target_layout.addWidget(button)
+
+    container_layout.addStretch(1)
+    container_layout.addWidget(left_group, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
+    container_layout.addWidget(create_divider(container))
+    container_layout.addWidget(
+        navigation_group, 0, QtCore.Qt.AlignmentFlag.AlignHCenter
+    )
+    container_layout.addWidget(create_divider(container))
+    container_layout.addWidget(frame_group, 0, QtCore.Qt.AlignmentFlag.AlignHCenter)
+    container_layout.addWidget(create_divider(container))
+    container_layout.addWidget(cleanup_group, 0, QtCore.Qt.AlignmentFlag.AlignRight)
+    container_layout.addStretch(1)
+    section_layout.addWidget(container)
+    main_window.scanToolsSection = section
+    main_window.verticalLayoutMediaControls.addWidget(section)
+    set_scan_tools_expanded(
+        main_window, getattr(main_window, "scan_tools_expanded", False)
+    )
+
+    update_drop_frame_button_label(main_window)
+    update_scan_review_button_states(main_window)
+
+
+# --- Scan / Issue / Drop UI state helpers ---
+def set_scan_tools_expanded(main_window: "MainWindow", expanded: bool):
+    """Shows or hides the scan-tools row and updates the toggle label."""
+    main_window.scan_tools_expanded = expanded
+    toggle_button = getattr(main_window, "scanToolsToggleButton", None)
+    container = getattr(main_window, "scanControlsContainer", None)
+    if toggle_button is not None:
+        toggle_button.blockSignals(True)
+        toggle_button.setChecked(expanded)
+        toggle_button.blockSignals(False)
+    if container is not None:
+        container.setVisible(expanded)
+
+
+def update_drop_frame_button_label(main_window: "MainWindow"):
+    """Updates the drop-frame button text to reflect the current frame state."""
+    button = getattr(main_window, "dropFrameButton", None)
+    if button is None:
+        return
+    current_frame = int(main_window.videoSeekSlider.value())
+    if current_frame in main_window.dropped_frames:
+        button.setText("Restore Frame")
+        button.setToolTip("Restore this frame so it is included in render output.")
+    else:
+        button.setText("Drop Frame")
+        button.setToolTip("Drop this frame from render output.")
+
+
+def update_scan_review_button_states(main_window: "MainWindow"):
+    """Enable scan/review actions based on available target-face context."""
+    has_target_faces = bool(getattr(main_window, "target_faces", {}))
+    has_selected_face = (
+        getattr(main_window, "selected_target_face_id", None) is not None
+    )
+
+    scan_button = getattr(main_window, "runScanButton", None)
+    if scan_button is not None:
+        scan_button.setEnabled(has_target_faces)
+
+    for button_name in (
+        "runScanButton",
+        "prevIssueButton",
+        "nextIssueButton",
+        "dropAllIssueFramesButton",
+    ):
+        button = getattr(main_window, button_name, None)
+        if button is not None:
+            if button_name == "runScanButton":
+                continue
+            button.setEnabled(has_selected_face)
+
+
+def _set_slider_marker_values(
+    slider: QtWidgets.QSlider,
+    attr_set_name: str,
+    attr_sorted_name: str,
+    values: list[int],
+):
+    slider_set = set(values)
+    setattr(slider, attr_set_name, slider_set)
+    setattr(slider, attr_sorted_name, sorted(slider_set))
+
+
+def get_selected_face_issue_frames(main_window: "MainWindow") -> set[int]:
+    selected_face_id = getattr(main_window, "selected_target_face_id", None)
+    if selected_face_id is None:
+        return set()
+    return set(main_window.issue_frames_by_face.get(str(selected_face_id), set()))
+
+
+def refresh_issue_frames_for_selected_face(main_window: "MainWindow"):
+    """Refresh visible issue markers to match the currently selected target face."""
+    visible_issue_frames = get_selected_face_issue_frames(main_window)
+    main_window.issue_frames = visible_issue_frames
+    _set_slider_marker_values(
+        main_window.videoSeekSlider,
+        "issue_markers",
+        "issue_markers_sorted",
+        list(visible_issue_frames),
+    )
+    main_window.videoSeekSlider.update()
+    update_scan_review_button_states(main_window)
+
+
+def set_issue_frames_for_face(main_window: "MainWindow", face_id, frames):
+    """Stores issue frames for a specific target face and refreshes visible markers if selected."""
+    if face_id is None:
+        return
+    normalized = {int(frame) for frame in frames}
+    main_window.issue_frames_by_face[str(face_id)] = normalized
+    if str(face_id) == str(getattr(main_window, "selected_target_face_id", None)):
+        refresh_issue_frames_for_selected_face(main_window)
+
+
+def set_issue_frames_by_face(main_window: "MainWindow", frames_by_face):
+    """Replaces all stored issue results and refreshes visible markers for the selected face."""
+    normalized_mapping: dict[str, set[int]] = {}
+    for face_id, frames in (frames_by_face or {}).items():
+        normalized_mapping[str(face_id)] = {int(frame) for frame in frames}
+    main_window.issue_frames_by_face = normalized_mapping
+    refresh_issue_frames_for_selected_face(main_window)
+
+
+def set_dropped_frames(main_window: "MainWindow", frames):
+    """Replaces the current dropped-frame set and refreshes slider visuals."""
+    normalized = {int(frame) for frame in frames}
+    main_window.dropped_frames = normalized
+    _set_slider_marker_values(
+        main_window.videoSeekSlider,
+        "dropped_markers",
+        "dropped_markers_sorted",
+        list(normalized),
+    )
+    main_window.videoSeekSlider.update()
+    update_drop_frame_button_label(main_window)
+
+
+def clear_scan_results(main_window: "MainWindow"):
+    selected_face_id = getattr(main_window, "selected_target_face_id", None)
+    if selected_face_id is None:
+        main_window.issue_frames_by_face.clear()
+    else:
+        main_window.issue_frames_by_face[str(selected_face_id)] = set()
+    refresh_issue_frames_for_selected_face(main_window)
+
+
+def clear_dropped_frames(main_window: "MainWindow"):
+    set_dropped_frames(main_window, [])
+
+
+def toggle_drop_frame(main_window: "MainWindow"):
+    current_position = int(main_window.videoSeekSlider.value())
+    if current_position in main_window.dropped_frames:
+        main_window.dropped_frames.remove(current_position)
+        main_window.videoSeekSlider.remove_dropped_marker_and_paint(current_position)
+    else:
+        main_window.dropped_frames.add(current_position)
+        main_window.videoSeekSlider.add_dropped_marker_and_paint(current_position)
+    update_drop_frame_button_label(main_window)
+
+
+def drop_all_issue_frames(main_window: "MainWindow"):
+    selected_issue_frames = get_selected_face_issue_frames(main_window)
+    if not selected_issue_frames:
+        return
+    reply = QtWidgets.QMessageBox.question(
+        main_window,
+        "Drop Issue Frames",
+        "Mark all current issue frames as dropped for render output?",
+        QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+        QtWidgets.QMessageBox.No,
+    )
+    if reply != QtWidgets.QMessageBox.Yes:
+        return
+    merged = set(main_window.dropped_frames)
+    merged.update(selected_issue_frames)
+    set_dropped_frames(main_window, merged)
+
+
+# --- Issue scan execution / progress helpers ---
+def _move_slider_to_nearest_issue(main_window: "MainWindow", direction: str):
+    current_position = int(main_window.videoSeekSlider.value())
+    review_frames = sorted(
+        get_selected_face_issue_frames(main_window) | set(main_window.dropped_frames)
+    )
+    if not review_frames:
+        return
+
+    new_position = None
+    if direction == "next":
+        filtered = [frame for frame in review_frames if frame > current_position]
+        new_position = filtered[0] if filtered else None
+    else:
+        filtered = [frame for frame in review_frames if frame < current_position]
+        new_position = filtered[-1] if filtered else None
+
+    if new_position is not None:
+        main_window.videoSeekSlider.setValue(new_position)
+        main_window.video_processor.process_current_frame()
+
+
+def move_slider_to_next_issue(main_window: "MainWindow"):
+    _move_slider_to_nearest_issue(main_window, "next")
+
+
+def move_slider_to_previous_issue(main_window: "MainWindow"):
+    _move_slider_to_nearest_issue(main_window, "previous")
+
+
+def _handle_issue_scan_progress(
+    main_window: "MainWindow",
+    scope_text: str,
+    processed: int,
+    total: int,
+    frame_number: int,
+):
+    dialog = main_window.scan_progress_dialog
+    dialog.setMaximum(max(total, 1))
+    dialog.setValue(min(processed, max(total, 1)))
+    dialog.setLabelText(f"{scope_text}\nScanning frame {frame_number} of {total}...")
+    QtCore.QCoreApplication.processEvents()
+
+
+def _cleanup_issue_scan_worker(main_window: "MainWindow"):
+    worker = getattr(main_window, "scan_issue_worker", None)
+    if worker is not None:
+        worker.deleteLater()
+        main_window.scan_issue_worker = None
+
+
+def _finish_issue_scan_dialog(main_window: "MainWindow"):
+    dialog = main_window.scan_progress_dialog
+    try:
+        dialog.canceled.disconnect()
+    except RuntimeError:
+        pass
+    dialog.close()
+
+
+def _handle_issue_scan_completed(
+    main_window: "MainWindow",
+    issue_frames_by_face: dict,
+    frames_scanned: int,
+    faces_with_issues: int,
+    scope_text: str,
+    elapsed_seconds: float,
+):
+    set_issue_frames_by_face(main_window, issue_frames_by_face)
+    _finish_issue_scan_dialog(main_window)
+    _cleanup_issue_scan_worker(main_window)
+    total_issue_frames = sum(
+        len(set(frames)) for frames in issue_frames_by_face.values()
+    )
+    scan_fps = (frames_scanned / elapsed_seconds) if elapsed_seconds > 0 else 0.0
+    print(
+        f"[INFO] Scan: Scope: {scope_text.removeprefix('Scanning ')} | Frames: {frames_scanned} | Time: {elapsed_seconds:.1f}s | FPS: {scan_fps:.1f} | Issues: {total_issue_frames} | Faces with issues: {faces_with_issues}"
+    )
+    if total_issue_frames:
+        common_widget_actions.create_and_show_toast_message(
+            main_window,
+            "Scan Complete",
+            f"Scanned {frames_scanned} frames in {elapsed_seconds:.1f}s ({scan_fps:.1f} FPS). Found {total_issue_frames} issues across {faces_with_issues} faces.",
+        )
+    else:
+        common_widget_actions.create_and_show_toast_message(
+            main_window,
+            "Scan Complete",
+            f"Scanned {frames_scanned} frames in {elapsed_seconds:.1f}s ({scan_fps:.1f} FPS). No issue frames found.",
+        )
+
+
+def _handle_issue_scan_cancelled(main_window: "MainWindow"):
+    _finish_issue_scan_dialog(main_window)
+    _cleanup_issue_scan_worker(main_window)
+    common_widget_actions.create_and_show_toast_message(
+        main_window,
+        "Scan Cancelled",
+        "Issue scan aborted. Previous scan results were kept.",
+        style_type="warning",
+    )
+
+
+def _handle_issue_scan_failed(main_window: "MainWindow", error_message: str):
+    _finish_issue_scan_dialog(main_window)
+    _cleanup_issue_scan_worker(main_window)
+    common_widget_actions.create_and_show_messagebox(
+        main_window,
+        "Scan Failed",
+        error_message,
+        main_window.scan_progress_dialog,
+    )
+
+
+def run_issue_scan(main_window: "MainWindow"):
+    video_processor = main_window.video_processor
+    if not getattr(main_window, "target_faces", {}):
+        common_widget_actions.create_and_show_messagebox(
+            main_window,
+            "Scan Not Available",
+            "No target faces found. Use Find Faces before running a scan.",
+            main_window.videoSeekSlider,
+        )
+        return
+    if video_processor.file_type != "video" or not video_processor.media_path:
+        common_widget_actions.create_and_show_messagebox(
+            main_window,
+            "Scan Not Available",
+            "Issue scans are only available when a video is loaded.",
+            main_window.videoSeekSlider,
+        )
+        return
+    if not Path(video_processor.media_path).is_file():
+        common_widget_actions.create_and_show_messagebox(
+            main_window,
+            "Scan Not Available",
+            "The selected video could not be found on disk.",
+            main_window.videoSeekSlider,
+        )
+        return
+    if getattr(main_window, "scan_issue_worker", None) is not None:
+        return
+
+    was_processing = video_processor.stop_processing()
+    if was_processing:
+        print("[INFO] Stopped active processing before running issue scan.")
+
+    worker = ui_workers.IssueScanWorker(main_window)
+    main_window.scan_issue_worker = worker
+    scope_text = worker._scan_scope_text
+    worker.progress.connect(
+        lambda processed, total, frame_number: _handle_issue_scan_progress(
+            main_window, scope_text, processed, total, frame_number
+        )
+    )
+    worker.completed.connect(
+        lambda issue_frames_by_face, frames_scanned, faces_with_issues, completed_scope_text, elapsed_seconds: (
+            _handle_issue_scan_completed(
+                main_window,
+                issue_frames_by_face,
+                frames_scanned,
+                faces_with_issues,
+                completed_scope_text,
+                elapsed_seconds,
+            )
+        )
+    )
+    worker.cancelled.connect(lambda: _handle_issue_scan_cancelled(main_window))
+    worker.failed.connect(
+        lambda error_message: _handle_issue_scan_failed(main_window, error_message)
+    )
+
+    dialog = main_window.scan_progress_dialog
+    try:
+        dialog.canceled.disconnect()
+    except RuntimeError:
+        pass
+    dialog.setWindowTitle("Scan")
+    dialog.setLabelText(f"{scope_text}\nPreparing scan...")
+    dialog.setRange(0, 1)
+    dialog.setValue(0)
+    dialog.setMinimumWidth(420)
+    dialog.canceled.connect(worker.cancel)
+    dialog.show()
+    worker.start()
+
+
 def remove_face_parameters_and_control_from_markers(main_window: "MainWindow", face_id):
     """
     Removes all stored parameter entries for *face_id* from every marker.
@@ -476,11 +1064,13 @@ def remove_face_parameters_and_control_from_markers(main_window: "MainWindow", f
 
 
 def remove_all_markers(main_window: "MainWindow"):
-    """Removes every standard marker and clears all job marker pairs."""
+    """Removes all standard, issue, and dropped-frame markers plus job pairs."""
     standard_markers_positions = list(main_window.markers.keys())
     for marker_position in standard_markers_positions:
         remove_marker(main_window, marker_position)
     main_window.markers.clear()
+    set_issue_frames_by_face(main_window, {})
+    set_dropped_frames(main_window, [])
     if main_window.job_marker_pairs:
         print("[INFO] Clearing job marker pairs.")
         main_window.job_marker_pairs.clear()
@@ -548,10 +1138,19 @@ def rewind_video_slider_by_n_frames(main_window: "MainWindow", n=None):
 
 
 def delete_all_markers(main_window: "MainWindow"):
-    """Clears all marker positions from the slider and the markers dict without removing job pairs."""
+    """Clears all slider marker overlays and marker dictionaries without removing job pairs."""
     main_window.videoSeekSlider.markers = set()
+    main_window.videoSeekSlider.markers_sorted = []
+    main_window.videoSeekSlider.issue_markers = set()
+    main_window.videoSeekSlider.issue_markers_sorted = []
+    main_window.videoSeekSlider.dropped_markers = set()
+    main_window.videoSeekSlider.dropped_markers_sorted = []
     main_window.videoSeekSlider.update()
     main_window.markers.clear()
+    main_window.issue_frames_by_face.clear()
+    main_window.issue_frames.clear()
+    main_window.dropped_frames.clear()
+    update_drop_frame_button_label(main_window)
 
 
 def view_fullscreen(main_window: "MainWindow"):
@@ -1014,6 +1613,7 @@ def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
 
     video_processor.current_frame_number = new_position
     video_processor.next_frame_to_display = new_position
+    update_drop_frame_button_label(main_window)
     if video_processor.media_capture:
         misc_helpers.seek_frame(video_processor.media_capture, new_position)
 

@@ -714,6 +714,18 @@ def set_all_parameters_and_control_widgets_enabled(
     main_window.previousMarkerButton.setDisabled(disabled)
     main_window.frameAdvanceButton.setDisabled(disabled)
     main_window.frameRewindButton.setDisabled(disabled)
+    for attr_name in (
+        "scanToolsToggleButton",
+        "runScanButton",
+        "clearScanResultsButton",
+        "prevIssueButton",
+        "nextIssueButton",
+        "dropFrameButton",
+        "dropAllIssueFramesButton",
+        "clearDroppedFramesButton",
+    ):
+        if hasattr(main_window, attr_name):
+            getattr(main_window, attr_name).setDisabled(disabled)
 
     # Compare checkboxes
     main_window.faceCompareCheckBox.setDisabled(disabled)

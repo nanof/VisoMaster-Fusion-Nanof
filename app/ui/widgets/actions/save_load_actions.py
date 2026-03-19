@@ -418,11 +418,32 @@ def load_saved_workspace(
                     marker_data["control"],
                     int(marker_position),
                 )
+            loaded_issue_frames_by_face = data.get("issue_frames_by_face")
+            if loaded_issue_frames_by_face is not None:
+                video_control_actions.set_issue_frames_by_face(
+                    main_window, loaded_issue_frames_by_face
+                )
+            else:
+                selected_face_id = getattr(main_window, "selected_target_face_id", None)
+                if selected_face_id is None and getattr(
+                    main_window, "target_faces", {}
+                ):
+                    selected_face_id = str(next(iter(main_window.target_faces.keys())))
+                if selected_face_id is not None:
+                    video_control_actions.set_issue_frames_for_face(
+                        main_window, selected_face_id, data.get("issue_frames", [])
+                    )
+                else:
+                    video_control_actions.set_issue_frames_by_face(main_window, {})
+            video_control_actions.set_dropped_frames(
+                main_window, data.get("dropped_frames", [])
+            )
             # main_window.videoSeekSlider.setValue(0)
             # video_control_actions.update_widget_values_from_markers(main_window, 0)
 
             # Update slider visuals after loading markers
             main_window.videoSeekSlider.update()
+            video_control_actions.update_drop_frame_button_label(main_window)
 
             # Set target media and input faces folder names
             main_window.last_target_media_folder_path = data.get(
@@ -538,6 +559,10 @@ def load_saved_workspace(
             main_window.filterWebcamsCheckBox.setChecked(
                 window_state.get("filterWebcamsCheckBox", False)
             )
+            if hasattr(main_window, "scanToolsToggleButton"):
+                video_control_actions.set_scan_tools_expanded(
+                    main_window, window_state.get("scan_tools_expanded", False)
+                )
             filter_actions.filter_target_videos(main_window)
             list_view_actions.load_target_webcams(main_window)
 
@@ -587,6 +612,7 @@ def save_current_workspace(
         "filterImagesCheckBox": main_window.filterImagesCheckBox.isChecked(),
         "filterVideosCheckBox": main_window.filterVideosCheckBox.isChecked(),
         "filterWebcamsCheckBox": main_window.filterWebcamsCheckBox.isChecked(),
+        "scan_tools_expanded": getattr(main_window, "scan_tools_expanded", False),
         "dock_state": dock_state_data,
     }
 
@@ -710,6 +736,11 @@ def save_current_workspace(
         "target_faces_data": target_faces_data,
         "embeddings_data": embeddings_data,
         "markers": markers_to_save,
+        "issue_frames_by_face": {
+            str(face_id): sorted(frames)
+            for face_id, frames in main_window.issue_frames_by_face.items()
+        },
+        "dropped_frames": sorted(main_window.dropped_frames),
         "job_marker_pairs": main_window.job_marker_pairs,  # Save the list of tuples
         "last_target_media_folder_path": main_window.last_target_media_folder_path,
         "last_input_media_folder_path": main_window.last_input_media_folder_path,
@@ -857,8 +888,14 @@ def save_current_job(main_window: "MainWindow"):
         "markers": convert_markers_to_supported_type(
             main_window, copy.deepcopy(main_window.markers), dict
         ),
+        "issue_frames_by_face": {
+            str(face_id): sorted(frames)
+            for face_id, frames in main_window.issue_frames_by_face.items()
+        },
+        "dropped_frames": sorted(main_window.dropped_frames),
         "control": main_window.control.copy(),
         "job_marker_pairs": main_window.job_marker_pairs,
+        "scan_tools_expanded": getattr(main_window, "scan_tools_expanded", False),
         "current_widget_parameters": main_window.current_widget_parameters.data.copy()
         if isinstance(
             main_window.current_widget_parameters, misc_helpers.ParametersDict
