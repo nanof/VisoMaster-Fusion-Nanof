@@ -18,22 +18,25 @@ QPushButton {
     border: 1px solid #343434; /* Subtle divider border */
     padding: 5px 10px;
     border-radius: 4px;
-    font-weight: bold;
 }
 
 QPushButton:hover {
     background-color: #2b2b2b; /* Slight lift on hover */
-    border: 1px solid #4cc2ff; /* Windows accent edge */
+    border: 1px solid #454545; /* Stronger neutral edge */
 }
 
 QPushButton:pressed {
-    background-color: #4cc2ff; /* Accent fill when active */
-    color: #ffffff;
-    border: 1px solid #2ea8e6; /* Slightly deeper accent edge */
+    background-color: #323232; /* Neutral pressed surface */
+    color: #f3f3f3;
+    border: 1px solid #454545;
 }
 
 QPushButton:checked {
     background-color: #16384a; /* Soft accent surface */
+    border: 1px solid #4cc2ff;
+}
+
+QPushButton:focus {
     border: 1px solid #4cc2ff;
 }
 
@@ -69,14 +72,14 @@ TargetMediaCardButton::icon, TargetFaceCardButton::icon, InputFaceCardButton::ic
 /* Hover state */
 TargetMediaCardButton:hover, TargetFaceCardButton:hover, InputFaceCardButton:hover, EmbeddingCardButton:hover {
     background-color: #2b2b2b;
-    border: 1px solid #4cc2ff;
+    border: 1px solid #454545;
 }
 
 /* Pressed state */
 TargetMediaCardButton:pressed, TargetFaceCardButton:pressed, InputFaceCardButton:pressed, EmbeddingCardButton:pressed {
-    background-color: #4cc2ff;
-    border: 1px solid #2ea8e6;
-    color: #ffffff;
+    background-color: #323232;
+    border: 1px solid #454545;
+    color: #f3f3f3;
 }
 
 /* Checked state */
@@ -113,13 +116,13 @@ TargetMediaCardButton:focus, TargetFaceCardButton:focus, InputFaceCardButton:foc
 }
 
 #videoSeekSlider::sub-page:horizontal {
-    background-color: #2ea8e6;
+    background-color: #4cc2ff;
     border-radius: 5px;
     height: 10px;
 }
 
 #videoSeekSlider::sub-page:horizontal:hover {
-    background-color: #4cc2ff;
+    background-color: #67ccff;
 }
 
 #videoSeekSlider::add-page:horizontal {
@@ -246,6 +249,22 @@ QLineEdit, QTextEdit, QPlainTextEdit {
     padding: 4px;
 }
 
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {
+    border: 1px solid #4cc2ff;
+    background-color: #202020;
+}
+
+QLineEdit:read-only, QTextEdit:read-only, QPlainTextEdit:read-only {
+    background-color: #242424;
+    color: #c8c8c8;
+}
+
+QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled {
+    background-color: #242424;
+    color: #7a7a7a;
+    border: 1px solid #343434;
+}
+
 QComboBox {
     border: 1px solid #343434;
     border-radius: 3px;
@@ -266,6 +285,20 @@ QComboBox:!editable, QComboBox::drop-down:editable {
 /* QComboBox gets the "on" state when the popup is open */
 QComboBox:!editable:on, QComboBox::drop-down:editable:on {
     background: #2b2b2b;
+}
+
+QComboBox:hover {
+    border: 1px solid #454545;
+}
+
+QComboBox:focus {
+    border: 1px solid #4cc2ff;
+}
+
+QComboBox:disabled {
+    background-color: #242424;
+    color: #7a7a7a;
+    border: 1px solid #343434;
 }
 
 QComboBox::drop-down {
@@ -329,7 +362,6 @@ QMenu::separator {
 }
 
 QScrollBar:vertical {
-    border: 1px solid #343434;
     background: #1e1e1e;
     width: 12px;
     margin: 0px 0px 0px 0px;
@@ -351,7 +383,6 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
 }
 
 QScrollBar:horizontal {
-    border: 1px solid #343434;
     background: #1e1e1e;
     height: 12px;
     margin: 0px 0px 0px 0px;
@@ -399,10 +430,10 @@ QTabBar::tab:selected, QTabBar::tab:hover {
 }
 
 QTabBar::tab:selected {
-    background: #2a4a5e;
-    color: #ffffff;
+    background: #2a2a2a;
+    color: #f3f3f3;
     border-color: #4cc2ff;
-    border-bottom-color: #2a4a5e;
+    border-bottom-color: #2a2a2a;
 }
 
 QTabBar::tab:!selected {
@@ -414,4 +445,17 @@ QTabBar::tab:!selected {
 /* Frame borders */
 QFrame, QListWidget {
 	background-color: transparent;
+}
+
+QProgressBar {
+    background-color: #232323;
+    border: 1px solid #343434;
+    border-radius: 4px;
+    color: #f3f3f3;
+    text-align: center;
+}
+
+QProgressBar::chunk {
+    background-color: #4cc2ff;
+    border-radius: 3px;
 }
