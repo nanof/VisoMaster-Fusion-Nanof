@@ -9,6 +9,7 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "label": "Theme",
             "options": [
                 "True-Dark",
+                "Windows11-Dark",
                 "Dark",
                 "Dark-Blue",
                 "Light",

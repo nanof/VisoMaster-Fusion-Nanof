@@ -162,6 +162,12 @@ def change_theme(main_window: "MainWindow", new_theme):
         )
     elif new_theme == "True-Dark":
         _style = get_style_data("true_dark.qss", "dark")
+    elif new_theme == "Windows11-Dark":
+        _style = get_style_data(
+            "windows11_dark.qss",
+            "dark",
+            {"primary": "#4cc2ff"},
+        )
     elif new_theme == "Solarized-Dark":
         _style = get_style_data("solarized_dark.qss", "dark")
     elif new_theme == "Solarized-Light":
