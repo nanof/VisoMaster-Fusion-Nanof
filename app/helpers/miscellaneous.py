@@ -243,6 +243,17 @@ class ParametersDict(UserDict):
             return self._default_parameters[key]
 
 
+def copy_mapping_data(value: object) -> dict[str, Any]:
+    """Return a plain dict copy when *value* is any mapping-like object.
+
+    This preserves `ParametersDict` and other `Mapping` subclasses while keeping
+    non-mapping inputs on a safe empty-dict fallback.
+    """
+    if isinstance(value, Mapping):
+        return dict(value)
+    return {}
+
+
 # --- Function Definitions ---
 
 

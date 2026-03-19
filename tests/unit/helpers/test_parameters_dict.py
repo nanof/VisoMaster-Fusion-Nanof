@@ -3,7 +3,7 @@ PD-* tests for app.helpers.miscellaneous.ParametersDict
 """
 
 import pytest
-from app.helpers.miscellaneous import ParametersDict
+from app.helpers.miscellaneous import ParametersDict, copy_mapping_data
 
 
 @pytest.fixture
@@ -84,3 +84,17 @@ def test_len_and_iteration(defaults):
     pd = ParametersDict({"alpha": 5, "beta": "x"}, defaults)
     assert len(pd) == 2
     assert set(pd.keys()) == {"alpha", "beta"}
+
+
+# PD-09: mapping copy helper must preserve ParametersDict contents
+def test_copy_mapping_data_accepts_parameters_dict(defaults):
+    pd = ParametersDict({"alpha": 5, "beta": "x"}, defaults)
+    copied = copy_mapping_data(pd)
+    assert copied == {"alpha": 5, "beta": "x"}
+    assert isinstance(copied, dict)
+
+
+# PD-10: non-mapping inputs fall back to an empty dict
+def test_copy_mapping_data_rejects_non_mapping():
+    assert copy_mapping_data(None) == {}
+    assert copy_mapping_data(123) == {}

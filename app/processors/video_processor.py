@@ -2664,10 +2664,8 @@ class VideoProcessor(QObject):
                         for face_id, target_face in target_faces_snapshot.items():
                             face_id_str = str(face_id)
                             face_params_raw = local_params.get(face_id_str)
-                            face_params_mapping = (
-                                dict(face_params_raw)
-                                if isinstance(face_params_raw, dict)
-                                else cast(dict[str, object], {})
+                            face_params_mapping = misc_helpers.copy_mapping_data(
+                                face_params_raw
                             )
                             face_params_pd = misc_helpers.ParametersDict(
                                 face_params_mapping, default_params
