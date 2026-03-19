@@ -15,18 +15,17 @@ the application when the *Custom* execution provider is selected.
 **Hardware:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
 **Conditions:** 50 iterations, 10 warm-up; input 640×640
 
-| Tier | Method | Latency | vs ORT FP32 | vs ORT TRT EP |
-|------|--------|--------:|:-----------:|:-------------:|
-| 0    | ORT FP32 CUDA EP (baseline) | 3.09 ms | 1.00× | 0.58× |
-| 0b   | ORT TensorRT EP (app default) | 1.79 ms | 1.73× | 1.00× |
-| 1    | PyTorch FP32 pure ops | 3.31 ms | 0.93× | — |
-| 2    | PyTorch FP16 NCHW | 2.42 ms | 1.28× | — |
-| 3    | PyTorch FP16 NCHW + CUDA graph | 1.01 ms | 3.07× | **1.78×** |
-| 4    | PyTorch FP16 NHWC (channels_last) | 2.42 ms | 1.28× | — |
-| **5** | **PyTorch FP16 NHWC + CUDA graph** | **1.02 ms** | **3.03×** | **1.76×** |
+| Tier | Method | Latency | vs ORT FP32 |
+|------|--------|--------:|:-----------:|
+| 0    | ORT FP32 CUDA EP (baseline) | 2.891 ms | 1.00× |
+| 0b   | ORT TensorRT EP FP32 | 1.764 ms | 1.64× |
+| 2    | PyTorch FP16 NCHW pure ops | 3.391 ms | 0.85× |
+| 3    | PyTorch FP16 NCHW + CUDA graph | 1.195 ms | 2.42× |
+| 4    | PyTorch FP16 NHWC (channels_last) | 2.968 ms | 0.97× |
+| **5** | **PyTorch FP16 NHWC + CUDA graph** | **1.196 ms** | **2.42×** |
 
-> **Recommended:** Tier 3 or 5 — both ~1.0 ms.  The application uses Tier 5 (NHWC + CUDA graph)
-> which is **3.03× faster** than ORT FP32 CUDA EP and **1.76× faster** than ORT TRT EP.
+> **Recommended:** Tier 3 or 5 — both ~1.2 ms.  The application uses Tier 5 (NHWC + CUDA graph)
+> which is **2.42× faster** than ORT FP32 CUDA EP.
 >
 > On PyTorch 2.8 + cuDNN 9.x, cuDNN already auto-selects NHWC convolution kernels for FP16
 > inputs, so Tier 4 vs 2 show identical eager latency.  The CUDA graph is the primary
@@ -40,7 +39,7 @@ All speed-up comes from:
 1. **FP16** — cuDNN dispatches Conv2d on FP16 weights to TensorCore GEMM
    kernels (~2× throughput vs FP32 on Ampere/Ada GPUs).
 2. **CUDA graph** — eliminates Python/CUDA kernel-launch overhead
-   (~3× total gain over ORT FP32, ~1.77× over ORT TRT EP).
+   (~2.44× total gain over ORT FP32).
 3. **NHWC (channels_last)** — model weights converted to NHWC layout so cuDNN
    uses its native NHWC path without internal NCHW↔NHWC reformatting.
    On PyTorch 2.8 + cuDNN 9 the gain is already included in (1); on older
@@ -62,9 +61,9 @@ FP16 vs ORT FP32 (640×640 input):
 
 | Output | Max Absolute Error | Status |
 |--------|--------------------|--------|
-| scores | < 1.0e-3 | Pass |
-| bbox   | < 5.5e-3 (< 1% of typical bbox range) | Pass |
-| kps    | < 3.7e-3 | Pass |
+| scores | < 8.8e-4 | Pass |
+| bbox   | 4.81e-3 (target < 1e-2) | Pass |
+| kps    | 4.09e-3 (target < 1e-2) | Pass |
 
 FP16 convolutions with cuDNN are numerically very close to FP32 for this
 pure-conv architecture (no accumulated groupwise statistics as in GroupNorm).

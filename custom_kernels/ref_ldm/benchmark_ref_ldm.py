@@ -17,6 +17,23 @@ Optional env vars:
 
 from __future__ import annotations
 
+# ── TensorRT DLL discovery (must be before onnxruntime import) ────────────
+import os as _os
+import sys as _sys
+from pathlib import Path as _Path
+
+_REPO_ROOT = _Path(__file__).resolve().parents[2]
+for _candidate in [
+    _REPO_ROOT / ".venv" / "Lib" / "site-packages" / "tensorrt_libs",
+    _REPO_ROOT / ".venv" / "Lib" / "site-packages" / "nvidia" / "cuda_runtime" / "bin",
+]:
+    if _candidate.exists():
+        _os.environ["PATH"] = (
+            str(_candidate) + _os.pathsep + _os.environ.get("PATH", "")
+        )
+del _candidate, _REPO_ROOT, _os, _sys, _Path
+# ──────────────────────────────────────────────────────────────────────────
+
 import os
 import sys
 import time
@@ -65,142 +82,42 @@ def _ort_session(onnx_path: str, provider: str = "CUDAExecutionProvider"):
     return ort.InferenceSession(onnx_path, sess_options=opts, providers=[provider])
 
 
-def _trt_ep_options():
-    return {
-        "trt_engine_cache_enable": True,
-        "trt_engine_cache_path": "tensorrt-engines",
-        "trt_timing_cache_enable": True,
-        "trt_timing_cache_path": "tensorrt-engines",
-        "trt_dump_ep_context_model": True,
-        "trt_ep_context_file_path": "tensorrt-engines",
-        "trt_layer_norm_fp32_fallback": True,
-        "trt_max_workspace_size": 8589934592,
-        "trt_builder_optimization_level": 5,
-    }
+import tempfile as _tempfile
+import shutil as _shutil
 
 
-def _ctx_engine_exists(ctx_path) -> bool:
-    """Return True if the engine file referenced by the ctx.onnx is present."""
-    try:
-        import onnx as _onnx
+def _make_trt_session(onnx_path: str):
+    """Create an ORT TensorRT EP session using a fresh temporary cache dir.
 
-        m = _onnx.load(str(ctx_path))
-        for node in m.graph.node:
-            if node.op_type == "EPContext":
-                for attr in node.attribute:
-                    if attr.name == "ep_cache_context":
-                        rel = attr.s.decode("utf-8", "replace")
-                        # engine path is relative to the ctx file's directory
-                        engine_abs = ctx_path.parent / rel
-                        return engine_abs.exists()
-    except Exception:
-        pass
-    return False
-
-
-def _patch_ctx_engine(ctx_path, new_engine_rel: str):
-    """Return a temporary ctx.onnx path with ep_cache_context replaced."""
-    import onnx as _onnx
-    import tempfile
-    import pathlib
-
-    m = _onnx.load(str(ctx_path))
-    for node in m.graph.node:
-        if node.op_type == "EPContext":
-            for attr in node.attribute:
-                if attr.name == "ep_cache_context":
-                    attr.s = new_engine_rel.encode("utf-8")
-    tmp = pathlib.Path(tempfile.mktemp(suffix=".onnx"))
-    _onnx.save(m, str(tmp))
-    return tmp
-
-
-def _ort_trt_session(onnx_path: str, ctx_name: str):
-    """Create an ORT session with TensorRT EP (same config as the application).
-
-    Load strategy (in order):
-    1. Pre-compiled _ctx.onnx  — instant if engine file is present.
-    2. Engine exists but hash mismatch — patch ctx to point to the right engine.
-    3. Rebuild from original ONNX with trt_builder_optimization_level=3 (fast).
-
-    Imports tensorrt first so nvinfer DLLs are in-process before ORT's TRT provider
-    DLL tries to resolve them (mirrors models_processor.py startup).
+    Returns (session, trt_tmp_dir) on success, or (None, None) on failure.
+    The caller is responsible for calling shutil.rmtree(trt_tmp_dir) when done.
     """
     import onnxruntime as ort
-    import os as _os
 
-    # Pre-load nvinfer DLLs — identical to what models_processor.py does at startup.
+    if (
+        "TensorrtExecutionProvider" not in ort.get_available_providers()
+        or os.environ.get("SKIP_TRT") == "1"
+    ):
+        return None, None
+
+    trt_tmp = _tempfile.mkdtemp(prefix="ort_trt_bench_")
     try:
-        import tensorrt  # noqa: F401  — side-effect: loads nvinfer_10.dll
-    except Exception as _e:
-        print(f"  [WARN] Could not import tensorrt: {_e}")
-
-    if "TensorrtExecutionProvider" not in ort.get_available_providers():
-        return None, "TensorrtExecutionProvider not in ort.get_available_providers()"
-
-    ctx_path = ROOT / "tensorrt-engines" / ctx_name
-    engine_dir = ROOT / "tensorrt-engines" / "tensorrt-engines"
-    tmp_ctx = None  # track any temp file we create
-
-    if ctx_path.exists() and _ctx_engine_exists(ctx_path):
-        load_path = str(ctx_path)  # fast path: engine in place
-    else:
-        # Try to find a matching engine by probing candidate files in size order
-        # (largest engines are more likely to be a complex model like UNet).
-        candidates = sorted(
-            [f for f in engine_dir.glob("*.engine") if "main_graph" in f.name],
-            key=lambda f: f.stat().st_size,
-            reverse=True,
+        opts = {
+            "trt_engine_cache_enable": True,
+            "trt_engine_cache_path": trt_tmp,
+            "trt_timing_cache_enable": True,
+            "trt_timing_cache_path": trt_tmp,
+            "trt_layer_norm_fp32_fallback": True,
+            "trt_max_workspace_size": 8589934592,
+            "trt_builder_optimization_level": 5,
+        }
+        print(
+            "  Tier 0b | ORT TRT EP — building engine (first run may take 1-5 min)..."
         )
-        # Exclude engines already claimed by encoder/decoder ctx files
-        claimed = set()
-        for other_ctx in (ROOT / "tensorrt-engines").glob("*_ctx.onnx"):
-            if other_ctx == ctx_path:
-                continue
-            try:
-                import onnx as _o
-
-                _m = _o.load(str(other_ctx))
-                for _n in _m.graph.node:
-                    if _n.op_type == "EPContext":
-                        for _a in _n.attribute:
-                            if _a.name == "ep_cache_context":
-                                claimed.add(
-                                    _a.s.decode("utf-8", "replace").replace("\\", "/")
-                                )
-            except Exception:
-                pass
-
-        load_path = None
-        for cand in candidates:
-            rel = "tensorrt-engines/" + cand.name
-            if rel.replace("/", "\\") in claimed or rel in claimed:
-                continue  # already used by another model
-            # Patch ctx to point at this candidate and try loading below
-            if ctx_path.exists():
-                tmp_ctx = _patch_ctx_engine(ctx_path, rel.replace("/", "\\"))
-                load_path = str(tmp_ctx)
-            break
-
-        if load_path is None:
-            # No candidate found — rebuild from ONNX (optimization_level=3 for speed)
-            print(
-                f"  [INFO] No cached engine for {ctx_name}; building TRT engine "
-                f"(level=3, may take several minutes)..."
-            )
-            load_path = onnx_path
-
-    opts = _trt_ep_options()
-    if load_path == onnx_path:
-        opts = {**opts, "trt_builder_optimization_level": 3}
-
-    _prev = _os.getcwd()
-    _os.chdir(str(ROOT))
-    try:
         so = ort.SessionOptions()
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         sess = ort.InferenceSession(
-            load_path,
+            onnx_path,
             so,
             providers=[
                 ("TensorrtExecutionProvider", opts),
@@ -208,37 +125,30 @@ def _ort_trt_session(onnx_path: str, ctx_name: str):
                 ("CPUExecutionProvider", {}),
             ],
         )
+        return sess, trt_tmp
     except Exception as _e:
-        if tmp_ctx is not None and load_path == str(tmp_ctx):
-            # Candidate engine didn't match — fall back to rebuild
-            _os.chdir(_prev)
-            tmp_ctx.unlink(missing_ok=True)
-            tmp_ctx = None
-            print("  [INFO] Candidate engine mismatch; rebuilding (level=3)...")
-            opts = {**_trt_ep_options(), "trt_builder_optimization_level": 3}
-            _os.chdir(str(ROOT))
-            try:
-                so2 = ort.SessionOptions()
-                so2.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-                sess = ort.InferenceSession(
-                    onnx_path,
-                    so2,
-                    providers=[
-                        ("TensorrtExecutionProvider", opts),
-                        ("CUDAExecutionProvider", {"device_id": "0"}),
-                        ("CPUExecutionProvider", {}),
-                    ],
-                )
-            except Exception as _e2:
-                return None, str(_e2)
-            finally:
-                _os.chdir(_prev)
-        else:
-            return None, str(_e)
-    finally:
-        _os.chdir(_prev)
-        if tmp_ctx is not None:
-            tmp_ctx.unlink(missing_ok=True)
+        _shutil.rmtree(trt_tmp, ignore_errors=True)
+        print(f"  [WARN] TRT session build failed: {_e}")
+        return None, None
+
+
+def _ort_trt_session(onnx_path: str, ctx_name: str):
+    """Compatibility wrapper: builds a fresh TRT session using tempfile.
+    The ctx_name parameter is ignored (kept for API compat).
+    Returns (session, error_string_or_None).
+    """
+    sess, trt_tmp = _make_trt_session(onnx_path)
+    if sess is None:
+        import onnxruntime as ort
+
+        if "TensorrtExecutionProvider" not in ort.get_available_providers():
+            return (
+                None,
+                "TensorrtExecutionProvider not in ort.get_available_providers()",
+            )
+        return None, "TRT engine build failed"
+    # Store trt_tmp on sess so callers can clean it up
+    sess._trt_tmp = trt_tmp
     return sess, None
 
 
@@ -266,14 +176,21 @@ def bench_encoder():
     t0 = _bench(lambda: sess0.run([out_name], {in_name: inp_np}))
     _print_row("0", "ORT FP32 CUDA EP", t0, t0)
 
-    # Tier 0b — ORT TensorRT EP (same provider config as the application)
+    # Tier 0b — ORT TensorRT EP
     t0b = t0
     sess0b, err0b = _ort_trt_session(ENC_ONNX, "ref_ldm_vae_encoder_ctx.onnx")
     if sess0b is None:
-        print(f"  Tier 0b | ORT TensorRT EP — skipped ({err0b})")
+        print(f"  Tier 0b | ORT TRT EP — skipped ({err0b})")
     else:
-        t0b = _bench(lambda: sess0b.run([out_name], {in_name: inp_np}))
-        _print_row("0b", "ORT TensorRT EP FP32 (app default)", t0b, t0)
+        try:
+            for _ in range(WARMUP):
+                sess0b.run([out_name], {in_name: inp_np})
+            t0b = _bench(lambda: sess0b.run([out_name], {in_name: inp_np}))
+            _print_row("0b", "ORT TRT EP FP32", t0b, t0)
+        except Exception as e:
+            print(f"  Tier 0b | TRT EP — failed: {e}")
+        finally:
+            _shutil.rmtree(getattr(sess0b, "_trt_tmp", None) or "", ignore_errors=True)
 
     # Tier 1  — PyTorch FP32
     sys.path.insert(0, str(ROOT))
@@ -361,14 +278,21 @@ def bench_decoder():
     t0 = _bench(lambda: sess0.run([out_name], {in_name: lat_np}))
     _print_row("0", "ORT FP32 CUDA EP", t0, t0)
 
-    # Tier 0b — ORT TensorRT EP (same provider config as the application)
+    # Tier 0b — ORT TensorRT EP
     t0b = t0
     sess0b, err0b = _ort_trt_session(DEC_ONNX, "ref_ldm_vae_decoder_ctx.onnx")
     if sess0b is None:
-        print(f"  Tier 0b | ORT TensorRT EP — skipped ({err0b})")
+        print(f"  Tier 0b | ORT TRT EP — skipped ({err0b})")
     else:
-        t0b = _bench(lambda: sess0b.run([out_name], {in_name: lat_np}))
-        _print_row("0b", "ORT TensorRT EP FP32 (app default)", t0b, t0)
+        try:
+            for _ in range(WARMUP):
+                sess0b.run([out_name], {in_name: lat_np})
+            t0b = _bench(lambda: sess0b.run([out_name], {in_name: lat_np}))
+            _print_row("0b", "ORT TRT EP FP32", t0b, t0)
+        except Exception as e:
+            print(f"  Tier 0b | TRT EP — failed: {e}")
+        finally:
+            _shutil.rmtree(getattr(sess0b, "_trt_tmp", None) or "", ignore_errors=True)
 
     # Tier 1  — PyTorch FP32
     from custom_kernels.ref_ldm.ref_ldm_torch import RefLDMDecoderTorch
@@ -517,14 +441,21 @@ def bench_unet():
     t0 = _bench(lambda: sess0.run([out_name], feeds))
     _print_row("0", "ORT FP32 CUDA EP (no K/V)", t0, t0)
 
-    # Tier 0b — ORT TensorRT EP (same provider config as the application)
+    # Tier 0b — ORT TensorRT EP
     t0b = t0
     sess0b, err0b = _ort_trt_session(UNET_ONNX, "ref_ldm_unet_external_kv_ctx.onnx")
     if sess0b is None:
-        print(f"  Tier 0b | ORT TensorRT EP — skipped ({err0b})")
+        print(f"  Tier 0b | ORT TRT EP — skipped ({err0b})")
     else:
-        t0b = _bench(lambda: sess0b.run([out_name], feeds))
-        _print_row("0b", "ORT TensorRT EP FP32 (app default)", t0b, t0)
+        try:
+            for _ in range(WARMUP):
+                sess0b.run([out_name], feeds)
+            t0b = _bench(lambda: sess0b.run([out_name], feeds))
+            _print_row("0b", "ORT TRT EP FP32", t0b, t0)
+        except Exception as e:
+            print(f"  Tier 0b | TRT EP — failed: {e}")
+        finally:
+            _shutil.rmtree(getattr(sess0b, "_trt_tmp", None) or "", ignore_errors=True)
 
     # Tier 1  — PyTorch FP32
     from custom_kernels.ref_ldm.ref_ldm_torch import RefLDMUNetTorch

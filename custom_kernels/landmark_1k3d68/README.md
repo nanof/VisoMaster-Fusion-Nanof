@@ -28,15 +28,15 @@ BN(in_ch) ──→ ReLU ──┬──→ Conv1×1(bias) → ReLU → Conv3×3
 GPU: NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
 (50 iterations, 10 warm-up, batch=1)
 
-| Tier | Method | Time | vs ORT CUDA EP | vs ORT TRT EP |
-|------|--------|------|:--------------:|:-------------:|
-| 0    | ORT FP32 CUDA EP (baseline) | 2.056 ms | 1.00× | 0.76× |
-| 0b   | ORT TRT EP | 1.573 ms | 1.31× | 1.00× (baseline) |
-| 1    | PyTorch FP32 eager | 2.759 ms | 0.75× | 0.57× |
-| 2    | PyTorch FP16 eager | 3.023 ms | 0.68× | 0.52× |
-| 3    | **PyTorch FP16 + CUDA graph (Custom)** | **0.767 ms** | **2.68×** | **2.05×** |
+| Tier | Method | Time | vs ORT CUDA EP |
+|------|--------|------|:--------------:|
+| 0    | ORT FP32 CUDA EP (baseline) | 1.855 ms | 1.00× |
+| 0b   | ORT TensorRT EP FP32 | 1.653 ms | 1.12× |
+| 1    | PyTorch FP32 eager | 6.229 ms | 0.30× |
+| 2    | PyTorch FP16 eager | 7.269 ms | 0.26× |
+| 3    | **PyTorch FP16 + CUDA graph (Custom)** | **0.819 ms** | **2.27×** |
 
-The CUDA-graph path (tier 3) is **2.68× faster** than ORT CUDA EP and **2.05× faster** than ORT TRT EP.
+The CUDA-graph path (tier 3) is **2.27× faster** than ORT CUDA EP.
 
 ### Speed-up breakdown (tier 3)
 
@@ -48,7 +48,7 @@ The CUDA-graph path (tier 3) is **2.68× faster** than ORT CUDA EP and **2.05× 
 
 | Mode | Max |Δ| vs ORT FP32 |
 |------|------------------------|
-| FP16 + CUDA graph | 0.0275 ✓ |
+| FP16 + CUDA graph | 0.0188 ✓ |
 
 ## Files
 

@@ -51,7 +51,8 @@ repos:
             (?x)^(
                 app/ui/core/main_window\.py|
                 app/ui/core/media_rc\.py|
-                app/processors/external/.*
+                app/processors/external/.*|
+                custom_kernels/.*
             )$
     -   id: ruff-format
         exclude: *exclude_files

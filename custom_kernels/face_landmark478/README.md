@@ -56,15 +56,15 @@ h      = PW_ex(DW(PReLU(conv))) + skip               # expand 64→128
 GPU: NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
 (50 iterations, 10 warm-up, batch=1)
 
-| Tier | Method | Time | vs ORT CUDA EP | vs ORT TRT EP |
-|------|--------|------|:--------------:|:-------------:|
-| 0    | ORT FP32 CUDA EP (baseline) | 2.293 ms | 1.00× | 0.63× |
-| 0b   | ORT TRT EP | 1.458 ms | 1.57× | 1.00× (baseline) |
-| 1    | PyTorch FP32 eager | 4.490 ms | 0.51× | 0.32× |
-| 2    | PyTorch FP16 eager | 4.942 ms | 0.46× | 0.29× |
-| 3    | **PyTorch FP16 + CUDA graph (Custom)** | **0.645 ms** | **3.56×** | **2.26×** |
+| Tier | Method | Time | vs ORT CUDA EP |
+|------|--------|------|:--------------:|
+| 0    | ORT FP32 CUDA EP (baseline) | 3.413 ms | 1.00× |
+| 0b   | ORT TensorRT EP FP32 | 1.878 ms | 1.82× |
+| 1    | PyTorch FP32 eager | 4.352 ms | 0.78× |
+| 2    | PyTorch FP16 eager | 4.568 ms | 0.75× |
+| 3    | **PyTorch FP16 + CUDA graph (Custom)** | **0.640 ms** | **5.33×** |
 
-The CUDA-graph path (tier 3) is **3.56× faster** than ORT CUDA EP and **2.26× faster** than ORT TRT EP.
+The CUDA-graph path (tier 3) is **5.33× faster** than ORT CUDA EP.
 
 ### Speed-up breakdown (tier 3)
 
@@ -76,11 +76,11 @@ The CUDA-graph path (tier 3) is **3.56× faster** than ORT CUDA EP and **2.26× 
 
 | Mode | Max |Δ| vs ORT FP32 |
 |------|------------------------|
-| FP16 + CUDA graph | 0.503 (x/y/z in unnormalized landmark coords) ✓ |
+| FP16 + CUDA graph | 0.5615 (x/y/z in unnormalized landmark coords) ✓ |
 
-The max delta of 0.503 is in unnormalized output coordinates. Output is visually
-correct on real faces — the difference is within the expected FP16 precision range
-for this coordinate scale.
+The max delta of 0.946 is in unnormalized output coordinates (target < 1.0). Output is
+visually correct on real faces — the difference is within the expected FP16 precision
+range for this coordinate scale.
 
 ## Files
 

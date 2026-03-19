@@ -81,28 +81,25 @@ The ONNX graph implements LN manually (TF export artefact):
 GPU: NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
 (50 iterations, 10 warm-up, batch=1)
 
-| Tier | Method | Time | vs ORT CUDA EP | vs ORT TRT EP |
-|------|--------|------|:--------------:|:-------------:|
-| 0    | ORT FP32 CUDA EP (baseline) | 1.311 ms | 1.00× | 0.22× |
-| 0b   | ORT TRT EP | 0.288 ms | 4.56× | 1.00× (baseline) |
-| 1    | PyTorch FP32 eager | 1.197 ms | 1.10× | 0.24× |
-| 2    | PyTorch FP16 eager | 1.233 ms | 1.06× | 0.23× |
-| 3    | **PyTorch FP16 + CUDA graph (Custom)** | **0.157 ms** | **8.35×** | **1.83×** |
+| Tier | Method | Time | vs ORT CUDA EP |
+|------|--------|------|:--------------:|
+| 0    | ORT FP32 CUDA EP (baseline) | 1.910 ms | 1.00× |
+| 0b   | ORT TRT EP FP32 | 0.313 ms | 6.10× |
+| 1    | PyTorch FP32 eager | 1.485 ms | 1.29× |
+| 2    | PyTorch FP16 eager | 1.330 ms | 1.44× |
+| 3    | **PyTorch FP16 + CUDA graph (Custom)** | **0.202 ms** | **9.48×** |
 
-The CUDA-graph path (tier 3) is **8.35× faster** than ORT CUDA EP and **1.83× faster**
-than ORT TRT EP.
+The CUDA-graph path (tier 3) is **9.48× faster** than ORT CUDA EP.
 
 Note: FaceBlendShapes is a tiny model (~448 K params, ~0.1 ms compute). The CUDA graph
-eliminates Python/driver overhead which dominates at this scale. ORT TRT EP achieves
-4.56× vs ORT CUDA EP by fusing the full graph — but the CUDA-graph custom kernel is
-still **1.83× faster** than TRT EP.
+eliminates Python/driver overhead which dominates at this scale.
 
 ## Accuracy
 
 | Mode | Max |Δ| vs ORT FP32 | Mean |Δ| |
 |------|------------------------|----------|
 | FP32 eager | ~9.5e-7 (rounding only) | ~1.8e-7 |
-| FP16 eager + CUDA graph | 0.00297 (blendshape coefficients in [0,1]) ✓ | ~0.0005 |
+| FP16 eager + CUDA graph | 0.00186 (blendshape coefficients in [0,1]) ✓ | ~0.000313 |
 
 ## Files
 

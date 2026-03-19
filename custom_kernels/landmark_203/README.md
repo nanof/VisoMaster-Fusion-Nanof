@@ -39,16 +39,16 @@ stage3 output (768-ch) → GAP → norm      ──┘
 GPU: NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · Triton 3.6.0 · ORT 1.22.0
 (50 iterations, 10 warm-up, batch=1)
 
-| Tier | Method | Time | vs ORT CUDA EP | vs ORT TRT EP |
-|------|--------|------|:--------------:|:-------------:|
-| 0    | ORT FP32 CUDA EP (baseline) | 4.281 ms | 1.00× | 0.27× |
-| 0b   | ORT TRT EP | 1.158 ms | 3.70× | 1.00× (baseline) |
-| 1    | PyTorch FP32 eager | 3.109 ms | 1.38× | 0.37× |
-| 2    | PyTorch FP16 eager | 4.112 ms | 1.04× | 0.28× |
-| 3    | PyTorch FP16 + Triton LN (eager) | 4.767 ms | 0.90× | 0.24× |
-| 4    | **PyTorch FP16 + Triton LN + CUDA graph (Custom)** | **0.763 ms** | **5.61×** | **1.52×** |
+| Tier | Method | Time | vs ORT CUDA EP |
+|------|--------|------|:--------------:|
+| 0    | ORT FP32 CUDA EP (baseline) | 4.677 ms | 1.00× |
+| 0b   | ORT TensorRT EP FP32 | 1.750 ms | 2.67× |
+| 1    | PyTorch FP32 eager | 3.364 ms | 1.39× |
+| 2    | PyTorch FP16 eager | 4.266 ms | 1.10× |
+| 3    | PyTorch FP16 + Triton LN (eager) | 4.841 ms | 0.97× |
+| 4    | **PyTorch FP16 + Triton LN + CUDA graph (Custom)** | **0.767 ms** | **6.09×** |
 
-The CUDA-graph path (tier 4) is **5.61× faster** than ORT CUDA EP and **1.52× faster** than ORT TRT EP.
+The CUDA-graph path (tier 4) is **6.09× faster** than ORT CUDA EP.
 
 Note: Triton LayerNorm adds overhead in eager mode (tier 3) but pays off significantly
 once the CUDA graph eliminates per-kernel CPU launch overhead (tier 4).
@@ -64,6 +64,8 @@ once the CUDA graph eliminates per-kernel CPU launch overhead (tier 4).
 | Mode | Max |Δ| vs ORT FP32 |
 |------|------------------------|
 | FP16 + Triton LN + CUDA graph | 0.0005 (landmark coords) ✓ |
+
+> (TRT EP: 2.67× faster than ORT CUDA EP. Custom kernel beats TRT EP by 2.28× at 0.767 ms vs 1.750 ms.)
 
 ## Files
 

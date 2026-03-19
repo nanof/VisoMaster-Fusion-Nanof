@@ -98,15 +98,15 @@ and complex exchange units make a hand-coded implementation error-prone.
 GPU: NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
 (50 iterations, 10 warm-up, batch=1)
 
-| Tier | Method | Time | vs ORT CUDA EP | vs ORT TRT EP |
-|------|--------|------|:--------------:|:-------------:|
-| 0    | ORT FP32 CUDA EP (baseline) | 10.574 ms | 1.00× | 0.46× |
-| 0b   | ORT TRT EP | 4.830 ms | 2.19× | 1.00× (baseline) |
-| 1    | PyTorch FP32 eager | 16.274 ms | 0.65× | 0.30× |
-| 2    | PyTorch FP16 eager | 18.667 ms | 0.57× | 0.26× |
-| 3    | **PyTorch FP16 + CUDA graph (Custom)** | **5.129 ms** | **2.06×** | **0.94×** |
+| Tier | Method | Time | vs ORT CUDA EP |
+|------|--------|------|:--------------:|
+| 0    | ORT FP32 CUDA EP (baseline) | 11.292 ms | 1.00× |
+| 0b   | ORT TRT EP FP32 | 13.052 ms | 0.87× ⚠ (slower than CUDA EP) |
+| 1    | PyTorch FP32 eager | 16.623 ms | 0.68× |
+| 2    | PyTorch FP16 eager | 31.148 ms | 0.36× |
+| 3    | **PyTorch FP16 + CUDA graph (Custom)** | **7.495 ms** | **1.51×** |
 
-The CUDA-graph path (tier 3) is **2.06× faster** than ORT CUDA EP and comparable to ORT TRT EP (0.94×).
+The CUDA-graph path (tier 3) is **1.51× faster** than ORT CUDA EP.
 
 CUDA graph speedup is especially impactful here (839-node network) because ORT has
 significant per-kernel CPU launch overhead across all those ops.
@@ -115,9 +115,9 @@ significant per-kernel CPU launch overhead across all those ops.
 
 | Mode | Max |Δ| xy vs ORT FP32 |
 |------|------------------------|
-| FP16 + CUDA graph | 0.265 (normalized [0,1] coords) ✓ |
+| FP16 + CUDA graph | 0.02512 xy (normalized [0,1] coords) ✓ |
 
-The max delta of 0.265 is measured with random noise input, which produces different
+The max xy delta of 0.0597 is measured with random noise input, which produces different
 internal routing through HRNet's conditional branches. On real face images the output
 is visually correct — the delta is expected from FP16 accumulation in the deep 839-node
 network and does not represent a quality regression in practice.

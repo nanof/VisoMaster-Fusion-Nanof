@@ -38,6 +38,12 @@ class Equirectangular:
         self._img_tensor_cxhxw_rgb_uint8 = img_tensor_cxhxw_rgb_uint8
         self.device = img_tensor_cxhxw_rgb_uint8.device
         self._channels, self._height, self._width = self._img_tensor_cxhxw_rgb_uint8.shape
+        # VR-PERF-11: per-frame float32 cache — computed once when the uint8 tensor is
+        # updated (via copy_() in frame_worker), reused across all GetPerspective calls
+        # for that frame, then freed by setting to None at the next copy_() invalidation.
+        # This avoids 24+ redundant uint8→float32 conversions per frame (one per tile/crop)
+        # that were the dominant VR processing bottleneck after the VR-MEM-01 change.
+        self._img_float: "torch.Tensor | None" = None
 
     def GetPerspective(self, FOV: float, THETA: float, PHI: float, height: int, width: int) -> torch.Tensor:
         #
@@ -127,19 +133,18 @@ class Equirectangular:
         grid_y = (lat_px / (equ_h - 1)) * 2.0 - 1.0
         grid = torch.stack((grid_x, grid_y), dim=2).unsqueeze(0) # 1, H_out, W_out, 2
 
-        # VR-MEM-01: convert uint8→float32 here (not persistent) so it is freed immediately
-        # after grid_sample.  The old code stored this tensor as a class attribute, which
-        # kept 216 MiB per FrameWorker alive permanently; removing that is the main fix.
-        # Using float32 (not float16) ensures compatibility with all ORT providers
-        # (CUDA, TensorRT, CPU) and avoids grid_sample dtype constraints.
-        img_float = self._img_tensor_cxhxw_rgb_uint8.float() * (1.0 / 255.0)
+        # VR-PERF-11: use per-frame float cache to avoid re-converting the full equirect
+        # frame for every tile/crop GetPerspective call.  Cache is invalidated (set to None)
+        # by the caller (frame_worker) via copy_() + _img_float = None each new frame.
+        if self._img_float is None:
+            self._img_float = self._img_tensor_cxhxw_rgb_uint8.float() * (1.0 / 255.0)
+        img_float = self._img_float
 
         # Sample from the equirectangular image.
         # padding_mode='border' replicates edge pixels for any residual out-of-bound coords
         # after the fmod/clamp above, avoiding the black-pixel artefacts that 'zeros' caused.
         persp_float = F.grid_sample(img_float.unsqueeze(0), grid,
                                     mode='bilinear', padding_mode='border', align_corners=True)
-        del img_float
 
         # Use round_() before byte() for nearest-integer rounding (matches P2E convention).
         # Plain .byte() truncates toward zero, causing a systematic -0.5 LSB bias on

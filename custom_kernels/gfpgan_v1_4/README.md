@@ -9,15 +9,17 @@ the *Custom* execution provider is selected.
 
 50-iteration warm benchmark:
 
-| Tier | Method | ms | vs ORT CUDA EP | vs ORT TRT EP |
-|------|--------|----|---------------:|---------------:|
-| 0 | ORT FP32 CUDA EP | 14.12 ms | 1.00x (baseline) | 0.79x |
-| 0b | ORT TensorRT EP (app default) | 11.11 ms | 1.27x | 1.00x (baseline) |
-| 1 | PyTorch FP32 pure ops | 12.88 ms | 1.10x | 0.86x |
-| 2 | PyTorch FP16 + Triton demod + fused-act | 8.88 ms | **1.59x** | **1.25x** |
-| 3 | PyTorch FP16 + Triton demod + CUDA graph (Custom) | **7.52 ms** | **1.88x** | **1.48x** |
+| Tier | Method | ms | vs ORT CUDA EP |
+|------|--------|----|---------------:|
+| 0 | ORT FP32 CUDA EP | 20.89 ms | 1.00x (baseline) |
+| 0b | ORT TensorRT EP FP32 | 43.18 ms | 0.48x ⚠ (slower than CUDA EP) |
+| 1 | PyTorch FP32 pure ops | 37.73 ms | 0.55x |
+| 2 | PyTorch FP16 + Triton demod + fused-act | 26.63 ms | 0.78x |
+| 3 | PyTorch FP16 + Triton demod + CUDA graph (Custom) | **19.94 ms** | **1.05x** |
 
-The CUDA-graph path is **1.48x faster** than ORT TRT EP (app default) and **1.88x faster** than ORT CUDA EP.
+The CUDA-graph path is **1.05x faster** than ORT CUDA EP.
+
+> **Note on TRT EP:** ORT TRT EP is slower than CUDA EP for this model (43 ms vs 21 ms). The application therefore benefits from Custom provider even though speedup vs CUDA EP is modest.
 
 Numerical accuracy: `mean|diff|` vs ORT ≈ 0.0096 (p99 ≈ 0.087), visually indistinguishable.
 

@@ -12,6 +12,23 @@ Optional env vars:
 
 from __future__ import annotations
 
+# ── TensorRT DLL discovery (must be before onnxruntime import) ────────────
+import os as _os
+import sys as _sys
+from pathlib import Path as _Path
+
+_REPO_ROOT = _Path(__file__).resolve().parents[2]
+for _candidate in [
+    _REPO_ROOT / ".venv" / "Lib" / "site-packages" / "tensorrt_libs",
+    _REPO_ROOT / ".venv" / "Lib" / "site-packages" / "nvidia" / "cuda_runtime" / "bin",
+]:
+    if _candidate.exists():
+        _os.environ["PATH"] = (
+            str(_candidate) + _os.pathsep + _os.environ.get("PATH", "")
+        )
+del _candidate, _REPO_ROOT, _os, _sys, _Path
+# ──────────────────────────────────────────────────────────────────────────
+
 import os
 import sys
 import time
@@ -84,40 +101,29 @@ def bench():
 
     # ── Tier 0b: ORT TensorRT EP ─────────────────────────────────────────
     t0b = t0
-    try:
-        pass  # registers nvinfer DLL path on Windows
-    except Exception:
-        pass
+    import tempfile
+    import shutil
     import onnxruntime as _ort
 
     if "TensorrtExecutionProvider" not in _ort.get_available_providers():
-        print(
-            "  Tier 0b | TensorRT EP — skipped (TensorrtExecutionProvider not available)"
-        )
+        print("  Tier 0b | TRT EP — skipped (provider not available)")
     else:
-        ctx = ROOT / "tensorrt-engines" / "2d106det_ctx.onnx"
-        if not ctx.exists():
-            print(
-                f"  Tier 0b | TensorRT EP — skipped (no pre-built engine: {ctx.name})"
-            )
-        else:
-            import os as _os
-
-            _prev_cwd = _os.getcwd()
-            _os.chdir(str(ROOT))
+        _trt_tmp = tempfile.mkdtemp(prefix="ort_trt_bench_")
+        try:
             trt_opts = {
                 "trt_engine_cache_enable": True,
-                "trt_engine_cache_path": "tensorrt-engines",
+                "trt_engine_cache_path": _trt_tmp,
                 "trt_timing_cache_enable": True,
-                "trt_timing_cache_path": "tensorrt-engines",
-                "trt_dump_ep_context_model": True,
-                "trt_ep_context_file_path": "tensorrt-engines",
+                "trt_timing_cache_path": _trt_tmp,
                 "trt_layer_norm_fp32_fallback": True,
                 "trt_max_workspace_size": 8589934592,
                 "trt_builder_optimization_level": 5,
             }
             so = _ort.SessionOptions()
             so.graph_optimization_level = _ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            print(
+                "  Tier 0b | ORT TRT EP — building engine (first run may take 1-5 min)..."
+            )
             sess0b = _ort.InferenceSession(
                 str(ONNX_PATH),
                 so,
@@ -127,9 +133,19 @@ def bench():
                     ("CPUExecutionProvider", {}),
                 ],
             )
-            _os.chdir(_prev_cwd)
+            for _ in range(WARMUP):
+                sess0b.run(out_names, {in_name: inp_np})
             t0b = _bench(lambda: sess0b.run(out_names, {in_name: inp_np}))
-            _print_row("0b", "ORT TensorRT EP FP32", t0b, t0)
+            _print_row("0b", "ORT TRT EP FP32", t0b, t0)
+            trt_out = sess0b.run(out_names, {in_name: inp_np})
+            ref_out_0b = sess0.run(out_names, {in_name: inp_np})
+            for i, (a, b) in enumerate(zip(ref_out_0b, trt_out)):
+                diff = abs(np.array(a) - np.array(b)).max()
+                print(f"  TRT vs CUDA EP output[{i}]: max|diff| = {diff:.5e}")
+        except Exception as e:
+            print(f"  Tier 0b | TRT EP — failed: {e}")
+        finally:
+            shutil.rmtree(_trt_tmp, ignore_errors=True)
 
     # ── Tier 1: PyTorch FP32 eager ────────────────────────────────────────
     from custom_kernels.det_106.det_106_torch import Det106Torch

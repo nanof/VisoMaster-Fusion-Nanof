@@ -255,8 +255,8 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
         "VR180TileDetectionToggle": {
             "level": 1,
             "label": "VR Tiled Face Detection",
-            "default": True,
-            "help": "Run face detection on a grid of undistorted perspective crops to catch faces missed by equirect-domain detection. Improves detection of faces at edges, near poles, and near the camera. Slightly slower.",
+            "default": False,
+            "help": "Run face detection on a grid of 24 undistorted perspective crops to catch faces missed by standard detection (faces near poles, the ±180° seam, or very close to the camera). OFF by default — adds ~24 extra detector runs per keyframe. Enable only when standard detection misses faces.",
             "parentToggle": "VR180ModeEnableToggle",
             "requiredToggleValue": True,
         },

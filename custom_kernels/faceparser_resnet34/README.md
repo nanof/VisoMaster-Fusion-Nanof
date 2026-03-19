@@ -14,19 +14,19 @@ Model: **BiSeNet-v1 / ResNet-34**  `(1,3,512,512)f32 → (1,19,512,512)f32`
 **Hardware:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
 **Conditions:** 50 iterations, 10 warm-up, input 512×512
 
-| Tier | Method | ms | vs ORT CUDA EP | vs ORT TRT EP |
-|------|--------|---:|:--------------:|:-------------:|
-| 0    | ORT FP32 CUDA EP (baseline) | 3.81 ms | 1.00x | 0.87x |
-| 0b   | ORT TRT EP (app default) | 3.31 ms | 1.15x | 1.00x (baseline) |
-| 1    | PyTorch FP32 | 2.42 ms | 1.58x | 1.37x |
-| 2    | PyTorch FP16 | 2.86 ms | 1.34x | 1.16x |
-| **3** | **PT FP16 + CUDA graph (Custom)** | **1.23 ms** | **3.11x** | **2.69x** |
+| Tier | Method | ms | vs ORT CUDA EP |
+|------|--------|---:|:--------------:|
+| 0    | ORT FP32 CUDA EP (baseline) | 4.57 ms | 1.00x |
+| 0b   | ORT TensorRT EP FP32 | 3.66 ms | 1.25x |
+| 1    | PyTorch FP32 | 3.82 ms | 1.20x |
+| 2    | PyTorch FP16 | 3.76 ms | 1.22x |
+| **3** | **PT FP16 + CUDA graph (Custom)** | **1.60 ms** | **2.85x** |
 
 > **Application uses Tier 3** (single CUDA graph; fixed 512×512 input).
 > If CUDA graph capture fails, falls back to Tier 2 (FP16 eager).
 
-**Accuracy:** MAE = 6.37e-02, MaxAbsErr = 1.13e+00; Argmax pixel agreement vs ORT
-CUDA EP = **96.04%**.
+**Accuracy:** MAE = 6.44e-02, MaxAbsErr = 1.30e+00; Argmax pixel agreement vs ORT
+CUDA EP = **95.49%**.
 
 > **Note on accuracy baseline:** ORT CUDA EP runs some nodes on CPU due to
 > asymmetric padding in the BiSeNet architecture, introducing rounding artefacts.

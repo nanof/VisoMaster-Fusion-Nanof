@@ -12,13 +12,13 @@ Model: **res50** `(1,3,512,512)f32 → conf(1,10752,2)f32 + landmarks(1,10752,10
 
 50 iterations, 10 warm-up.
 
-| Tier | Method | ms | vs CUDA EP | vs TRT EP |
-|------|--------|---:|-----------:|----------:|
-| 0 | ORT FP32 CUDA EP | 4.59 | 1.00x | 0.52x |
-| 0b | ORT TensorRT EP | 2.38 | 1.92x | 1.00x |
-| 1 | PyTorch FP32 | 3.90 | 1.17x | 0.61x |
-| 2 | PyTorch FP16 | 4.13 | 1.11x | 0.58x |
-| **3** | **PT FP16 + CUDA graph (Custom)** | **1.66** | **2.77x** | **1.43x** |
+| Tier | Method | ms | vs CUDA EP |
+|------|--------|---:|-----------:|
+| 0 | ORT FP32 CUDA EP | 5.40 | 1.00x |
+| 0b | ORT TRT EP FP32 | 3.01 | 1.80x |
+| 1 | PyTorch FP32 | 9.86 | 0.55x |
+| 2 | PyTorch FP16 | 10.75 | 0.50x |
+| **3** | **PT FP16 + CUDA graph (Custom)** | **2.34** | **2.30x** |
 
 > **Application uses Tier 3** (CUDA graph). FaceLandmark5 has no dynamic
 > parameters — the forward pass is fully static and CUDA-graph-capturable.

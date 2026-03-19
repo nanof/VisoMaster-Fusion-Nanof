@@ -14,19 +14,19 @@ Model: **IResNet-50 / ArcFace**  `(1,3,112,112)f32 → (1,512)f32`
 **Hardware:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
 **Conditions:** 50 iterations, 10 warm-up, input 112×112
 
-| Tier | Method | ms | vs ORT CUDA EP | vs ORT TRT EP |
-|------|--------|---:|:--------------:|:-------------:|
-| 0    | ORT FP32 CUDA EP (baseline) | 2.03 ms | 1.00x | 0.90x |
-| 0b   | ORT TRT EP (app default) | 1.82 ms | 1.12x | 1.00x (baseline) |
-| 1    | PyTorch FP32 | 6.11 ms | 0.33x | 0.30x |
-| 2    | PyTorch FP16 | 3.94 ms | 0.51x | 0.46x |
-| **3** | **PT FP16 + CUDA graph (Custom)** | **1.12 ms** | **1.81x** | **1.63x** |
+| Tier | Method | ms | vs ORT CUDA EP |
+|------|--------|---:|:--------------:|
+| 0    | ORT FP32 CUDA EP (baseline) | 4.36 ms | 1.00x |
+| 0b   | ORT TensorRT EP FP32 | 2.73 ms | 1.60x |
+| 1    | PyTorch FP32 | 3.76 ms | 1.16x |
+| 2    | PyTorch FP16 | 4.00 ms | 1.09x |
+| **3** | **PT FP16 + CUDA graph (Custom)** | **1.17 ms** | **3.72x** |
 
 > **Application uses Tier 3** (single CUDA graph; fixed 112×112 input).
 > If CUDA graph capture fails, falls back to Tier 2 (FP16 eager).
 
-**Accuracy:** MAE = 8.32e-04, MaxAbsErr = 3.45e-03;
-Cosine similarity between Custom and ORT outputs = **0.999997** — face recognition
+**Accuracy:** MAE = 7.73e-04, MaxAbsErr = 2.61e-03;
+Cosine similarity between Custom and ORT outputs = **0.999998** — face recognition
 quality is unaffected at normal operating conditions.
 
 ### Speed-up Source

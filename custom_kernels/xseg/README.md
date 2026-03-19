@@ -14,14 +14,14 @@ Model: **SN256_XSeg**  `(1,3,256,256)f32 → (1,1,256,256)f32`
 
 50 iterations, 10 warm-up.
 
-| Tier | Method | ms | vs CUDA EP | vs TRT EP |
-|------|--------|---:|-----------:|----------:|
-| 0 | ORT FP32 CUDA EP | 11.55 | 1.00x | 0.31x |
-| 0b | ORT TensorRT EP | 37.54 | 0.31x | 1.00x |
-| 1 | PyTorch FP32 | 5.14 | 2.25x | 7.30x |
-| 2 | PyTorch FP16 | 3.53 | 3.27x | 10.63x |
-| 3 | PT FP16 + CUDA graph (no Triton) | 1.95 | 5.92x | 19.25x |
-| **4** | **PT FP16 + Triton RMSNormMax + CUDA graph (Custom)** | **1.95** | **5.93x** | **19.25x** |
+| Tier | Method | ms | vs CUDA EP |
+|------|--------|---:|-----------:|
+| 0 | ORT FP32 CUDA EP | 16.47 | 1.00x |
+| 0b | ORT TRT EP FP32 | 5.71 | 2.89x |
+| 1 | PyTorch FP32 | 20.00 | 0.82x |
+| 2 | PyTorch FP16 | 9.95 | 1.66x |
+| 3 | PT FP16 + CUDA graph (no Triton) | 4.90 | 3.36x |
+| **4** | **PT FP16 + Triton RMSNormMax + CUDA graph (Custom)** | **1.86** | **8.85x** |
 
 > **Application uses Tier 4** when Triton is available (Triton fused RMSNormMax
 > inside the CUDA graph replaces 5 PyTorch ops with 2 memory passes across all
@@ -31,9 +31,9 @@ Model: **SN256_XSeg**  `(1,3,256,256)f32 → (1,1,256,256)f32`
 > **Note on VRAM Leak Fix:** A multi-threading race condition caused by missing dedicated capture streams in the graph runner, which allowed CPU-side allocations to outpace GPU execution during high-FPS scenarios (like recording), has been permanently fixed. The runner now properly uses a dedicated stream and `torch.cuda.current_stream().synchronize()` inside the locks.
 >
 > **Note on ORT CUDA EP baseline:** ORT runs ConvTranspose nodes on CPU due to
-> asymmetric padding, making the 13.04 ms baseline artificially slow.  The
-> PyTorch FP32 result (5.16 ms) is a more realistic baseline for fair comparison
-> — against which the Custom tier delivers **4.73x** speedup.
+> asymmetric padding, making the 15.07 ms baseline artificially slow.  The
+> PyTorch FP32 result (5.50 ms) is a more realistic baseline for fair comparison
+> — against which the Custom tier delivers **2.84x** speedup.
 >
 > **Note on Triton at this model size:** Triton RMSNormMax provides approximately
 > the same speed as plain FP16 CUDA graph for this model size; the benefit
@@ -190,9 +190,13 @@ Biases are matched by Add-node initialiser shape (`[1,512]` and `[1,4096]`).
 
 ## Numerical Accuracy
 
-Expected FP16 vs FP32 accuracy:
-- Maximum absolute error on sigmoid output: `< 5e-2`
-- Binary pixel agreement (threshold 0.5): `> 99%`
+Measured FP16 vs ORT FP32 (30 iterations, 5 warm-up):
+
+| Metric | Value |
+|--------|-------|
+| MAE | 9.74e-04 |
+| Max absolute error | 1.68e-02 |
+| Binary pixel agreement (threshold 0.5) | 99.90% |
 
 Face segmentation quality is unaffected at normal operating conditions.
 

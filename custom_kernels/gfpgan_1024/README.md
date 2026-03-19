@@ -12,15 +12,15 @@ Input: 512×512  →  Output: 1024×1024 (super-resolution face restoration)
 **Environment:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · Triton 3.6.0 · ORT 1.22.0
 **Method:** 50 iterations, 10 warm-up passes · Input: (1,3,512,512) f32 → Output: (1,3,1024,1024) f32
 
-| Tier | Method | Latency | vs ORT CUDA EP | vs ORT TRT EP |
-|------|--------|--------:|---------------:|---------------:|
-| 0 | ORT FP32 CUDA EP | 24.28 ms | 1.00x (baseline) | 0.75x |
-| 0b | ORT TensorRT EP (app default) | 18.10 ms | 1.34x | 1.00x (baseline) |
-| 1 | PyTorch FP32 pure ops | 21.45 ms | 1.13x | 0.84x |
-| 2 | PyTorch FP16 + Triton demod + fused-act | 14.02 ms | **1.73x** | **1.29x** |
-| 3 | PyTorch FP16 + Triton demod + CUDA graph (Custom) | **12.67 ms** | **1.92x** | **1.43x** |
+| Tier | Method | Latency | vs ORT CUDA EP |
+|------|--------|--------:|---------------:|
+| 0 | ORT FP32 CUDA EP | 68.49 ms | 1.00x (baseline) |
+| 0b | ORT TensorRT EP FP32 | 30.97 ms | 2.21x |
+| 1 | PyTorch FP32 pure ops | 32.09 ms | 2.13x |
+| 2 | PyTorch FP16 + Triton demod + fused-act | 20.42 ms | **3.35x** |
+| 3 | PyTorch FP16 + Triton demod + CUDA graph (Custom) | **17.90 ms** | **3.83x** |
 
-The CUDA-graph path is **1.43x faster** than ORT TRT EP (app default) and **1.92x faster** than ORT CUDA EP.
+The CUDA-graph path is **3.83x faster** than ORT CUDA EP.
 
 Numerical accuracy: comparable to GFPGANv1.4 (FP16 ~1.6% mean relative error vs ORT).
 

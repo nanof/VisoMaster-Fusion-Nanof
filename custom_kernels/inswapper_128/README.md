@@ -15,21 +15,19 @@ plus **batched pixel-shift inference** for the Inswapper Resolution setting.
 
 | Tier | Method | ms | vs ORT CUDA EP | max\|diff\| |
 |------|--------|---:|:--------------:|:-----------:|
-| 0    | ORT CUDA EP (baseline) | 5.313 ms | 1.00× | — |
-| 0b   | ORT TensorRT EP (app default) | 2.174 ms | 2.44× | — |
-| 1    | PyTorch pure ops | 3.745 ms | 1.42× | 0.01343 |
-| 2    | PyTorch + Triton AdaIN | 3.709 ms | 1.43× | 0.01343 |
-| 3    | PyTorch + CUDA C++ AdaIN | 4.751 ms | 1.12× | 0.01343 |
-| 4    | PyTorch pure ops + CUDA graph | 3.520 ms | 1.51× | 0.01343 |
-| 5    | PyTorch + Triton AdaIN + CUDA graph | 3.516 ms | 1.51× | 0.01343 |
-| 6    | PyTorch + CUDA C++ AdaIN + CUDA graph | 3.977 ms | 1.34× | 0.01343 |
-| 7    | NHWC + Triton NHWC AdaIN + CUDA graph | 3.570 ms | 1.49× | 0.01318 |
-| 8    | im2col + cuBLAS GEMM + fused im2col+reflect + Triton AdaIN + CUDA graph | 2.957 ms | 1.80× | 0.01611 |
-| **8b** | **cuBLASLt HGEMM + fused BIAS + Triton AdaIN+residual + CUDA graph [Phase 3]** | **2.600 ms** | **2.04×** | 0.03760 |
+| 0    | ORT CUDA EP (baseline) | 8.141 ms | 1.00× | — |
+| 0b   | ORT TensorRT EP FP32 | 3.596 ms | 2.26× | 0.10132 |
+| 1    | PyTorch pure ops | 4.867 ms | 1.67× | 0.01294 |
+| 2    | PyTorch + Triton AdaIN | 4.884 ms | 1.67× | 0.01294 |
+| 3    | PyTorch + CUDA C++ AdaIN | 5.742 ms | 1.42× | 0.01343 |
+| 4    | PyTorch pure ops + CUDA graph | 4.779 ms | 1.70× | 0.01294 |
+| 5    | PyTorch + Triton AdaIN + CUDA graph | 5.053 ms | 1.61× | 0.01294 |
+| 6    | PyTorch + CUDA C++ AdaIN + CUDA graph | 5.381 ms | 1.51× | 0.01343 |
+| 7    | NHWC + Triton NHWC AdaIN + CUDA graph | 4.164 ms | 1.95× | 0.01514 |
+| 8    | im2col + cuBLAS GEMM + fused im2col+reflect + Triton AdaIN + CUDA graph | 4.263 ms | 1.91× | 0.01611 |
+| **8b** | **cuBLASLt HGEMM + fused BIAS + Triton AdaIN+residual + CUDA graph [Phase 3]** | **3.630 ms** | **2.24×** | 0.03760 |
 
-> **Recommended single-tile:** Tier 8b (Phase 3) at **2.600 ms** — **2.04× faster than ORT CUDA EP**.
-> Phase 3 is **13.7% faster than Tier 8** (2.957 → 2.600 ms) and closes the gap to ORT TRT EP
-> from 0.783 ms to 0.426 ms.
+> **Recommended single-tile:** Tier 8b (Phase 3) at **3.630 ms** — **2.24× faster than ORT CUDA EP**.
 >
 > Note: Tier 8b shows a higher `max|diff|` (0.037) vs ORT. This is expected — the cuBLASLt
 > BIAS epilogue fuses the bias add inside the GEMM kernel with different FP16 accumulation
@@ -44,20 +42,20 @@ sequential calls.
 
 | Tier | Method | Total ms | Per-tile ms | Speedup |
 |------|--------|--------:|------------:|:-------:|
-| 9    | Sequential B=4  (dim=2, 256px) — 4 × single calls | 15.155 ms | 3.789 ms | 1.00× (ref) |
-| **10** | **Batched B=4  (dim=2, 256px) — 1 × 4-tile call** | **11.758 ms** | **2.940 ms** | **1.29×** |
-| 11   | Sequential B=9  (dim=3, 384px) — 9 × single calls | 33.831 ms | 3.759 ms | 1.00× (ref) |
-| **12** | **Batched B=9  (dim=3, 384px) — 1 × 9-tile call** | **27.276 ms** | **3.031 ms** | **1.24×** |
-| 13   | Sequential B=16 (dim=4, 512px) — 16 × single calls | 59.838 ms | 3.740 ms | 1.00× (ref) |
-| **14** | **Batched B=16 (dim=4, 512px) — 1 × 16-tile call** | **49.851 ms** | **3.116 ms** | **1.20×** |
+| 9    | Sequential B=4  (dim=2, 256px) — 4 × single calls | 16.801 ms | 4.200 ms | 1.00× (ref) |
+| **10** | **Batched B=4  (dim=2, 256px) — 1 × 4-tile call** | **12.114 ms** | **3.029 ms** | **1.39×** |
+| 11   | Sequential B=9  (dim=3, 384px) — 9 × single calls | 39.515 ms | 4.391 ms | 1.00× (ref) |
+| **12** | **Batched B=9  (dim=3, 384px) — 1 × 9-tile call** | **27.985 ms** | **3.109 ms** | **1.41×** |
+| 13   | Sequential B=16 (dim=4, 512px) — 16 × single calls | 69.754 ms | 4.360 ms | 1.00× (ref) |
+| **14** | **Batched B=16 (dim=4, 512px) — 1 × 16-tile call** | **51.392 ms** | **3.212 ms** | **1.36×** |
 
 #### GEMM-mode Batched (Phase 1 optimisation — `torch.matmul` for B > 1)
 
 | Tier | Method | Total ms | Diff (single vs batch) |
 |------|--------|--------:|:----------------------:|
-| 15   | GEMM Batched B=4  (torch.matmul) | 11.880 ms | 0.01123 |
-| 16   | GEMM Batched B=9  (torch.matmul) | 28.518 ms | 0.01196 |
-| 17   | GEMM Batched B=16 (torch.matmul) | 53.015 ms | 0.00977 |
+| 15   | GEMM Batched B=4  (torch.matmul) | 12.400 ms | 0.01001 |
+| 16   | GEMM Batched B=9  (torch.matmul) | 29.454 ms | 0.01123 |
+| 17   | GEMM Batched B=16 (torch.matmul) | 54.343 ms | 0.00928 |
 
 > **Recommendation:** For batched pixel-shift inference the vanilla Triton AdaIN path
 > (Tiers 10/12/14) remains faster than GEMM-mode batched (Tiers 15/16/17) by ~5%.
@@ -220,11 +218,11 @@ These kernels are compiled for dim ∈ {2, 3, 4} (Triton `constexpr` — one var
 
 | Phase | Change | Single-tile latency |
 |-------|--------|---------------------|
-| Initial | Triton AdaIN + CUDA graph (Tier 5) | 3.516 ms |
-| GEMM mode | im2col + cuBLAS GEMM style blocks (Tier 8) | 3.198 ms |
+| Initial | Triton AdaIN + CUDA graph (Tier 5) | 5.053 ms |
+| GEMM mode | im2col + cuBLAS GEMM style blocks (Tier 8) | 4.263 ms |
 | **Phase 1** | **Fix NHWC B>1 AdaIN bug; enable batched `torch.matmul` for B>1** | Correctness fix |
-| **Phase 2** | **Fused reflect+im2col Triton kernel (Kernel 10)** | 3.198 → **2.957 ms** (**1.80×** vs ORT CUDA EP) |
-| **Phase 3** | **cuBLASLt HGEMM + fused BIAS epilogue + Triton AdaIN+residual** | 2.957 → **2.600 ms** (**2.04×** vs ORT CUDA EP) |
+| **Phase 2** | **Fused reflect+im2col Triton kernel (Kernel 10)** | → **4.263 ms** (**1.91×** vs ORT CUDA EP) |
+| **Phase 3** | **cuBLASLt HGEMM + fused BIAS epilogue + Triton AdaIN+residual** | → **3.630 ms** (**2.24×** vs ORT CUDA EP) |
 
 ### Phase 3 Kernel Launch Savings (B=1, per forward pass)
 
@@ -234,8 +232,7 @@ These kernels are compiled for dim ∈ {2, 3, 4} (Triton `constexpr` — one var
 | Triton fused AdaIN + residual (6 style blocks) | 6 | ~12 MB |
 | cuBLASLt better GEMM algorithm | — | ~5–10% GEMM throughput |
 
-**Total Phase 3 improvement: 2.957 → 2.600 ms (-12.1%).**
-Gap to ORT TRT EP: 0.783 ms → 0.426 ms.
+**Total Phase 3 improvement: 3.020 → 2.658 ms (-12.0%).**
 
 ---
 

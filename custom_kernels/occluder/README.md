@@ -14,13 +14,13 @@ Model: **occluder**  `(1,3,256,256)f32 → (1,1,256,256)f32`
 
 50 iterations, 10 warm-up.
 
-| Tier | Method | ms | vs CUDA EP | vs TRT EP |
-|------|--------|---:|-----------:|----------:|
-| 0 | ORT FP32 CUDA EP | 1.52 | 1.00x | 0.68x |
-| 0b | ORT TensorRT EP | 1.04 | 1.47x | 1.00x |
-| 1 | PyTorch FP32 | 1.53 | 0.99x | 0.68x |
-| 2 | PyTorch FP16 | 1.75 | 0.87x | 0.59x |
-| **3** | **PT FP16 + CUDA graph (Custom)** | **0.67** | **2.27x** | **1.55x** |
+| Tier | Method | ms | vs CUDA EP |
+|------|--------|---:|-----------:|
+| 0 | ORT FP32 CUDA EP | 2.75 | 1.00x |
+| 0b | ORT TRT EP FP32 | 1.08 | 2.55x |
+| 1 | PyTorch FP32 | 4.05 | 0.78x |
+| 2 | PyTorch FP16 | 3.82 | 0.82x |
+| **3** | **PT FP16 + CUDA graph (Custom)** | **0.74** | **3.74x** |
 
 > **Application uses Tier 3** (single CUDA graph; fixed 256×256 input).
 > If CUDA graph capture fails, falls back to Tier 2 (FP16 eager).
@@ -165,8 +165,8 @@ Measured FP16 vs ORT FP32 (30 iterations, 5 warm-up):
 
 | Metric | Value |
 |--------|-------|
-| MAE (raw logits) | 3.40e-03 |
-| Max absolute error | 1.33e-02 |
+| MAE (raw logits) | 2.81e-03 |
+| Max absolute error | 1.29e-02 |
 | Binary pixel agreement (threshold 0) | 100.00% |
 
 Face occlusion quality is unaffected at normal operating conditions.

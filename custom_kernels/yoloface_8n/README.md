@@ -14,15 +14,15 @@ application when the *Custom* execution provider is selected.
 
 50 iterations, 10 warm-up; input 640×640:
 
-| Method | Latency | vs ORT CUDA EP | vs ORT TRT EP |
-|--------|---------|:--------------:|:-------------:|
-| ORT FP32 CUDA EP | 3.91 ms | 1.00x (baseline) | 0.40x |
-| ORT TensorRT EP (app default) | 1.56 ms | 2.50x | 1.00x (baseline) |
-| PyTorch FP32 | 4.74 ms | 0.82x | 0.33x |
-| PyTorch FP16 | 5.42 ms | 0.72x | 0.29x |
-| **PT FP16 + CUDA graph (Custom)** | **1.08 ms** | **3.61x** | **1.44x** |
+| Method | Latency | vs ORT CUDA EP |
+|--------|---------|:--------------:|
+| ORT FP32 CUDA EP | 3.29 ms | 1.00x (baseline) |
+| ORT TensorRT EP FP32 | 1.81 ms | 1.82x |
+| PyTorch FP32 | 4.49 ms | 0.73x |
+| PyTorch FP16 | 7.01 ms | 0.47x |
+| **PT FP16 + CUDA graph (Custom)** | **1.11 ms** | **2.97x** |
 
-The CUDA-graph path is **3.61x faster** than ORT CUDA EP and **1.44x faster** than ORT TRT EP.
+The CUDA-graph path is **2.97x faster** than ORT CUDA EP.
 
 > **Application uses PT FP16 + CUDA graph** (single captured graph; fixed 640×640 input).
 > If CUDA graph capture fails, falls back to FP16 eager.

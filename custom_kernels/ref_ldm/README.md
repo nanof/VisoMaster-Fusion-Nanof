@@ -22,56 +22,57 @@ selected.
 
 | Tier | Method | Latency | vs ORT CUDA EP |
 |------|--------|--------:|:--------------:|
-| 0    | ORT FP32 CUDA EP (baseline) | 20.94 ms | 1.00× |
-| 0b   | ORT TensorRT EP FP32 (app default) | 12.17 ms | 1.72× |
-| 1    | PyTorch FP32 pure ops | 21.59 ms | 0.97× |
-| 2    | PyTorch FP16 + Triton GroupNorm+SiLU | 10.52 ms | 1.99× |
-| **3** | **FP16 + Triton + CUDA graph** | **10.25 ms** | **2.04×** |
-| 4    | FP16 + Triton + CUDA graph + NHWC | 13.80 ms | 1.52× |
+| 0    | ORT FP32 CUDA EP (baseline) | 21.17 ms | 1.00× |
+| 0b   | ORT TensorRT EP FP32 | — *(crashes: Windows access violation during engine build)* | — |
+| 1    | PyTorch FP32 pure ops | 21.96 ms | 0.96× |
+| 2    | PyTorch FP16 + Triton GroupNorm+SiLU | 10.81 ms | 1.96× |
+| **3** | **FP16 + Triton + CUDA graph** | **10.58 ms** | **2.00×** |
+| 4    | FP16 + Triton + CUDA graph + NHWC | 14.05 ms | 1.51× |
 
 > NHWC (Tier 4) is slower for the encoder on cuDNN 9 — the small channel counts
 > (128–512) don't benefit from NHWC at this spatial resolution. **Tier 3 is used by default.**
-> Custom kernel (Tier 3) beats TRT EP by **1.19× (10.25 vs 12.17 ms)**.
 
 ### VAE Decoder (1,8,64,64) → (1,3,512,512)
 
 | Tier | Method | Latency | vs ORT CUDA EP |
 |------|--------|--------:|:--------------:|
-| 0    | ORT FP32 CUDA EP (baseline) | 70.08 ms | 1.00× |
-| 0b   | ORT TensorRT EP FP32 (app default) | 21.43 ms | 3.27× |
-| 1    | PyTorch FP32 pure ops | 36.05 ms | 1.94× |
-| 2    | PyTorch FP16 + Triton GroupNorm+SiLU | 17.12 ms | 4.09× |
-| **3** | **FP16 + Triton + CUDA graph** | **16.97 ms** | **4.13×** |
-| 4    | FP16 + Triton + CUDA graph + NHWC | 23.91 ms | 2.93× |
+| 0    | ORT FP32 CUDA EP (baseline) | 71.21 ms | 1.00× |
+| 0b   | ORT TensorRT EP FP32 | — *(crashes: Windows access violation during engine build)* | — |
+| 1    | PyTorch FP32 pure ops | 36.42 ms | 1.96× |
+| 2    | PyTorch FP16 + Triton GroupNorm+SiLU | 17.51 ms | 4.07× |
+| **3** | **FP16 + Triton + CUDA graph** | **17.23 ms** | **4.13×** |
+| 4    | FP16 + Triton + CUDA graph + NHWC | 23.96 ms | 2.97× |
 
 > The `norm_out` GroupNorm fuses the SiLU activation directly inside the Triton kernel
 > (eliminates a separate read + write of the 512×512 feature map), saving ~0.5 ms per call.
 > NHWC (Tier 4) regresses for the decoder — small channel counts (ch=128) at 512×512 spatial
 > resolution don't benefit from cuDNN NHWC layout. **Tier 3 (NCHW) is used by default.**
-> Custom kernel (Tier 3) beats TRT EP by **1.26× (16.97 vs 21.43 ms)**.
 
 ### UNet Denoiser (1,16,64,64) + K/V → (1,8,64,64)
 
 | Tier | Method | Latency | vs ORT CUDA EP |
 |------|--------|--------:|:--------------:|
-| 0    | ORT FP32 CUDA EP — no K/V (baseline) | 9.60 ms | 1.00× |
-| 0b   | ORT TensorRT EP FP32 (app default) | 6.67 ms | 1.44× |
-| 1    | PyTorch FP32 pure ops | 28.17 ms | 0.34× |
-| 2    | PyTorch FP16 + Triton GroupNorm+SiLU | 28.48 ms | 0.34× |
-| 3    | FP16 + Triton + CUDA graph | 5.36 ms | 1.79× |
-| **4** | **FP16 + Triton + CUDA graph + NHWC** | **5.25 ms** | **1.83×** |
+| 0    | ORT FP32 CUDA EP — no K/V (baseline) | 10.25 ms | 1.00× |
+| 0b   | ORT TensorRT EP FP32 | — *(crashes: Windows access violation during engine build)* | — |
+| 1    | PyTorch FP32 pure ops | 15.63 ms | 0.66× |
+| 2    | PyTorch FP16 + Triton GroupNorm+SiLU | 15.54 ms | 0.66× |
+| 3    | FP16 + Triton + CUDA graph | 5.28 ms | 1.94× |
+| **4** | **FP16 + Triton + CUDA graph + NHWC** | **5.25 ms** | **1.95×** |
 
 > The UNet CUDA graph (Tier 3/4) works because K/V tensors are **static buffers** that are
 > copied into the graph's pre-allocated memory each call — the graph sees constant shapes.
-> ORT CUDA EP baseline uses zeroed K/V; PyTorch Tiers 1–2 include real K/V concat per block,
-> explaining the higher eager latency.  Once the CUDA graph is captured, kernel-launch overhead
-> is eliminated and the UNet runs at **5.25 ms** — **1.83× faster than ORT CUDA EP**.
-> Custom kernel (Tier 4) beats TRT EP by **1.27× (5.25 vs 6.67 ms)**.
+> ORT CUDA EP baseline uses zeroed K/V; PyTorch Tiers 1–2 run eager with real K/V (higher
+> latency due to Python/kernel-launch overhead).  Once the CUDA graph is captured, kernel-launch
+> overhead is eliminated and the UNet runs at **5.25 ms** — **1.95× faster than ORT CUDA EP**.
+
+> **Note:** ORT TensorRT EP crashes with a Windows access violation (rc=3221225477) during engine
+> build for all three ReF-LDM models. Custom kernels deliver 2.00×/4.13×/1.95× speedups over
+> ORT CUDA EP baseline without TRT dependency.
 
 > **Application uses:**
 > - VAE Encoder → **Tier 3** (CUDA graph, NCHW — NHWC is slower for this model)
 > - VAE Decoder → **Tier 3** (CUDA graph, NCHW — NHWC is slower for this model)
-> - UNet → **Tier 4** (CUDA graph + NHWC — 1.83× faster than ORT CUDA EP, 1.27× faster than TRT EP)
+> - UNet → **Tier 4** (CUDA graph + NHWC — 1.95× faster than ORT CUDA EP)
 
 ### Kernel Priority Chain
 

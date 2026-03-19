@@ -17,15 +17,15 @@ Pre-processing `(x − 127.5) × 0.0078125` → **[−1, 1]** is baked into `for
 
 50 iterations, 10 warm-up; input 192×192:
 
-| Method | Latency | vs ORT CUDA EP | vs ORT TRT EP |
-|--------|---------|:--------------:|:-------------:|
-| ORT FP32 CUDA EP | 0.707 ms | 1.00x (baseline) | 0.84x |
-| ORT TensorRT EP (app default) | 0.592 ms | 1.19x | 1.00x (baseline) |
-| PyTorch FP32 | 1.036 ms | 0.68x | 0.57x |
-| PyTorch FP16 | 1.179 ms | 0.60x | 0.50x |
-| **PT FP16 + CUDA graph (Custom)** | **0.199 ms** | **3.55x** | **2.98x** |
+| Method | Latency | vs ORT CUDA EP |
+|--------|---------|:--------------:|
+| ORT FP32 CUDA EP | 0.729 ms | 1.00x (baseline) |
+| ORT TensorRT EP FP32 | 0.848 ms | 0.86x ⚠ (slower than CUDA EP) |
+| PyTorch FP32 | 1.232 ms | 0.59x |
+| PyTorch FP16 | 1.453 ms | 0.50x |
+| **PT FP16 + CUDA graph (Custom)** | **0.301 ms** | **2.42x** |
 
-The CUDA-graph path is **3.55x faster** than ORT CUDA EP and **2.98x faster** than ORT TRT EP.
+The CUDA-graph path is **2.42x faster** than ORT CUDA EP.
 
 > **Application uses PT FP16 + CUDA graph** (single captured graph; fixed 192×192 input).
 > If CUDA graph capture fails, falls back to FP16 eager.
@@ -51,7 +51,7 @@ FP16 CUDA graph vs ORT FP32 (192×192 input):
 
 | Output | Max Absolute Error | Status |
 |--------|--------------------|--------|
-| Landmarks (x/y in model space [−1, 1]) | 0.0004 | Pass |
+| Landmarks (x/y in model space [−1, 1]) | 5.0e-4 | Pass |
 
 ## Architecture Notes
 

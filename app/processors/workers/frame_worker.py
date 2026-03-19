@@ -1140,6 +1140,9 @@ class FrameWorker(threading.Thread):
             self._vr_converter.equirect_tensor_cxhxw_rgb_uint8.copy_(
                 torch.from_numpy(img_numpy_rgb_uint8).permute(2, 0, 1)
             )
+            # VR-PERF-11: invalidate the per-frame float cache so GetPerspective
+            # recomputes it once from the fresh uint8 data (instead of 24+ times).
+            self._vr_converter.e2p_instance._img_float = None
         equirect_converter = self._vr_converter
         assert equirect_converter is not None, (
             "VR converter must be initialized before use"
@@ -1309,7 +1312,7 @@ class FrameWorker(threading.Thread):
         # Skip tile detection for Custom provider entirely.
         _skip_tile_det = self.models_processor.provider_name == "Custom"
         if (
-            control.get("VR180TileDetectionToggle", True)
+            control.get("VR180TileDetectionToggle", False)
             and _is_detection_keyframe
             and not _skip_tile_det
         ):

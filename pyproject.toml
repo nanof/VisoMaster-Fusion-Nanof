@@ -27,6 +27,7 @@ exclude = [
     "app/processors/external/",   # vendored third-party code
     "app/ui/core/media_rc\\.py",  # auto-generated Qt resource file
     "app/ui/core/main_window\\.py",
+    "custom_kernels/",            # standalone benchmark/utility scripts, not app code
 ]
 
 # Per-module overrides for packages that ship no stubs and are heavy to analyse.
@@ -51,6 +52,10 @@ module = [
 ignore_missing_imports = true
 follow_imports = "skip"
 
+[tool.ruff.lint]
+# benchmark scripts have a mandatory TensorRT DLL-path setup block before imports
+per-file-ignores = { "custom_kernels/**/benchmark_*.py" = ["E402"], "custom_kernels/run_all_benchmarks.py" = ["E402"] }
+
 [tool.pytest.ini_options]
 testpaths  = ["tests"]
 addopts    = "-ra -q --tb=short"
@@ -58,4 +63,5 @@ markers    = [
     "slow: tests that take > 2 s (deselect with -m 'not slow')",
     "gpu:  tests requiring a CUDA device",
     "qt:   tests requiring a Qt application instance",
+    "integration: integration tests requiring GPU + model files",
 ]

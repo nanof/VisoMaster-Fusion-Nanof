@@ -7,6 +7,23 @@ Run via:
     .venv/Scripts/python custom_kernels/gpen_bfr/benchmark_gpen.py [256|512|1024|2048]
 """
 
+# ── TensorRT DLL discovery (must be before onnxruntime import) ────────────
+import os as _os
+import sys as _sys
+from pathlib import Path as _Path
+
+_REPO_ROOT = _Path(__file__).resolve().parents[2]
+for _candidate in [
+    _REPO_ROOT / ".venv" / "Lib" / "site-packages" / "tensorrt_libs",
+    _REPO_ROOT / ".venv" / "Lib" / "site-packages" / "nvidia" / "cuda_runtime" / "bin",
+]:
+    if _candidate.exists():
+        _os.environ["PATH"] = (
+            str(_candidate) + _os.pathsep + _os.environ.get("PATH", "")
+        )
+del _candidate, _REPO_ROOT, _os, _sys, _Path
+# ──────────────────────────────────────────────────────────────────────────
+
 import sys
 import time
 import os
@@ -56,56 +73,53 @@ def run_ort(model_path, inp_hw):
 
 
 def run_ort_trt(model_path, inp_hw, model_stem):
+    import tempfile
+    import shutil
     import numpy as np
     import onnxruntime as ort
     import torch
 
-    try:
-        pass
-    except Exception:
-        pass
     if "TensorrtExecutionProvider" not in ort.get_available_providers():
         print("  SKIP: TensorrtExecutionProvider not available")
         return None
-    ctx = ROOT / "tensorrt-engines" / f"{model_stem}_ctx.onnx"
-    if not ctx.exists():
-        print(f"  SKIP: no pre-built TRT engine ({ctx.name})")
+    _trt_tmp = tempfile.mkdtemp(prefix="ort_trt_bench_")
+    try:
+        trt_opts = {
+            "trt_engine_cache_enable": True,
+            "trt_engine_cache_path": _trt_tmp,
+            "trt_timing_cache_enable": True,
+            "trt_timing_cache_path": _trt_tmp,
+            "trt_layer_norm_fp32_fallback": True,
+            "trt_max_workspace_size": 8589934592,
+            "trt_builder_optimization_level": 5,
+        }
+        so = ort.SessionOptions()
+        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        print("  Building TRT engine (first run may take 1-5 min)...")
+        sess = ort.InferenceSession(
+            model_path,
+            so,
+            providers=[
+                ("TensorrtExecutionProvider", trt_opts),
+                ("CUDAExecutionProvider", {"device_id": "0"}),
+                ("CPUExecutionProvider", {}),
+            ],
+        )
+        inp_name = sess.get_inputs()[0].name
+        inp = np.random.default_rng(0).random((1, 3, inp_hw, inp_hw)).astype("float32")
+        for _ in range(WARMUP):
+            sess.run(None, {inp_name: inp})
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        for _ in range(RUNS):
+            sess.run(None, {inp_name: inp})
+        torch.cuda.synchronize()
+        return ms(t0, time.perf_counter(), RUNS)
+    except Exception as e:
+        print(f"  FAILED: {e}")
         return None
-    _prev = os.getcwd()
-    os.chdir(str(ROOT))
-    trt_opts = {
-        "trt_engine_cache_enable": True,
-        "trt_engine_cache_path": "tensorrt-engines",
-        "trt_timing_cache_enable": True,
-        "trt_timing_cache_path": "tensorrt-engines",
-        "trt_dump_ep_context_model": True,
-        "trt_ep_context_file_path": "tensorrt-engines",
-        "trt_layer_norm_fp32_fallback": True,
-        "trt_max_workspace_size": 8589934592,
-        "trt_builder_optimization_level": 5,
-    }
-    so = ort.SessionOptions()
-    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    sess = ort.InferenceSession(
-        model_path,
-        so,
-        providers=[
-            ("TensorrtExecutionProvider", trt_opts),
-            ("CUDAExecutionProvider", {"device_id": "0"}),
-            ("CPUExecutionProvider", {}),
-        ],
-    )
-    os.chdir(_prev)
-    inp_name = sess.get_inputs()[0].name
-    inp = np.random.default_rng(0).random((1, 3, inp_hw, inp_hw)).astype("float32")
-    for _ in range(WARMUP):
-        sess.run(None, {inp_name: inp})
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
-    for _ in range(RUNS):
-        sess.run(None, {inp_name: inp})
-    torch.cuda.synchronize()
-    return ms(t0, time.perf_counter(), RUNS)
+    finally:
+        shutil.rmtree(_trt_tmp, ignore_errors=True)
 
 
 def run_pytorch(model_path, inp_hw, fp16: bool):

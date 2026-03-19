@@ -25,6 +25,23 @@ Compares inference strategies for inswapper_128.fp16.onnx:
 Also verifies numerical correctness against Tier 0 (ORT).
 """
 
+# ── TensorRT DLL discovery (must be before onnxruntime import) ────────────
+import os as _os
+import sys as _sys
+from pathlib import Path as _Path
+
+_REPO_ROOT = _Path(__file__).resolve().parents[2]
+for _candidate in [
+    _REPO_ROOT / ".venv" / "Lib" / "site-packages" / "tensorrt_libs",
+    _REPO_ROOT / ".venv" / "Lib" / "site-packages" / "nvidia" / "cuda_runtime" / "bin",
+]:
+    if _candidate.exists():
+        _os.environ["PATH"] = (
+            str(_candidate) + _os.pathsep + _os.environ.get("PATH", "")
+        )
+del _candidate, _REPO_ROOT, _os, _sys, _Path
+# ──────────────────────────────────────────────────────────────────────────
+
 import sys
 import os
 import pathlib
@@ -125,28 +142,20 @@ def main():
     print(sep)
     print("Tier 0b -- ORT TensorRT EP (app default)")
     ms0b = float("nan")
-    try:
-        pass  # registers nvinfer DLL path on Windows
-    except Exception:
-        pass
+    import tempfile
+    import shutil
     import onnxruntime as _ort_trt
 
     if "TensorrtExecutionProvider" not in _ort_trt.get_available_providers():
         print("  SKIP: TensorrtExecutionProvider not available")
     else:
-        _ctx = ROOT / "tensorrt-engines" / "inswapper_128.fp16_ctx.onnx"
-        if not _ctx.exists():
-            print(f"  SKIP: no pre-built TRT engine ({_ctx.name})")
-        else:
-            _prev_cwd = os.getcwd()
-            os.chdir(str(ROOT))
+        _trt_tmp = tempfile.mkdtemp(prefix="ort_trt_bench_")
+        try:
             _trt_opts = {
                 "trt_engine_cache_enable": True,
-                "trt_engine_cache_path": "tensorrt-engines",
+                "trt_engine_cache_path": _trt_tmp,
                 "trt_timing_cache_enable": True,
-                "trt_timing_cache_path": "tensorrt-engines",
-                "trt_dump_ep_context_model": True,
-                "trt_ep_context_file_path": "tensorrt-engines",
+                "trt_timing_cache_path": _trt_tmp,
                 "trt_layer_norm_fp32_fallback": True,
                 "trt_max_workspace_size": 8589934592,
                 "trt_builder_optimization_level": 5,
@@ -155,6 +164,7 @@ def main():
             _so.graph_optimization_level = (
                 _ort_trt.GraphOptimizationLevel.ORT_ENABLE_ALL
             )
+            print("  Building TRT engine (first run may take 1-5 min)...")
             _sess_trt = _ort_trt.InferenceSession(
                 MODEL_PATH,
                 _so,
@@ -164,13 +174,19 @@ def main():
                     ("CPUExecutionProvider", {}),
                 ],
             )
-            os.chdir(_prev_cwd)
             for _ in range(WARMUP):
                 ort_run(_sess_trt, target_np, source_np)
             ms0b = timed(
                 lambda: ort_run(_sess_trt, target_np, source_np), RUNS, sync=False
             )
+            out_trt = ort_run(_sess_trt, target_np, source_np)
+            diff_trt = np.abs(out_trt - out_ort).max()
             print(f"  Latency : {ms0b:.3f} ms  ({ms0 / ms0b:.2f}x vs ORT CUDA EP)")
+            print(f"  Max |diff| vs ORT CUDA EP: {diff_trt:.5f}")
+        except Exception as e:
+            print(f"  FAILED: {e}")
+        finally:
+            shutil.rmtree(_trt_tmp, ignore_errors=True)
 
     # ------------------------------------------------------------------ Tier 1
     print(sep)

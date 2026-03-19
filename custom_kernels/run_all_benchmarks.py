@@ -58,7 +58,10 @@ def run_benchmark(rel_path: str) -> tuple[bool, str]:
     print(f"  Running: {rel_path}")
     print(f"{'=' * 60}")
     t0 = time.perf_counter()
+    trt_libs = ROOT / ".venv" / "Lib" / "site-packages" / "tensorrt_libs"
     env = {**__import__("os").environ, "PYTHONIOENCODING": "utf-8"}
+    if trt_libs.exists():
+        env["PATH"] = str(trt_libs) + __import__("os").pathsep + env.get("PATH", "")
     result = subprocess.run(
         [str(VENV_PY), str(script)],
         capture_output=True,

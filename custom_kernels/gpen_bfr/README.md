@@ -21,13 +21,17 @@ With Triton-accelerated kernels (demod + fused activation):
 
 | Model | ORT CUDA EP | ORT TRT EP | PT FP32 | PT FP16 + Triton | PT FP16 + Triton + CUDAGraph |
 |-------|-------------|------------|---------|------------------|------------------------------|
-| 256   | 3.85 ms | 2.37 ms | 4.65 ms | 5.03 ms | **1.34 ms** (1.77x vs TRT) |
-| 512   | 15.47 ms | 11.53 ms | 10.68 ms | 6.74 ms | **6.03 ms** (1.91x vs TRT) |
-| 1024  | 30.47 ms | 21.52 ms | 18.40 ms | 11.51 ms | **10.65 ms** (2.02x vs TRT) |
-| 2048  | 78.11 ms | 44.04 ms | 43.00 ms | 21.88 ms | **21.00 ms** (2.10x vs TRT) |
+| 256   | 6.65 ms | 3.55 ms | 5.33 ms | 5.43 ms | **1.79 ms** (3.72× vs ORT) |
+| 512   | 19.89 ms | 15.57 ms | 17.57 ms | 19.06 ms | **14.29 ms** (1.39× vs ORT) |
+| 1024  | 73.16 ms | 45.46 ms | 38.54 ms | 12.21 ms | **18.29 ms** (4.00× vs ORT) |
+| 2048  | 120.59 ms | 67.97 ms | 72.60 ms | 30.38 ms | **27.71 ms** (4.35× vs ORT) |
 
-The CUDA-graph path (PT FP16 + Triton + CUDAGraph) is **1.77–2.10x faster** than TRT EP
-and **2.87–3.72x faster** than ORT CUDA EP for all model sizes.
+The CUDA-graph path (PT FP16 + Triton + CUDAGraph) is **1.39–4.35× faster** than ORT CUDA EP across model sizes.
+
+> **Note on GPEN-BFR-1024:** PT FP16 eager (12.21 ms) is faster than CUDA graph (18.29 ms) for this model size.
+> GPEN-BFR-512 shows the smallest speedup (1.39×) due to ConvTranspose upsampling at intermediate resolutions.
+> Both GPEN-BFR-1024 and 2048 achieve strong speedups (4.00× and 4.35×) thanks to large feature maps where
+> FP16 bandwidth savings dominate.
 
 ## Accuracy
 

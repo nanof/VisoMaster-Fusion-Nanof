@@ -1,3 +1,4 @@
+import threading
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -11,6 +12,18 @@ from app.processors.external.Equirec2Perspec_vr import (
     Equirectangular as E2P_Equirectangular,
 )
 from app.processors.external.Perspec2Equirec_vr import Perspective as P2E_Perspective
+
+# P2E-CACHE-02: module-level feathered-mask cache — persists across worker instances so
+# both pool workers (recording) and single-frame workers (scrubbing) benefit.
+# Cache hit skips _apply_feathering (max_pool2d + GaussianBlur on the full H×W equirect).
+# Key: (theta, phi, fov, is_left_eye, orig_height, orig_width) — purely geometric.
+# VRAM cost: (1, H, W) float32 ≈ 8 MB at 1080p, 33 MB at 4K.  Max 16 entries.
+# Thread-safe: _FEATHERED_MASK_CACHE_LOCK guards all read-modify-write sequences so
+# concurrent pool workers cannot race on eviction (KeyError on move_to_end).
+_FEATHERED_MASK_CACHE: OrderedDict = OrderedDict()
+_FEATHERED_MASK_CACHE_MAX = 16
+_FEATHERED_MASK_CACHE_LOCK = threading.Lock()
+
 
 # Define Sobel kernels once at the module level
 _SOBEL_X_KERNEL = torch.tensor(
@@ -190,80 +203,63 @@ class PerspectiveConverter:
             self.orig_height, self.orig_width
         )
 
-        eye_region_mask = torch.zeros_like(mask_torch_original_shape, dtype=torch.bool)
-        if is_left_eye is None:
-            # Single-eye mode: stitch covers the full frame
-            eye_region_mask[:] = True
-        else:
-            half_width = self.orig_width // 2
-            if is_left_eye:
-                eye_region_mask[:, :, :half_width] = True
+        # P2E-CACHE-02: feathered-mask cache (module-level) — depends only on geometry
+        # (theta/phi/fov/eye/size), not on image content.  Module-level so both pool workers
+        # (recording) and single-frame workers (scrubbing) share the same cached masks.
+        # Cache hit skips eye-mask derivation, feather-radius estimation, max_pool2d erosion,
+        # and Gaussian blur — all of which operate on the full H×W equirect frame.
+        _fmask_key = (
+            round(theta, 3),
+            round(phi, 3),
+            round(fov, 3),
+            is_left_eye,
+            self.orig_height,
+            self.orig_width,
+        )
+        # Thread-safe cache lookup: hold the lock only for the dict read so concurrent
+        # pool workers cannot race between `key in cache` and `move_to_end(key)`.
+        with _FEATHERED_MASK_CACHE_LOCK:
+            feathered_mask_torch_float_1hw = _FEATHERED_MASK_CACHE.get(_fmask_key)
+            if feathered_mask_torch_float_1hw is not None:
+                _FEATHERED_MASK_CACHE.move_to_end(_fmask_key)
+
+        if feathered_mask_torch_float_1hw is None:
+            eye_region_mask = torch.zeros_like(
+                mask_torch_original_shape, dtype=torch.bool
+            )
+            if is_left_eye is None:
+                # Single-eye mode: stitch covers the full frame
+                eye_region_mask[:] = True
             else:
-                eye_region_mask[:, :, half_width:] = True
+                half_width = self.orig_width // 2
+                if is_left_eye:
+                    eye_region_mask[:, :, :half_width] = True
+                else:
+                    eye_region_mask[:, :, half_width:] = True
 
-        eye_specific_mask_torch_original_shape = (
-            mask_torch_original_shape & eye_region_mask
-        )
+            eye_specific_mask_torch_original_shape = (
+                mask_torch_original_shape & eye_region_mask
+            )
 
-        # Improvement G: scale feather_radius with face size in equirectangular space.
-        # A fixed 12px radius is too coarse for distant faces (under-feathered) and
-        # can be too aggressive for large/close faces (over-feathered).
-        _mask_h = eye_specific_mask_torch_original_shape.shape[-2]
-        _mask_w = eye_specific_mask_torch_original_shape.shape[-1]
-        # Compute the TRUE bounding-box side length of the mask region.
-        # sqrt(sum) (old approach) underestimates for sparse/irregular masks because it
-        # conflates pixel count with geometric extent.  Using nonzero() indices of the
-        # 2D mask gives the actual pixel span in the equirectangular image.
-        _mask_2d = eye_specific_mask_torch_original_shape.squeeze(0)  # H, W bool
+            # Fixed feather parameters — small kernels keep max_pool2d + GaussianBlur fast
+            # even on 4K equirects (1920×3840).  Dynamic scaling (VR-PERF-12) was replaced
+            # because it produced erosion_k=41 on 4K frames, which caused severe GPU stalls.
+            feather_radius_val = 12
+            feathered_mask_torch_float_1hw = self._apply_feathering(
+                eye_specific_mask_torch_original_shape,
+                feather_radius=feather_radius_val,
+                blur_sigma_factor=0.5,
+                erosion_kernel_size=(2 * feather_radius_val + 1),  # = 25
+            )
 
-        # VR-PERF-10: avoid nonzero() on the full H×W mask — it forces a CUDA stream
-        # sync to determine the variable output size before allocation, causing cascading
-        # GPU pipeline stalls when 8 workers run concurrently on the default stream.
-        # With 4 faces × 8 workers = 32 such calls per frame batch, the pipeline stalls
-        # for tens of seconds waiting for each other's large GetEquirec GPU ops.
-        #
-        # Fix: project to 1D row/col indicators (cheap fixed-size ops), then use argmax
-        # to find first/last True index without variable-size allocation.  All arithmetic
-        # stays on GPU; a single .cpu() call at the end does ONE stream sync to transfer
-        # both "any mask pixels" and "span value" together.
-        _row_has = _mask_2d.any(dim=1)  # (H,) bool — no sync, fixed output size
-        _col_has = _mask_2d.any(dim=0)  # (W,) bool — no sync, fixed output size
-        _any_gpu = _row_has.any()  # 0-dim bool GPU tensor — no sync
+            # Store result — lock briefly, only for the dict write.
+            with _FEATHERED_MASK_CACHE_LOCK:
+                if _fmask_key not in _FEATHERED_MASK_CACHE:
+                    if len(_FEATHERED_MASK_CACHE) >= _FEATHERED_MASK_CACHE_MAX:
+                        _FEATHERED_MASK_CACHE.popitem(last=False)
+                    _FEATHERED_MASK_CACHE[_fmask_key] = feathered_mask_torch_float_1hw
 
-        _row_f = _row_has.float()
-        _col_f = _col_has.float()
-        _h = _row_f.shape[0]  # Python int
-        _w = _col_f.shape[0]  # Python int
-
-        # span = last_true_idx - first_true_idx + 1
-        #      = (_h - 1 - argmax(flipped)) - argmax + 1
-        #      = _h - argmax(flipped) - argmax(forward)
-        _y_span = _h - _row_f.flip(0).argmax() - _row_f.argmax()
-        _x_span = _w - _col_f.flip(0).argmax() - _col_f.argmax()
-        _mask_span_gpu = torch.maximum(_y_span, _x_span)
-
-        # Single D2H transfer — ONE stream sync for both the emptiness check and span value.
-        _res = torch.stack([_any_gpu.float(), _mask_span_gpu.float()]).cpu()
-        if bool(_res[0] > 0):
-            _mask_region_side = int(_res[1])
-        else:
-            _mask_region_side = 0
-        # Dynamic feather: proportional to face size, clamped to [4, 20]
-        _mask_side_clamped = max(48, _mask_region_side)
-        feather_radius_val = max(4, min(20, _mask_side_clamped // 12))
-        if _mask_region_side < 48:
-            # Very small face — skip erosion entirely, only apply light blur
-            _erosion_k = 1
-        else:
-            _max_erosion = min(_mask_h, _mask_w) // 8
-            _erosion_k = min(2 * feather_radius_val + 1, _max_erosion)
-            _erosion_k = max(3, _erosion_k | 1)  # ensure odd and at least 3
-        feathered_mask_torch_float_1hw = self._apply_feathering(
-            eye_specific_mask_torch_original_shape,
-            feather_radius=feather_radius_val,
-            blur_sigma_factor=0.5,
-            erosion_kernel_size=_erosion_k,
-        )
+            del eye_region_mask, eye_specific_mask_torch_original_shape
 
         # VR-PERF-10b: removed the `feathered_mask.max() < 1e-4` guard (VR-14).
         # That check called `.max()` on a (1, H, W) GPU tensor inside an `if`, which
@@ -299,7 +295,6 @@ class PerspectiveConverter:
         )
 
         del p2e_instance, equirect_component_torch, mask_torch_original_shape
-        del eye_region_mask, eye_specific_mask_torch_original_shape
         del feathered_mask_torch_float_1hw
         # Manually clear large temporary float tensors to help the garbage collector
         del target_float, component_float

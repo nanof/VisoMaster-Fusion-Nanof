@@ -7,6 +7,23 @@ Run via:
     .venv/Scripts/python custom_kernels/gfpgan_1024/benchmark_gfpgan1024.py
 """
 
+# ── TensorRT DLL discovery (must be before onnxruntime import) ────────────
+import os as _os
+import sys as _sys
+from pathlib import Path as _Path
+
+_REPO_ROOT = _Path(__file__).resolve().parents[2]
+for _candidate in [
+    _REPO_ROOT / ".venv" / "Lib" / "site-packages" / "tensorrt_libs",
+    _REPO_ROOT / ".venv" / "Lib" / "site-packages" / "nvidia" / "cuda_runtime" / "bin",
+]:
+    if _candidate.exists():
+        _os.environ["PATH"] = (
+            str(_candidate) + _os.pathsep + _os.environ.get("PATH", "")
+        )
+del _candidate, _REPO_ROOT, _os, _sys, _Path
+# ──────────────────────────────────────────────────────────────────────────
+
 import sys
 import time
 import os
@@ -50,60 +67,52 @@ def run_ort():
 
 def run_ort_trt():
     """ORT TensorRT EP — matches the application's provider config.
-    Loads from the pre-built engine cache (tensorrt-engines/).
-    Returns None and prints a reason if TRT EP is unavailable or not cached."""
+    Always attempts to build/load engine using a temporary cache dir.
+    Returns None and prints a reason if TRT EP is unavailable."""
+    import tempfile
+    import shutil
     import onnxruntime as ort
 
-    try:
-        pass  # registers tensorrt_libs DLL directory on Windows
-    except Exception:
-        pass
     if "TensorrtExecutionProvider" not in ort.get_available_providers():
         print("  SKIP: TensorrtExecutionProvider not available")
         return None
-    ctx = ROOT / "tensorrt-engines" / "gfpgan-1024_ctx.onnx"
-    if not ctx.exists():
-        print(
-            "  SKIP: no pre-built TRT engine (run the app once with TRT provider first)"
+    _trt_tmp = tempfile.mkdtemp(prefix="ort_trt_bench_")
+    try:
+        trt_opts = {
+            "trt_engine_cache_enable": True,
+            "trt_engine_cache_path": _trt_tmp,
+            "trt_timing_cache_enable": True,
+            "trt_timing_cache_path": _trt_tmp,
+            "trt_layer_norm_fp32_fallback": True,
+            "trt_max_workspace_size": 8589934592,
+            "trt_builder_optimization_level": 5,
+        }
+        so = ort.SessionOptions()
+        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        print("  Building TRT engine (first run may take 1-5 min)...")
+        sess = ort.InferenceSession(
+            MODEL_PATH,
+            so,
+            providers=[
+                ("TensorrtExecutionProvider", trt_opts),
+                ("CUDAExecutionProvider", {"device_id": "0"}),
+                ("CPUExecutionProvider", {}),
+            ],
         )
+        inp = np.random.default_rng(0).random((1, 3, 512, 512)).astype(np.float32)
+        for _ in range(WARMUP):
+            sess.run(None, {"input": inp})
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        for _ in range(RUNS):
+            sess.run(None, {"input": inp})
+        torch.cuda.synchronize()
+        return ms(t0, time.perf_counter(), RUNS)
+    except Exception as e:
+        print(f"  FAILED: {e}")
         return None
-    # Use relative paths matching the app config; run from project root.
-    import os
-
-    _prev_cwd = os.getcwd()
-    os.chdir(str(ROOT))
-    trt_opts = {
-        "trt_engine_cache_enable": True,
-        "trt_engine_cache_path": "tensorrt-engines",
-        "trt_timing_cache_enable": True,
-        "trt_timing_cache_path": "tensorrt-engines",
-        "trt_dump_ep_context_model": True,
-        "trt_ep_context_file_path": "tensorrt-engines",
-        "trt_layer_norm_fp32_fallback": True,
-        "trt_max_workspace_size": 8589934592,
-        "trt_builder_optimization_level": 5,
-    }
-    so = ort.SessionOptions()
-    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    sess = ort.InferenceSession(
-        MODEL_PATH,
-        so,
-        providers=[
-            ("TensorrtExecutionProvider", trt_opts),
-            ("CUDAExecutionProvider", {"device_id": "0"}),
-            ("CPUExecutionProvider", {}),
-        ],
-    )
-    os.chdir(_prev_cwd)
-    inp = np.random.default_rng(0).random((1, 3, 512, 512)).astype(np.float32)
-    for _ in range(WARMUP):
-        sess.run(None, {"input": inp})
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
-    for _ in range(RUNS):
-        sess.run(None, {"input": inp})
-    torch.cuda.synchronize()
-    return ms(t0, time.perf_counter(), RUNS)
+    finally:
+        shutil.rmtree(_trt_tmp, ignore_errors=True)
 
 
 def run_pytorch(fp16: bool):

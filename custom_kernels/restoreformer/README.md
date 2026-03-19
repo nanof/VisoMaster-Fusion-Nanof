@@ -15,17 +15,24 @@ Used by VisoMaster-Fusion when the *Custom* execution provider is selected.
 **Environment:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · Triton 3.6.0 · ORT 1.22.0
 **Method:** 50 iterations, 10 warm-up passes
 
-| Tier | Method | Latency | vs ORT CUDA EP | vs ORT TRT EP |
-|------|--------|--------:|---------------:|--------------:|
-| 0 | ORT FP32 CUDA EP (baseline) | 18.58 ms | 1.00x | 0.55x |
-| 0b | ORT TensorRT EP FP32 (app default) | 10.31 ms | 1.80x | 1.00x (baseline) |
-| 1 | PyTorch FP32 pure ops | 26.71 ms | 0.70x | 0.39x |
-| 2 | PyTorch FP16 + Triton GroupNorm+SiLU | 16.67 ms | 1.12x | 0.62x |
-| 3 | **FP16 + Triton + CUDA graph (Custom)** | **12.50 ms** | **1.49x** | **0.83x** |
+| Tier | Method | Latency | vs ORT CUDA EP |
+|------|--------|--------:|---------------:|
+| 0 | ORT FP32 CUDA EP (baseline) | 63.09 ms | 1.00x |
+| 0b | ORT TensorRT EP FP32 | 22.43 ms | 2.81x |
+| 1 | PyTorch FP32 pure ops | 45.05 ms | 1.40x |
+| 2 | PyTorch FP16 + Triton GroupNorm+SiLU | 31.33 ms | 2.01x |
+| 3 | **FP16 + Triton + CUDA graph (Custom)** | **12.38 ms** | **5.10x** |
 
 > **Application uses Tier 3** (CUDA graph) because RestoreFormer++ uses a fixed input
 > shape and has no dynamic parameters — the forward pass is fully static and
 > graph-capturable.
+
+> **Note on TRT EP accuracy:** ORT TRT EP max|diff| vs ORT CUDA EP = 4.63 (very high),
+> indicating significant numerical degradation with TRT for this model. Custom FP16
+> PyTorch is the recommended fast path.
+
+> **Note on ORT CUDA EP baseline:** ORT CUDA EP ran at 63 ms in this measurement — the
+> application's CUDA graph path at 12.38 ms delivers **5.10× speedup**.
 
 ### Kernel Priority Chain
 

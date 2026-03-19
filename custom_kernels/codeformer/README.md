@@ -15,16 +15,17 @@ Used by VisoMaster-Fusion when the *Custom* execution provider is selected.
 **Environment:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · Triton 3.6.0 · ORT 1.22.0
 **Method:** 50 iterations, 10 warm-up passes · Input/Output: (1,3,512,512) float32
 
-| Tier | Method | Latency | vs ORT CUDA EP | vs ORT TRT EP |
-|------|--------|--------:|---------------:|--------------:|
-| 0 | ORT FP32 CUDA EP (baseline) | 20.57 ms | 1.00x | 0.49x |
-| 0b | ORT TensorRT EP FP32 (app default) | 10.14 ms | 2.03x | 1.00x |
-| 1 | PyTorch FP32 pure ops | 31.81 ms | 0.65x | 0.32x |
-| 2 | PyTorch FP16 + Triton GroupNorm+SiLU | 16.23 ms | 1.27x | 0.63x |
-| 3 | FP16 + Triton + CUDA graph (fixed w=0.5) | **13.32 ms** | **1.54x** | **0.76x** |
-| 4 | FP16 + Triton + SDPA4D + GEMM + CUDA graph | **13.25 ms** | **1.55x** | **0.76x** |
+| Tier | Method | Latency | vs ORT CUDA EP |
+|------|--------|--------:|---------------:|
+| 0 | ORT FP32 CUDA EP (baseline) | 22.98 ms | 1.00x |
+| 0b | ORT TRT EP FP32 | 12.85 ms | 1.79x |
+| 1 | PyTorch FP32 pure ops | 44.68 ms | 0.51x |
+| 2 | PyTorch FP16 + Triton GroupNorm+SiLU | 29.02 ms | 0.79x |
+| 3 | FP16 + Triton + CUDA graph (fixed w=0.5) | **19.72 ms** | **1.17x** |
+| 4 | FP16 + Triton + SDPA4D + GEMM + CUDA graph | **16.04 ms** | **1.43x** |
+| 5 | FP16 + Triton + SDPA4D + GEMM + NHWC + CUDA graph | 22.40 ms | 1.03x |
 
-The CUDA-graph path is **0.76x vs ORT TRT EP** (app default) and **1.54x faster** than ORT CUDA EP.
+The CUDA-graph path (Tier 4) is **1.43x faster** than ORT CUDA EP.
 
 > **Application uses Tier 2** (FP16 + Triton, no CUDA graph) because `fidelity_weight`
 > is dynamic — it can change between frames.  Tier 3 is available for advanced use when

@@ -14,24 +14,27 @@ Model: **vgg_combo**  `(N,3,512,512)f32 → (N,512,128,128)f32`
 
 50 iterations, 10 warm-up.
 
-| Tier | Method | ms | vs CUDA EP | vs TRT EP |
-|------|--------|---:|-----------:|----------:|
-| 0 | ORT FP32 CUDA EP | 5.078 | 1.00x | 0.88x |
-| 0b | ORT TensorRT EP | 4.508 | 1.13x | 1.00x |
-| 1 | PyTorch FP32 | 2.342 | 2.17x | 1.92x |
-| 2 | PyTorch FP16 | 1.218 | 4.17x | 3.70x |
-| **3** | **PT FP16 + CUDA graph batch=1 (Custom)** | **1.183** | **4.29x** | **3.81x** |
-| 4 | PT FP16 + CUDA graph batch=2 | 2.990 | 1.70x per-image | 1.51x per-image |
+| Tier | Method | ms | vs CUDA EP |
+|------|--------|---:|-----------:|
+| 0 | ORT FP32 CUDA EP | 5.445 | 1.00x |
+| 0b | ORT TRT EP FP32 | 6.488 | 0.84x ⚠ (slower than CUDA EP) |
+| 1 | PyTorch FP32 | 3.454 | 1.58x |
+| 2 | PyTorch FP16 | 1.415 | 3.85x |
+| **3** | **PT FP16 + CUDA graph batch=1 (Custom)** | **1.846** | **2.95x** |
+| 4 | PT FP16 + CUDA graph batch=2 | 4.687 | 2.32x per-pair |
 
 > **Application uses Tier 3** (batch=1 CUDA graph; one call per face image).
 >
-> Note: PyTorch FP32 is already 2.17x faster than ORT CUDA EP for this model.
+> Note: PyTorch FP32 is already 1.58x faster than ORT CUDA EP for this model.
 > VGG feature extraction with large 512×512 feature maps is heavily
 > memory-bandwidth bound; FP16 halves the bandwidth requirement.
 >
+> ORT TRT EP is **slower** than ORT CUDA EP (6.488 ms vs 5.445 ms) — TRT does
+> not benefit this all-conv architecture at 512×512.
+>
 > The batch=2 variant (Tier 4) combines both face inferences (swapped +
-> original) into one call.  At 2.990 ms total it delivers 1.70x per-image
-> speedup vs ORT, equivalent to 3.40x for the two-image workload.
+> original) into one call. At 4.687 ms total it delivers 2.32x vs two ORT
+> CUDA EP calls (10.89 ms), equivalent to 2.32x for the two-image workload.
 
 Run `benchmark_vgg_combo.py` to measure on your hardware.
 
@@ -172,9 +175,9 @@ Measured FP16 + CUDA graph vs ORT FP32 (200 iterations, 20 warm-up):
 
 | Metric | Value |
 |--------|-------|
-| Max \|Δ\| | 0.0781 |
-| Feature range | [-92.50, 101.14] |
-| Relative error | 0.040% of feature range |
+| Max \|Δ\| | 0.0749 |
+| Feature range | [-91.16, 110.72] |
+| Relative error | 0.037% of feature range |
 
 The downstream computation averages the L1 difference across 512 channels,
 so per-feature FP16 noise averages out effectively.

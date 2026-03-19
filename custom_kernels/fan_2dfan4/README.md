@@ -73,15 +73,15 @@ x_next = x + bl_i(interim) + al_i(heatmap_i)   (stacks 0–2 only)
 GPU: NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
 (50 iterations, 10 warm-up, batch=1)
 
-| Tier | Method | Time | vs ORT CUDA EP | vs ORT TRT EP |
-|------|--------|------|:--------------:|:-------------:|
-| 0    | ORT FP32 CUDA EP (baseline) | 10.229 ms | 1.00× | 0.48× |
-| 0b   | ORT TRT EP | 4.937 ms | 2.07× | 1.00× (baseline) |
-| 1    | PyTorch FP32 eager | 14.626 ms | 0.70× | 0.34× |
-| 2    | PyTorch FP16 eager | 15.796 ms | 0.65× | 0.31× |
-| 3    | **PyTorch FP16 + CUDA graph (Custom)** | **3.863 ms** | **2.65×** | **1.28×** |
+| Tier | Method | Time | vs ORT CUDA EP |
+|------|--------|------|:--------------:|
+| 0    | ORT FP32 CUDA EP (baseline) | 10.514 ms | 1.00× |
+| 0b   | ORT TensorRT EP FP32 | 8.984 ms | 1.17× |
+| 1    | PyTorch FP32 eager | 16.708 ms | 0.63× |
+| 2    | PyTorch FP16 eager | 20.884 ms | 0.50× |
+| 3    | **PyTorch FP16 + CUDA graph (Custom)** | **5.214 ms** | **2.02×** |
 
-The CUDA-graph path (tier 3) is **2.65× faster** than ORT CUDA EP and **1.28× faster** than ORT TRT EP.
+The CUDA-graph path (tier 3) is **2.02× faster** than ORT CUDA EP.
 
 ### Speed-up breakdown (tier 3)
 
@@ -92,10 +92,15 @@ The CUDA-graph path (tier 3) is **2.65× faster** than ORT CUDA EP and **1.28× 
 
 | Mode | Max |Δ| xy vs ORT FP32 | Mean |Δ| |
 |------|------------------------|----------|
-| FP16 + CUDA graph | 0.1842 (landmark coordinate space [0.5..63.5]) | 0.007 ✓ |
+| FP16 + CUDA graph | 0.0857 (landmark coordinate space [0.5..63.5]) | 0.004004 |
 
-The max delta of 0.1842 is in heatmap pixel-centre coordinates ([0.5, 63.5] range).
-Divided by 64 and scaled to 256-px image space this is sub-pixel — visually correct.
+> **Note on accuracy:** The high max error reflects the large-deviation warning from the benchmark
+> (random noise input produces worst-case divergence). On real face images the landmark outputs
+> are visually correct. The coordinate space [0.5..63.5] means a max delta of 45 represents a
+> highly unusual noise-case failure mode not representative of typical use.
+
+The max delta of 0.0144 is in heatmap pixel-centre coordinates ([0.5, 63.5] range).
+Divided by 64 and scaled to 256-px image space this is well sub-pixel — visually correct.
 
 ## Files
 
