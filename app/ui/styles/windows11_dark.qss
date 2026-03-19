@@ -4,7 +4,7 @@
 QWidget {
     background-color: #1c1c1c; /* Main neutral charcoal background */
     color: #f3f3f3; /* Bright foreground text */
-    selection-background-color: #2a4a5e; /* Soft Windows-style blue selection */
+    selection-background-color: #254457; /* Soft Windows-style blue selection */
     selection-color: #ffffff; /* High-contrast selected text */
 }
 
@@ -32,12 +32,12 @@ QPushButton:pressed {
 }
 
 QPushButton:checked {
-    background-color: #16384a; /* Soft accent surface */
-    border: 1px solid #4cc2ff;
+    background-color: #143241; /* Soft accent surface */
+    border: 1px solid #409ecf;
 }
 
 QPushButton:focus {
-    border: 1px solid #4cc2ff;
+    border: 1px solid #409ecf;
 }
 
 QPushButton:disabled {
@@ -84,8 +84,8 @@ TargetMediaCardButton:pressed, TargetFaceCardButton:pressed, InputFaceCardButton
 
 /* Checked state */
 TargetMediaCardButton:checked, TargetFaceCardButton:checked, InputFaceCardButton:checked, EmbeddingCardButton:checked {
-    border: 2px solid #4cc2ff;
-    background-color: #16384a;
+    border: 2px solid #409ecf;
+    background-color: #143241;
     color: #ffffff;
 }
 
@@ -99,7 +99,7 @@ TargetMediaCardButton:disabled, TargetFaceCardButton:disabled, InputFaceCardButt
 /* Focused state */
 TargetMediaCardButton:focus, TargetFaceCardButton:focus, InputFaceCardButton:focus, EmbeddingCardButton:focus {
     outline: none;
-    border: 2px solid #4cc2ff;
+    border: 2px solid #409ecf;
 }
 
 
@@ -116,13 +116,13 @@ TargetMediaCardButton:focus, TargetFaceCardButton:focus, InputFaceCardButton:foc
 }
 
 #videoSeekSlider::sub-page:horizontal {
-    background-color: #4cc2ff;
+    background-color: #409ecf;
     border-radius: 5px;
     height: 10px;
 }
 
 #videoSeekSlider::sub-page:horizontal:hover {
-    background-color: #67ccff;
+    background-color: #56b6e3;
 }
 
 #videoSeekSlider::add-page:horizontal {
@@ -142,12 +142,12 @@ TargetMediaCardButton:focus, TargetFaceCardButton:focus, InputFaceCardButton:foc
 
 #videoSeekSlider::handle:horizontal:hover {
     background-color: #ffffff;
-    border: 1px solid #4cc2ff;
+    border: 1px solid #409ecf;
 }
 
 #videoSeekSlider::handle:horizontal:pressed {
-    background-color: #4cc2ff;
-    border: 1px solid #2ea8e6;
+    background-color: #409ecf;
+    border: 1px solid #2f8fbe;
 }
 
 /* #videoSeekSlider disabled state */
@@ -201,7 +201,7 @@ ParameterSlider::groove:horizontal, ParameterDecimalSlider::groove:horizontal {
 }
 
 ParameterSlider::sub-page:horizontal, ParameterDecimalSlider::sub-page:horizontal {
-    background-color: #4cc2ff;
+    background-color: #409ecf;
     border-radius: 3px;
     height: 6px;
 }
@@ -223,7 +223,7 @@ ParameterSlider::handle:horizontal, ParameterDecimalSlider::handle:horizontal {
 
 ParameterSlider::handle:horizontal:hover, ParameterDecimalSlider::handle:horizontal:hover {
     background-color: #ffffff;
-    border: 1px solid #4cc2ff;
+    border: 1px solid #409ecf;
 }
 
 /* Disabled state */
@@ -250,7 +250,7 @@ QLineEdit, QTextEdit, QPlainTextEdit {
 }
 
 QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {
-    border: 1px solid #4cc2ff;
+    border: 1px solid #409ecf;
     background-color: #202020;
 }
 
@@ -292,7 +292,7 @@ QComboBox:hover {
 }
 
 QComboBox:focus {
-    border: 1px solid #4cc2ff;
+    border: 1px solid #409ecf;
 }
 
 QComboBox:disabled {
@@ -315,7 +315,7 @@ QComboBox::drop-down {
 QComboBox QAbstractItemView { /* Style for the dropdown list */
     border: 1px solid #343434;
     background-color: #242424;
-    selection-background-color: #2a4a5e;
+    selection-background-color: #254457;
     selection-color: #ffffff;
     color: #f3f3f3;
 }
@@ -331,12 +331,12 @@ QMenuBar::item {
 }
 
 QMenuBar::item:selected { /* when selected using mouse or keyboard */
-    background: #2a4a5e;
+    background: #254457;
     color: #ffffff;
 }
 
 QMenuBar::item:pressed {
-    background: #16384a;
+    background: #143241;
 }
 
 QMenu {
@@ -350,7 +350,7 @@ QMenu::item {
 }
 
 QMenu::item:selected {
-    background-color: #2a4a5e;
+    background-color: #254457;
     color: #ffffff;
 }
 
@@ -432,7 +432,7 @@ QTabBar::tab:selected, QTabBar::tab:hover {
 QTabBar::tab:selected {
     background: #2a2a2a;
     color: #f3f3f3;
-    border-color: #4cc2ff;
+    border-color: #409ecf;
     border-bottom-color: #2a2a2a;
 }
 
@@ -456,6 +456,6 @@ QProgressBar {
 }
 
 QProgressBar::chunk {
-    background-color: #4cc2ff;
+    background-color: #409ecf;
     border-radius: 3px;
 }
