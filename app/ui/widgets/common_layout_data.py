@@ -350,6 +350,16 @@ COMMON_LAYOUT_DATA: Any = {
             "requiredSelectionValue": "Advanced",
             "help": "Activate the eyes face expression restorer",
         },
+        "FaceExpressionStableGazeEyesToggle": {
+            "level": 4,
+            "label": "Relative Lids + Retargeted Gaze",
+            "default": False,
+            "parentToggle": "FaceExpressionRetargetingEyesBothEnableToggle & FaceExpressionEnableBothToggle & FaceExpressionEyesToggle & FaceExpressionRelativeEyesToggle",
+            "requiredToggleValue": True,
+            "parentSelection": "FaceExpressionModeSelection",
+            "requiredSelectionValue": "Advanced",
+            "help": "Combines Relative Position eye motion with Retargeting Eyes by preserving relative eyelid motion while using retargeted horizontal gaze. Requires Relative Position and Retargeting Eyes.",
+        },
         "FaceExpressionRelativeEyesToggle": {
             "level": 4,
             "label": "Relative Position",
