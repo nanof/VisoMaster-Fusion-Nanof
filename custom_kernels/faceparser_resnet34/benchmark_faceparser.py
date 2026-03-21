@@ -31,6 +31,13 @@ for _candidate in [
             str(_candidate) + _os.pathsep + _os.environ.get("PATH", "")
         )
 del _candidate, _REPO_ROOT, _os, _sys, _Path
+
+import sys as _sys_enc
+if hasattr(_sys_enc.stdout, 'reconfigure'):
+    _sys_enc.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(_sys_enc.stderr, 'reconfigure'):
+    _sys_enc.stderr.reconfigure(encoding='utf-8', errors='replace')
+del _sys_enc
 # ──────────────────────────────────────────────────────────────────────────
 
 import os
@@ -87,15 +94,15 @@ def _print_row(tier, label, ms_val, ref_ms):
 # ---------------------------------------------------------------------------
 # Numerical accuracy check
 # ---------------------------------------------------------------------------
-def _check_accuracy(ort_out: np.ndarray, pt_out: torch.Tensor) -> None:
-    """Compare ORT FP32 primary output vs PyTorch FP16 primary output."""
+def _check_accuracy(ort_out: np.ndarray, pt_out: torch.Tensor, label: str = "FP16") -> None:
+    """Compare ORT FP32 primary output vs PyTorch output."""
     a = ort_out.astype(np.float32)
-    b = pt_out.cpu().numpy().astype(np.float32)
+    b = pt_out.detach().cpu().numpy().astype(np.float32)
     if a.shape != b.shape:
         print(f"  Shape mismatch: ORT={a.shape} vs PT={b.shape}")
         return
     diff = np.abs(a - b)
-    print("\n  Numerical accuracy (FP16 PyTorch vs ORT FP32):")
+    print(f"\n  Numerical accuracy ({label} PyTorch vs ORT FP32):")
     print(f"    MAE={diff.mean():.2e}  MaxAbsErr={diff.max():.2e}")
     # Per-class argmax agreement
     ort_labels = a.argmax(axis=1)
@@ -199,22 +206,84 @@ def bench_faceparser():
         t2 = _bench(lambda: m_fp16(inp_f32))
     _print_row("2", "PyTorch FP16 (TensorCore conv dispatch)", t2, t0)
 
-    # ── Accuracy check ────────────────────────────────────────────────────
+    # ── Accuracy check — FP16 ─────────────────────────────────────────────
     ort_out = sess0.run(["output"], {in_name: inp_np})[0]  # (1, 19, 512, 512)
     with torch.no_grad():
         pt_out = m_fp16(inp_f32)
-    _check_accuracy(ort_out, pt_out)
+    _check_accuracy(ort_out, pt_out, label="FP16")
 
-    # ── Tier 3 — FP16 + CUDA graph ────────────────────────────────────────
+    # ── Tier 2b — PyTorch BF16 ────────────────────────────────────────────
+    m_bf16 = (
+        FaceParserResnet34Torch.from_onnx(FP_ONNX, compute_dtype=torch.bfloat16)
+        .cuda()
+        .eval()
+    )
+    with torch.no_grad():
+        t2b = _bench(lambda: m_bf16(inp_f32))
+    _print_row("2b", "PyTorch BF16 (TensorCore conv dispatch)", t2b, t0)
+
+    # ── Accuracy check — BF16 ─────────────────────────────────────────────
+    with torch.no_grad():
+        pt_out_bf16 = m_bf16(inp_f32)
+    _check_accuracy(ort_out, pt_out_bf16, label="BF16")
+
+    # ── Tier 3 — FP16 + CUDA graph (matches app runtime) ──────────────────
     try:
         runner = build_cuda_graph_runner(m_fp16)
         with torch.no_grad():
             _ = runner(inp_f32)  # already captured in constructor; just verify output
         t3 = _bench(lambda: runner(inp_f32))
         _print_row("3", "FP16 + CUDA graph (single captured graph)", t3, t0)
+        # ── Accuracy check — FP16 CUDA graph ──────────────────────────────
+        with torch.no_grad():
+            pt_out_cg = runner(inp_f32)
+        _check_accuracy(ort_out, pt_out_cg, label="FP16 CUDA graph")
     except Exception as e:
         print(f"  Tier 3 | CUDA graph — skipped ({e})")
 
+    # ── Tier 4 — torch.compile + FP16 + CUDA graph ────────────────────────
+    print("\n  [Tier 4] torch.compile(mode='default') + CUDA graph")
+    print("  One-time compile cost: ~30 s on first run (Triton JIT).")
+    try:
+        m4 = (
+            FaceParserResnet34Torch.from_onnx(FP_ONNX, compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
+        runner4 = build_cuda_graph_runner(m4, torch_compile=True)
+        t4 = _bench(lambda: runner4(inp_f32))
+        _print_row("4", "torch.compile + FP16 + CUDA graph", t4, t0)
+        # ── Accuracy check — compiled ──────────────────────────────────────
+        pt_out_c4 = runner4(inp_f32)
+        _check_accuracy(ort_out, pt_out_c4, label="torch.compile FP16 CUDA graph")
+    except Exception as e:
+        print(f"  Tier 4 | torch.compile — failed: {e}")
+        import traceback; traceback.print_exc()
+
+    # ── Tier 4b — torch.compile reduce-overhead (no separate CUDA graph) ────
+    print("\n  [Tier 4b] torch.compile(mode='reduce-overhead') — no extra CUDA graph")
+    try:
+        from custom_kernels.compile_utils import apply_torch_compile
+        m4b = (
+            FaceParserResnet34Torch.from_onnx(FP_ONNX, compute_dtype=torch.float16)
+            .cuda().eval()
+        )
+        m4b_compiled = apply_torch_compile(
+            m4b,
+            torch.zeros(1, 3, 512, 512, dtype=torch.float32, device="cuda"),
+            compile_mode="reduce-overhead",
+        )
+        with torch.no_grad():
+            t4b = _bench(lambda: m4b_compiled(inp_f32))
+        _print_row("4b", "torch.compile reduce-overhead (no CUDA graph)", t4b, t0)
+    except Exception as e:
+        print(f"  Tier 4b | reduce-overhead — failed: {e}")
+        import traceback; traceback.print_exc()
+
+    print()
+    print("  Note: App runtime uses Tier 3 (FP16 + CUDA graph).")
+    print("        Tier 4 adds torch.compile(default) + manual CUDA graph.")
+    print("        Tier 4b tests reduce-overhead (manages its own CUDA graphs).")
     print()
     return t0, t0b
 

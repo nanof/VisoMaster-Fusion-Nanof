@@ -1,23 +1,33 @@
 import cv2
+import threading
 from collections import OrderedDict
+from functools import lru_cache
 from typing import Dict, Any
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-_PERSP_GRID_CACHE: OrderedDict = OrderedDict()  # module-level cache — persists across frames
-_PERSP_GRID_CACHE_MAX = 256
+# E2P-CACHE-01: perspective plane grid cache — (FOV, height, width) → (persp_xx, persp_yy, w_len, h_len).
+# Stores CPU tensors; callers move to device.  Thread-safe: _PERSP_GRID_CACHE_LOCK guards
+# all read-modify-write sequences so concurrent pool workers cannot race on eviction.
+_PERSP_GRID_CACHE: OrderedDict = OrderedDict()
+_PERSP_GRID_CACHE_MAX = 64
+_PERSP_GRID_CACHE_LOCK = threading.Lock()
 
 
-def _get_cached_grid(cache_key, compute_fn):
-    """Get or compute a perspective sampling grid, evicting oldest if cache is full."""
-    if cache_key in _PERSP_GRID_CACHE:
-        return _PERSP_GRID_CACHE[cache_key]
-    if len(_PERSP_GRID_CACHE) >= _PERSP_GRID_CACHE_MAX:
-        _PERSP_GRID_CACHE.popitem(last=False)  # evict oldest
-    grid = compute_fn()
-    _PERSP_GRID_CACHE[cache_key] = grid
-    return grid
+# E2P-CACHE-02: rotation matrix cache — same pattern as P2E's _get_rotation_matrices_cached.
+# Avoids 2× cv2.Rodrigues + 2× numpy→GPU transfers on EVERY GetPerspective call.
+# With 24 tiles × multiple faces, this was 48+ redundant Rodrigues calls per detection frame.
+@lru_cache(maxsize=1024)
+def _get_e2p_rotation_matrices_cached(THETA_deg: float, PHI_deg: float, device_str: str):
+    device = torch.device(device_str)
+    y_axis_np = np.array([0.0, 1.0, 0.0], np.float32)
+    z_axis_np = np.array([0.0, 0.0, 1.0], np.float32)
+    R1_np, _ = cv2.Rodrigues(z_axis_np * np.radians(THETA_deg))
+    R2_np, _ = cv2.Rodrigues(np.dot(R1_np, y_axis_np) * np.radians(-PHI_deg))
+    R1_torch = torch.from_numpy(R1_np).float().to(device)
+    R2_torch = torch.from_numpy(R2_np).float().to(device)
+    return R1_torch, R2_torch
 
 
 class Equirectangular:
@@ -56,49 +66,49 @@ class Equirectangular:
         equ_cx = (equ_w - 1) / 2.0
         equ_cy = (equ_h - 1) / 2.0
 
-        # Cache key uses only (FOV, height, width) — the perspective plane grid (persp_xx,
-        # persp_yy, w_len, h_len) depends only on FOV and crop dimensions, NOT on THETA/PHI.
-        # THETA/PHI only affect the rotation matrices computed below, which are cheap (2×
-        # cv2.Rodrigues calls) and are NOT cached here.  Including THETA/PHI in the key
-        # was a bug: it caused a cache miss for every unique viewing direction even when the
-        # FOV and size were identical, wasting GPU memory (each entry holds two H×W tensors)
-        # and CPU time on repeated meshgrid computations.
+        # E2P-CACHE-01: perspective plane grid — depends only on FOV and output size,
+        # NOT on THETA/PHI.  Stores CPU tensors; move to device on use.
+        # Thread-safe via _PERSP_GRID_CACHE_LOCK.
         cache_key = (FOV, height, width)
-        if cache_key in _PERSP_GRID_CACHE:
-            persp_xx, persp_yy, w_len, h_len = _PERSP_GRID_CACHE[cache_key]
+        with _PERSP_GRID_CACHE_LOCK:
+            _cached_grid = _PERSP_GRID_CACHE.get(cache_key)
+            if _cached_grid is not None:
+                _PERSP_GRID_CACHE.move_to_end(cache_key)
+
+        if _cached_grid is not None:
+            persp_xx, persp_yy = _cached_grid
+            persp_xx = persp_xx.to(self.device)
+            persp_yy = persp_yy.to(self.device)
         else:
             wFOV = FOV
             hFOV = float(height) / float(width) * wFOV
             w_len = torch.tan(torch.deg2rad(torch.tensor(wFOV / 2.0, device=self.device)))
             h_len = torch.tan(torch.deg2rad(torch.tensor(hFOV / 2.0, device=self.device)))
 
-            # Create perspective grid
             persp_x_coords = torch.linspace(-w_len, w_len, width, device=self.device, dtype=torch.float32)
             persp_y_coords = torch.linspace(-h_len, h_len, height, device=self.device, dtype=torch.float32)
             persp_yy, persp_xx = torch.meshgrid(persp_y_coords, persp_x_coords, indexing='ij')
-            if len(_PERSP_GRID_CACHE) >= _PERSP_GRID_CACHE_MAX:
-                _PERSP_GRID_CACHE.popitem(last=False)  # evict oldest
-            _PERSP_GRID_CACHE[cache_key] = (persp_xx, persp_yy, w_len, h_len)
+
+            with _PERSP_GRID_CACHE_LOCK:
+                if cache_key not in _PERSP_GRID_CACHE:
+                    if len(_PERSP_GRID_CACHE) >= _PERSP_GRID_CACHE_MAX:
+                        _PERSP_GRID_CACHE.popitem(last=False)
+                    _PERSP_GRID_CACHE[cache_key] = (persp_xx.cpu(), persp_yy.cpu())
 
         # Points in 3D space on the perspective image plane (camera looking along X-axis)
         x_3d = torch.ones_like(persp_xx)
         y_3d = persp_xx
-        z_3d = -persp_yy # Negative because image y is typically top-to-bottom, z is up in 3D
+        z_3d = -persp_yy  # Negative because image y is top-to-bottom, z is up in 3D
 
         # Normalize to unit vectors
         D = torch.sqrt(x_3d**2 + y_3d**2 + z_3d**2)
-        xyz_persp_norm = torch.stack((x_3d/D, y_3d/D, z_3d/D), dim=2) # H, W, 3
+        xyz_persp_norm = torch.stack((x_3d/D, y_3d/D, z_3d/D), dim=2)  # H, W, 3
 
-        # Rotation matrices
-        y_axis_np = np.array([0.0, 1.0, 0.0], np.float32)
-        z_axis_np = np.array([0.0, 0.0, 1.0], np.float32)
-
-        # 1. Yaw around Z-axis
-        R1_np, _ = cv2.Rodrigues(z_axis_np * np.radians(THETA))
-        # 2. Pitch around new Y-axis
-        R2_np, _ = cv2.Rodrigues(np.dot(R1_np, y_axis_np) * np.radians(-PHI))
-        R1_torch = torch.from_numpy(R1_np).float().to(self.device)
-        R2_torch = torch.from_numpy(R2_np).float().to(self.device)
+        # E2P-CACHE-02: rotation matrices cached by (THETA, PHI, device).
+        # Avoids 2× cv2.Rodrigues + numpy→GPU on every call (was 48+ calls per tile-detect frame).
+        R1_torch, R2_torch = _get_e2p_rotation_matrices_cached(
+            float(THETA), float(PHI), str(self.device)
+        )
 
         # Rotate the 3D points
         # (H, W, 3) -> (H*W, 3) -> (3, H*W) for matmul

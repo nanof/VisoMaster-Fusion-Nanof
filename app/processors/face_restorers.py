@@ -33,6 +33,9 @@ class FaceRestorers:
         self._ref_ldm_unet_runner: dict = {}  # {use_exclusive: UNetCUDAGraphRunner}
         self._codeformer_torch: Optional[object] = None  # CodeFormerTorch
         self._codeformer_runner: Optional[object] = None  # CUDA graph runner
+        self._codeformer_runner_w: Optional[float] = (
+            None  # fidelity weight baked into runner
+        )
         self._restoreformer_torch: Optional[object] = None  # RestoreFormerPlusPlusTorch
         self._restoreformer_runner: Optional[object] = None  # CUDA graph runner
         self._custom_inference_lock = threading.Lock()
@@ -80,6 +83,7 @@ class FaceRestorers:
             self._ref_ldm_unet_runner = {}
             self._codeformer_torch = None
             self._codeformer_runner = None
+            self._codeformer_runner_w = None
             self._restoreformer_torch = None
             self._restoreformer_runner = None
 
@@ -111,7 +115,7 @@ class FaceRestorers:
             return runner
         self.models_processor.show_build_dialog.emit(
             "Finalizing Custom Provider",
-            f"Capturing CUDA graph for {label}…\nThis only happens once and improves performance.",
+            f"Compiling & capturing CUDA graph for {label}…\nFirst run only — future sessions load instantly from cache.",
         )
         try:
             with self._custom_init_lock:
@@ -146,7 +150,9 @@ class FaceRestorers:
                     )
 
                     with self.models_processor.cuda_graph_capture_lock:
-                        r = build_cuda_graph_runner(model, inp_shape=(1, 3, 512, 512))
+                        r = build_cuda_graph_runner(
+                            model, inp_shape=(1, 3, 512, 512), torch_compile=True
+                        )
                     setattr(self, runner_attr, r)
                     runner = r
                 except Exception as e:
@@ -233,7 +239,7 @@ class FaceRestorers:
             return self._ref_ldm_encoder_runner
         self.models_processor.show_build_dialog.emit(
             "Finalizing Custom Provider",
-            "Capturing CUDA graph for RefLDM VAE Encoder…",
+            "Compiling & capturing CUDA graph for RefLDM VAE Encoder…\nFirst run only — future sessions load instantly from cache.",
         )
         try:
             with self._custom_init_lock:
@@ -264,7 +270,9 @@ class FaceRestorers:
 
                     with self.models_processor.cuda_graph_capture_lock:
                         runner = build_cuda_graph_runner(
-                            self._ref_ldm_encoder_torch, inp_shape=(1, 3, 512, 512)
+                            self._ref_ldm_encoder_torch,
+                            inp_shape=(1, 3, 512, 512),
+                            torch_compile=True,
                         )
                     self._ref_ldm_encoder_runner = runner
                 except Exception as e:
@@ -282,7 +290,7 @@ class FaceRestorers:
             return self._ref_ldm_decoder_runner
         self.models_processor.show_build_dialog.emit(
             "Finalizing Custom Provider",
-            "Capturing CUDA graph for RefLDM VAE Decoder…",
+            "Compiling & capturing CUDA graph for RefLDM VAE Decoder…\nFirst run only — future sessions load instantly from cache.",
         )
         try:
             with self._custom_init_lock:
@@ -313,7 +321,9 @@ class FaceRestorers:
 
                     with self.models_processor.cuda_graph_capture_lock:
                         runner = build_cuda_graph_runner(
-                            self._ref_ldm_decoder_torch, inp_shape=(1, 8, 64, 64)
+                            self._ref_ldm_decoder_torch,
+                            inp_shape=(1, 8, 64, 64),
+                            torch_compile=True,
                         )
                     self._ref_ldm_decoder_runner = runner
                 except Exception as e:
@@ -353,7 +363,7 @@ class FaceRestorers:
             return self._restoreformer_runner
         self.models_processor.show_build_dialog.emit(
             "Finalizing Custom Provider",
-            "Capturing CUDA graph for RestoreFormer++…",
+            "Compiling & capturing CUDA graph for RestoreFormer++…\nFirst run only — future sessions load instantly from cache.",
         )
         try:
             with self._custom_init_lock:
@@ -388,7 +398,9 @@ class FaceRestorers:
 
                     with self.models_processor.cuda_graph_capture_lock:
                         runner = build_cuda_graph_runner(
-                            self._restoreformer_torch, inp_shape=(1, 3, 512, 512)
+                            self._restoreformer_torch,
+                            inp_shape=(1, 3, 512, 512),
+                            torch_compile=True,
                         )
                     self._restoreformer_runner = runner
                 except Exception as e:
@@ -433,6 +445,59 @@ class FaceRestorers:
         finally:
             self.models_processor.hide_build_dialog.emit()
         return self._codeformer_torch
+
+    def _get_codeformer_runner(self, model, fidelity_weight: float):
+        """
+        Return a CUDA-graph runner for the given fidelity_weight.
+
+        The fidelity weight is baked into the graph at capture time.
+        If the weight changes, the old runner is invalidated and a new one is
+        built on the next call (one direct-inference frame in between).
+        """
+        w = round(float(fidelity_weight), 3)  # quantise to 3dp to reduce rebuilds
+        if (
+            self._codeformer_runner is not None
+            and self._codeformer_runner_w is not None
+            and abs(self._codeformer_runner_w - w) < 0.005
+        ):
+            return self._codeformer_runner
+
+        # Invalidate stale runner — caller will use direct inference this frame.
+        self._codeformer_runner = None
+        self._codeformer_runner_w = None
+
+        self.models_processor.show_build_dialog.emit(
+            "Finalizing Custom Provider",
+            f"Compiling & capturing CUDA graph for CodeFormer (w={w:.2f})…\nFirst run only — future sessions load instantly from cache.",
+        )
+        try:
+            with self._custom_init_lock:
+                # Re-check under lock in case another thread just built it.
+                if (
+                    self._codeformer_runner is not None
+                    and self._codeformer_runner_w is not None
+                    and abs(self._codeformer_runner_w - w) < 0.005
+                ):
+                    return self._codeformer_runner
+                try:
+                    from custom_kernels.codeformer.codeformer_torch import (
+                        build_cuda_graph_runner,
+                    )
+
+                    with self.models_processor.cuda_graph_capture_lock:
+                        runner = build_cuda_graph_runner(
+                            model,
+                            inp_shape=(1, 3, 512, 512),
+                            fidelity_weight=w,
+                            torch_compile=True,
+                        )
+                    self._codeformer_runner = runner
+                    self._codeformer_runner_w = w
+                except Exception as e:
+                    print(f"[Custom] CodeFormer CUDA graph build failed: {e}")
+        finally:
+            self.models_processor.hide_build_dialog.emit()
+        return self._codeformer_runner
 
     def _run_model_with_lazy_build_check(
         self, model_name: str, ort_session, io_binding
@@ -832,8 +897,9 @@ class FaceRestorers:
 
                         self.models_processor.show_build_dialog.emit(
                             "Finalizing Custom Provider",
-                            f"Capturing CUDA graph for RefLDM UNet "
-                            f"(use_exclusive={use_exclusive})…",
+                            f"Compiling & capturing CUDA graph for RefLDM UNet "
+                            f"(use_exclusive={use_exclusive})…\n"
+                            f"First run only — future sessions load instantly from cache.",
                         )
                         try:
                             with self.models_processor.cuda_graph_capture_lock:
@@ -843,6 +909,7 @@ class FaceRestorers:
                                     ts_example=timesteps_tensor.clone(),
                                     kv_map_template=kv_tensor_map,
                                     use_exclusive=use_exclusive,
+                                    torch_compile=False,
                                 )
                             self._ref_ldm_unet_runner[use_exclusive] = runner
                             print(
@@ -1220,11 +1287,16 @@ class FaceRestorers:
         if self.models_processor.provider_name == "Custom":
             model = self._get_codeformer_torch()
             if model is not None:
+                w = float(fidelity_weight_value)
+                runner = self._get_codeformer_runner(model, w)
                 with torch.no_grad():
                     with self._get_runner_lock(model):
-                        result = model(
-                            image, fidelity_weight=float(fidelity_weight_value)
-                        )
+                        if runner is not None:
+                            result = runner(image)
+                        else:
+                            # Runner not yet ready (first frame after weight change):
+                            # fall back to direct FP16 inference.
+                            result = model(image, fidelity_weight=w)
                 output.copy_(result)
                 return
 

@@ -12,22 +12,24 @@ Model: **IResNet-50 / ArcFace**  `(1,3,112,112)f32 → (1,512)f32`
 ## Benchmark Results
 
 **Hardware:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
-**Conditions:** 50 iterations, 10 warm-up, input 112×112
+**Conditions:** 30 iterations, 5 warm-up, input 112×112
 
 | Tier | Method | ms | vs ORT CUDA EP |
 |------|--------|---:|:--------------:|
-| 0    | ORT FP32 CUDA EP (baseline) | 4.36 ms | 1.00x |
-| 0b   | ORT TensorRT EP FP32 | 2.73 ms | 1.60x |
-| 1    | PyTorch FP32 | 3.76 ms | 1.16x |
-| 2    | PyTorch FP16 | 4.00 ms | 1.09x |
-| **3** | **PT FP16 + CUDA graph (Custom)** | **1.17 ms** | **3.72x** |
+| 0    | ORT FP32 CUDA EP (baseline) | 2.00 ms | 1.00× |
+| 0b   | ORT TensorRT EP FP32 | 2.10 ms | 0.95× *(slower than ORT on this tiny model)* |
+| 1    | PyTorch FP32 | 4.02 ms | 0.50× |
+| 2    | PyTorch FP16 | 4.63 ms | 0.43× |
+| **3** | **PT FP16 + CUDA graph (Custom)** | **1.13 ms** | **1.78×** |
+| **4** | **torch.compile default + FP16 + CUDA graph** | **0.82 ms** | **2.44×** |
+| 4b   | torch.compile reduce-overhead | — *(MLIR segfault on Windows/sm_89)* | — |
 
 > **Application uses Tier 3** (single CUDA graph; fixed 112×112 input).
-> If CUDA graph capture fails, falls back to Tier 2 (FP16 eager).
+> Pass `torch_compile=True` to `build_cuda_graph_runner` to activate Tier 4 (default+CG, 2.44×).
+> `reduce-overhead` crashes (MLIR segfault) on this model; set `W600K_TORCH_COMPILE=1` to attempt.
 
-**Accuracy:** MAE = 7.73e-04, MaxAbsErr = 2.61e-03;
-Cosine similarity between Custom and ORT outputs = **0.999998** — face recognition
-quality is unaffected at normal operating conditions.
+**Accuracy (Tier 4 vs ORT FP32):** MAE = 7.39e-04, MaxAbsErr = 3.03e-03;
+Cosine similarity = **0.999998** — face recognition quality is unaffected.
 
 ### Speed-up Source
 

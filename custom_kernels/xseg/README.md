@@ -10,23 +10,31 @@ Model: **SN256_XSeg**  `(1,3,256,256)f32 → (1,1,256,256)f32`
 
 ---
 
-## Benchmark Results (RTX 4090, CUDA 12.9, PyTorch 2.8+cu129, Triton 3.6.0, ORT 1.22.0, input 256×256)
+## Benchmark Results
 
-50 iterations, 10 warm-up.
+**Hardware:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
+**Conditions:** 30 iterations, 5 warm-up, input 256×256
 
-| Tier | Method | ms | vs CUDA EP |
-|------|--------|---:|-----------:|
-| 0 | ORT FP32 CUDA EP | 16.47 | 1.00x |
-| 0b | ORT TRT EP FP32 | 5.71 | 2.89x |
-| 1 | PyTorch FP32 | 20.00 | 0.82x |
-| 2 | PyTorch FP16 | 9.95 | 1.66x |
-| 3 | PT FP16 + CUDA graph (no Triton) | 4.90 | 3.36x |
-| **4** | **PT FP16 + Triton RMSNormMax + CUDA graph (Custom)** | **1.86** | **8.85x** |
+| Tier | Method | ms | vs ORT CUDA EP |
+|------|--------|----|:--------------:|
+| 0 | ORT FP32 CUDA EP (baseline) *(ConvTranspose on CPU)* | 11.83 ms | 1.00× |
+| 0b | ORT TRT EP FP32 | 1.91 ms | 6.18× |
+| 1 | PyTorch FP32 | 5.23 ms | 2.26× |
+| 2 | PyTorch FP16 | 3.78 ms | 3.13× |
+| **3** | **PT FP16 + CUDA graph (Custom)** | **1.89 ms** | **6.25×** |
+| **4** | **PT FP16 + Triton RMSNormMax + CUDA graph (Custom)** | **1.89 ms** | **6.25×** |
+| **5** | **torch.compile default + FP16 + CUDA graph** | **0.88 ms** | **13.44×** |
+| 5b | torch.compile reduce-overhead | — *(skipped by default; set `XSEG_TORCH_COMPILE=1`)* | — |
 
-> **Application uses Tier 4** when Triton is available (Triton fused RMSNormMax
-> inside the CUDA graph replaces 5 PyTorch ops with 2 memory passes across all
-> 36 norm blocks).  Falls back to Tier 3 if Triton is unavailable, and Tier 2
-> if CUDA graph capture fails.
+> **Application uses Tier 4** when Triton is available. Pass `torch_compile=True` to `build_cuda_graph_runner` to activate Tier 5 (13.44× vs ORT CUDA EP, 2.17× vs TRT EP).
+>
+> **Note on ORT CUDA EP baseline:** ORT runs ConvTranspose nodes on CPU due to asymmetric padding — the baseline is artificially slow compared to fully GPU-resident PyTorch.
+
+**Accuracy (Tier 4 vs ORT FP32):** MAE=8.20e-04, MaxAbsErr=1.91e-02; binary pixel agreement = 99.77%.
+
+> **Tier 5 (torch.compile):** Pass `torch_compile=True` to `build_cuda_graph_runner`
+> to enable `torch.compile(mode='default')` before CUDA graph capture.  Incurs a
+> one-time ~30 s Triton JIT compile cost on first run.
 >
 > **Note on VRAM Leak Fix:** A multi-threading race condition caused by missing dedicated capture streams in the graph runner, which allowed CPU-side allocations to outpace GPU execution during high-FPS scenarios (like recording), has been permanently fixed. The runner now properly uses a dedicated stream and `torch.cuda.current_stream().synchronize()` inside the locks.
 >

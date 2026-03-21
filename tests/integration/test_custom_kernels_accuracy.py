@@ -20,6 +20,7 @@ import pytest
 try:
     import torch
     import onnxruntime as ort
+
     _CUDA_AVAILABLE = torch.cuda.is_available()
     _ORT_CUDA_AVAILABLE = "CUDAExecutionProvider" in ort.get_available_providers()
 except ImportError:
@@ -36,6 +37,7 @@ pytestmark = pytest.mark.integration
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _ort_cuda_session(onnx_path: str | Path):
     so = ort.SessionOptions()
@@ -64,6 +66,7 @@ def _skip_no_model(path: Path):
 # det_10g — SCRFD-10G face detector
 # ---------------------------------------------------------------------------
 
+
 class TestDet10gAccuracy:
     ONNX = ROOT / "model_assets" / "det_10g.onnx"
     TOL = 0.02
@@ -71,7 +74,10 @@ class TestDet10gAccuracy:
     def test_fp16_cuda_graph_vs_ort(self):
         _skip_no_cuda()
         _skip_no_model(self.ONNX)
-        from custom_kernels.det_10g.det10g_torch import Det10gTorch, build_cuda_graph_runner
+        from custom_kernels.det_10g.det10g_torch import (
+            Det10gTorch,
+            build_cuda_graph_runner,
+        )
 
         sess = _ort_cuda_session(self.ONNX)
         in_name = sess.get_inputs()[0].name
@@ -80,7 +86,11 @@ class TestDet10gAccuracy:
         inp = torch.randn(1, 3, 640, 640, dtype=torch.float32, device="cuda")
         inp_np = inp.cpu().numpy()
 
-        model = Det10gTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16).cuda().eval()
+        model = (
+            Det10gTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
         runner = build_cuda_graph_runner(model)
 
         ort_out = sess.run(out_names, {in_name: inp_np})
@@ -89,12 +99,15 @@ class TestDet10gAccuracy:
 
         for i, (a, b) in enumerate(zip(ort_out, pt_out)):
             diff = np.abs(np.array(a) - b.float().cpu().numpy()).max()
-            assert diff < self.TOL, f"output[{i}]: max|diff|={diff:.4e} > tol={self.TOL}"
+            assert diff < self.TOL, (
+                f"output[{i}]: max|diff|={diff:.4e} > tol={self.TOL}"
+            )
 
 
 # ---------------------------------------------------------------------------
 # yoloface_8n — YOLOv8n face detector
 # ---------------------------------------------------------------------------
+
 
 class TestYoloFace8nAccuracy:
     ONNX = ROOT / "model_assets" / "yoloface_8n.onnx"
@@ -103,7 +116,10 @@ class TestYoloFace8nAccuracy:
     def test_fp16_cuda_graph_vs_ort(self):
         _skip_no_cuda()
         _skip_no_model(self.ONNX)
-        from custom_kernels.yoloface_8n.yoloface8n_torch import YoloFace8nTorch, build_cuda_graph_runner
+        from custom_kernels.yoloface_8n.yoloface8n_torch import (
+            YoloFace8nTorch,
+            build_cuda_graph_runner,
+        )
 
         sess = _ort_cuda_session(self.ONNX)
         in_name = sess.get_inputs()[0].name
@@ -111,7 +127,11 @@ class TestYoloFace8nAccuracy:
         inp = torch.rand(1, 3, 640, 640, dtype=torch.float32, device="cuda")
         inp_np = inp.cpu().numpy()
 
-        model = YoloFace8nTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16).cuda().eval()
+        model = (
+            YoloFace8nTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
         runner = build_cuda_graph_runner(model)
 
         ort_out = sess.run(["output0"], {in_name: inp_np})[0]
@@ -126,6 +146,7 @@ class TestYoloFace8nAccuracy:
 # det_106 — 2D-106 landmark detector
 # ---------------------------------------------------------------------------
 
+
 class TestDet106Accuracy:
     ONNX = ROOT / "model_assets" / "2d106det.onnx"
     TOL = 0.02
@@ -133,16 +154,25 @@ class TestDet106Accuracy:
     def test_fp16_cuda_graph_vs_ort(self):
         _skip_no_cuda()
         _skip_no_model(self.ONNX)
-        from custom_kernels.det_106.det_106_torch import Det106Torch, build_cuda_graph_runner
+        from custom_kernels.det_106.det_106_torch import (
+            Det106Torch,
+            build_cuda_graph_runner,
+        )
 
         sess = _ort_cuda_session(self.ONNX)
         in_name = sess.get_inputs()[0].name
         out_names = [o.name for o in sess.get_outputs()]
 
-        inp = torch.randint(0, 256, (1, 3, 192, 192), dtype=torch.float32, device="cuda")
+        inp = torch.randint(
+            0, 256, (1, 3, 192, 192), dtype=torch.float32, device="cuda"
+        )
         inp_np = inp.cpu().numpy()
 
-        model = Det106Torch.from_onnx(str(self.ONNX), compute_dtype=torch.float16).cuda().eval()
+        model = (
+            Det106Torch.from_onnx(str(self.ONNX), compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
         runner = build_cuda_graph_runner(model)
 
         ort_out = sess.run(out_names, {in_name: inp_np})[0]
@@ -157,6 +187,7 @@ class TestDet106Accuracy:
 # inswapper_128 — face swapper
 # ---------------------------------------------------------------------------
 
+
 class TestInswapper128Accuracy:
     ONNX = ROOT / "model_assets" / "inswapper_128.fp16.onnx"
     TOL = 0.05
@@ -164,12 +195,16 @@ class TestInswapper128Accuracy:
     def test_triton_cuda_graph_vs_ort(self):
         _skip_no_cuda()
         _skip_no_model(self.ONNX)
-        from custom_kernels.inswapper_128.inswapper_torch import InSwapperTorch, build_cuda_graph_runner
+        from custom_kernels.inswapper_128.inswapper_torch import (
+            InSwapperTorch,
+            build_cuda_graph_runner,
+        )
 
         so = ort.SessionOptions()
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         sess = ort.InferenceSession(
-            str(self.ONNX), so,
+            str(self.ONNX),
+            so,
             providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
             provider_options=[{"device_id": "0"}, {}],
         )
@@ -203,6 +238,7 @@ class TestInswapper128Accuracy:
 # w600k_r50 — IResNet-50 ArcFace (face recognizer)
 # ---------------------------------------------------------------------------
 
+
 class TestW600kR50Accuracy:
     ONNX = ROOT / "model_assets" / "w600k_r50.onnx"
     COSINE_TOL = 0.999
@@ -210,7 +246,10 @@ class TestW600kR50Accuracy:
     def test_fp16_cuda_graph_vs_ort(self):
         _skip_no_cuda()
         _skip_no_model(self.ONNX)
-        from custom_kernels.w600k_r50.w600k_r50_torch import IResNet50Torch, build_cuda_graph_runner
+        from custom_kernels.w600k_r50.w600k_r50_torch import (
+            IResNet50Torch,
+            build_cuda_graph_runner,
+        )
 
         sess = _ort_cuda_session(self.ONNX)
         in_name = sess.get_inputs()[0].name
@@ -218,20 +257,30 @@ class TestW600kR50Accuracy:
         inp = torch.randn(1, 3, 112, 112, dtype=torch.float32, device="cuda")
         inp_np = inp.cpu().numpy()
 
-        model = IResNet50Torch.from_onnx(str(self.ONNX), compute_dtype=torch.float16).cuda().eval()
+        model = (
+            IResNet50Torch.from_onnx(str(self.ONNX), compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
         runner = build_cuda_graph_runner(model)
 
         ort_out = sess.run(None, {in_name: inp_np})[0].flatten()
         with torch.no_grad():
             pt_out = runner(inp).float().cpu().numpy().flatten()
 
-        cos_sim = float(np.dot(ort_out, pt_out) / (np.linalg.norm(ort_out) * np.linalg.norm(pt_out) + 1e-8))
-        assert cos_sim > self.COSINE_TOL, f"cosine_sim={cos_sim:.6f} < {self.COSINE_TOL}"
+        cos_sim = float(
+            np.dot(ort_out, pt_out)
+            / (np.linalg.norm(ort_out) * np.linalg.norm(pt_out) + 1e-8)
+        )
+        assert cos_sim > self.COSINE_TOL, (
+            f"cosine_sim={cos_sim:.6f} < {self.COSINE_TOL}"
+        )
 
 
 # ---------------------------------------------------------------------------
 # faceparser_resnet34 — BiSeNet face parser
 # ---------------------------------------------------------------------------
+
 
 class TestFaceparserResnet34Accuracy:
     ONNX = ROOT / "model_assets" / "faceparser_resnet34.onnx"
@@ -241,7 +290,8 @@ class TestFaceparserResnet34Accuracy:
         _skip_no_cuda()
         _skip_no_model(self.ONNX)
         from custom_kernels.faceparser_resnet34.faceparser_resnet34_torch import (
-            FaceParserResnet34Torch, build_cuda_graph_runner,
+            FaceParserResnet34Torch,
+            build_cuda_graph_runner,
         )
 
         sess = _ort_cuda_session(self.ONNX)
@@ -250,7 +300,13 @@ class TestFaceparserResnet34Accuracy:
         inp = torch.randn(1, 3, 512, 512, dtype=torch.float32, device="cuda")
         inp_np = inp.cpu().numpy()
 
-        model = FaceParserResnet34Torch.from_onnx(str(self.ONNX), compute_dtype=torch.float16).cuda().eval()
+        model = (
+            FaceParserResnet34Torch.from_onnx(
+                str(self.ONNX), compute_dtype=torch.float16
+            )
+            .cuda()
+            .eval()
+        )
         runner = build_cuda_graph_runner(model)
 
         ort_out = sess.run(["output"], {in_name: inp_np})[0]
@@ -265,6 +321,7 @@ class TestFaceparserResnet34Accuracy:
 # GFPGANv1.4 — face restorer
 # ---------------------------------------------------------------------------
 
+
 class TestGFPGANv14Accuracy:
     ONNX = ROOT / "model_assets" / "GFPGANv1.4.onnx"
     TOL = 0.1
@@ -272,12 +329,16 @@ class TestGFPGANv14Accuracy:
     def test_fp16_cuda_graph_vs_ort(self):
         _skip_no_cuda()
         _skip_no_model(self.ONNX)
-        from custom_kernels.gfpgan_v1_4.gfpgan_torch import GFPGANTorch, build_cuda_graph_runner
+        from custom_kernels.gfpgan_v1_4.gfpgan_torch import (
+            GFPGANTorch,
+            build_cuda_graph_runner,
+        )
 
         so = ort.SessionOptions()
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         sess = ort.InferenceSession(
-            str(self.ONNX), so,
+            str(self.ONNX),
+            so,
             providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
             provider_options=[{"device_id": "0"}, {}],
         )
@@ -285,7 +346,11 @@ class TestGFPGANv14Accuracy:
         ort_out = sess.run(None, {"input": inp_np})[0]
 
         inp = torch.from_numpy(inp_np).cuda()
-        model = GFPGANTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16).cuda().eval()
+        model = (
+            GFPGANTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
         runner = build_cuda_graph_runner(model, inp_shape=(1, 3, 512, 512))
 
         with torch.no_grad():
@@ -299,6 +364,7 @@ class TestGFPGANv14Accuracy:
 # GFPGAN-1024 — face restorer (1024 variant)
 # ---------------------------------------------------------------------------
 
+
 class TestGFPGAN1024Accuracy:
     ONNX = ROOT / "model_assets" / "gfpgan-1024.onnx"
     TOL = 0.1
@@ -306,12 +372,16 @@ class TestGFPGAN1024Accuracy:
     def test_fp16_cuda_graph_vs_ort(self):
         _skip_no_cuda()
         _skip_no_model(self.ONNX)
-        from custom_kernels.gfpgan_v1_4.gfpgan_torch import GFPGANTorch, build_cuda_graph_runner
+        from custom_kernels.gfpgan_v1_4.gfpgan_torch import (
+            GFPGANTorch,
+            build_cuda_graph_runner,
+        )
 
         so = ort.SessionOptions()
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         sess = ort.InferenceSession(
-            str(self.ONNX), so,
+            str(self.ONNX),
+            so,
             providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
             provider_options=[{"device_id": "0"}, {}],
         )
@@ -319,7 +389,11 @@ class TestGFPGAN1024Accuracy:
         ort_out = sess.run(None, {"input": inp_np})[0]
 
         inp = torch.from_numpy(inp_np).cuda()
-        model = GFPGANTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16).cuda().eval()
+        model = (
+            GFPGANTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
         runner = build_cuda_graph_runner(model, inp_shape=(1, 3, 512, 512))
 
         with torch.no_grad():
@@ -333,6 +407,7 @@ class TestGFPGAN1024Accuracy:
 # GPEN-BFR-256 — face restorer
 # ---------------------------------------------------------------------------
 
+
 class TestGPENBFR256Accuracy:
     ONNX = ROOT / "model_assets" / "GPEN-BFR-256.onnx"
     TOL = 0.1
@@ -340,12 +415,16 @@ class TestGPENBFR256Accuracy:
     def test_fp16_cuda_graph_vs_ort(self):
         _skip_no_cuda()
         _skip_no_model(self.ONNX)
-        from custom_kernels.gpen_bfr.gpen_torch import GPENTorch, build_cuda_graph_runner
+        from custom_kernels.gpen_bfr.gpen_torch import (
+            GPENTorch,
+            build_cuda_graph_runner,
+        )
 
         so = ort.SessionOptions()
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         sess = ort.InferenceSession(
-            str(self.ONNX), so,
+            str(self.ONNX),
+            so,
             providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
             provider_options=[{"device_id": "0"}, {}],
         )
@@ -354,7 +433,11 @@ class TestGPENBFR256Accuracy:
         ort_out = sess.run(None, {inp_name: inp_np})[0]
 
         inp = torch.from_numpy(inp_np).cuda()
-        model = GPENTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16).cuda().eval()
+        model = (
+            GPENTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
         runner = build_cuda_graph_runner(model, inp_shape=(1, 3, 256, 256))
 
         with torch.no_grad():
@@ -367,6 +450,7 @@ class TestGPENBFR256Accuracy:
 # ---------------------------------------------------------------------------
 # CodeFormer — face restorer
 # ---------------------------------------------------------------------------
+
 
 class TestCodeFormerAccuracy:
     ONNX = ROOT / "model_assets" / "codeformer_fp16.onnx"
@@ -388,7 +472,11 @@ class TestCodeFormerAccuracy:
 
         ort_out = sess.run([out_name], {in_name: inp_np, w_name: w_np})[0]
 
-        model = CodeFormerTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16).cuda().eval()
+        model = (
+            CodeFormerTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
         with torch.no_grad():
             pt_out = model(inp, fidelity_weight=0.5).float().cpu().numpy()
 
@@ -400,6 +488,7 @@ class TestCodeFormerAccuracy:
 # RestoreFormerPlusPlus — face restorer
 # ---------------------------------------------------------------------------
 
+
 class TestRestoreFormerAccuracy:
     ONNX = ROOT / "model_assets" / "RestoreFormerPlusPlus.fp16.onnx"
     TOL = 0.1
@@ -408,7 +497,8 @@ class TestRestoreFormerAccuracy:
         _skip_no_cuda()
         _skip_no_model(self.ONNX)
         from custom_kernels.restoreformer.restoreformer_torch import (
-            RestoreFormerPlusPlusTorch, build_cuda_graph_runner,
+            RestoreFormerPlusPlusTorch,
+            build_cuda_graph_runner,
         )
 
         sess = _ort_cuda_session(self.ONNX)
@@ -420,7 +510,13 @@ class TestRestoreFormerAccuracy:
 
         ort_out = sess.run([out_name], {in_name: inp_np})[0]
 
-        model = RestoreFormerPlusPlusTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16).cuda().eval()
+        model = (
+            RestoreFormerPlusPlusTorch.from_onnx(
+                str(self.ONNX), compute_dtype=torch.float16
+            )
+            .cuda()
+            .eval()
+        )
         runner = build_cuda_graph_runner(model, inp_shape=(1, 3, 512, 512))
 
         with torch.no_grad():
@@ -434,6 +530,7 @@ class TestRestoreFormerAccuracy:
 # landmark_203 — 203-point face landmark detector
 # ---------------------------------------------------------------------------
 
+
 class TestLandmark203Accuracy:
     ONNX = ROOT / "model_assets" / "landmark.onnx"
     TOL = 0.5
@@ -441,7 +538,10 @@ class TestLandmark203Accuracy:
     def test_fp16_cuda_graph_vs_ort(self):
         _skip_no_cuda()
         _skip_no_model(self.ONNX)
-        from custom_kernels.landmark_203.landmark_203_torch import Landmark203Torch, build_cuda_graph_runner
+        from custom_kernels.landmark_203.landmark_203_torch import (
+            Landmark203Torch,
+            build_cuda_graph_runner,
+        )
 
         sess = _ort_cuda_session(self.ONNX)
         in_name = sess.get_inputs()[0].name
@@ -450,7 +550,11 @@ class TestLandmark203Accuracy:
         inp = torch.randn(1, 3, 224, 224, dtype=torch.float32, device="cuda")
         inp_np = inp.cpu().numpy()
 
-        model = Landmark203Torch.from_onnx(str(self.ONNX), compute_dtype=torch.float16).cuda().eval()
+        model = (
+            Landmark203Torch.from_onnx(str(self.ONNX), compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
         runner = build_cuda_graph_runner(model)
 
         ref_outs = sess.run(out_names, {in_name: inp_np})
@@ -467,6 +571,7 @@ class TestLandmark203Accuracy:
 # landmark_1k3d68 — 1k3d68 3D face landmark detector
 # ---------------------------------------------------------------------------
 
+
 class TestLandmark1k3d68Accuracy:
     ONNX = ROOT / "model_assets" / "1k3d68.onnx"
     TOL = 0.5
@@ -474,7 +579,10 @@ class TestLandmark1k3d68Accuracy:
     def test_fp16_cuda_graph_vs_ort(self):
         _skip_no_cuda()
         _skip_no_model(self.ONNX)
-        from custom_kernels.landmark_1k3d68.landmark_1k3d68_torch import Landmark1k3d68Torch, build_cuda_graph_runner
+        from custom_kernels.landmark_1k3d68.landmark_1k3d68_torch import (
+            Landmark1k3d68Torch,
+            build_cuda_graph_runner,
+        )
 
         sess = _ort_cuda_session(self.ONNX)
         in_name = sess.get_inputs()[0].name
@@ -483,7 +591,11 @@ class TestLandmark1k3d68Accuracy:
         inp = torch.randn(1, 3, 192, 192, dtype=torch.float32, device="cuda")
         inp_np = inp.cpu().numpy()
 
-        model = Landmark1k3d68Torch.from_onnx(str(self.ONNX), compute_dtype=torch.float16).cuda().eval()
+        model = (
+            Landmark1k3d68Torch.from_onnx(str(self.ONNX), compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
         runner = build_cuda_graph_runner(model)
 
         ref_np = sess.run([out_name], {in_name: inp_np})[0][0]  # (3309,)
@@ -498,6 +610,7 @@ class TestLandmark1k3d68Accuracy:
 # fan_2dfan4 — 2D FAN landmark detector
 # ---------------------------------------------------------------------------
 
+
 class TestFan2dfan4Accuracy:
     ONNX = ROOT / "model_assets" / "2dfan4.onnx"
     TOL = 0.5
@@ -505,7 +618,10 @@ class TestFan2dfan4Accuracy:
     def test_fp16_cuda_graph_vs_ort(self):
         _skip_no_cuda()
         _skip_no_model(self.ONNX)
-        from custom_kernels.fan_2dfan4.fan_2dfan4_torch import FAN2dfan4, build_cuda_graph_runner
+        from custom_kernels.fan_2dfan4.fan_2dfan4_torch import (
+            FAN2dfan4,
+            build_cuda_graph_runner,
+        )
 
         sess = _ort_cuda_session(self.ONNX)
         in_name = sess.get_inputs()[0].name
@@ -514,7 +630,11 @@ class TestFan2dfan4Accuracy:
         inp = torch.randn(1, 3, 256, 256, dtype=torch.float32, device="cuda")
         inp_np = inp.cpu().numpy()
 
-        model = FAN2dfan4.from_onnx(str(self.ONNX), compute_dtype=torch.float16).cuda().eval()
+        model = (
+            FAN2dfan4.from_onnx(str(self.ONNX), compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
         runner = build_cuda_graph_runner(model)
 
         ref_outs = sess.run(out_names, {in_name: inp_np})
@@ -531,6 +651,7 @@ class TestFan2dfan4Accuracy:
 # face_landmark478 — MediaPipe 478-point face landmark detector
 # ---------------------------------------------------------------------------
 
+
 class TestFaceLandmark478Accuracy:
     ONNX = ROOT / "model_assets" / "face_landmarks_detector_Nx3x256x256.onnx"
     TOL = 0.5
@@ -539,7 +660,8 @@ class TestFaceLandmark478Accuracy:
         _skip_no_cuda()
         _skip_no_model(self.ONNX)
         from custom_kernels.face_landmark478.face_landmark478_torch import (
-            FaceLandmark478Torch, build_cuda_graph_runner,
+            FaceLandmark478Torch,
+            build_cuda_graph_runner,
         )
 
         sess = _ort_cuda_session(self.ONNX)
@@ -549,7 +671,11 @@ class TestFaceLandmark478Accuracy:
         inp = torch.randn(1, 3, 256, 256, dtype=torch.float32, device="cuda")
         inp_np = inp.cpu().numpy()
 
-        model = FaceLandmark478Torch.from_onnx(str(self.ONNX), compute_dtype=torch.float16).cuda().eval()
+        model = (
+            FaceLandmark478Torch.from_onnx(str(self.ONNX), compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
         runner = build_cuda_graph_runner(model)
 
         ref_outs = sess.run(out_names, {in_name: inp_np})
@@ -566,6 +692,7 @@ class TestFaceLandmark478Accuracy:
 # face_blendshapes — MediaPipe face blendshapes
 # ---------------------------------------------------------------------------
 
+
 class TestFaceBlendshapesAccuracy:
     ONNX = ROOT / "model_assets" / "face_blendshapes_Nx146x2.onnx"
     TOL = 0.5
@@ -574,7 +701,8 @@ class TestFaceBlendshapesAccuracy:
         _skip_no_cuda()
         _skip_no_model(self.ONNX)
         from custom_kernels.face_blendshapes.face_blendshapes_torch import (
-            FaceBlendShapesTorch, build_cuda_graph_runner,
+            FaceBlendShapesTorch,
+            build_cuda_graph_runner,
         )
 
         sess = _ort_cuda_session(self.ONNX)
@@ -584,7 +712,11 @@ class TestFaceBlendshapesAccuracy:
         inp = torch.randn(1, 146, 2, dtype=torch.float32, device="cuda")
         inp_np = inp.cpu().numpy()
 
-        model = FaceBlendShapesTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16).cuda().eval()
+        model = (
+            FaceBlendShapesTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
         runner = build_cuda_graph_runner(model)
 
         ref_out = sess.run(out_names, {in_name: inp_np})[0]
@@ -599,6 +731,7 @@ class TestFaceBlendshapesAccuracy:
 # peppapig_98 — PeppaPig 98-point landmark detector
 # ---------------------------------------------------------------------------
 
+
 class TestPeppaPig98Accuracy:
     ONNX = ROOT / "model_assets" / "peppapig_teacher_Nx3x256x256.onnx"
     TOL = 0.5
@@ -606,7 +739,10 @@ class TestPeppaPig98Accuracy:
     def test_fp16_cuda_graph_vs_ort(self):
         _skip_no_cuda()
         _skip_no_model(self.ONNX)
-        from custom_kernels.peppapig_98.peppapig_98_torch import PeppaPig98Torch, build_cuda_graph_runner
+        from custom_kernels.peppapig_98.peppapig_98_torch import (
+            PeppaPig98Torch,
+            build_cuda_graph_runner,
+        )
 
         sess = _ort_cuda_session(self.ONNX)
         in_name = sess.get_inputs()[0].name
@@ -615,7 +751,9 @@ class TestPeppaPig98Accuracy:
         inp = torch.rand(1, 3, 256, 256, dtype=torch.float32, device="cuda")
         inp_np = inp.cpu().numpy()
 
-        model = PeppaPig98Torch(str(self.ONNX), compute_dtype=torch.float16).cuda().eval()
+        model = (
+            PeppaPig98Torch(str(self.ONNX), compute_dtype=torch.float16).cuda().eval()
+        )
         runner = build_cuda_graph_runner(model)
 
         ref_outs = sess.run(out_names, {in_name: inp_np})
@@ -631,6 +769,7 @@ class TestPeppaPig98Accuracy:
 # occluder — face occlusion segmentation
 # ---------------------------------------------------------------------------
 
+
 class TestOccluderAccuracy:
     ONNX = ROOT / "model_assets" / "occluder.onnx"
     TOL = 0.05
@@ -638,7 +777,10 @@ class TestOccluderAccuracy:
     def test_fp16_cuda_graph_vs_ort(self):
         _skip_no_cuda()
         _skip_no_model(self.ONNX)
-        from custom_kernels.occluder.occluder_torch import OccluderTorch, build_cuda_graph_runner
+        from custom_kernels.occluder.occluder_torch import (
+            OccluderTorch,
+            build_cuda_graph_runner,
+        )
 
         sess = _ort_cuda_session(self.ONNX)
         in_name = sess.get_inputs()[0].name
@@ -646,7 +788,11 @@ class TestOccluderAccuracy:
         inp = torch.rand(1, 3, 256, 256, dtype=torch.float32, device="cuda")
         inp_np = inp.cpu().numpy()
 
-        model = OccluderTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16).cuda().eval()
+        model = (
+            OccluderTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
         runner = build_cuda_graph_runner(model)
 
         ort_out = sess.run(None, {in_name: inp_np})[0]
@@ -660,6 +806,7 @@ class TestOccluderAccuracy:
 # ---------------------------------------------------------------------------
 # xseg — XSeg face segmentation
 # ---------------------------------------------------------------------------
+
 
 class TestXSegAccuracy:
     ONNX = ROOT / "model_assets" / "XSeg_model.onnx"
@@ -676,7 +823,11 @@ class TestXSegAccuracy:
         inp = torch.rand(1, 3, 256, 256, dtype=torch.float32, device="cuda")
         inp_np = inp.cpu().numpy()
 
-        model = XSegTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16).cuda().eval()
+        model = (
+            XSegTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
         runner = build_cuda_graph_runner(model)
 
         ort_out = sess.run(None, {in_name: inp_np})[0]
@@ -690,6 +841,7 @@ class TestXSegAccuracy:
 # ---------------------------------------------------------------------------
 # res50 — RetinaFace/FaceLandmark5 detector
 # ---------------------------------------------------------------------------
+
 
 class TestRes50Accuracy:
     ONNX = ROOT / "model_assets" / "res50.onnx"
@@ -707,7 +859,11 @@ class TestRes50Accuracy:
         inp = torch.randn(1, 3, 512, 512, dtype=torch.float32, device="cuda")
         inp_np = inp.cpu().numpy()
 
-        model = Res50Torch.from_onnx(str(self.ONNX), compute_dtype=torch.float16).cuda().eval()
+        model = (
+            Res50Torch.from_onnx(str(self.ONNX), compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
         runner = build_cuda_graph_runner(model)
 
         ort_out = sess.run(out_names, {in_name: inp_np})
@@ -716,12 +872,15 @@ class TestRes50Accuracy:
 
         for i, (a, b) in enumerate(zip(ort_out, pt_out)):
             diff = np.abs(np.array(a) - b.float().cpu().numpy()).max()
-            assert diff < self.TOL, f"output[{i}]: max|diff|={diff:.4e} > tol={self.TOL}"
+            assert diff < self.TOL, (
+                f"output[{i}]: max|diff|={diff:.4e} > tol={self.TOL}"
+            )
 
 
 # ---------------------------------------------------------------------------
 # vgg_combo — VGG feature extractor (relu3_3 + relu3_1)
 # ---------------------------------------------------------------------------
+
 
 class TestVggComboAccuracy:
     ONNX = ROOT / "model_assets" / "vgg_combo_relu3_3_relu3_1.onnx"
@@ -730,7 +889,10 @@ class TestVggComboAccuracy:
     def test_fp16_cuda_graph_vs_ort(self):
         _skip_no_cuda()
         _skip_no_model(self.ONNX)
-        from custom_kernels.vgg_combo.vgg_combo_torch import VggComboTorch, build_cuda_graph_runner
+        from custom_kernels.vgg_combo.vgg_combo_torch import (
+            VggComboTorch,
+            build_cuda_graph_runner,
+        )
 
         sess = _ort_cuda_session(self.ONNX)
         in_name = sess.get_inputs()[0].name
@@ -739,7 +901,11 @@ class TestVggComboAccuracy:
         inp = torch.randn(1, 3, 512, 512, dtype=torch.float32, device="cuda")
         inp_np = inp.cpu().numpy()
 
-        model = VggComboTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16).cuda().eval()
+        model = (
+            VggComboTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
         runner = build_cuda_graph_runner(model)
 
         ort_out = sess.run(out_names, {in_name: inp_np})[0]
@@ -754,6 +920,7 @@ class TestVggComboAccuracy:
 # ref_ldm VAE Encoder
 # ---------------------------------------------------------------------------
 
+
 class TestRefLDMEncoderAccuracy:
     ONNX = ROOT / "model_assets" / "ref_ldm_vae_encoder.onnx"
     TOL = 0.05
@@ -761,7 +928,10 @@ class TestRefLDMEncoderAccuracy:
     def test_fp16_cuda_graph_vs_ort(self):
         _skip_no_cuda()
         _skip_no_model(self.ONNX)
-        from custom_kernels.ref_ldm.ref_ldm_torch import RefLDMEncoderTorch, build_cuda_graph_runner
+        from custom_kernels.ref_ldm.ref_ldm_torch import (
+            RefLDMEncoderTorch,
+            build_cuda_graph_runner,
+        )
 
         sess = _ort_cuda_session(self.ONNX)
         in_name = sess.get_inputs()[0].name
@@ -770,7 +940,11 @@ class TestRefLDMEncoderAccuracy:
         inp = torch.randn(1, 3, 512, 512, dtype=torch.float32, device="cuda")
         inp_np = inp.cpu().numpy()
 
-        model = RefLDMEncoderTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16).cuda().eval()
+        model = (
+            RefLDMEncoderTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
         runner = build_cuda_graph_runner(model, inp_shape=(1, 3, 512, 512))
 
         ort_out = sess.run([out_name], {in_name: inp_np})[0]
@@ -785,6 +959,7 @@ class TestRefLDMEncoderAccuracy:
 # ref_ldm VAE Decoder
 # ---------------------------------------------------------------------------
 
+
 class TestRefLDMDecoderAccuracy:
     ONNX = ROOT / "model_assets" / "ref_ldm_vae_decoder.onnx"
     TOL = 0.05
@@ -792,7 +967,10 @@ class TestRefLDMDecoderAccuracy:
     def test_fp16_cuda_graph_vs_ort(self):
         _skip_no_cuda()
         _skip_no_model(self.ONNX)
-        from custom_kernels.ref_ldm.ref_ldm_torch import RefLDMDecoderTorch, build_cuda_graph_runner
+        from custom_kernels.ref_ldm.ref_ldm_torch import (
+            RefLDMDecoderTorch,
+            build_cuda_graph_runner,
+        )
 
         sess = _ort_cuda_session(self.ONNX)
         in_name = sess.get_inputs()[0].name
@@ -801,7 +979,11 @@ class TestRefLDMDecoderAccuracy:
         lat = torch.randn(1, 8, 64, 64, dtype=torch.float32, device="cuda")
         lat_np = lat.cpu().numpy()
 
-        model = RefLDMDecoderTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16).cuda().eval()
+        model = (
+            RefLDMDecoderTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
         runner = build_cuda_graph_runner(model, inp_shape=(1, 8, 64, 64))
 
         ort_out = sess.run([out_name], {in_name: lat_np})[0]
@@ -815,6 +997,7 @@ class TestRefLDMDecoderAccuracy:
 # ---------------------------------------------------------------------------
 # ref_ldm UNet
 # ---------------------------------------------------------------------------
+
 
 class TestRefLDMUNetAccuracy:
     ONNX = ROOT / "model_assets" / "ref_ldm_unet_external_kv.onnx"
@@ -847,7 +1030,11 @@ class TestRefLDMUNetAccuracy:
 
         ort_out = sess.run([out_name], feeds)[0]
 
-        model = RefLDMUNetTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16).cuda().eval()
+        model = (
+            RefLDMUNetTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
         # Use empty kv_map (no reference)
         with torch.no_grad():
             pt_out = model(x, ts, kv_map={}, use_exclusive=False).float().cpu().numpy()

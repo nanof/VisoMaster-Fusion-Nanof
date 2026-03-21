@@ -31,6 +31,13 @@ for _candidate in [
             str(_candidate) + _os.pathsep + _os.environ.get("PATH", "")
         )
 del _candidate, _REPO_ROOT, _os, _sys, _Path
+
+import sys as _sys_enc
+if hasattr(_sys_enc.stdout, 'reconfigure'):
+    _sys_enc.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(_sys_enc.stderr, 'reconfigure'):
+    _sys_enc.stderr.reconfigure(encoding='utf-8', errors='replace')
+del _sys_enc
 # ──────────────────────────────────────────────────────────────────────────
 
 import os
@@ -189,7 +196,44 @@ def bench_restoreformer():
     except Exception as e:
         print(f"  Tier 3 | CUDA graph — skipped ({e})")
 
+    # ── Tier 4 — torch.compile + FP16 + Triton + CUDA graph ───────────────
+    print("\n  [Tier 4] torch.compile(mode='default') + FP16 + Triton + CUDA graph")
+    print("  One-time compile cost: ~60 s on first run (Triton JIT; complex transformer).")
+    try:
+        rfp_c = (
+            RestoreFormerPlusPlusTorch.from_onnx(RFP_ONNX, compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
+        runner4 = build_cuda_graph_runner(rfp_c, inp_shape=(1, 3, 512, 512), torch_compile=True)
+        with torch.no_grad():
+            _ = runner4(inp)
+        t4 = _bench(lambda: runner4(inp))
+        _print_row("4", "torch.compile + FP16 + Triton + CUDA graph", t4, t0)
+    except Exception as e:
+        print(f"  Tier 4 | torch.compile — failed: {e}")
+        import traceback; traceback.print_exc()
+
+    # ── Tier 4b — torch.compile reduce-overhead (no separate CUDA graph) ────
+    print("\n  [Tier 4b] torch.compile(mode='reduce-overhead') — no extra CUDA graph")
+    try:
+        from custom_kernels.compile_utils import apply_torch_compile
+        m4b = RestoreFormerPlusPlusTorch.from_onnx(RFP_ONNX, compute_dtype=torch.float16).cuda().eval()
+        m4b_compiled = apply_torch_compile(
+            m4b,
+            inp,
+            compile_mode="reduce-overhead",
+        )
+        with torch.no_grad():
+            t4b = _bench(lambda: m4b_compiled(inp))
+        _print_row("4b", "torch.compile reduce-overhead (no CUDA graph)", t4b, t0)
+    except Exception as e:
+        print(f"  Tier 4b | reduce-overhead — failed: {e}")
+        import traceback; traceback.print_exc()
+
     print()
+    print("  Note: App runtime uses Tier 3 (FP16 + Triton + CUDA graph).")
+    print("        Tier 4 adds torch.compile for further speedup (~1.16x vs Tier 3).")
     return t0, t0b
 
 

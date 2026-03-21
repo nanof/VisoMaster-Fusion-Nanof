@@ -10,26 +10,29 @@ Used by VisoMaster-Fusion when the *Custom* execution provider is selected.
 |-------|-------|--------|
 | CodeFormer | (1,3,512,512) f32 | (1,3,512,512) f32 |
 
-## Benchmark Results (RTX 4090, CUDA 12.9, PyTorch 2.8+cu129, ORT 1.22.0, Triton 3.6.0)
+## Benchmark Results (RTX 4090, CUDA 12.9, PyTorch 2.8+cu129, ORT 1.22.0, Triton 3.4.0)
 
-**Environment:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · Triton 3.6.0 · ORT 1.22.0
+**Environment:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · Triton 3.4.0 · ORT 1.22.0
 **Method:** 50 iterations, 10 warm-up passes · Input/Output: (1,3,512,512) float32
 
 | Tier | Method | Latency | vs ORT CUDA EP |
 |------|--------|--------:|---------------:|
-| 0 | ORT FP32 CUDA EP (baseline) | 22.98 ms | 1.00x |
-| 0b | ORT TRT EP FP32 | 12.85 ms | 1.79x |
-| 1 | PyTorch FP32 pure ops | 44.68 ms | 0.51x |
-| 2 | PyTorch FP16 + Triton GroupNorm+SiLU | 29.02 ms | 0.79x |
-| 3 | FP16 + Triton + CUDA graph (fixed w=0.5) | **19.72 ms** | **1.17x** |
-| 4 | FP16 + Triton + SDPA4D + GEMM + CUDA graph | **16.04 ms** | **1.43x** |
-| 5 | FP16 + Triton + SDPA4D + GEMM + NHWC + CUDA graph | 22.40 ms | 1.03x |
+| 0  | ORT FP32 CUDA EP (baseline) | 20.51 ms | 1.00× |
+| 0b | ORT TRT EP (opt=5) | 10.30 ms | 1.99× |
+| 1  | PyTorch FP32 pure ops | 31.74 ms | 0.65× |
+| 2  | PyTorch FP16 + Triton GroupNorm+SiLU | 19.43 ms | 1.06× |
+| **3** | **FP16 + Triton + CUDA graph (Custom)** | **13.30 ms** | **1.54×** |
+| 4  | FP16 + Triton + SDPA4D + GEMM + CUDA graph | 13.24 ms | 1.55× |
+| 5  | FP16 + Triton + SDPA4D + GEMM + NHWC + CUDA graph | 17.76 ms | 1.15× |
+| **6** | **torch.compile default + FP16 + Triton + CUDA graph** | **11.25 ms** | **1.82×** |
+| 4b | torch.compile reduce-overhead (no separate CUDA graph) | 11.76 ms | 1.74× |
 
-The CUDA-graph path (Tier 4) is **1.43x faster** than ORT CUDA EP.
+The CUDA-graph path (Tier 4) is **1.55x faster** than ORT CUDA EP.
+Tier 6 adds torch.compile(default) + CUDA graph for **1.82× vs ORT** (1.18× vs Tier 3).
+Both `default+CUDA graph` and `reduce-overhead` work for CodeFormer; default is slightly faster.
 
-> **Application uses Tier 2** (FP16 + Triton, no CUDA graph) because `fidelity_weight`
-> is dynamic — it can change between frames.  Tier 3 is available for advanced use when
-> `fidelity_weight` is held constant.
+> **Application uses Tier 3** (CUDA graph; CUDA graph is rebuilt when `fidelity_weight` changes).
+> Pass `torch_compile=True` to `build_cuda_graph_runner` to activate Tier 6.
 
 ### Kernel Priority Chain
 

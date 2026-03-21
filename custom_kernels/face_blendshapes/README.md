@@ -78,18 +78,20 @@ The ONNX graph implements LN manually (TF export artefact):
 
 ## Benchmark Results
 
-GPU: NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
-(50 iterations, 10 warm-up, batch=1)
+**Hardware:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
+**Conditions:** 500 iterations, 50 warm-up, batch=1
 
 | Tier | Method | Time | vs ORT CUDA EP |
 |------|--------|------|:--------------:|
-| 0    | ORT FP32 CUDA EP (baseline) | 1.910 ms | 1.00× |
-| 0b   | ORT TRT EP FP32 | 0.313 ms | 6.10× |
-| 1    | PyTorch FP32 eager | 1.485 ms | 1.29× |
-| 2    | PyTorch FP16 eager | 1.330 ms | 1.44× |
-| 3    | **PyTorch FP16 + CUDA graph (Custom)** | **0.202 ms** | **9.48×** |
+| 0    | ORT FP32 CUDA EP (baseline) | 1.432 ms | 1.00× |
+| 0b   | ORT TRT EP FP32 | 0.408 ms | 3.51× |
+| 1    | PyTorch FP32 eager | 2.747 ms | 0.52× |
+| 2    | PyTorch FP16 eager | 2.788 ms | 0.51× |
+| **3** | **PyTorch FP16 + CUDA graph (Custom)** | **0.170 ms** | **8.41×** |
+| **4** | **torch.compile default + FP16 + CUDA graph** | **0.110 ms** | **13.01×** |
+| 4b   | torch.compile reduce-overhead | — *(skipped by default; set `BLENDSHAPES_TORCH_COMPILE=1`)* | — |
 
-The CUDA-graph path (tier 3) is **9.48× faster** than ORT CUDA EP.
+> **Application uses Tier 3** (CUDA graph). Pass `torch_compile=True` to `build_cuda_graph_runner()` to activate Tier 4 (13.01×).
 
 Note: FaceBlendShapes is a tiny model (~448 K params, ~0.1 ms compute). The CUDA graph
 eliminates Python/driver overhead which dominates at this scale.
@@ -99,14 +101,14 @@ eliminates Python/driver overhead which dominates at this scale.
 | Mode | Max |Δ| vs ORT FP32 | Mean |Δ| |
 |------|------------------------|----------|
 | FP32 eager | ~9.5e-7 (rounding only) | ~1.8e-7 |
-| FP16 eager + CUDA graph | 0.00186 (blendshape coefficients in [0,1]) ✓ | ~0.000313 |
+| FP16 + CUDA graph | 0.00179 (blendshape coefficients in [0,1]) ✓ | 0.000281 |
 
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `face_blendshapes_torch.py` | `FaceBlendShapesTorch` model, `from_onnx()` loader, `build_cuda_graph_runner()` |
-| `benchmark_face_blendshapes.py` | Four-tier benchmark vs ORT + numerical accuracy check |
+| `benchmark_face_blendshapes.py` | Five-tier benchmark vs ORT + numerical accuracy check |
 
 ## Weight Loading
 

@@ -336,6 +336,7 @@ class XSegTorch(nn.Module):
         print(
             f"[XSegTorch] Loaded {total:,} parameters | compute dtype: {compute_dtype}"
         )
+        model._visomaster_onnx_path = str(onnx_path)
         return model
 
 
@@ -722,6 +723,21 @@ class _CapturedGraph:
         return self._out.clone()
 
 
-def build_cuda_graph_runner(model: XSegTorch, warmup: int = 3) -> _CapturedGraph:
+def build_cuda_graph_runner(
+    model: XSegTorch, warmup: int = 3, torch_compile: bool = False
+) -> _CapturedGraph:
     """Capture a CUDA graph for model and return a callable runner."""
+    if torch_compile:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            device = next(model.parameters()).device
+            example_inp = torch.zeros((1, 3, 256, 256), dtype=torch.float32, device=device)
+            # default avoids the Triton MLIR AV crash (0xC0000005 on Windows sm_89)
+            # that mode='reduce-overhead' can trigger in the subprocess ptxas optimizer.
+            compiled = apply_torch_compile(model, example_inp, compile_mode="default")
+            print("[XSegTorch] torch.compile default done.")
+            return compiled
+        except Exception as e:
+            print(f"[XSegTorch] torch.compile failed ({e!s:.120}), falling back to CUDA graph.")
+            # Fall through to CUDA graph capture below
     return _CapturedGraph(model, warmup)

@@ -25,18 +25,22 @@ BN(in_ch) ──→ ReLU ──┬──→ Conv1×1(bias) → ReLU → Conv3×3
 
 ## Benchmark Results
 
-GPU: NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
-(50 iterations, 10 warm-up, batch=1)
+**Hardware:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
+**Conditions:** 500 iterations, 50 warm-up, input 192×192
 
-| Tier | Method | Time | vs ORT CUDA EP |
-|------|--------|------|:--------------:|
-| 0    | ORT FP32 CUDA EP (baseline) | 1.855 ms | 1.00× |
-| 0b   | ORT TensorRT EP FP32 | 1.653 ms | 1.12× |
-| 1    | PyTorch FP32 eager | 6.229 ms | 0.30× |
-| 2    | PyTorch FP16 eager | 7.269 ms | 0.26× |
-| 3    | **PyTorch FP16 + CUDA graph (Custom)** | **0.819 ms** | **2.27×** |
+| Tier | Method | ms | vs ORT CUDA EP |
+|------|--------|----|:--------------:|
+| 0    | ORT FP32 CUDA EP (baseline) | 1.680 ms | 1.00× |
+| 0b   | ORT TensorRT EP FP32 | 1.702 ms | 0.99× *(slower than ORT on this model)* |
+| 1    | PyTorch FP32 eager | 6.266 ms | 0.27× |
+| 2    | PyTorch FP16 eager | 7.074 ms | 0.24× |
+| **3** | **PyTorch FP16 + CUDA graph (Custom)** | **0.792 ms** | **2.12×** |
+| **4** | **torch.compile default + FP16 + CUDA graph** | **0.532 ms** | **3.15×** |
+| 4b   | torch.compile reduce-overhead | — *(skipped by default; set `LMK1K3D68_TORCH_COMPILE=1`)* | — |
 
-The CUDA-graph path (tier 3) is **2.27× faster** than ORT CUDA EP.
+> **Application uses Tier 3** (FP16 + CUDA graph). Pass `torch_compile=True` to `build_cuda_graph_runner` to activate Tier 4 (3.15×).
+
+**Accuracy (Tier 3 vs ORT FP32):** max|Δ| = 1.91e-02, mean|Δ| = 3.62e-04 — well within tolerance.
 
 ### Speed-up breakdown (tier 3)
 

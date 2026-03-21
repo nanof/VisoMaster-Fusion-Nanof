@@ -53,18 +53,20 @@ h      = PW_ex(DW(PReLU(conv))) + skip               # expand 64→128
 
 ## Benchmark Results
 
-GPU: NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
-(50 iterations, 10 warm-up, batch=1)
+**Hardware:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
+**Conditions:** 500 iterations, 50 warm-up, batch=1
 
 | Tier | Method | Time | vs ORT CUDA EP |
 |------|--------|------|:--------------:|
-| 0    | ORT FP32 CUDA EP (baseline) | 3.413 ms | 1.00× |
-| 0b   | ORT TensorRT EP FP32 | 1.878 ms | 1.82× |
-| 1    | PyTorch FP32 eager | 4.352 ms | 0.78× |
-| 2    | PyTorch FP16 eager | 4.568 ms | 0.75× |
-| 3    | **PyTorch FP16 + CUDA graph (Custom)** | **0.640 ms** | **5.33×** |
+| 0    | ORT FP32 CUDA EP (baseline) | 2.356 ms | 1.00× |
+| 0b   | ORT TRT EP FP32 | 1.919 ms | 1.23× |
+| 1    | PyTorch FP32 eager | 9.553 ms | 0.25× |
+| 2    | PyTorch FP16 eager | 10.759 ms | 0.22× |
+| **3** | **PyTorch FP16 + CUDA graph (Custom)** | **0.665 ms** | **3.54×** |
+| **4** | **torch.compile default + FP16 + CUDA graph** | **0.509 ms** | **4.63×** |
+| 4b   | torch.compile reduce-overhead | — *(skipped by default; set `LMK478_TORCH_COMPILE=1`)* | — |
 
-The CUDA-graph path (tier 3) is **5.33× faster** than ORT CUDA EP.
+> **Application uses Tier 3** (CUDA graph). Pass `torch_compile=True` to `build_cuda_graph_runner()` to activate Tier 4 (4.63×).
 
 ### Speed-up breakdown (tier 3)
 
@@ -74,20 +76,19 @@ The CUDA-graph path (tier 3) is **5.33× faster** than ORT CUDA EP.
 
 ## Accuracy
 
-| Mode | Max |Δ| vs ORT FP32 |
-|------|------------------------|
-| FP16 + CUDA graph | 0.5615 (x/y/z in unnormalized landmark coords) ✓ |
+| Mode | Max |Δ| vs ORT FP32 | Mean |Δ| |
+|------|------------------------|---------|
+| FP16 + CUDA graph | 0.8682 (x/y/z in unnormalized landmark coords) ✓ | 0.1324 |
 
-The max delta of 0.946 is in unnormalized output coordinates (target < 1.0). Output is
-visually correct on real faces — the difference is within the expected FP16 precision
-range for this coordinate scale.
+Output is visually correct on real faces — the difference is within the expected FP16
+precision range for this coordinate scale. Accuracy check: ✓ OK (max error < 1.0).
 
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `face_landmark478_torch.py` | `FaceLandmark478Torch` model, `from_onnx()` loader, `build_cuda_graph_runner()` |
-| `benchmark_face_landmark478.py` | Four-tier benchmark vs ORT + numerical accuracy check |
+| `benchmark_face_landmark478.py` | Five-tier benchmark vs ORT + numerical accuracy check |
 
 ## Weight Loading
 

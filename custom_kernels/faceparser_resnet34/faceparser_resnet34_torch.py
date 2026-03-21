@@ -241,7 +241,7 @@ class _OutputHead(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv(self.conv_block(x))
-        return F.interpolate(x, size=(512, 512), mode="bilinear", align_corners=False)
+        return F.interpolate(x, size=(512, 512), mode="bilinear", align_corners=True)
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +323,7 @@ class FaceParserResnet34Torch(nn.Module):
         # Convert to compute dtype (FP16 for TensorCore dispatch)
         model = model.to(compute_dtype)
         model._compute_dtype = compute_dtype
+        model._visomaster_onnx_path = str(onnx_path)
         return model
 
 
@@ -431,13 +432,45 @@ class _CapturedGraph:
 
 def build_cuda_graph_runner(
     model: FaceParserResnet34Torch,
+    torch_compile: bool = False,
 ) -> "_CapturedGraph | FaceParserResnet34Torch":
     """
     Capture a single CUDA graph for the fixed 512×512 input.
 
-    Returns a :class:`_CapturedGraph` callable on success, or the original
-    *model* as an eager-FP16 fallback if graph capture fails.
+    Args:
+        model:         FaceParserResnet34Torch already on CUDA in eval mode.
+        torch_compile: If True, wrap the model with ``torch.compile``
+                       (``reduce-overhead`` mode) before capturing CUDA graphs.
+                       reduce-overhead avoids the Triton MLIR AV crash that
+                       ``mode='default'`` triggers on Windows (sm_89 / Triton
+                       3.4.0) and is ~1.67× faster than CUDA graph (0.80 ms/iter
+                       on RTX 4090).  30 warmup calls are used because BiSeNet's
+                       multi-branch structure requires more graph captures than
+                       simpler models.  The compiled model is returned directly
+                       (no outer _CapturedGraph — reduce-overhead has its own).
+
+    Returns a :class:`_CapturedGraph` callable (torch_compile=False) or the
+    torch-compiled model (torch_compile=True), or the original *model* as an
+    eager-FP16 fallback if graph capture fails.
     """
+    if torch_compile:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            device = next(model.parameters()).device
+            example_inp = torch.zeros(1, 3, 512, 512, dtype=torch.float32, device=device)
+            # reduce-overhead: avoids manual CUDA graph capture conflicts and is
+            # faster (~1.67x vs CUDA graph at 0.80 ms/iter on RTX 4090).
+            # warmup=30: BiSeNet has multiple branches; cudagraph_trees needs ~30
+            # calls to capture all internal CUDA graphs before hitting fast path.
+            compiled = apply_torch_compile(model, example_inp,
+                                           compile_mode="reduce-overhead",
+                                           warmup=30)
+            print("[faceparser_resnet34] torch.compile reduce-overhead done.")
+            # reduce-overhead manages its own CUDA graphs — return directly.
+            return compiled
+        except Exception as e:
+            print(f"[faceparser_resnet34] torch.compile failed ({e!s:.120}), falling back to CUDA graph.")
+
     device = next(model.parameters()).device
     try:
         runner = _CapturedGraph(model, device)

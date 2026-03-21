@@ -5,21 +5,23 @@ with Triton and CUDA C++ fused kernels for StyleGAN2 weight demodulation and
 activation fusion, plus CUDA-graph acceleration.  Used by VisoMaster-Fusion when
 the *Custom* execution provider is selected.
 
-## Benchmark Results (RTX 4090, CUDA 12.9, PyTorch 2.8+cu129, ORT 1.22.0, Triton 3.6.0)
+## Benchmark Results
 
-50-iteration warm benchmark:
+**Hardware:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
+**Conditions:** 50 iterations, 10 warm-up, input 512×512
 
-| Tier | Method | ms | vs ORT CUDA EP |
-|------|--------|----|---------------:|
-| 0 | ORT FP32 CUDA EP | 20.89 ms | 1.00x (baseline) |
-| 0b | ORT TensorRT EP FP32 | 43.18 ms | 0.48x ⚠ (slower than CUDA EP) |
-| 1 | PyTorch FP32 pure ops | 37.73 ms | 0.55x |
-| 2 | PyTorch FP16 + Triton demod + fused-act | 26.63 ms | 0.78x |
-| 3 | PyTorch FP16 + Triton demod + CUDA graph (Custom) | **19.94 ms** | **1.05x** |
+| Tier | Method | ms | vs ORT CUDA EP | vs TRT EP |
+|------|--------|----|---------------:|----------:|
+| 0 | ORT FP32 CUDA EP (baseline) | 15.16 ms | 1.00× | — |
+| 0b | ORT TensorRT EP FP32 | 11.80 ms | 1.28× | 1.00× |
+| 1 | PyTorch FP32 | 13.79 ms | 1.10× | 0.86× |
+| 2 | PyTorch FP16 + Triton demod | 16.73 ms | 0.91× | 0.71× |
+| **3** | **FP16 + Triton + CUDA graph (Custom)** | **7.14 ms** | **2.13×** | **1.65×** |
+| **4** | **torch.compile default + FP16 + CUDA graph** | **4.83 ms** | **3.14×** | **2.44×** |
+| 4b | torch.compile reduce-overhead | — *(may crash MLIR segfault on Windows/sm_89)* | — | — |
 
-The CUDA-graph path is **1.05x faster** than ORT CUDA EP.
-
-> **Note on TRT EP:** ORT TRT EP is slower than CUDA EP for this model (43 ms vs 21 ms). The application therefore benefits from Custom provider even though speedup vs CUDA EP is modest.
+> **Application uses Tier 3** (FP16 + CUDA graph). Pass `torch_compile=True` to `build_cuda_graph_runner` to activate Tier 4 (3.14× vs ORT CUDA EP, 2.44× vs TRT EP).
+> `reduce-overhead` skipped by default; set `GFPGAN_TORCH_COMPILE=1` to attempt.
 
 Numerical accuracy: `mean|diff|` vs ORT ≈ 0.0096 (p99 ≈ 0.087), visually indistinguishable.
 

@@ -33,6 +33,22 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
+# ---------------------------------------------------------------------------
+# Venv guard — re-exec with the project venv's Python if the user ran this
+# script with a different interpreter (e.g. the bare `python` on PATH).
+# Running with the wrong Python version causes a "SystemError: unknown opcode"
+# crash because the venv's site-packages contain bytecode compiled for a
+# different Python version.
+# ---------------------------------------------------------------------------
+_VENV_PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
+if _VENV_PYTHON.exists():
+    try:
+        Path(sys.executable).resolve().relative_to((ROOT / ".venv").resolve())
+    except ValueError:
+        # sys.executable is not inside the project venv — re-exec with it.
+        import subprocess as _sp
+        sys.exit(_sp.run([str(_VENV_PYTHON)] + sys.argv, env=os.environ.copy()).returncode)
+
 
 # ---------------------------------------------------------------------------
 # On Windows, ensure MSVC (cl.exe) is on PATH before torch.utils.cpp_extension

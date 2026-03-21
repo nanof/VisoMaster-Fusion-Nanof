@@ -32,6 +32,13 @@ for _candidate in [
             str(_candidate) + _os.pathsep + _os.environ.get("PATH", "")
         )
 del _candidate, _REPO_ROOT, _os, _sys, _Path
+
+import sys as _sys_enc
+if hasattr(_sys_enc.stdout, 'reconfigure'):
+    _sys_enc.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(_sys_enc.stderr, 'reconfigure'):
+    _sys_enc.stderr.reconfigure(encoding='utf-8', errors='replace')
+del _sys_enc
 # ──────────────────────────────────────────────────────────────────────────
 
 import os
@@ -46,6 +53,8 @@ import torch
 # Config
 # ---------------------------------------------------------------------------
 ROOT = pathlib.Path(__file__).parent.parent.parent
+sys.path.insert(0, str(ROOT))   # needed by all sub-benchmarks when run as subprocess
+
 ONNX_DIR = pathlib.Path(os.environ.get("ONNX_DIR", ROOT / "model_assets"))
 WARMUP = int(os.environ.get("WARMUP", 50))
 ITERS = int(os.environ.get("ITERS", 200))
@@ -193,7 +202,6 @@ def bench_encoder():
             _shutil.rmtree(getattr(sess0b, "_trt_tmp", None) or "", ignore_errors=True)
 
     # Tier 1  — PyTorch FP32
-    sys.path.insert(0, str(ROOT))
     from custom_kernels.ref_ldm.ref_ldm_torch import RefLDMEncoderTorch
 
     enc_fp32 = (
@@ -233,27 +241,46 @@ def bench_encoder():
     t4 = _bench(lambda: runner_cl(inp))
     _print_row("4", "FP16 + Triton + CUDA graph + NHWC", t4, t0)
 
-    # Tier 5 — torch.compile + CUDA graph (Linux only)
-    # torch.compile + Triton causes a hard native segfault (access violation in
-    # libtriton.pyd during Inductor codegen) on Windows — cannot be caught by try/except.
-    if sys.platform == "win32":
-        print("  Tier 5 | torch.compile — skipped (not supported on Windows)")
+    # Tier 5 — torch.compile(mode='default') + CUDA graph
+    print("\n  [Tier 5] torch.compile(mode='default') + CUDA graph")
+    print("  One-time compile cost: ~30–60 s on first run (Triton JIT).")
+    try:
+        enc_c5 = (
+            RefLDMEncoderTorch.from_onnx(ENC_ONNX, compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
+        runner_c5 = build_cuda_graph_runner(enc_c5, inp_shape=(1, 3, 512, 512), torch_compile=True)
+        t5 = _bench(lambda: runner_c5(inp))
+        _print_row("5", "FP16 + Triton + CUDA graph + torch.compile", t5, t0)
+    except Exception as e:
+        print(f"  Tier 5 | torch.compile — failed ({type(e).__name__}: {e})")
+        import traceback; traceback.print_exc()
+
+    # Tier 5b — torch.compile reduce-overhead (no separate CUDA graph)
+    print("\n  [Tier 5b] torch.compile(mode='reduce-overhead') — no extra CUDA graph")
+    if not int(os.environ.get("REFLDM_TORCH_COMPILE", "0")):
+        print("  Skipped — reduce-overhead may crash on this model on Windows/sm_89.")
+        print("  Set REFLDM_TORCH_COMPILE=1 to attempt.")
     else:
         try:
-            enc_c5 = (
+            from custom_kernels.compile_utils import apply_torch_compile
+            enc_5b = (
                 RefLDMEncoderTorch.from_onnx(ENC_ONNX, compute_dtype=torch.float16)
                 .cuda()
                 .eval()
             )
-            enc_c5 = torch.compile(enc_c5, mode="reduce-overhead", fullgraph=False)
+            enc_5b_compiled = apply_torch_compile(
+                enc_5b,
+                inp,
+                compile_mode="reduce-overhead",
+            )
             with torch.no_grad():
-                for _ in range(5):  # trigger compilation
-                    enc_c5(inp)
-            runner_c5 = build_cuda_graph_runner(enc_c5, inp_shape=(1, 3, 512, 512))
-            t5 = _bench(lambda: runner_c5(inp))
-            _print_row("5", "FP16 + Triton + CUDA graph + compile", t5, t0)
+                t5b = _bench(lambda: enc_5b_compiled(inp))
+            _print_row("5b", "torch.compile reduce-overhead (no CUDA graph)", t5b, t0)
         except Exception as e:
-            print(f"  Tier 5 | torch.compile — skipped ({type(e).__name__}: {e})")
+            print(f"  Tier 5b | reduce-overhead — failed: {e}")
+            import traceback; traceback.print_exc()
 
     print()
     return t0, t0b
@@ -334,25 +361,46 @@ def bench_decoder():
     t4 = _bench(lambda: runner_cl(lat))
     _print_row("4", "FP16 + Triton + CUDA graph + NHWC", t4, t0)
 
-    # Tier 5 — torch.compile + CUDA graph (Linux only)
-    if sys.platform == "win32":
-        print("  Tier 5 | torch.compile — skipped (not supported on Windows)")
+    # Tier 5 — torch.compile(mode='default') + CUDA graph
+    print("\n  [Tier 5] torch.compile(mode='default') + CUDA graph")
+    print("  One-time compile cost: ~30–60 s on first run (Triton JIT).")
+    try:
+        dec_c5 = (
+            RefLDMDecoderTorch.from_onnx(DEC_ONNX, compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
+        runner_c5 = build_cuda_graph_runner(dec_c5, inp_shape=(1, 8, 64, 64), torch_compile=True)
+        t5 = _bench(lambda: runner_c5(lat))
+        _print_row("5", "FP16 + Triton + CUDA graph + torch.compile", t5, t0)
+    except Exception as e:
+        print(f"  Tier 5 | torch.compile — failed ({type(e).__name__}: {e})")
+        import traceback; traceback.print_exc()
+
+    # Tier 5b — torch.compile reduce-overhead (no separate CUDA graph)
+    print("\n  [Tier 5b] torch.compile(mode='reduce-overhead') — no extra CUDA graph")
+    if not int(os.environ.get("REFLDM_TORCH_COMPILE", "0")):
+        print("  Skipped — reduce-overhead may crash on this model on Windows/sm_89.")
+        print("  Set REFLDM_TORCH_COMPILE=1 to attempt.")
     else:
         try:
-            dec_c5 = (
+            from custom_kernels.compile_utils import apply_torch_compile
+            dec_5b = (
                 RefLDMDecoderTorch.from_onnx(DEC_ONNX, compute_dtype=torch.float16)
                 .cuda()
                 .eval()
             )
-            dec_c5 = torch.compile(dec_c5, mode="reduce-overhead", fullgraph=False)
+            dec_5b_compiled = apply_torch_compile(
+                dec_5b,
+                lat,
+                compile_mode="reduce-overhead",
+            )
             with torch.no_grad():
-                for _ in range(5):
-                    dec_c5(lat)
-            runner_c5 = build_cuda_graph_runner(dec_c5, inp_shape=(1, 8, 64, 64))
-            t5 = _bench(lambda: runner_c5(lat))
-            _print_row("5", "FP16 + Triton + CUDA graph + compile", t5, t0)
+                t5b = _bench(lambda: dec_5b_compiled(lat))
+            _print_row("5b", "torch.compile reduce-overhead (no CUDA graph)", t5b, t0)
         except Exception as e:
-            print(f"  Tier 5 | torch.compile — skipped ({type(e).__name__}: {e})")
+            print(f"  Tier 5b | reduce-overhead — failed: {e}")
+            import traceback; traceback.print_exc()
 
     print()
     return t0, t0b
@@ -503,28 +551,55 @@ def bench_unet():
     t4 = _bench(lambda: unet_cl_runner(x, ts, kv_map, use_exclusive=True))
     _print_row("4", "FP16 + Triton + CUDA graph + NHWC", t4, t0)
 
-    # Tier 5 — torch.compile + CUDA graph (Linux only)
-    if sys.platform == "win32":
-        print("  Tier 5 | torch.compile — skipped (not supported on Windows)")
+    # Tier 5 — torch.compile(mode='default') + CUDA graph
+    print("\n  [Tier 5] torch.compile(mode='default') + CUDA graph")
+    print("  One-time compile cost: ~60–120 s on first run (UNet is a complex transformer).")
+    try:
+        unet_c5 = (
+            RefLDMUNetTorch.from_onnx(UNET_ONNX, compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
+        unet_c5_runner = build_unet_cuda_graph_runner(
+            unet_c5,
+            x_shape=(1, 16, 64, 64),
+            ts_example=ts,
+            kv_map_template=kv_map,
+            use_exclusive=True,
+            torch_compile=True,
+        )
+        t5 = _bench(lambda: unet_c5_runner(x, ts, kv_map, use_exclusive=True))
+        _print_row("5", "FP16 + Triton + CUDA graph + torch.compile", t5, t0)
+    except Exception as e:
+        print(f"  Tier 5 | torch.compile — failed ({type(e).__name__}: {e})")
+        import traceback; traceback.print_exc()
+
+    # Tier 5b — torch.compile reduce-overhead (no separate CUDA graph)
+    print("\n  [Tier 5b] torch.compile(mode='reduce-overhead') — no extra CUDA graph")
+    if not int(os.environ.get("REFLDM_TORCH_COMPILE", "0")):
+        print("  Skipped — reduce-overhead may crash on this model on Windows/sm_89.")
+        print("  Set REFLDM_TORCH_COMPILE=1 to attempt.")
     else:
         try:
-            unet_c5 = (
+            from custom_kernels.compile_utils import apply_torch_compile
+            unet_5b = (
                 RefLDMUNetTorch.from_onnx(UNET_ONNX, compute_dtype=torch.float16)
                 .cuda()
                 .eval()
             )
-            unet_c5 = torch.compile(unet_c5, mode="reduce-overhead", fullgraph=False)
-            unet_c5_runner = build_unet_cuda_graph_runner(
-                unet_c5,
-                x_shape=(1, 16, 64, 64),
-                ts_example=ts,
-                kv_map_template=kv_map,
-                use_exclusive=True,
+            unet_5b_compiled = apply_torch_compile(
+                unet_5b,
+                x,
+                extra_args=(ts,),
+                extra_kwargs={"kv_map": kv_map, "use_exclusive": True},
+                compile_mode="reduce-overhead",
             )
-            t5 = _bench(lambda: unet_c5_runner(x, ts, kv_map, use_exclusive=True))
-            _print_row("5", "FP16 + Triton + CUDA graph + compile", t5, t0)
+            with torch.no_grad():
+                t5b = _bench(lambda: unet_5b_compiled(x, ts, kv_map=kv_map, use_exclusive=True))
+            _print_row("5b", "torch.compile reduce-overhead (no CUDA graph)", t5b, t0)
         except Exception as e:
-            print(f"  Tier 5 | torch.compile — skipped ({type(e).__name__}: {e})")
+            print(f"  Tier 5b | reduce-overhead — failed: {e}")
+            import traceback; traceback.print_exc()
 
     print()
     return t0, t0b
@@ -533,29 +608,24 @@ def bench_unet():
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-if __name__ == "__main__":
+def _check_prerequisites():
     if not torch.cuda.is_available():
         print("ERROR: CUDA not available.")
         sys.exit(1)
-
     dev = torch.cuda.get_device_name(0)
     print(f"\nDevice: {dev}")
     print(f"PyTorch: {torch.__version__}")
     try:
         import triton
-
         print(f"Triton:  {triton.__version__}")
     except ImportError:
         print("Triton:  not available (FP32 fallback will be used)")
     try:
         import onnxruntime as ort
-
         print(f"ORT:     {ort.__version__}")
     except ImportError:
         print("ORT:     not available (skipping Tier 0/0b)")
         sys.exit(1)
-
-    # Check ONNX files exist
     for path, name in [
         (ENC_ONNX, "VAE encoder"),
         (DEC_ONNX, "VAE decoder"),
@@ -565,6 +635,46 @@ if __name__ == "__main__":
             print(f"ERROR: {name} ONNX not found: {path}")
             sys.exit(1)
 
-    bench_encoder()
-    bench_decoder()
-    bench_unet()
+
+if __name__ == "__main__":
+    # Each sub-benchmark can be run standalone via --encoder / --decoder / --unet.
+    # When invoked without flags, each is spawned as an isolated subprocess so that
+    # native TRT engine-build crashes (0xC0000005 access violations when building
+    # multiple TRT engines in one process) cannot kill the overall benchmark run.
+    import subprocess
+
+    _MODE = None
+    if "--encoder" in sys.argv:
+        _MODE = "encoder"
+    elif "--decoder" in sys.argv:
+        _MODE = "decoder"
+    elif "--unet" in sys.argv:
+        _MODE = "unet"
+
+    if _MODE is not None:
+        # Subprocess mode: run only the requested sub-benchmark.
+        _check_prerequisites()
+        if _MODE == "encoder":
+            bench_encoder()
+        elif _MODE == "decoder":
+            bench_decoder()
+        else:
+            bench_unet()
+        sys.exit(0)
+
+    # Orchestrator mode: spawn each sub-benchmark in its own process.
+    # This prevents a TRT build crash in one component from killing the others.
+    _check_prerequisites()
+    _script = pathlib.Path(__file__).resolve()
+    for _flag in ["--encoder", "--decoder", "--unet"]:
+        print(f"\n{'='*60}")
+        print(f"  Running {_flag[2:].upper()} sub-benchmark in isolated subprocess...")
+        print(f"{'='*60}")
+        _env = os.environ.copy()
+        _result = subprocess.run(
+            [sys.executable, str(_script), _flag],
+            env=_env,
+            timeout=3600,
+        )
+        if _result.returncode not in (0, 1):
+            print(f"  [WARN] {_flag[2:].upper()} subprocess exited with code {_result.returncode}")

@@ -8,54 +8,52 @@ plus **batched pixel-shift inference** for the Inswapper Resolution setting.
 
 ## Benchmark Results
 
-**Hardware:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · Triton 3.6.0 · ORT 1.22.0
-**Conditions:** 300 iterations, 20 warm-up, input 128×128
+**Hardware:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · Triton 3.4.0 · ORT 1.22.0
+**Conditions:** 50 iterations (shorter run), input 128×128
 
 ### Single-Tile Inference (B=1, 128px base)
 
 | Tier | Method | ms | vs ORT CUDA EP | max\|diff\| |
 |------|--------|---:|:--------------:|:-----------:|
-| 0    | ORT CUDA EP (baseline) | 8.141 ms | 1.00× | — |
-| 0b   | ORT TensorRT EP FP32 | 3.596 ms | 2.26× | 0.10132 |
-| 1    | PyTorch pure ops | 4.867 ms | 1.67× | 0.01294 |
-| 2    | PyTorch + Triton AdaIN | 4.884 ms | 1.67× | 0.01294 |
-| 3    | PyTorch + CUDA C++ AdaIN | 5.742 ms | 1.42× | 0.01343 |
-| 4    | PyTorch pure ops + CUDA graph | 4.779 ms | 1.70× | 0.01294 |
-| 5    | PyTorch + Triton AdaIN + CUDA graph | 5.053 ms | 1.61× | 0.01294 |
-| 6    | PyTorch + CUDA C++ AdaIN + CUDA graph | 5.381 ms | 1.51× | 0.01343 |
-| 7    | NHWC + Triton NHWC AdaIN + CUDA graph | 4.164 ms | 1.95× | 0.01514 |
-| 8    | im2col + cuBLAS GEMM + fused im2col+reflect + Triton AdaIN + CUDA graph | 4.263 ms | 1.91× | 0.01611 |
-| **8b** | **cuBLASLt HGEMM + fused BIAS + Triton AdaIN+residual + CUDA graph [Phase 3]** | **3.630 ms** | **2.24×** | 0.03760 |
+| 0    | ORT CUDA EP (baseline) | 5.17 ms | 1.00× | — |
+| 0b   | ORT TensorRT EP FP32 | 2.29 ms | 2.26× | 0.09570 |
+| 1    | PyTorch pure ops | 3.71 ms | 1.39× | 0.01318 |
+| 2    | PyTorch + Triton AdaIN | 3.71 ms | 1.39× | 0.01318 |
+| 3    | PyTorch + CUDA C++ AdaIN | 4.63 ms | 1.12× | 0.01416 |
+| 4    | PyTorch pure ops + CUDA graph | 3.53 ms | 1.47× | 0.01318 |
+| **5** | **PyTorch + Triton AdaIN + CUDA graph (Custom)** | **3.52 ms** | **1.47×** | **0.01318** |
+| 6    | PyTorch + CUDA C++ AdaIN + CUDA graph | 3.98 ms | 1.30× | 0.01416 |
+| 7    | NHWC + Triton NHWC AdaIN + CUDA graph | 3.60 ms | 1.44× | 0.01514 |
+| 8    | im2col + cuBLAS GEMM + Triton AdaIN + CUDA graph | 2.95 ms | 1.75× | 0.01587 |
+| **8b** | **cuBLASLt HGEMM + fused BIAS + Triton AdaIN+residual + CUDA graph** | **2.60 ms** | **1.99×** | **0.02881** |
+| 18   | torch.compile + Triton AdaIN + CUDA graph | — *(MLIR segfault on Windows/sm_89)* | — | — |
+| 18b  | torch.compile reduce-overhead | — *(MLIR segfault on Windows/sm_89)* | — | — |
 
-> **Recommended single-tile:** Tier 8b (Phase 3) at **3.630 ms** — **2.24× faster than ORT CUDA EP**.
+> **Best single-tile:** Tier 8b (cuBLASLt) at **2.60 ms (1.99× vs ORT)**.
+> `torch.compile` crashes with an MLIR optimizer segfault in `libtriton.pyd` on this model
+> (Windows/sm_89). Set `INSWAPPER_TORCH_COMPILE=1` env var to attempt it.
 >
-> Note: Tier 8b shows a higher `max|diff|` (0.037) vs ORT. This is expected — the cuBLASLt
-> BIAS epilogue fuses the bias add inside the GEMM kernel with different FP16 accumulation
-> ordering than a sequential `mm + add`. The perceptual face-swap quality is unaffected.
+> Note: Tier 8b shows higher `max|diff|` (0.029) — the cuBLASLt BIAS epilogue uses different
+> FP16 accumulation order than sequential `mm + add`. Face-swap quality is unaffected.
 
 ### Batched Pixel-Shift Inference (Custom provider only)
 
-The Inswapper Resolution setting subdivides the aligned face into `dim×dim` tiles that
-are processed independently (all tiles share the same source embedding). The Custom
-provider batches all tiles into a **single forward pass** instead of `dim*dim`
-sequential calls.
-
 | Tier | Method | Total ms | Per-tile ms | Speedup |
 |------|--------|--------:|------------:|:-------:|
-| 9    | Sequential B=4  (dim=2, 256px) — 4 × single calls | 16.801 ms | 4.200 ms | 1.00× (ref) |
-| **10** | **Batched B=4  (dim=2, 256px) — 1 × 4-tile call** | **12.114 ms** | **3.029 ms** | **1.39×** |
-| 11   | Sequential B=9  (dim=3, 384px) — 9 × single calls | 39.515 ms | 4.391 ms | 1.00× (ref) |
-| **12** | **Batched B=9  (dim=3, 384px) — 1 × 9-tile call** | **27.985 ms** | **3.109 ms** | **1.41×** |
-| 13   | Sequential B=16 (dim=4, 512px) — 16 × single calls | 69.754 ms | 4.360 ms | 1.00× (ref) |
-| **14** | **Batched B=16 (dim=4, 512px) — 1 × 16-tile call** | **51.392 ms** | **3.212 ms** | **1.36×** |
+| 9    | Sequential B=4  (dim=2, 256px) — 4 × single calls | 15.00 ms | 3.75 ms | 1.00× (ref) |
+| **10** | **Batched B=4  (dim=2, 256px) — 1 × 4-tile call** | **11.75 ms** | **2.94 ms** | **1.28×** |
+| 11   | Sequential B=9  (dim=3, 384px) — 9 × single calls | 33.60 ms | 3.73 ms | 1.00× (ref) |
+| **12** | **Batched B=9  (dim=3, 384px) — 1 × 9-tile call** | **27.21 ms** | **3.02 ms** | **1.23×** |
+| 13   | Sequential B=16 (dim=4, 512px) — 16 × single calls | 60.72 ms | 3.80 ms | 1.00× (ref) |
+| **14** | **Batched B=16 (dim=4, 512px) — 1 × 16-tile call** | **50.15 ms** | **3.13 ms** | **1.21×** |
 
 #### GEMM-mode Batched (Phase 1 optimisation — `torch.matmul` for B > 1)
 
 | Tier | Method | Total ms | Diff (single vs batch) |
 |------|--------|--------:|:----------------------:|
-| 15   | GEMM Batched B=4  (torch.matmul) | 12.400 ms | 0.01001 |
-| 16   | GEMM Batched B=9  (torch.matmul) | 29.454 ms | 0.01123 |
-| 17   | GEMM Batched B=16 (torch.matmul) | 54.343 ms | 0.00928 |
+| 15   | GEMM Batched B=4  (torch.matmul) | 12.07 ms | 0.01172 |
+| 16   | GEMM Batched B=9  (torch.matmul) | 28.89 ms | 0.00977 |
+| 17   | GEMM Batched B=16 (torch.matmul) | 53.09 ms | 0.01025 |
 
 > **Recommendation:** For batched pixel-shift inference the vanilla Triton AdaIN path
 > (Tiers 10/12/14) remains faster than GEMM-mode batched (Tiers 15/16/17) by ~5%.

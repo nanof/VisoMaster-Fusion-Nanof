@@ -494,6 +494,7 @@ class Res50Torch(nn.Module):
             f"[Res50Torch] Loaded {total_params:,} parameters "
             f"| compute dtype: {compute_dtype}"
         )
+        model._visomaster_onnx_path = str(onnx_path)
         return model
 
 
@@ -537,6 +538,18 @@ class Res50CUDAGraphRunner:
         return self._out_conf.clone(), self._out_ldmk.clone()
 
 
-def build_cuda_graph_runner(model: Res50Torch, warmup: int = 3) -> Res50CUDAGraphRunner:
+def build_cuda_graph_runner(
+    model: Res50Torch, warmup: int = 3, torch_compile: bool = False
+) -> Res50CUDAGraphRunner:
     """Convenience factory for Res50CUDAGraphRunner."""
+    if torch_compile:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            device = next(model.parameters()).device
+            example_inp = torch.zeros((1, 3, 512, 512), dtype=torch.float32, device=device)
+            compiled = apply_torch_compile(model, example_inp)
+            print("[Res50Torch] torch.compile warmup done.")
+            return compiled  # CUDA graph on top of torch.compile fails on Windows
+        except Exception as e:
+            print(f"[Res50Torch] torch.compile failed ({e!s:.120}), falling back to CUDA graph.")
     return Res50CUDAGraphRunner(model, warmup)

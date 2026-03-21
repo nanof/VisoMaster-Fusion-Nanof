@@ -90,7 +90,7 @@ class FaceMasks:
             return self._faceparser_runner
         self.models_processor.show_build_dialog.emit(
             "Finalizing Custom Provider",
-            "Capturing CUDA graph for FaceParser.\nThis only happens once and improves performance.",
+            "Compiling & capturing CUDA graph for FaceParser…\nFirst run only — future sessions load instantly from cache.",
         )
         try:
             with self._faceparser_init_lock:
@@ -124,7 +124,7 @@ class FaceMasks:
 
                     with self.models_processor.cuda_graph_capture_lock:
                         self._faceparser_runner = build_cuda_graph_runner(
-                            self._faceparser_torch
+                            self._faceparser_torch, torch_compile=True
                         )
                 except Exception as e:
                     print(
@@ -141,7 +141,7 @@ class FaceMasks:
             return self._xseg_runner
         self.models_processor.show_build_dialog.emit(
             "Finalizing Custom Provider",
-            "Capturing CUDA graph for XSeg mask model.\nThis only happens once and improves performance.",
+            "Compiling & capturing CUDA graph for XSeg mask model…\nFirst run only — future sessions load instantly from cache.",
         )
         try:
             with self._xseg_init_lock:
@@ -170,7 +170,9 @@ class FaceMasks:
                     from custom_kernels.xseg.xseg_torch import build_cuda_graph_runner
 
                     with self.models_processor.cuda_graph_capture_lock:
-                        self._xseg_runner = build_cuda_graph_runner(self._xseg_torch)
+                        self._xseg_runner = build_cuda_graph_runner(
+                            self._xseg_torch, torch_compile=True
+                        )
                 except Exception as e:
                     print(f"[Custom] xseg graph runner failed, using eager: {e}")
                     self._xseg_runner = self._xseg_torch
@@ -184,7 +186,7 @@ class FaceMasks:
             return self._occluder_runner
         self.models_processor.show_build_dialog.emit(
             "Finalizing Custom Provider",
-            "Capturing CUDA graph for Occluder mask model.\nThis only happens once and improves performance.",
+            "Compiling & capturing CUDA graph for Occluder mask model…\nFirst run only — future sessions load instantly from cache.",
         )
         try:
             with self._occluder_init_lock:
@@ -216,7 +218,7 @@ class FaceMasks:
 
                     with self.models_processor.cuda_graph_capture_lock:
                         self._occluder_runner = build_cuda_graph_runner(
-                            self._occluder_torch
+                            self._occluder_torch, torch_compile=True
                         )
                 except Exception as e:
                     print(f"[Custom] occluder graph runner failed, using eager: {e}")
@@ -231,7 +233,7 @@ class FaceMasks:
             return self._vgg_combo_runner
         self.models_processor.show_build_dialog.emit(
             "Finalizing Custom Provider",
-            "Capturing CUDA graph for VGG face differencing model.\nThis only happens once and improves performance.",
+            "Compiling & capturing CUDA graph for VGG face differencing model…\nFirst run only — future sessions load instantly from cache.",
         )
         try:
             with self._vgg_init_lock:
@@ -265,7 +267,7 @@ class FaceMasks:
 
                     with self.models_processor.cuda_graph_capture_lock:
                         self._vgg_combo_runner = build_cuda_graph_runner(
-                            self._vgg_combo_torch
+                            self._vgg_combo_torch, torch_compile=True
                         )
                 except Exception as e:
                     print(f"[Custom] vgg_combo CUDA graph failed, using eager: {e}")

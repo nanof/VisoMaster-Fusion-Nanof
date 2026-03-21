@@ -13,19 +13,24 @@ provider is selected.
 
 Pre-processing `(x − 127.5) × 0.0078125` → **[−1, 1]** is baked into `forward`.
 
-## Benchmark Results (NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0)
+## Benchmark Results
 
-50 iterations, 10 warm-up; input 192×192:
+**Hardware:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
+**Conditions:** 500 iterations, 50 warm-up, input 192×192
 
-| Method | Latency | vs ORT CUDA EP |
-|--------|---------|:--------------:|
-| ORT FP32 CUDA EP | 0.729 ms | 1.00x (baseline) |
-| ORT TensorRT EP FP32 | 0.848 ms | 0.86x ⚠ (slower than CUDA EP) |
-| PyTorch FP32 | 1.232 ms | 0.59x |
-| PyTorch FP16 | 1.453 ms | 0.50x |
-| **PT FP16 + CUDA graph (Custom)** | **0.301 ms** | **2.42x** |
+| Tier | Method | ms | vs ORT CUDA EP |
+|------|--------|----|:--------------:|
+| 0    | ORT FP32 CUDA EP (baseline) | 0.800 ms | 1.00× |
+| 0b   | ORT TensorRT EP FP32 | 0.442 ms | 1.81× |
+| 1    | PyTorch FP32 | 1.274 ms | 0.63× |
+| 2    | PyTorch FP16 | 1.287 ms | 0.62× |
+| **3** | **PT FP16 + CUDA graph (Custom)** | **0.219 ms** | **3.65×** |
+| **4** | **torch.compile default + FP16 + CUDA graph** | **0.181 ms** | **4.42×** |
+| 4b   | torch.compile reduce-overhead | — *(skipped by default; set `DET106_TORCH_COMPILE=1`)* | — |
 
-The CUDA-graph path is **2.42x faster** than ORT CUDA EP.
+> **Application uses Tier 3** (FP16 + CUDA graph). Pass `torch_compile=True` to `build_cuda_graph_runner` to activate Tier 4 (4.42×).
+
+**Accuracy (Tier 3 vs ORT FP32):** max|Δ| = 1.0e-03, mean|Δ| = 3.75e-04 (landmarks in model space [−1, 1]).
 
 > **Application uses PT FP16 + CUDA graph** (single captured graph; fixed 192×192 input).
 > If CUDA graph capture fails, falls back to FP16 eager.

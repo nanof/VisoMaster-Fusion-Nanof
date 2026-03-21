@@ -70,18 +70,25 @@ x_next = x + bl_i(interim) + al_i(heatmap_i)   (stacks 0–2 only)
 
 ## Benchmark Results
 
-GPU: NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
-(50 iterations, 10 warm-up, batch=1)
+**Hardware:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
+**Conditions:** 50 iterations, 10 warm-up, batch=1
 
 | Tier | Method | Time | vs ORT CUDA EP |
 |------|--------|------|:--------------:|
-| 0    | ORT FP32 CUDA EP (baseline) | 10.514 ms | 1.00× |
-| 0b   | ORT TensorRT EP FP32 | 8.984 ms | 1.17× |
-| 1    | PyTorch FP32 eager | 16.708 ms | 0.63× |
-| 2    | PyTorch FP16 eager | 20.884 ms | 0.50× |
-| 3    | **PyTorch FP16 + CUDA graph (Custom)** | **5.214 ms** | **2.02×** |
+| 0    | ORT FP32 CUDA EP (baseline) | 10.293 ms | 1.00× |
+| 0b   | ORT TensorRT EP FP32 | 4.638 ms | 2.22× |
+| 1    | PyTorch FP32 eager | 15.594 ms | 0.66× |
+| 2    | PyTorch FP16 eager | 17.478 ms | 0.59× |
+| **3** | **PyTorch FP16 + CUDA graph (Custom)** | **3.521 ms** | **2.92×** |
+| **4** | **torch.compile default + FP16 + CUDA graph** | **2.335 ms** | **4.41×** |
+| 4b   | torch.compile reduce-overhead | — *(skipped by default; set `FAN_TORCH_COMPILE=1`)* | — |
 
-The CUDA-graph path (tier 3) is **2.02× faster** than ORT CUDA EP.
+> **Application uses Tier 3** (CUDA graph). Pass `torch_compile=True` to `build_cuda_graph_runner()` to activate Tier 4 (4.41×).
+
+> **Tier 4 — torch.compile:** Pass `torch_compile=True` to `build_cuda_graph_runner()` to
+> enable `torch.compile` before CUDA graph capture. This triggers an additional compilation
+> warmup pass via `custom_kernels.compile_utils.apply_torch_compile`. Benchmark results
+> will vary by GPU and PyTorch version.
 
 ### Speed-up breakdown (tier 3)
 
@@ -92,22 +99,17 @@ The CUDA-graph path (tier 3) is **2.02× faster** than ORT CUDA EP.
 
 | Mode | Max |Δ| xy vs ORT FP32 | Mean |Δ| |
 |------|------------------------|----------|
-| FP16 + CUDA graph | 0.0857 (landmark coordinate space [0.5..63.5]) | 0.004004 |
+| FP16 + CUDA graph | 0.2254 px (coordinate space [0.5..63.5]) | 0.0053 px |
 
-> **Note on accuracy:** The high max error reflects the large-deviation warning from the benchmark
-> (random noise input produces worst-case divergence). On real face images the landmark outputs
-> are visually correct. The coordinate space [0.5..63.5] means a max delta of 45 represents a
-> highly unusual noise-case failure mode not representative of typical use.
-
-The max delta of 0.0144 is in heatmap pixel-centre coordinates ([0.5, 63.5] range).
-Divided by 64 and scaled to 256-px image space this is well sub-pixel — visually correct.
+> Coordinates are in [0.5, 63.5] heatmap-pixel space; max|Δ|=0.2254 is well sub-pixel
+> in 256-px image space. Accuracy check: ✓ OK (< 1.0 pixel).
 
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `fan_2dfan4_torch.py` | `FAN2dfan4` model, `from_onnx()` loader, `build_cuda_graph_runner()` |
-| `benchmark_fan_2dfan4.py` | Four-tier benchmark vs ORT + numerical accuracy check |
+| `benchmark_fan_2dfan4.py` | Five-tier benchmark vs ORT + numerical accuracy check |
 
 ## Weight Loading
 

@@ -17,15 +17,20 @@ the application when the *Custom* execution provider is selected.
 
 | Tier | Method | Latency | vs ORT FP32 |
 |------|--------|--------:|:-----------:|
-| 0    | ORT FP32 CUDA EP (baseline) | 2.891 ms | 1.00× |
-| 0b   | ORT TensorRT EP FP32 | 1.764 ms | 1.64× |
-| 2    | PyTorch FP16 NCHW pure ops | 3.391 ms | 0.85× |
-| 3    | PyTorch FP16 NCHW + CUDA graph | 1.195 ms | 2.42× |
-| 4    | PyTorch FP16 NHWC (channels_last) | 2.968 ms | 0.97× |
-| **5** | **PyTorch FP16 NHWC + CUDA graph** | **1.196 ms** | **2.42×** |
+| 0    | ORT FP32 CUDA EP (baseline) | 3.01 ms | 1.00× |
+| 0b   | ORT TensorRT EP FP32 | 1.77 ms | 1.70× |
+| 1    | PyTorch FP32 pure ops | 3.48 ms | 0.86× |
+| 2    | PyTorch FP16 NCHW pure ops | 3.07 ms | 0.98× |
+| **3** | **PyTorch FP16 NCHW + CUDA graph** | **1.22 ms** | **2.46×** |
+| 4    | PyTorch FP16 NHWC (channels_last) | 3.00 ms | 1.00× |
+| 5    | PyTorch FP16 NHWC + CUDA graph | 1.25 ms | 2.40× |
+| **6** | **torch.compile default + FP16 NHWC + CUDA graph** | **1.04 ms** | **2.89×** |
+| 4b   | torch.compile reduce-overhead (no separate CUDA graph) | 1.06 ms | 2.83× |
 
-> **Recommended:** Tier 3 or 5 — both ~1.2 ms.  The application uses Tier 5 (NHWC + CUDA graph)
-> which is **2.42× faster** than ORT FP32 CUDA EP.
+Both compile modes work. `default + CUDA graph` (Tier 6) is recommended — slightly faster (1.04 vs 1.06 ms).
+
+> **Application uses Tier 5** (NHWC + CUDA graph). Pass `torch_compile=True` to `build_cuda_graph_runner`
+> to activate Tier 6 (torch.compile default + NHWC + CUDA graph).
 >
 > On PyTorch 2.8 + cuDNN 9.x, cuDNN already auto-selects NHWC convolution kernels for FP16
 > inputs, so Tier 4 vs 2 show identical eager latency.  The CUDA graph is the primary
@@ -45,7 +50,10 @@ All speed-up comes from:
    On PyTorch 2.8 + cuDNN 9 the gain is already included in (1); on older
    cuDNN versions this step provides an additional ~30% speedup.
 
-No Triton kernels are used (no GroupNorm layers to fuse).
+4. **torch.compile** (Tier 6) — fuses Conv/SiLU sequences into optimised Triton kernels;
+   one-time ~30 s Triton JIT cost per unique input shape.
+
+No Triton kernels are used in Tiers 1–5 (no GroupNorm layers to fuse).
 
 ### Dynamic Input Handling
 

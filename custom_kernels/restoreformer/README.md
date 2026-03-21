@@ -12,27 +12,26 @@ Used by VisoMaster-Fusion when the *Custom* execution provider is selected.
 
 ## Benchmark Results
 
-**Environment:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · Triton 3.6.0 · ORT 1.22.0
+**Environment:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · Triton 3.4.0 · ORT 1.22.0
 **Method:** 50 iterations, 10 warm-up passes
 
 | Tier | Method | Latency | vs ORT CUDA EP |
 |------|--------|--------:|---------------:|
-| 0 | ORT FP32 CUDA EP (baseline) | 63.09 ms | 1.00x |
-| 0b | ORT TensorRT EP FP32 | 22.43 ms | 2.81x |
-| 1 | PyTorch FP32 pure ops | 45.05 ms | 1.40x |
-| 2 | PyTorch FP16 + Triton GroupNorm+SiLU | 31.33 ms | 2.01x |
-| 3 | **FP16 + Triton + CUDA graph (Custom)** | **12.38 ms** | **5.10x** |
+| 0  | ORT FP32 CUDA EP (baseline) | 19.47 ms | 1.00× |
+| 0b | ORT TensorRT EP FP32 | 10.49 ms | 1.86× |
+| 1  | PyTorch FP32 pure ops | 25.98 ms | 0.75× |
+| 2  | PyTorch FP16 + Triton GroupNorm+SiLU | 24.77 ms | 0.79× |
+| **3** | **FP16 + Triton + CUDA graph (Custom)** | **12.75 ms** | **1.53×** |
+| **4** | **torch.compile default + FP16 + Triton + CUDA graph** | **10.57 ms** | **1.84×** |
+| 4b | torch.compile reduce-overhead (no separate CUDA graph) | 10.50 ms | 1.85× |
 
-> **Application uses Tier 3** (CUDA graph) because RestoreFormer++ uses a fixed input
-> shape and has no dynamic parameters — the forward pass is fully static and
-> graph-capturable.
+Both compile modes work and achieve nearly identical speedup (~1.84–1.85×). `default+CUDA graph` is the recommended compile path since it is the application runtime.
 
-> **Note on TRT EP accuracy:** ORT TRT EP max|diff| vs ORT CUDA EP = 4.63 (very high),
-> indicating significant numerical degradation with TRT for this model. Custom FP16
-> PyTorch is the recommended fast path.
+> **Application uses Tier 3** (CUDA graph). Pass `torch_compile=True` to `build_cuda_graph_runner`
+> to activate Tier 4 (default + CUDA graph, 1.21× faster than Tier 3).
 
-> **Note on ORT CUDA EP baseline:** ORT CUDA EP ran at 63 ms in this measurement — the
-> application's CUDA graph path at 12.38 ms delivers **5.10× speedup**.
+> **Note on TRT EP accuracy:** ORT TRT EP max|diff| vs ORT CUDA EP = 3.11 (high),
+> indicating numerical degradation with TRT for this model.
 
 ### Kernel Priority Chain
 

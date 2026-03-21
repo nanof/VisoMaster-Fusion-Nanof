@@ -188,6 +188,7 @@ class OccluderTorch(nn.Module):
         onnx_model = onnx.load(onnx_path)
         model = cls(compute_dtype=compute_dtype)
         _load_all_params(model, onnx_model)
+        model._visomaster_onnx_path = str(onnx_path)
         return model.to(compute_dtype)
 
 
@@ -329,6 +330,7 @@ class _CapturedGraph:
 def build_cuda_graph_runner(
     model: OccluderTorch,
     warmup: int = 3,
+    torch_compile: bool = False,
 ) -> _CapturedGraph:
     """
     Return a CUDA-graph-backed runner for fixed (1, 3, 256, 256) input.
@@ -336,4 +338,14 @@ def build_cuda_graph_runner(
     Falls back gracefully: caller should catch exceptions and use the eager
     model directly if capture fails.
     """
+    if torch_compile:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            device = next(model.parameters()).device
+            example_inp = torch.zeros((1, 3, 256, 256), dtype=torch.float32, device=device)
+            compiled = apply_torch_compile(model, example_inp)
+            print("[OccluderTorch] torch.compile warmup done.")
+            return compiled  # CUDA graph on top of torch.compile fails on Windows
+        except Exception as e:
+            print(f"[OccluderTorch] torch.compile failed ({e!s:.120}), falling back to CUDA graph.")
     return _CapturedGraph(model, warmup=warmup)

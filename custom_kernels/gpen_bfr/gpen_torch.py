@@ -480,6 +480,7 @@ class GPENTorch(torch.nn.Module):
 
         model = cls(in_hw, out_hw, n_enc, n_loop, compute_dtype)
         model._load_weights(w)
+        model._visomaster_onnx_path = str(onnx_path)
         return model
 
     # ------------------------------------------------------------------
@@ -960,13 +961,35 @@ class GPENTorch(torch.nn.Module):
 # ---------------------------------------------------------------------------
 
 
-def build_cuda_graph_runner(model: GPENTorch, inp_shape: tuple):
+def build_cuda_graph_runner(
+    model: GPENTorch,
+    inp_shape: tuple,
+    torch_compile: bool = False,
+):
     """
     Capture model() as a CUDAGraph for repeated fixed-shape inference.
     Returns a callable: (x: float32 CUDA) → float32 CUDA.
+
+    Args:
+        model:         GPENTorch instance (.cuda().eval())
+        inp_shape:     Input tensor shape, e.g. (1, 3, 512, 512)
+        torch_compile: If True, apply torch.compile() before CUDA graph capture
+                       for additional kernel fusion (~1.2-1.5x over Tier 3).
     """
     dev = next(iter(model.buffers())).device
     static_inp = torch.zeros(inp_shape, dtype=torch.float32, device=dev)
+
+    if torch_compile:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            example_inp = torch.zeros(inp_shape, dtype=torch.float32, device=dev)
+            compiled = apply_torch_compile(model, example_inp)
+            print("[GPENTorch] torch.compile warmup done.")
+            # Return compiled model directly — CUDA graph on top of torch.compile
+            # fails on Windows (64-bit kernel handles overflow 32-bit C long).
+            return compiled
+        except Exception as e:
+            print(f"[GPENTorch] torch.compile failed ({e!s:.120}), falling back to CUDA graph.")
 
     with torch.no_grad():
         for _ in range(3):

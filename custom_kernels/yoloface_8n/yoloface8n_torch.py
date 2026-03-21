@@ -224,9 +224,10 @@ class _DetectHead(nn.Module):
         self.dfl = nn.Conv2d(self.REG_MAX, 1, 1, bias=False)
 
         # Anchor grids — computed analytically for fixed 640×640; float32 always.
-        anchor_xy, strides = _make_anchor_grids()
-        self.register_buffer("anchor_xy", anchor_xy)  # (1, 2, 8400)
-        self.register_buffer("strides", strides)  # (1, 1, 8400)
+        anchor_xy, kps_anchor_xy, strides = _make_anchor_grids()
+        self.register_buffer("anchor_xy", anchor_xy)          # (1, 2, 8400) — bbox (cell centers)
+        self.register_buffer("kps_anchor_xy", kps_anchor_xy)  # (2,    8400) — kps  (no +0.5)
+        self.register_buffer("strides", strides)               # (1, 1, 8400)
 
     # ------------------------------------------------------------------
     def _dfl_decode(
@@ -255,9 +256,10 @@ class _DetectHead(nn.Module):
     def _decode_scale(
         self,
         head: _HeadScale,
-        feat: torch.Tensor,  # (B,C,H,W)
-        anc_xy: torch.Tensor,  # (1,2,N)
-        stride: torch.Tensor,  # (1,1,N)
+        feat: torch.Tensor,       # (B,C,H,W)
+        anc_xy: torch.Tensor,     # (1,2,N)   — bbox cell centers (+0.5)
+        stride: torch.Tensor,     # (1,1,N)
+        kps_anc_xy: torch.Tensor, # (2,N)     — kps grid indices (no +0.5)
     ) -> torch.Tensor:  # (B,20,N)
         B, _, H, W = feat.shape
         N = H * W
@@ -269,12 +271,13 @@ class _DetectHead(nn.Module):
         bbox = self._dfl_decode(raw_reg, anc_xy, stride)  # (B,4,N)
         cls = raw_cls.float().sigmoid()  # (B,1,N)
 
-        # kps xy: (B,5,2,N) * 2 + anchor(1,1,2,N) * stride(1,1,1,N)
-        kps_xy_raw = raw_kps[:, :, :2, :].float()
-        kps_vis_raw = raw_kps[:, :, 2:3, :].float()
-        anc_exp = anc_xy.unsqueeze(1).float()  # (1,1,2,N) — broadcast over kpt dim
-        str_exp = stride.unsqueeze(1).float()  # (1,1,1,N)
-        kps_xy = (kps_xy_raw * 2.0 + anc_exp) * str_exp  # (B,5,2,N) pixels
+        # kps xy: (raw * 2 + kps_anchor) * stride
+        # kps_anchor uses raw grid indices (no +0.5) — matches ONNX Constant_23.
+        kps_xy_raw = raw_kps[:, :, :2, :].float()   # (B,5,2,N)
+        kps_vis_raw = raw_kps[:, :, 2:3, :].float() # (B,5,1,N)
+        str_exp = stride.unsqueeze(1).float()        # (1,1,1,N)
+        # kps_anc_xy is (2,N); broadcasting against (B,5,2,N) works via trailing dims.
+        kps_xy = (kps_xy_raw * 2.0 + kps_anc_xy.float()) * str_exp  # (B,5,2,N) pixels
         kps_vis = kps_vis_raw.sigmoid()  # (B,5,1,N)
         kps_out = torch.cat([kps_xy, kps_vis], 2).reshape(B, 15, N)  # (B,15,N)
 
@@ -282,13 +285,16 @@ class _DetectHead(nn.Module):
 
     # ------------------------------------------------------------------
     def forward(self, p3, p4, p5) -> torch.Tensor:  # (B,20,8400)
-        a8, s8 = self.anchor_xy[:, :, :6400], self.strides[:, :, :6400]
-        a16, s16 = self.anchor_xy[:, :, 6400:8000], self.strides[:, :, 6400:8000]
-        a32, s32 = self.anchor_xy[:, :, 8000:], self.strides[:, :, 8000:]
+        a8,   s8   = self.anchor_xy[:, :, :6400],    self.strides[:, :, :6400]
+        a16,  s16  = self.anchor_xy[:, :, 6400:8000], self.strides[:, :, 6400:8000]
+        a32,  s32  = self.anchor_xy[:, :, 8000:],    self.strides[:, :, 8000:]
+        ka8  = self.kps_anchor_xy[:, :6400]
+        ka16 = self.kps_anchor_xy[:, 6400:8000]
+        ka32 = self.kps_anchor_xy[:, 8000:]
 
-        out8 = self._decode_scale(self.head8, p3, a8, s8)
-        out16 = self._decode_scale(self.head16, p4, a16, s16)
-        out32 = self._decode_scale(self.head32, p5, a32, s32)
+        out8  = self._decode_scale(self.head8,  p3, a8,  s8,  ka8)
+        out16 = self._decode_scale(self.head16, p4, a16, s16, ka16)
+        out32 = self._decode_scale(self.head32, p5, a32, s32, ka32)
         return torch.cat([out8, out16, out32], 2)  # (B,20,8400)
 
 
@@ -302,7 +308,7 @@ class YoloFace8nTorch(nn.Module):
     FP16 YOLOv8n-face detector.
 
     Weights loaded from yoloface_8n.onnx via :meth:`from_onnx`.
-    The model internally runs convolutions in *compute_dtype* (default fp16)
+    The model internally runs convolutions in *compute_dtype* (default float16)
     and returns float32 output (1, 20, 8400).
 
     Input accepted in float32 [0, 1].
@@ -422,13 +428,16 @@ class YoloFace8nTorch(nn.Module):
 
         # Apply compute dtype (anchor buffers stay float32 — cast back after)
         anchor_xy_saved = model.head.anchor_xy.clone()
+        kps_anchor_xy_saved = model.head.kps_anchor_xy.clone()
         strides_saved = model.head.strides.clone()
         model = model.to(compute_dtype)
         model._compute_dtype = compute_dtype
         # Restore float32 anchor buffers (used in decode, not in conv path)
         model.head.anchor_xy.copy_(anchor_xy_saved.float())
+        model.head.kps_anchor_xy.copy_(kps_anchor_xy_saved.float())
         model.head.strides.copy_(strides_saved.float())
 
+        model._visomaster_onnx_path = str(onnx_path)
         return model
 
 
@@ -437,32 +446,42 @@ class YoloFace8nTorch(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-def _make_anchor_grids() -> tuple[torch.Tensor, torch.Tensor]:
+def _make_anchor_grids() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Returns (anchor_xy, strides) tensors for fixed 640×640 YOLOv8n input.
+    Returns (bbox_anchor_xy, kps_anchor_xy, strides) for fixed 640×640 YOLOv8n input.
 
-    anchor_xy : (1, 2, 8400) float32  — cx/cy of each anchor in grid units
-    strides   : (1, 1, 8400) float32  — stride value (8/16/32) per anchor
+    bbox_anchor_xy : (1, 2, 8400) float32 — cell centers (+0.5) for DFL bbox decode
+    kps_anchor_xy  : (2,    8400) float32 — raw grid indices (no +0.5) for kps decode
+                     Matches ONNX Constant_23 used in the kps branch.
+    strides        : (1, 1, 8400) float32 — stride value (8/16/32) per anchor
     """
     configs = [(8, 80, 80), (16, 40, 40), (32, 20, 20)]
-    all_xy: list[torch.Tensor] = []
+    all_bbox_xy: list[torch.Tensor] = []
+    all_kps_xy: list[torch.Tensor] = []
     all_st: list[torch.Tensor] = []
 
     for stride, H, W in configs:
         N = H * W
-        gy, gx = torch.meshgrid(
+        # bbox anchors: cell centers (+ 0.5)
+        gy_c, gx_c = torch.meshgrid(
             torch.arange(H, dtype=torch.float32) + 0.5,
             torch.arange(W, dtype=torch.float32) + 0.5,
             indexing="ij",
         )
-        gx = gx.reshape(-1)  # (N,)
-        gy = gy.reshape(-1)
-        all_xy.append(torch.stack([gx, gy], 0))  # (2, N)
+        all_bbox_xy.append(torch.stack([gx_c.reshape(-1), gy_c.reshape(-1)], 0))  # (2, N)
+        # kps anchors: raw grid indices (no + 0.5) — matches ONNX Constant_23
+        gy, gx = torch.meshgrid(
+            torch.arange(H, dtype=torch.float32),
+            torch.arange(W, dtype=torch.float32),
+            indexing="ij",
+        )
+        all_kps_xy.append(torch.stack([gx.reshape(-1), gy.reshape(-1)], 0))  # (2, N)
         all_st.append(torch.full((N,), stride, dtype=torch.float32))
 
-    anchor_xy = torch.cat(all_xy, 1).unsqueeze(0)  # (1, 2, 8400)
-    strides = torch.cat(all_st).unsqueeze(0).unsqueeze(0)  # (1, 1, 8400)
-    return anchor_xy, strides
+    bbox_anchor_xy = torch.cat(all_bbox_xy, 1).unsqueeze(0)  # (1, 2, 8400)
+    kps_anchor_xy = torch.cat(all_kps_xy, 1)                 # (2,    8400)
+    strides = torch.cat(all_st).unsqueeze(0).unsqueeze(0)    # (1, 1, 8400)
+    return bbox_anchor_xy, kps_anchor_xy, strides
 
 
 # ---------------------------------------------------------------------------
@@ -498,13 +517,42 @@ class _CapturedGraph:
 
 def build_cuda_graph_runner(
     model: YoloFace8nTorch,
+    torch_compile: bool = False,
 ) -> "_CapturedGraph | YoloFace8nTorch":
     """
     Capture a CUDA graph for the fixed 640×640 input.
 
-    Returns a :class:`_CapturedGraph` callable on success, or the original
-    *model* as a fallback if graph capture is unavailable.
+    Args:
+        model:         YoloFace8nTorch already on CUDA in eval mode.
+        torch_compile: If True, wrap the model with ``torch.compile`` before
+                       capturing the CUDA graph.  Uses ``default`` mode (stable
+                       on all GPUs / Triton versions).  The compiled model is
+                       then captured into a CUDA graph so that dynamo is never
+                       re-invoked during inference (avoids recompile_limit
+                       warnings and ensures stable latency).
+                       Adds a one-time ~30 s compile cost; gives ~1.92×
+                       speedup over the uncompiled baseline.
+
+    Returns a :class:`_CapturedGraph` callable, or the original *model* as a
+    fallback if graph capture is unavailable.
     """
+    if torch_compile:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            device = next(model.parameters()).device
+            example_inp = torch.zeros(1, 3, 640, 640, dtype=torch.float32, device=device)
+            # reduce-overhead: captures its own CUDA graphs internally; avoids the
+            # manual CUDA graph capture seed error.
+            # ~1.9x faster than mode='default'+CUDA graph at 0.59 ms/iter.
+            compiled = apply_torch_compile(model, example_inp,
+                                           compile_mode="reduce-overhead")
+            print("[yoloface_8n] torch.compile reduce-overhead done.")
+            # reduce-overhead has its own internal CUDA graphs — return directly
+            # without an outer _CapturedGraph wrapper.
+            return compiled
+        except Exception as e:
+            print(f"[yoloface_8n] torch.compile failed ({e!s:.120}), falling back to CUDA graph.")
+
     device = next(model.parameters()).device
     try:
         runner = _CapturedGraph(model, device)

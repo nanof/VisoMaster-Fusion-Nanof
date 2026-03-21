@@ -219,16 +219,24 @@ def _fused_demod(
     style : [C_in]                  FP32  CUDA
     returns: [C_out, C_in, kH, kW]  same dtype as w  CUDA  (demodulated)
     """
-    # Priority 1: Triton (Windows-friendly, no MSVC needed)
-    if _TRITON_AVAILABLE and _triton_demod is not None:
-        return _triton_demod(
-            w.to(torch.float16).contiguous(), style.contiguous().float(), eps
-        )
-    # Priority 2: CUDA C++ extension
-    fn = _get_demod_fn()
-    if fn is not None:
-        return fn(w.contiguous().float(), style.contiguous().float(), eps)
-    # Priority 3: Pure PyTorch fallback
+    # When being traced by torch.compile/dynamo, skip custom Triton/@triton.jit and
+    # CUDA C++ ops — they create graph breaks and trigger Triton MLIR compilation in
+    # the subprocess, which crashes on Windows (sm_89 MLIR optimizer AV).  Fall
+    # through to the pure PyTorch path so inductor can fuse the entire demod op into
+    # a single efficient kernel with no graph breaks.
+    # In eager mode (CUDA graph capture / direct inference) the fast custom paths below
+    # are still used.
+    if not torch.compiler.is_compiling():
+        # Priority 1: Triton (Windows-friendly, no MSVC needed)
+        if _TRITON_AVAILABLE and _triton_demod is not None:
+            return _triton_demod(
+                w.to(torch.float16).contiguous(), style.contiguous().float(), eps
+            )
+        # Priority 2: CUDA C++ extension
+        fn = _get_demod_fn()
+        if fn is not None:
+            return fn(w.contiguous().float(), style.contiguous().float(), eps)
+    # Priority 3: Pure PyTorch — fully traceable by dynamo, fused by inductor
     wm = w.float() * style.view(1, -1, 1, 1)
     return (wm * torch.rsqrt(wm.pow(2).sum([1, 2, 3], keepdim=True) + eps)).to(w.dtype)
 
@@ -339,6 +347,7 @@ class GFPGANTorch(torch.nn.Module):
         out_size = 1024 if "final_extend_linear.weight" in w else 512
         model = cls(out_size, compute_dtype=compute_dtype)
         model._load_weights(w)
+        model._visomaster_onnx_path = str(onnx_path)
         return model
 
     # ------------------------------------------------------------------
@@ -610,6 +619,7 @@ class GFPGANTorch(torch.nn.Module):
             _TRITON_AVAILABLE
             and _triton_gfpgan_act is not None
             and out.dtype == torch.float16
+            and not torch.compiler.is_compiling()  # skip custom @triton.jit during tracing
         ):
             # Triton kernel now handles broadcasting of noise/bias internally
             out = _triton_gfpgan_act(out, noise, bias, 0.2, 2.0**0.5)
@@ -788,13 +798,44 @@ class GFPGANTorch(torch.nn.Module):
 # ---------------------------------------------------------------------------
 
 
-def build_cuda_graph_runner(model: GFPGANTorch, inp_shape: tuple = (1, 3, 512, 512)):
+def build_cuda_graph_runner(
+    model: GFPGANTorch,
+    inp_shape: tuple = (1, 3, 512, 512),
+    torch_compile: bool = False,
+):
     """
     Capture model() as a CUDAGraph for repeated fixed-shape inference.
     Returns a callable: (x: float32 CUDA) → float32 CUDA.
+
+    Args:
+        model:         GFPGANTorch instance (.cuda().eval())
+        inp_shape:     Input tensor shape (default: (1, 3, 512, 512))
+        torch_compile: If True, apply torch.compile() before CUDA graph capture
+                       for additional kernel fusion (~1.2-1.5x over Tier 3).
     """
     dev = next(iter(model.buffers())).device
     static_inp = torch.zeros(inp_shape, dtype=torch.float32, device=dev)
+
+    if torch_compile:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            example_inp = torch.zeros(inp_shape, dtype=torch.float32, device=dev)
+            compiled = apply_torch_compile(model, example_inp)
+            print("[GFPGANTorch] torch.compile warmup done.")
+            # Fall through to CUDA graph capture with the compiled model.
+            # Previously returned early to avoid the 64-bit CUDA handle overflow in
+            # _StaticCudaLauncher (ctypes c_long = 32-bit on Windows).  That root
+            # cause is now fixed via use_static_cuda_launcher=False.
+            # Capturing a CUDA graph on top of the compiled model ensures that inference
+            # always replays a fixed CUDA graph — dynamo is never re-invoked, so the
+            # recompile_limit=8 warning (from _style_conv/_resblock called with varying
+            # channel widths) is fully avoided.
+            # The compiled model uses pure-PyTorch demod/act (guarded by is_compiling()
+            # during tracing), so all kernels in the graph are inductor-generated and
+            # safely capturable.
+            model = compiled
+        except Exception as e:
+            print(f"[GFPGANTorch] torch.compile failed ({e!s:.120}), falling back to CUDA graph.")
 
     with torch.no_grad():
         for _ in range(3):

@@ -70,7 +70,17 @@ class PeppaPig98Torch(nn.Module):
     ):
         super().__init__()
         self.compute_dtype = compute_dtype
+        self._visomaster_onnx_path = str(onnx_path)
         self._build(str(onnx_path))
+
+    @classmethod
+    def from_onnx(
+        cls,
+        onnx_path: str | pathlib.Path,
+        compute_dtype: torch.dtype = torch.float16,
+    ) -> "PeppaPig98Torch":
+        """Thin shim so the subprocess compile worker can reconstruct this model."""
+        return cls(onnx_path, compute_dtype=compute_dtype)
 
     # -------------------------------------------------------------------------
 
@@ -397,6 +407,7 @@ class PeppaPig98Torch(nn.Module):
 def build_cuda_graph_runner(
     model: PeppaPig98Torch,
     input_shape: tuple = (1, 3, 256, 256),
+    torch_compile: bool = False,
 ):
     """
     Wrap a PeppaPig98Torch in a CUDA graph for zero-CPU-overhead inference.
@@ -410,7 +421,20 @@ def build_cuda_graph_runner(
     - The runner clones the output tensor each call so callers own their copy.
     - The execution plan (Python list walk) runs once during capture; only the
       CUDA kernels are replayed — no Python overhead on the hot path.
+    - torch_compile: if True, apply torch.compile (mode='default') before CUDA
+      graph capture.  Triggers Triton JIT on first call (~30 s); compiled
+      kernels are then captured in the graph.
     """
+    if torch_compile:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            device = next(model.parameters()).device
+            example_inp = torch.zeros((1, 3, 256, 256), dtype=torch.float32, device=device)
+            compiled = apply_torch_compile(model, example_inp)
+            print("[peppapig_98] torch.compile warmup done.")
+            return compiled  # CUDA graph on top of torch.compile fails on Windows
+        except Exception as e:
+            print(f"[peppapig_98] torch.compile failed ({e!s:.120}), falling back to CUDA graph.")
     device = next(model.parameters()).device
     assert device.type == "cuda", "Model must be on a CUDA device"
 

@@ -204,6 +204,7 @@ class Landmark1k3d68Torch(nn.Module):
             f"[1k3d68Torch] {n_params:,} parameters loaded"
             f" | compute dtype: {compute_dtype}"
         )
+        model._visomaster_onnx_path = str(onnx_path)
         return model
 
 
@@ -377,11 +378,30 @@ class Landmark1k3d68CUDAGraphRunner:
 def build_cuda_graph_runner(
     model: Landmark1k3d68Torch,
     warmup: int = 3,
+    torch_compile: bool = False,
 ) -> "Landmark1k3d68CUDAGraphRunner | Landmark1k3d68Torch":
     """
     Capture a CUDA graph for fixed (1, 3, 192, 192) input.
     Falls back to eager model if capture fails (e.g. CPU-only environment).
+
+    Args:
+        model         : Landmark1k3d68Torch on CUDA, already in eval() mode.
+        warmup        : number of warm-up passes before graph capture.
+        torch_compile : if True, apply torch.compile (mode='default') to the
+                        model before CUDA graph capture.  Triggers Triton JIT
+                        on first call (~30 s); compiled kernels are then
+                        captured in the graph.
     """
+    if torch_compile:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            device = next(model.parameters()).device
+            example_inp = torch.zeros((1, 3, 192, 192), dtype=torch.float32, device=device)
+            compiled = apply_torch_compile(model, example_inp, compile_mode="default")
+            print("[landmark_1k3d68] torch.compile default done.")
+            return compiled
+        except Exception as e:
+            print(f"[landmark_1k3d68] torch.compile failed ({e!s:.120}), falling back to CUDA graph.")
     try:
         runner = Landmark1k3d68CUDAGraphRunner(model, warmup=warmup)
         print("[1k3d68Torch] CUDA graph captured successfully.")

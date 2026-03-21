@@ -111,6 +111,9 @@ class VideoProcessor(QObject):
         ] = queue.Queue(maxsize=self.max_display_buffer_size)
         # This list will hold our *persistent* worker threads
         self.worker_threads: List[threading.Thread] = []
+        # Single-frame (scrubbing) worker — tracked so a new seek can stop the old one
+        # before starting a fresh worker, preventing concurrent model inference crashes.
+        self._current_single_frame_worker: "FrameWorker | None" = None
 
         # --- Media State ---
         self.media_capture: cv2.VideoCapture | None = None
@@ -1484,6 +1487,19 @@ class VideoProcessor(QObject):
         Starts a one-shot FrameWorker for a *single frame*.
         This is NOT used by the video pool.
         """
+        # Stop any previous single-frame worker before starting a new one.
+        # Without this, fast scrubbing spawns concurrent workers that share the same
+        # model sessions — TRT inference is not thread-safe and crashes under concurrent
+        # calls.  VR180 workers are especially vulnerable because they run for several
+        # seconds (multiple face detections + landmark detection + stitching per frame).
+        prev = self._current_single_frame_worker
+        if prev is not None and prev.is_alive():
+            prev.stop_event.set()
+            prev.join(timeout=3.0)
+            if prev.is_alive():
+                print("[WARN] Previous single-frame worker did not finish within 3 s.")
+        self._current_single_frame_worker = None
+
         worker = FrameWorker(
             frame=frame,  # Pass frame directly
             main_window=self.main_window,
@@ -1494,11 +1510,11 @@ class VideoProcessor(QObject):
         )
 
         if synchronous:
-            # Run in the *current* thread (blocking).
             worker.run()
-            return worker  # Still return worker, though it has finished.
+            return worker
         else:
             # Run in a *new* thread (asynchronous).
+            self._current_single_frame_worker = worker
             worker.start()
             return worker
 

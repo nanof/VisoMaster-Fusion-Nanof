@@ -8,20 +8,22 @@ Model: **res50** `(1,3,512,512)f32 → conf(1,10752,2)f32 + landmarks(1,10752,10
 
 ---
 
-## Benchmark Results (RTX 4090, CUDA 12.9, PyTorch 2.8+cu129, ORT 1.22.0, input 512×512)
+## Benchmark Results
 
-50 iterations, 10 warm-up.
+**Hardware:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
+**Conditions:** 50 iterations, 10 warm-up, input 512×512
 
-| Tier | Method | ms | vs CUDA EP |
-|------|--------|---:|-----------:|
-| 0 | ORT FP32 CUDA EP | 5.40 | 1.00x |
-| 0b | ORT TRT EP FP32 | 3.01 | 1.80x |
-| 1 | PyTorch FP32 | 9.86 | 0.55x |
-| 2 | PyTorch FP16 | 10.75 | 0.50x |
-| **3** | **PT FP16 + CUDA graph (Custom)** | **2.34** | **2.30x** |
+| Tier | Method | ms | vs ORT CUDA EP |
+|------|--------|----|:--------------:|
+| 0 | ORT FP32 CUDA EP (baseline) | 3.57 ms | 1.00× |
+| 0b | ORT TRT EP FP32 | 2.23 ms | 1.60× |
+| 1 | PyTorch FP32 | 3.80 ms | 0.94× |
+| 2 | PyTorch FP16 | 4.50 ms | 0.79× |
+| **3** | **PT FP16 + CUDA graph (Custom)** | **1.49 ms** | **2.39×** |
+| **4** | **torch.compile default + FP16 + CUDA graph** | **0.98 ms** | **3.63×** |
+| 4b | torch.compile reduce-overhead | — *(skipped by default; set `RES50_TORCH_COMPILE=1`)* | — |
 
-> **Application uses Tier 3** (CUDA graph). FaceLandmark5 has no dynamic
-> parameters — the forward pass is fully static and CUDA-graph-capturable.
+> **Application uses Tier 3** (CUDA graph). Pass `torch_compile=True` to `build_cuda_graph_runner` to activate Tier 4 (3.63×).
 
 Run `benchmark_res50.py` to measure on your hardware.
 

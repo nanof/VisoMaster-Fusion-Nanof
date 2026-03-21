@@ -27,6 +27,13 @@ for _candidate in [
             str(_candidate) + _os.pathsep + _os.environ.get("PATH", "")
         )
 del _candidate, _REPO_ROOT, _os, _sys, _Path
+
+import sys as _sys_enc
+if hasattr(_sys_enc.stdout, 'reconfigure'):
+    _sys_enc.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(_sys_enc.stderr, 'reconfigure'):
+    _sys_enc.stderr.reconfigure(encoding='utf-8', errors='replace')
+del _sys_enc
 # ──────────────────────────────────────────────────────────────────────────
 
 import os
@@ -176,13 +183,50 @@ def bench():
     t4 = _bench(lambda: runner2(inp2))
     _print_row("4", "PyTorch FP16 + CUDA graph, batch=2", t4, t0 * 2)
 
+    # ── Tier 5 — torch.compile + FP16 + CUDA graph ────────────────────────
+    print("\n  [Tier 5] torch.compile(mode='default') + CUDA graph")
+    print("  One-time compile cost: ~30 s on first run (Triton JIT).")
+    if not int(os.environ.get("VGG_TORCH_COMPILE", "0")):
+        print("  Skipped — torch.compile may crash on this model on Windows/sm_89.")
+        print("  Set VGG_TORCH_COMPILE=1 to attempt.")
+    else:
+        try:
+            m5 = VggComboTorch.from_onnx(ONNX_PATH, compute_dtype=torch.float16).cuda().eval()
+            runner5 = build_cuda_graph_runner(m5, torch_compile=True)
+            t5 = _bench(lambda: runner5(inp))
+            _print_row("5", "torch.compile + FP16 + CUDA graph", t5, t0)
+        except Exception as e:
+            print(f"  Tier 5 | torch.compile — failed: {e}")
+            import traceback; traceback.print_exc()
+
+    # ── Tier 5b — torch.compile reduce-overhead (no separate CUDA graph) ────
+    print("\n  [Tier 5b] torch.compile(mode='reduce-overhead') — no extra CUDA graph")
+    if not int(os.environ.get("VGG_TORCH_COMPILE", "0")):
+        print("  Skipped — reduce-overhead may crash on this model on Windows/sm_89.")
+        print("  Set VGG_TORCH_COMPILE=1 to attempt.")
+    else:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            m5b = VggComboTorch.from_onnx(ONNX_PATH, compute_dtype=torch.float16).cuda().eval()
+            m5b_compiled = apply_torch_compile(
+                m5b,
+                inp,
+                compile_mode="reduce-overhead",
+            )
+            with torch.no_grad():
+                t5b = _bench(lambda: m5b_compiled(inp))
+            _print_row("5b", "torch.compile reduce-overhead (no CUDA graph)", t5b, t0)
+        except Exception as e:
+            print(f"  Tier 5b | reduce-overhead — failed: {e}")
+            import traceback; traceback.print_exc()
+
     print()
 
     # ── Numerical accuracy check ──────────────────────────────────────────
     print("=== Numerical accuracy (ORT FP32 vs PyTorch FP16 + CUDA graph) ===")
     ref_out = sess0.run(out_names, {in_name: inp_np})[0]  # (1, 512, 128, 128)
     with torch.no_grad():
-        pt_out = runner(inp).cpu().numpy()
+        pt_out = runner(inp).detach().cpu().numpy()
 
     feat_range = ref_out.max() - ref_out.min()
     max_err = float(np.abs(ref_out - pt_out).max())

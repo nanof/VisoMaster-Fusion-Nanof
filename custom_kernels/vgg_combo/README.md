@@ -10,31 +10,34 @@ Model: **vgg_combo**  `(N,3,512,512)f32 → (N,512,128,128)f32`
 
 ---
 
-## Benchmark Results (RTX 4090, CUDA 12.9, PyTorch 2.8+cu129, ORT 1.22.0, input 512×512)
+## Benchmark Results
 
-50 iterations, 10 warm-up.
+**Hardware:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
+**Conditions:** 200 iterations, 20 warm-up, input 512×512
 
-| Tier | Method | ms | vs CUDA EP |
-|------|--------|---:|-----------:|
-| 0 | ORT FP32 CUDA EP | 5.445 | 1.00x |
-| 0b | ORT TRT EP FP32 | 6.488 | 0.84x ⚠ (slower than CUDA EP) |
-| 1 | PyTorch FP32 | 3.454 | 1.58x |
-| 2 | PyTorch FP16 | 1.415 | 3.85x |
-| **3** | **PT FP16 + CUDA graph batch=1 (Custom)** | **1.846** | **2.95x** |
-| 4 | PT FP16 + CUDA graph batch=2 | 4.687 | 2.32x per-pair |
+| Tier | Method | ms | vs ORT CUDA EP |
+|------|--------|----|:--------------:|
+| 0 | ORT FP32 CUDA EP (baseline) | 4.919 ms | 1.00× |
+| 0b | ORT TRT EP FP32 | 4.390 ms | 1.12× *(marginal)* |
+| 1 | PyTorch FP32 | 2.256 ms | 2.18× |
+| 2 | PyTorch FP16 | 1.168 ms | 4.21× |
+| **3** | **PT FP16 + CUDA graph batch=1 (Custom)** | **1.172 ms** | **4.20×** |
+| 4 | PT FP16 + CUDA graph batch=2 | 3.064 ms | — |
+| **5** | **torch.compile + FP16 + CUDA graph** | **0.839 ms** | **5.86×** |
+| 5b | torch.compile reduce-overhead (no CUDA graph) | 0.755 ms | 6.52× |
 
 > **Application uses Tier 3** (batch=1 CUDA graph; one call per face image).
->
-> Note: PyTorch FP32 is already 1.58x faster than ORT CUDA EP for this model.
-> VGG feature extraction with large 512×512 feature maps is heavily
-> memory-bandwidth bound; FP16 halves the bandwidth requirement.
->
-> ORT TRT EP is **slower** than ORT CUDA EP (6.488 ms vs 5.445 ms) — TRT does
-> not benefit this all-conv architecture at 512×512.
+> Pass `torch_compile=True` to `build_cuda_graph_runner()` to activate Tier 5 (5.86×).
+
+**Accuracy (Tier 3 vs ORT FP32):** max|Δ|=0.0826, mean|Δ|=0.0059 (0.040% of feature range [-93.46, 112.10]).
 >
 > The batch=2 variant (Tier 4) combines both face inferences (swapped +
 > original) into one call. At 4.687 ms total it delivers 2.32x vs two ORT
 > CUDA EP calls (10.89 ms), equivalent to 2.32x for the two-image workload.
+>
+> **Tier 5 (torch.compile):** Pass `torch_compile=True` to `build_cuda_graph_runner`
+> to enable `torch.compile(mode='default')` before CUDA graph capture.  Incurs a
+> one-time ~30 s Triton JIT compile cost on first run.
 
 Run `benchmark_vgg_combo.py` to measure on your hardware.
 
@@ -175,9 +178,9 @@ Measured FP16 + CUDA graph vs ORT FP32 (200 iterations, 20 warm-up):
 
 | Metric | Value |
 |--------|-------|
-| Max \|Δ\| | 0.0749 |
-| Feature range | [-91.16, 110.72] |
-| Relative error | 0.037% of feature range |
+| Max \|Δ\| | 0.0826 |
+| Feature range | [-93.46, 112.10] |
+| Relative error | 0.040% of feature range |
 
 The downstream computation averages the L1 difference across 512 channels,
 so per-feature FP16 noise averages out effectively.

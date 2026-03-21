@@ -1814,19 +1814,6 @@ def on_slider_released(main_window: "MainWindow"):
         # the parameters for the final frame position.
         run_post_seek_actions(main_window, new_position)
 
-        # BUG-C04: Pre-warm Custom provider runners when Swap Faces is active so
-        # the FrameWorker doesn't stall on first-time CUDA graph builds.
-        if (
-            getattr(main_window, "swapfacesButton", None) is not None
-            and main_window.swapfacesButton.isChecked()
-            and main_window.models_processor.provider_name == "Custom"
-        ):
-            from app.ui.widgets.actions.control_actions import (
-                warm_up_active_models_for_custom,
-            )
-
-            warm_up_active_models_for_custom(main_window)
-
         # This is the heavy processing call that runs the AI models (swap, etc.)
         # It will now use the correct faces and parameters from the functions above.
         video_processor.process_current_frame()
@@ -1835,33 +1822,15 @@ def on_slider_released(main_window: "MainWindow"):
 def process_swap_faces(main_window: "MainWindow"):
     """Triggers a single-frame re-process after the Swap Faces button state changes.
 
-    For the Custom provider, processing is asynchronous so that the main Qt event
-    loop remains free to paint build-progress dialogs during CUDA graph capture.
-    For all other providers, processing is synchronous so the result is applied to
-    the currently displayed frame before control returns to the UI.
+    Runs synchronously so the processed result (including any required model loading
+    or first-time CUDA graph builds) is applied to the currently displayed frame
+    before control returns to the UI, matching the behaviour of the single-frame-step
+    advance button.  For the Custom provider, build-progress dialogs are shown via
+    show_build_dialog signals emitted before each CUDA graph capture; those signals
+    call processEvents() so the dialog paints even while the main thread is occupied.
     """
     video_processor = main_window.video_processor
-
-    # BUG-C04 fix: when Swap Faces is being ENABLED on the Custom provider, pre-build
-    # CUDA graph runners for the active pipeline in a background thread so that the
-    # first processed frame is not blocked by 20–60 s of sequential lazy builds.
-    # The background thread and FrameWorker serialize on per-model init locks —
-    # whichever arrives first builds the runner, the other waits and reuses it.
-    if (
-        getattr(main_window, "swapfacesButton", None) is not None
-        and main_window.swapfacesButton.isChecked()
-        and main_window.models_processor.provider_name == "Custom"
-    ):
-        from app.ui.widgets.actions.control_actions import (
-            warm_up_active_models_for_custom,
-        )
-
-        warm_up_active_models_for_custom(main_window)
-        # Run async: FrameWorker runs in a background thread so show_build_dialog
-        # signals from that thread are queued to the main event loop and can paint.
-        video_processor.process_current_frame()
-    else:
-        video_processor.process_current_frame(synchronous=True)
+    video_processor.process_current_frame(synchronous=True)
 
 
 def process_edit_faces(main_window: "MainWindow"):

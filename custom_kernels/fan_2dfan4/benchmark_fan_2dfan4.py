@@ -27,6 +27,13 @@ for _candidate in [
             str(_candidate) + _os.pathsep + _os.environ.get("PATH", "")
         )
 del _candidate, _REPO_ROOT, _os, _sys, _Path
+
+import sys as _sys_enc
+if hasattr(_sys_enc.stdout, 'reconfigure'):
+    _sys_enc.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(_sys_enc.stderr, 'reconfigure'):
+    _sys_enc.stderr.reconfigure(encoding='utf-8', errors='replace')
+del _sys_enc
 # ──────────────────────────────────────────────────────────────────────────
 
 import os
@@ -163,6 +170,33 @@ def bench():
     t3 = _bench(lambda: runner(inp))
     _print_row("3", "PyTorch FP16 + CUDA graph", t3, t0)
 
+    # ── Tier 4: PyTorch FP16 + torch.compile + CUDA graph ─────────────────
+    m_fp16_tc = FAN2dfan4.from_onnx(ONNX_PATH, compute_dtype=torch.float16).cuda().eval()
+    runner_tc = build_cuda_graph_runner(m_fp16_tc, torch_compile=True)
+    t4 = _bench(lambda: runner_tc(inp))
+    _print_row("4", "PyTorch FP16 + torch.compile + CUDA graph", t4, t0)
+
+    # ── Tier 4b — torch.compile reduce-overhead (no separate CUDA graph) ────
+    print("\n  [Tier 4b] torch.compile(mode='reduce-overhead') — no extra CUDA graph")
+    if not int(os.environ.get("FAN_TORCH_COMPILE", "0")):
+        print("  Skipped — reduce-overhead may crash on this model on Windows/sm_89.")
+        print("  Set FAN_TORCH_COMPILE=1 to attempt.")
+    else:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            m4b = FAN2dfan4.from_onnx(ONNX_PATH, compute_dtype=torch.float16).cuda().eval()
+            m4b_compiled = apply_torch_compile(
+                m4b,
+                inp,
+                compile_mode="reduce-overhead",
+            )
+            with torch.no_grad():
+                t4b = _bench(lambda: m4b_compiled(inp))
+            _print_row("4b", "torch.compile reduce-overhead (no CUDA graph)", t4b, t0)
+        except Exception as e:
+            print(f"  Tier 4b | reduce-overhead — failed: {e}")
+            import traceback; traceback.print_exc()
+
     print()
 
     # ── Numerical accuracy check ──────────────────────────────────────────
@@ -172,7 +206,7 @@ def bench():
     ref_lmk = ref_outs[0][0, :, :2]  # (68, 2) — x,y coords [0.5..63.5]
     with torch.no_grad():
         pt_outs = runner(inp)
-    pt_lmk = pt_outs[0][0, :, :2].cpu().numpy()  # (68, 2)
+    pt_lmk = pt_outs[0][0, :, :2].detach().cpu().numpy()  # (68, 2)
 
     max_err = float(np.abs(ref_lmk - pt_lmk).max())
     mean_err = float(np.abs(ref_lmk - pt_lmk).mean())

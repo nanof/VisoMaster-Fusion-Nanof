@@ -15,64 +15,75 @@ selected.
 
 ## Benchmark Results
 
-**Hardware:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · Triton 3.6.0 · ORT 1.22.0 · TensorRT 10
+**Hardware:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · Triton 3.4.0 · ORT 1.22.0
 **Conditions:** 200 iterations, 50 warm-up passes
+
+> **Note on benchmark isolation:** Building multiple ORT TRT engines in one process causes
+> a native access violation (0xC0000005) in `torch_python.dll`. The benchmark runs each
+> sub-benchmark in an isolated subprocess (`--encoder` / `--decoder` / `--unet` flags) so
+> all three TRT engines build and measure correctly.
 
 ### VAE Encoder (1,3,512,512) → (1,8,64,64)
 
 | Tier | Method | Latency | vs ORT CUDA EP |
 |------|--------|--------:|:--------------:|
-| 0    | ORT FP32 CUDA EP (baseline) | 21.17 ms | 1.00× |
-| 0b   | ORT TensorRT EP FP32 | — *(crashes: Windows access violation during engine build)* | — |
-| 1    | PyTorch FP32 pure ops | 21.96 ms | 0.96× |
-| 2    | PyTorch FP16 + Triton GroupNorm+SiLU | 10.81 ms | 1.96× |
-| **3** | **FP16 + Triton + CUDA graph** | **10.58 ms** | **2.00×** |
-| 4    | FP16 + Triton + CUDA graph + NHWC | 14.05 ms | 1.51× |
+| 0    | ORT FP32 CUDA EP (baseline) | 20.98 ms | 1.00× |
+| 0b   | ORT TRT EP FP32 | 12.35 ms | 1.70× |
+| 1    | PyTorch FP32 pure ops | 21.95 ms | 0.96× |
+| 2    | PyTorch FP16 + Triton GroupNorm+SiLU | 10.65 ms | 1.97× |
+| **3** | **FP16 + Triton + CUDA graph (Custom)** | **10.43 ms** | **2.01×** |
+| 4    | FP16 + Triton + CUDA graph + NHWC | 13.94 ms | 1.51× *(slower — NHWC overhead)* |
+| **5** | **torch.compile + FP16 + Triton + CUDA graph** | **8.39 ms** | **2.50×** |
+| 5b   | torch.compile reduce-overhead | — *(skipped by default; set `REFLDM_TORCH_COMPILE=1`)* | — |
 
-> NHWC (Tier 4) is slower for the encoder on cuDNN 9 — the small channel counts
-> (128–512) don't benefit from NHWC at this spatial resolution. **Tier 3 is used by default.**
+> **Application uses Tier 3** (CUDA graph, NCHW — NHWC is slower for encoder).
+> Pass `torch_compile=True` to `build_cuda_graph_runner` to activate Tier 5 (2.50×).
 
 ### VAE Decoder (1,8,64,64) → (1,3,512,512)
 
 | Tier | Method | Latency | vs ORT CUDA EP |
 |------|--------|--------:|:--------------:|
-| 0    | ORT FP32 CUDA EP (baseline) | 71.21 ms | 1.00× |
-| 0b   | ORT TensorRT EP FP32 | — *(crashes: Windows access violation during engine build)* | — |
-| 1    | PyTorch FP32 pure ops | 36.42 ms | 1.96× |
-| 2    | PyTorch FP16 + Triton GroupNorm+SiLU | 17.51 ms | 4.07× |
-| **3** | **FP16 + Triton + CUDA graph** | **17.23 ms** | **4.13×** |
-| 4    | FP16 + Triton + CUDA graph + NHWC | 23.96 ms | 2.97× |
+| 0    | ORT FP32 CUDA EP (baseline) | 96.06 ms | 1.00× |
+| 0b   | ORT TRT EP FP32 | 22.27 ms | 4.31× |
+| 1    | PyTorch FP32 pure ops | 36.04 ms | 2.67× |
+| 2    | PyTorch FP16 + Triton GroupNorm+SiLU | 17.34 ms | 5.54× |
+| **3** | **FP16 + Triton + CUDA graph (Custom)** | **16.97 ms** | **5.66×** |
+| 4    | FP16 + Triton + CUDA graph + NHWC | 23.88 ms | 4.02× *(slower — NHWC overhead)* |
+| **5** | **torch.compile + FP16 + Triton + CUDA graph** | **14.42 ms** | **6.66×** |
+| 5b   | torch.compile reduce-overhead | — *(skipped by default; set `REFLDM_TORCH_COMPILE=1`)* | — |
 
-> The `norm_out` GroupNorm fuses the SiLU activation directly inside the Triton kernel
-> (eliminates a separate read + write of the 512×512 feature map), saving ~0.5 ms per call.
-> NHWC (Tier 4) regresses for the decoder — small channel counts (ch=128) at 512×512 spatial
-> resolution don't benefit from cuDNN NHWC layout. **Tier 3 (NCHW) is used by default.**
+> **ORT CUDA EP baseline is slow (96 ms)** because ORT inserts 6 memcpy nodes for the decoder
+> (ConvTranspose asymmetric padding falls back to CPU path, requiring CPU↔GPU transfers).
+> PyTorch runs the decoder fully on GPU. The `norm_out` GroupNorm fuses SiLU into the Triton
+> kernel, saving ~0.5 ms per call. **Application uses Tier 3** (NCHW; NHWC regresses here).
+> Pass `torch_compile=True` to `build_cuda_graph_runner` to activate Tier 5 (6.66×).
 
 ### UNet Denoiser (1,16,64,64) + K/V → (1,8,64,64)
 
 | Tier | Method | Latency | vs ORT CUDA EP |
 |------|--------|--------:|:--------------:|
-| 0    | ORT FP32 CUDA EP — no K/V (baseline) | 10.25 ms | 1.00× |
-| 0b   | ORT TensorRT EP FP32 | — *(crashes: Windows access violation during engine build)* | — |
-| 1    | PyTorch FP32 pure ops | 15.63 ms | 0.66× |
-| 2    | PyTorch FP16 + Triton GroupNorm+SiLU | 15.54 ms | 0.66× |
-| 3    | FP16 + Triton + CUDA graph | 5.28 ms | 1.94× |
-| **4** | **FP16 + Triton + CUDA graph + NHWC** | **5.25 ms** | **1.95×** |
+| 0    | ORT FP32 CUDA EP — no K/V (baseline) | 9.63 ms | 1.00× |
+| 0b   | ORT TRT EP FP32 | 6.68 ms | 1.44× |
+| 1    | PyTorch FP32 pure ops (with K/V) | 27.69 ms | 0.35× |
+| 2    | PyTorch FP16 + Triton GroupNorm+SiLU (with K/V) | 27.76 ms | 0.35× |
+| **3** | **FP16 + Triton + CUDA graph (Custom)** | **5.25 ms** | **1.83×** |
+| **4** | **FP16 + Triton + CUDA graph + NHWC** | **5.24 ms** | **1.84×** |
+| **5** | **torch.compile + FP16 + Triton + CUDA graph** | **2.94 ms** | **3.27×** |
+| 5b   | torch.compile reduce-overhead | — *(skipped by default; set `REFLDM_TORCH_COMPILE=1`)* | — |
 
-> The UNet CUDA graph (Tier 3/4) works because K/V tensors are **static buffers** that are
-> copied into the graph's pre-allocated memory each call — the graph sees constant shapes.
-> ORT CUDA EP baseline uses zeroed K/V; PyTorch Tiers 1–2 run eager with real K/V (higher
-> latency due to Python/kernel-launch overhead).  Once the CUDA graph is captured, kernel-launch
-> overhead is eliminated and the UNet runs at **5.25 ms** — **1.95× faster than ORT CUDA EP**.
-
-> **Note:** ORT TensorRT EP crashes with a Windows access violation (rc=3221225477) during engine
-> build for all three ReF-LDM models. Custom kernels deliver 2.00×/4.13×/1.95× speedups over
-> ORT CUDA EP baseline without TRT dependency.
+> The UNet CUDA graph (Tier 3/4) works because K/V tensors are **static buffers** pre-allocated
+> at capture time; real K/V values are copied in before each replay — the graph sees constant shapes.
+> Tiers 1–2 run eager with real K/V (Python/kernel-launch overhead dominates).
+> Once captured, the UNet runs at **5.25 ms** — **1.83× faster than ORT CUDA EP** (no-K/V baseline).
+> NHWC (Tier 4) is neutral for the UNet; Tier 3 and Tier 4 are essentially equivalent.
+>
+> **Application uses Tier 4** (CUDA graph + NHWC). Pass `torch_compile=True` to
+> `build_unet_cuda_graph_runner` to activate Tier 5 (3.27×).
 
 > **Application uses:**
-> - VAE Encoder → **Tier 3** (CUDA graph, NCHW — NHWC is slower for this model)
-> - VAE Decoder → **Tier 3** (CUDA graph, NCHW — NHWC is slower for this model)
-> - UNet → **Tier 4** (CUDA graph + NHWC — 1.95× faster than ORT CUDA EP)
+> - VAE Encoder → **Tier 3** (CUDA graph, NCHW — 2.01× vs ORT CUDA EP)
+> - VAE Decoder → **Tier 3** (CUDA graph, NCHW — 5.66× vs ORT CUDA EP)
+> - UNet → **Tier 4** (CUDA graph + NHWC — 1.84× vs ORT CUDA EP)
 
 ### Kernel Priority Chain
 
@@ -141,7 +152,7 @@ The Triton kernel fuses these into a single two-pass operation:
 | File | Purpose |
 |------|---------|
 | `ref_ldm_torch.py` | `RefLDMEncoderTorch`, `RefLDMDecoderTorch`, `RefLDMUNetTorch` + Triton kernels + CUDA graph runner |
-| `benchmark_ref_ldm.py` | 5-tier latency benchmark vs ORT baseline (Tier 5: `torch.compile`, Linux only) |
+| `benchmark_ref_ldm.py` | 5-tier latency benchmark vs ORT baseline (each sub-benchmark runs in an isolated subprocess) |
 | `benchmark_results.txt` | Latest benchmark output |
 | `__init__.py` | Package marker |
 
@@ -217,11 +228,14 @@ at very low sequence lengths).
 .venv/Scripts/python custom_kernels/ref_ldm/benchmark_ref_ldm.py
 ```
 
-Optional env vars:
-```
-WARMUP=10 ITERS=50 .venv/Scripts/python custom_kernels/ref_ldm/benchmark_ref_ldm.py
+Optional env vars: `WARMUP` (default 50), `ITERS` (default 200), `ONNX_DIR`, `SKIP_TRT=1`
+
+Run individual sub-benchmarks directly:
+```bat
+.venv/Scripts/python custom_kernels/ref_ldm/benchmark_ref_ldm.py --encoder
+.venv/Scripts/python custom_kernels/ref_ldm/benchmark_ref_ldm.py --decoder
+.venv/Scripts/python custom_kernels/ref_ldm/benchmark_ref_ldm.py --unet
 ```
 
-> **Note (Windows):** Tier 5 (`torch.compile`) is automatically skipped on Windows
-> because `torch.inductor` + Triton causes a hard native segfault in `libtriton.pyd`
-> during Inductor codegen.  Tier 5 will run correctly on Linux.
+> **Tier 5b (`torch.compile reduce-overhead`)** is skipped by default on Windows/sm_89.
+> Set `REFLDM_TORCH_COMPILE=1` to attempt.

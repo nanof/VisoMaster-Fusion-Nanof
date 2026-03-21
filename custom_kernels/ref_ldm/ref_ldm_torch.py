@@ -353,6 +353,7 @@ class RefLDMEncoderTorch(nn.Module):
         _load_from_onnx_weights(
             model, w, prefixes=["", "encoder.", "first_stage_model."], verbose=verbose
         )
+        model._visomaster_onnx_path = str(onnx_path)
         return model.to(compute_dtype)
 
 
@@ -514,6 +515,7 @@ class RefLDMDecoderTorch(nn.Module):
             ],
             verbose=verbose,
         )
+        model._visomaster_onnx_path = str(onnx_path)
         return model.to(compute_dtype)
 
 
@@ -923,6 +925,7 @@ class RefLDMUNetTorch(nn.Module):
             prefixes=["unet_model.", "", "model.diffusion_model.", "diffusion_model."],
             verbose=verbose,
         )
+        model._visomaster_onnx_path = str(onnx_path)
         return model.to(compute_dtype)
 
 
@@ -992,11 +995,30 @@ def build_cuda_graph_runner(
     model: nn.Module,
     inp_shape: Tuple[int, ...],
     warmup: int = 3,
+    torch_compile: bool = False,
 ) -> "CUDAGraphRunner":
     """
     Capture a CUDA graph for a fixed-shape model.
     Returns a CUDAGraphRunner callable with the same signature as model(x).
+
+    Args:
+        torch_compile: If True, wrap the model with ``torch.compile`` before
+                       capturing the CUDA graph.  Requires Triton; adds ~30–60 s
+                       one-time compile overhead.
     """
+    if torch_compile:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            device = next(model.parameters()).device
+            example_inp = torch.zeros(inp_shape, dtype=torch.float32, device=device)
+            # default avoids the Triton MLIR AV crash (0xC0000005 on Windows sm_89)
+            # that mode='reduce-overhead' can trigger in the subprocess ptxas optimizer.
+            compiled = apply_torch_compile(model, example_inp, compile_mode="default")
+            print("[ref_ldm] torch.compile default done.")
+            return compiled
+        except Exception as e:
+            print(f"[ref_ldm] torch.compile failed ({e!s:.120}), falling back to CUDA graph.")
+
     return CUDAGraphRunner(model, inp_shape, warmup)
 
 
@@ -1162,8 +1184,44 @@ def build_unet_cuda_graph_runner(
     kv_map_template: Dict,
     use_exclusive: bool = True,
     warmup: int = 3,
+    torch_compile: bool = False,
 ) -> UNetCUDAGraphRunner:
-    """Convenience factory — see ``UNetCUDAGraphRunner`` for full documentation."""
+    """Convenience factory — see ``UNetCUDAGraphRunner`` for full documentation.
+
+    Args:
+        torch_compile: If True, wrap the model with ``torch.compile`` before
+                       capturing the CUDA graph.  Requires Triton; complex UNet
+                       adds ~60–120 s one-time compile overhead.
+    """
+    if torch_compile:
+        try:
+            from custom_kernels.compile_utils import setup_compile_env
+            # TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER=0 is set here, BEFORE torch.compile,
+            # so compiled kernels use a 64-bit-safe launcher.  This prevents the
+            # "Python int too large to convert to C long" overflow that occurs on Windows
+            # when ctypes.c_long (32-bit) stores 64-bit CUDA function handles inside
+            # _StaticCudaLauncher._launch_kernel during CUDA graph capture.
+            setup_compile_env()
+            _compiled = torch.compile(model, mode="default", fullgraph=False, dynamic=None)
+            _device = next(model.parameters()).device
+            _x_ex = torch.zeros(x_shape, dtype=torch.float32, device=_device)
+            print("[ref_ldm UNet] Warming up torch.compile (this may take ~2 min)...")
+            with torch.no_grad():
+                for _ in range(warmup):
+                    _compiled(_x_ex, ts_example, kv_map=kv_map_template, use_exclusive=use_exclusive)
+            torch.cuda.synchronize()
+            print("[ref_ldm UNet] torch.compile warmup done.")
+            # Only assign to model after successful warmup, so the except clause below
+            # always gets the original model for the fallback CUDA graph capture.
+            model = _compiled
+            # Fall through to UNetCUDAGraphRunner — the CUDA graph is captured over the
+            # compiled kernels (same as the benchmark Tier 5).  Static K/V buffers mean
+            # inference always replays the same fixed graph; dynamo never sees variable
+            # K/V shapes so the recompile_limit is never hit during inference.
+        except Exception as e:
+            print(f"[ref_ldm UNet] torch.compile failed ({e!s:.120}), using CUDA graph only.")
+            # model is still the original nn.Module — CUDA graph below works without compile
+
     return UNetCUDAGraphRunner(
         model,
         x_shape,

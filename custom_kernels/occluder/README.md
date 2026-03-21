@@ -10,20 +10,24 @@ Model: **occluder**  `(1,3,256,256)f32 → (1,1,256,256)f32`
 
 ---
 
-## Benchmark Results (RTX 4090, CUDA 12.9, PyTorch 2.8+cu129, ORT 1.22.0, input 256×256)
+## Benchmark Results
 
-50 iterations, 10 warm-up.
+**Hardware:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
+**Conditions:** 30 iterations, 5 warm-up, input 256×256
 
-| Tier | Method | ms | vs CUDA EP |
-|------|--------|---:|-----------:|
-| 0 | ORT FP32 CUDA EP | 2.75 | 1.00x |
-| 0b | ORT TRT EP FP32 | 1.08 | 2.55x |
-| 1 | PyTorch FP32 | 4.05 | 0.78x |
-| 2 | PyTorch FP16 | 3.82 | 0.82x |
-| **3** | **PT FP16 + CUDA graph (Custom)** | **0.74** | **3.74x** |
+| Tier | Method | ms | vs ORT CUDA EP |
+|------|--------|----|:--------------:|
+| 0 | ORT FP32 CUDA EP (baseline) | 1.48 ms | 1.00× |
+| 0b | ORT TRT EP FP32 | 1.04 ms | 1.42× |
+| 1 | PyTorch FP32 | 2.57 ms | 0.57× |
+| 2 | PyTorch FP16 | 3.02 ms | 0.49× |
+| **3** | **PT FP16 + CUDA graph (Custom)** | **0.62 ms** | **2.37×** |
+| **4** | **torch.compile default + FP16 + CUDA graph** | **0.41 ms** | **3.59×** |
+| 4b | torch.compile reduce-overhead | — *(skipped by default; set `OCCLUDER_TORCH_COMPILE=1`)* | — |
 
-> **Application uses Tier 3** (single CUDA graph; fixed 256×256 input).
-> If CUDA graph capture fails, falls back to Tier 2 (FP16 eager).
+> **Application uses Tier 3** (FP16 + CUDA graph). Pass `torch_compile=True` to `build_cuda_graph_runner` to activate Tier 4 (3.59×).
+
+**Accuracy (Tier 3 vs ORT FP32):** MAE=3.31e-03, MaxAbsErr=1.18e-02; binary pixel agreement = 100.00%.
 
 Run `benchmark_occluder.py` to measure on your hardware.
 

@@ -1168,6 +1168,7 @@ def build_cuda_graph_runner(
     model: InSwapperTorch,
     target_example: torch.Tensor,
     source_example: torch.Tensor,
+    torch_compile: bool = False,
 ) -> Callable[..., torch.Tensor]:
     """
     Captures the model into a CUDA graph for zero-overhead repeated inference.
@@ -1180,7 +1181,21 @@ def build_cuda_graph_runner(
     Warmup runs before capture to ensure cuDNN algorithm selection and Triton
     JIT compilation are complete — any one-time GPU allocation inside those
     paths would corrupt the CUDA graph capture window.
+
+    Args:
+        torch_compile: If True, wrap the model with ``torch.compile`` before
+                       capturing the CUDA graph.  Requires Triton; adds ~30 s
+                       one-time compile overhead.
     """
+    if torch_compile:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            model = apply_torch_compile(
+                model, target_example, extra_args=(source_example,)
+            )
+            print("[InSwapperTorch] torch.compile warmup done.")
+        except Exception as e:
+            print(f"[InSwapperTorch] torch.compile failed ({e!s:.120}), falling back to CUDA graph.")
     # Static tensors at fixed GPU addresses — the graph records their pointers
     static_target = target_example.clone()
     static_source = source_example.clone()

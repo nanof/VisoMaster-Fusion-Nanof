@@ -22,6 +22,13 @@ for _candidate in [
             str(_candidate) + _os.pathsep + _os.environ.get("PATH", "")
         )
 del _candidate, _REPO_ROOT, _os, _sys, _Path
+
+import sys as _sys_enc
+if hasattr(_sys_enc.stdout, 'reconfigure'):
+    _sys_enc.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(_sys_enc.stderr, 'reconfigure'):
+    _sys_enc.stderr.reconfigure(encoding='utf-8', errors='replace')
+del _sys_enc
 # ──────────────────────────────────────────────────────────────────────────
 
 import sys
@@ -159,6 +166,26 @@ def run_cuda_graph(model_path, inp_hw):
     return ms(t0, time.perf_counter(), RUNS)
 
 
+def run_compile_cuda_graph(model_path, inp_hw):
+    import torch
+    from custom_kernels.gpen_bfr.gpen_torch import GPENTorch, build_cuda_graph_runner
+
+    model = GPENTorch.from_onnx(model_path, compute_dtype=torch.float16).cuda().eval()
+    inp = torch.randn(1, 3, inp_hw, inp_hw, device="cuda")
+    with torch.no_grad():
+        runner = build_cuda_graph_runner(
+            model, inp_shape=(1, 3, inp_hw, inp_hw), torch_compile=True
+        )
+    for _ in range(WARMUP):
+        runner(inp)
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(RUNS):
+        runner(inp)
+    torch.cuda.synchronize()
+    return ms(t0, time.perf_counter(), RUNS)
+
+
 def benchmark_one(size: int):
     model_name = MODELS[size]
     model_path = str(ROOT / "model_assets" / model_name)
@@ -203,6 +230,47 @@ def benchmark_one(size: int):
         print(f"  {t:.2f} ms")
     except Exception as e:
         print(f"  SKIPPED: {e}")
+
+    print("Tier 4: PyTorch FP16 + fused demod + torch.compile + CUDA graph ...")
+    if not int(os.environ.get("GPEN_TORCH_COMPILE", "0")):
+        print("  Skipped — torch.compile crashes (access violation) on this model on Windows/sm_89.")
+        print("  Set GPEN_TORCH_COMPILE=1 to attempt.")
+    else:
+        try:
+            t = run_compile_cuda_graph(model_path, inp_hw)
+            results.append(("PT FP16 + demod + compile + CUDAGraph", t))
+            print(f"  {t:.2f} ms")
+        except Exception as e:
+            print(f"  SKIPPED: {e}")
+
+    print("Tier 4b: torch.compile(reduce-overhead) — no extra CUDA graph ...")
+    if not int(os.environ.get("GPEN_TORCH_COMPILE", "0")):
+        print("  Skipped — reduce-overhead may crash (MLIR segfault) on this model on Windows/sm_89.")
+        print("  Set GPEN_TORCH_COMPILE=1 to attempt.")
+    else:
+        try:
+            import torch as _torch
+            from custom_kernels.gpen_bfr.gpen_torch import GPENTorch
+            from custom_kernels.compile_utils import apply_torch_compile
+            import time as _time
+            _m4b = GPENTorch.from_onnx(model_path, compute_dtype=_torch.float16).cuda().eval()
+            _inp4b = _torch.randn(1, 3, inp_hw, inp_hw, device="cuda")
+            _m4b_compiled = apply_torch_compile(_m4b, _inp4b, compile_mode="reduce-overhead")
+            with _torch.no_grad():
+                for _ in range(WARMUP):
+                    _m4b_compiled(_inp4b)
+            _torch.cuda.synchronize()
+            _t0_4b = _time.perf_counter()
+            with _torch.no_grad():
+                for _ in range(RUNS):
+                    _m4b_compiled(_inp4b)
+            _torch.cuda.synchronize()
+            t_4b = (_time.perf_counter() - _t0_4b) / RUNS * 1000
+            results.append(("torch.compile reduce-overhead (no CUDA graph)", t_4b))
+            print(f"  {t_4b:.2f} ms")
+        except Exception as e:
+            print(f"  SKIPPED: {e}")
+            import traceback; traceback.print_exc()
 
     cuda_ep_t = results[0][1]
     hdr = f"{'Method':<40} {'ms':>8} {'vs CUDA EP':>11}"

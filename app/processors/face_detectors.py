@@ -443,7 +443,7 @@ class FaceDetectors:
             return self._det10g_runner
         self.models_processor.show_build_dialog.emit(
             "Finalizing Custom Provider",
-            "Capturing CUDA graph for RetinaFace (det10g).\nThis only happens once and improves performance.",
+            "Compiling & capturing CUDA graph for RetinaFace (det10g)…\nFirst run only — future sessions load instantly from cache.",
         )
         try:
             with self._custom_init_lock:
@@ -475,7 +475,7 @@ class FaceDetectors:
 
                     with self.models_processor.cuda_graph_capture_lock:
                         self._det10g_runner = build_cuda_graph_runner(
-                            self._det10g_torch
+                            self._det10g_torch, torch_compile=True
                         )
                 except Exception as e:
                     print(f"[Custom] det_10g graph runner failed, using eager: {e}")
@@ -490,7 +490,7 @@ class FaceDetectors:
             return self._yolo_runner
         self.models_processor.show_build_dialog.emit(
             "Finalizing Custom Provider",
-            "Capturing CUDA graph for YOLOv8n face detector.\nThis only happens once and improves performance.",
+            "Compiling & capturing CUDA graph for YOLOv8n face detector…\nFirst run only — future sessions load instantly from cache.",
         )
         try:
             with self._custom_init_lock:
@@ -523,7 +523,9 @@ class FaceDetectors:
                     )
 
                     with self.models_processor.cuda_graph_capture_lock:
-                        self._yolo_runner = build_cuda_graph_runner(self._yolo_torch)
+                        self._yolo_runner = build_cuda_graph_runner(
+                            self._yolo_torch, torch_compile=True
+                        )
                 except Exception as e:
                     print(f"[Custom] yoloface_8n graph runner failed, using eager: {e}")
                     self._yolo_runner = self._yolo_torch

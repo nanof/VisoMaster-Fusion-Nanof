@@ -498,6 +498,7 @@ class FaceLandmark478Torch(nn.Module):
         assert pi == len(prelu_params), (
             f"PReLU mismatch: assigned {pi}/{len(prelu_params)}"
         )
+        m._visomaster_onnx_path = str(onnx_path)
         return m
 
 
@@ -549,6 +550,24 @@ class FaceLandmark478CUDAGraphRunner:
 def build_cuda_graph_runner(
     model: FaceLandmark478Torch,
     input_shape: tuple = (1, 3, 256, 256),
+    torch_compile: bool = False,
 ) -> FaceLandmark478CUDAGraphRunner:
-    """Build and return a CUDA-graph-backed runner for FaceLandmark478Torch."""
+    """
+    Build and return a CUDA-graph-backed runner for FaceLandmark478Torch.
+
+    Args:
+        model         : FaceLandmark478Torch on CUDA in eval() mode.
+        input_shape   : fixed input shape (default (1, 3, 256, 256)).
+        torch_compile : if True, apply torch.compile before building the CUDA graph.
+    """
+    if torch_compile:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            device = next(model.parameters()).device
+            example_inp = torch.zeros(input_shape, dtype=torch.float32, device=device)
+            compiled = apply_torch_compile(model, example_inp)
+            print("[face_landmark478] torch.compile warmup done.")
+            return compiled  # CUDA graph on top of torch.compile fails on Windows
+        except Exception as e:
+            print(f"[face_landmark478] torch.compile failed ({e!s:.120}), falling back to CUDA graph.")
     return FaceLandmark478CUDAGraphRunner(model, input_shape=input_shape)

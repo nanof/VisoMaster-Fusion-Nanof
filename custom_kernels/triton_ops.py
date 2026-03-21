@@ -199,6 +199,16 @@ try:
 except ImportError:
     pass
 
+if TRITON_AVAILABLE:
+    # Apply Windows-specific environment fixes (ptxas path, TF32, UTF-8 cache
+    # write patch, etc.) as early as possible — before any kernel JIT fires.
+    # setup_compile_env() is idempotent so calling it here is always safe.
+    try:
+        from custom_kernels.compile_utils import setup_compile_env as _sce
+        _sce()
+        del _sce
+    except Exception:
+        pass
 
 if TRITON_AVAILABLE:
     # -----------------------------------------------------------------------
@@ -302,33 +312,41 @@ if TRITON_AVAILABLE:
         neg_slope: float = 0.2,
         scale: float = 2.0**0.5,
     ) -> torch.Tensor:
-        C_out = conv_out.shape[1]
-        HW = conv_out.shape[2] * conv_out.shape[3]
-        bias = act_b.view(2 * C_out).contiguous().float()
-        out = torch.empty(
-            1,
-            2 * C_out,
-            conv_out.shape[2],
-            conv_out.shape[3],
-            dtype=conv_out.dtype,
-            device=conv_out.device,
+        _shown = _triton_show(
+            "gpen_act",
+            "Compiling Triton kernel: GPEN fused noise+activate…\nThis only happens once per GPU/driver combination.",
         )
+        try:
+            C_out = conv_out.shape[1]
+            HW = conv_out.shape[2] * conv_out.shape[3]
+            bias = act_b.view(2 * C_out).contiguous().float()
+            out = torch.empty(
+                1,
+                2 * C_out,
+                conv_out.shape[2],
+                conv_out.shape[3],
+                dtype=conv_out.dtype,
+                device=conv_out.device,
+            )
 
-        BLOCK_HW = 512 if HW >= 512 else 256
-        grid = (C_out, triton.cdiv(HW, BLOCK_HW))
-        _gpen_act_fwd[grid](
-            conv_out,
-            noise_term,
-            bias,
-            out,
-            C_out,
-            HW,
-            neg_slope=neg_slope,
-            scale=scale,
-            BLOCK_HW=BLOCK_HW,
-            num_warps=4,
-        )
-        return out
+            BLOCK_HW = 512 if HW >= 512 else 256
+            grid = (C_out, triton.cdiv(HW, BLOCK_HW))
+            _gpen_act_fwd[grid](
+                conv_out,
+                noise_term,
+                bias,
+                out,
+                C_out,
+                HW,
+                neg_slope=neg_slope,
+                scale=scale,
+                BLOCK_HW=BLOCK_HW,
+                num_warps=4,
+            )
+            return out
+        finally:
+            if _shown:
+                _triton_hide()
 
     # -----------------------------------------------------------------------
     # Kernel 3 — GFPGAN fused activate (Broadcasting support)

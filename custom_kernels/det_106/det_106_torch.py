@@ -318,13 +318,18 @@ class Det106Torch(nn.Module):
         m.fc.weight.data = torch.tensor(fc_w, dtype=compute_dtype)
         m.fc.bias.data = torch.tensor(fc_b, dtype=compute_dtype)
 
+        m._visomaster_onnx_path = str(onnx_path)
         return m
 
 
 # ---------------------------------------------------------------------------
 
 
-def build_cuda_graph_runner(model: Det106Torch, input_shape: tuple = (1, 3, 192, 192)):
+def build_cuda_graph_runner(
+    model: Det106Torch,
+    input_shape: tuple = (1, 3, 192, 192),
+    torch_compile: bool = False,
+):
     """
     Wrap a Det106Torch in a CUDA graph for zero-CPU-overhead repeated inference.
 
@@ -335,7 +340,20 @@ def build_cuda_graph_runner(model: Det106Torch, input_shape: tuple = (1, 3, 192,
     -----
     - Input shape is fixed at capture time; always pass (1,3,192,192).
     - The runner clones the output tensor each call so callers own their copy.
+    - torch_compile: if True, apply torch.compile (mode='default') before CUDA
+      graph capture.  Triggers Triton JIT on first call (~30 s); compiled
+      kernels are then captured in the graph.
     """
+    if torch_compile:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            device = next(model.parameters()).device
+            example_inp = torch.zeros((1, 3, 192, 192), dtype=torch.float32, device=device)
+            compiled = apply_torch_compile(model, example_inp)
+            print("[det_106] torch.compile warmup done.")
+            return compiled  # CUDA graph on top of torch.compile fails on Windows
+        except Exception as e:
+            print(f"[det_106] torch.compile failed ({e!s:.120}), falling back to CUDA graph.")
     device = next(model.parameters()).device
     assert device.type == "cuda", "Model must be on a CUDA device"
 

@@ -12,26 +12,28 @@ Model: **BiSeNet-v1 / ResNet-34**  `(1,3,512,512)f32 → (1,19,512,512)f32`
 ## Benchmark Results
 
 **Hardware:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
-**Conditions:** 50 iterations, 10 warm-up, input 512×512
+**Conditions:** 30 iterations, 5 warm-up, input 512×512
 
 | Tier | Method | ms | vs ORT CUDA EP |
 |------|--------|---:|:--------------:|
-| 0    | ORT FP32 CUDA EP (baseline) | 4.57 ms | 1.00x |
-| 0b   | ORT TensorRT EP FP32 | 3.66 ms | 1.25x |
-| 1    | PyTorch FP32 | 3.82 ms | 1.20x |
-| 2    | PyTorch FP16 | 3.76 ms | 1.22x |
-| **3** | **PT FP16 + CUDA graph (Custom)** | **1.60 ms** | **2.85x** |
+| 0    | ORT FP32 CUDA EP (baseline) | 4.05 ms | 1.00× |
+| 0b   | ORT TensorRT EP FP32 | 3.28 ms | 1.23× |
+| 1    | PyTorch FP32 | 3.40 ms | 1.19× |
+| 2    | PyTorch FP16 | 3.07 ms | 1.32× |
+| 2b   | PyTorch BF16 | 2.68 ms | 1.51× |
+| **3** | **PT FP16 + CUDA graph** | **1.18 ms** | **3.44×** |
+| **4** | **torch.compile (reduce-overhead) — `build_cuda_graph_runner(torch_compile=True)`** | **1.09 ms** | **4.01×** |
 
-> **Application uses Tier 3** (single CUDA graph; fixed 512×512 input).
-> If CUDA graph capture fails, falls back to Tier 2 (FP16 eager).
+> **Application uses torch.compile reduce-overhead (Tier 4)** — **1.09 ms (4.01× vs ORT CUDA EP)**.
+> Pass `torch_compile=True` to `build_cuda_graph_runner` (default in Custom provider).
+> `torch.compile(default)` + manual CUDA graph fails on this model (same `current_seed` issue as yoloface_8n).
+> Fixed by using `reduce-overhead` mode, which manages its own internal CUDA graphs.
 
-**Accuracy:** MAE = 6.44e-02, MaxAbsErr = 1.30e+00; Argmax pixel agreement vs ORT
-CUDA EP = **95.49%**.
+**Accuracy (FP16 vs ORT FP32):** MAE = 9.91e-04, MaxAbsErr = 9.03e-03; Argmax pixel agreement = **99.91%**.
 
 > **Note on accuracy baseline:** ORT CUDA EP runs some nodes on CPU due to
 > asymmetric padding in the BiSeNet architecture, introducing rounding artefacts.
-> PyTorch FP16 is the more numerically accurate reference — the 4.33% disagreement
-> is primarily against the degraded ORT output, not a true model error.
+> PyTorch FP16 is the more numerically accurate reference.
 
 ### Speed-up Source
 
@@ -42,10 +44,10 @@ ResNet-34 + BiSeNet Context Path is a **pure Conv2d/ReLU/Sigmoid architecture**
    kernels (~2× throughput vs FP32 on Ampere/Ada GPUs).
 2. **CUDA graph** — eliminates Python/CUDA kernel-launch overhead across the
    full backbone; the 512×512 fixed input makes single-capture practical.
-
-No Triton kernels are used.  The simple ReLU/Sigmoid activations and absence
-of GroupNorm layers leave no fuser-friendly patterns beyond what cuDNN already
-handles automatically for Conv2d.
+3. **torch.compile reduce-overhead** (Tier 4) — fuses ReLU/Conv sequences and
+   captures its own internal CUDA graphs; achieves **1.09 ms (4.01×)** vs ORT.
+   `mode="default"` + manual CUDA graph fails on Windows/sm_89 (`current_seed` issue).
+   Fixed by using `reduce-overhead` mode, which bypasses the manual graph capture entirely.
 
 ---
 

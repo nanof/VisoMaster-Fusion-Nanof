@@ -33,6 +33,13 @@ for _candidate in [
             str(_candidate) + _os.pathsep + _os.environ.get("PATH", "")
         )
 del _candidate, _REPO_ROOT, _os, _sys, _Path
+
+import sys as _sys_enc
+if hasattr(_sys_enc.stdout, 'reconfigure'):
+    _sys_enc.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(_sys_enc.stderr, 'reconfigure'):
+    _sys_enc.stderr.reconfigure(encoding='utf-8', errors='replace')
+del _sys_enc
 # ──────────────────────────────────────────────────────────────────────────
 
 import os
@@ -112,7 +119,7 @@ def _check_accuracy(
     max_errs = []
     for name, ort_out, pt_out in zip(out_names, ort_outs, pt_outs):
         a = ort_out.astype(np.float32)
-        b = pt_out.cpu().numpy().astype(np.float32)
+        b = pt_out.detach().cpu().numpy().astype(np.float32)
         if a.shape != b.shape:
             print(f"    {name}: shape mismatch ORT={a.shape} PT={b.shape}")
             continue
@@ -255,6 +262,44 @@ def bench_det10g():
     print("\n  Accuracy (FP16 NHWC vs ORT FP32 — should match FP16 NCHW):")
     _check_accuracy(ort_outs, pt_outs_nhwc)
 
+    # ── Tier 6 — torch.compile + FP16 NHWC + CUDA graph ──────────────────
+    t6 = t5
+    print("\n  [Tier 6] torch.compile(mode='default') + FP16 NHWC + CUDA graph")
+    print("  One-time compile cost: ~30 s on first run (Triton JIT).")
+    try:
+        m6 = (
+            Det10gTorch.from_onnx(DET_ONNX, compute_dtype=torch.float16)
+            .to(memory_format=torch.channels_last)
+            .cuda()
+            .eval()
+        )
+        runner6 = build_cuda_graph_runner(m6, torch_compile=True)
+        with torch.no_grad():
+            _ = runner6(inp)  # first call: trigger graph capture for INPUT_H×INPUT_W
+        t6 = _bench(lambda: runner6(inp))
+        _print_row("6", "torch.compile + FP16 NHWC + CUDA graph", t6, t0)
+    except Exception as e:
+        print(f"  Tier 6 | torch.compile — failed: {e}")
+        import traceback; traceback.print_exc()
+
+    # ── Tier 4b — torch.compile reduce-overhead (no separate CUDA graph) ────
+    print("\n  [Tier 4b] torch.compile(mode='reduce-overhead') — no extra CUDA graph")
+    try:
+        from custom_kernels.compile_utils import apply_torch_compile
+        inp_f32 = inp
+        m4b = Det10gTorch.from_onnx(DET_ONNX, compute_dtype=torch.float16).cuda().eval()
+        m4b_compiled = apply_torch_compile(
+            m4b,
+            inp_f32,
+            compile_mode="reduce-overhead",
+        )
+        with torch.no_grad():
+            t4b = _bench(lambda: m4b_compiled(inp_f32))
+        _print_row("4b", "torch.compile reduce-overhead (no CUDA graph)", t4b, t0)
+    except Exception as e:
+        print(f"  Tier 4b | reduce-overhead — failed: {e}")
+        import traceback; traceback.print_exc()
+
     # ── Summary ───────────────────────────────────────────────────────────
     print(f"\n  {'─' * 72}")
     print(f"  SUMMARY  (input {INPUT_H}×{INPUT_W}, {ITERS} iters)")
@@ -268,10 +313,11 @@ def bench_det10g():
         ("3", "FP16 NCHW + CUDA graph", t3),
         ("4", "FP16 NHWC (channels_last)", t4),
         ("5", "FP16 NHWC + CUDA graph  ← recommended", t5),
+        ("6", "torch.compile + FP16 NHWC + CUDA graph", t6),
     ]
     for tier, label, ms_val in rows:
         speedup = t0 / ms_val if ms_val > 0 else float("nan")
-        marker = " ***" if tier == "5" else ""
+        marker = " ***" if tier == "6" else ""
         print(f"  {tier:<6} | {label:<46} | {ms_val:8.3f} ms | {speedup:6.2f}×{marker}")
     print(f"  {'─' * 72}")
 

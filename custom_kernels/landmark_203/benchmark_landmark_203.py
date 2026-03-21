@@ -27,6 +27,13 @@ for _candidate in [
             str(_candidate) + _os.pathsep + _os.environ.get("PATH", "")
         )
 del _candidate, _REPO_ROOT, _os, _sys, _Path
+
+import sys as _sys_enc
+if hasattr(_sys_enc.stdout, 'reconfigure'):
+    _sys_enc.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(_sys_enc.stderr, 'reconfigure'):
+    _sys_enc.stderr.reconfigure(encoding='utf-8', errors='replace')
+del _sys_enc
 # ──────────────────────────────────────────────────────────────────────────
 
 import os
@@ -72,14 +79,14 @@ def _ort_session(path: str, provider: str = "CUDAExecutionProvider"):
 
 def _print_row(tier, label, ms_val, ref_ms):
     speedup = ref_ms / ms_val if ms_val > 0 else float("nan")
-    print(f"  Tier {tier} | {label:<44} | {ms_val:8.3f} ms | {speedup:6.2f}×")
+    print(f"  Tier {tier} | {label:<44} | {ms_val:8.3f} ms | {speedup:6.2f}x")
 
 
 # ---------------------------------------------------------------------------
 
 
 def bench():
-    print("\n=== landmark_203 face landmark detector — (1,3,224,224) → (1,406) ===")
+    print("\n=== landmark_203 face landmark detector -- (1,3,224,224) -> (1,406) ===")
     print(f"  warm-up={WARMUP}, iters={ITERS}\n")
     print(f"  {'Tier':<6} | {'Method':<44} | {'ms':>8} | {'speedup':>7}")
     print(f"  {'-' * 6}-+-{'-' * 44}-+-{'-' * 8}-+-{'-' * 7}")
@@ -199,6 +206,39 @@ def bench():
     )
     _print_row("4", label, t4, t0)
 
+    # ── Tier 5 — torch.compile + FP16 + CUDA graph ────────────────────────
+    print("\n  [Tier 5] torch.compile(mode='default') + CUDA graph")
+    print("  One-time compile cost: ~30 s on first run (Triton JIT).")
+    try:
+        m5 = Landmark203Torch.from_onnx(ONNX_PATH, compute_dtype=torch.float16).cuda().eval()
+        runner5 = build_cuda_graph_runner(m5, torch_compile=True)
+        t5 = _bench(lambda: runner5(inp))
+        _print_row("5", "torch.compile + FP16 + CUDA graph", t5, t0)
+    except Exception as e:
+        print(f"  Tier 5 | torch.compile — failed: {e}")
+        import traceback; traceback.print_exc()
+
+    # ── Tier 5b — torch.compile reduce-overhead (no separate CUDA graph) ─────
+    print("\n  [Tier 5b] torch.compile(mode='reduce-overhead') — no extra CUDA graph")
+    if not int(os.environ.get("LANDMARK203_TORCH_COMPILE", "0")):
+        print("  Skipped — reduce-overhead may crash on this model on Windows/sm_89.")
+        print("  Set LANDMARK203_TORCH_COMPILE=1 to attempt.")
+    else:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            m5b = Landmark203Torch.from_onnx(ONNX_PATH, compute_dtype=torch.float16).cuda().eval()
+            m5b_compiled = apply_torch_compile(
+                m5b,
+                inp,
+                compile_mode="reduce-overhead",
+            )
+            with torch.no_grad():
+                t5b = _bench(lambda: m5b_compiled(inp))
+            _print_row("5b", "torch.compile reduce-overhead (no CUDA graph)", t5b, t0)
+        except Exception as e:
+            print(f"  Tier 5b | reduce-overhead — failed: {e}")
+            import traceback; traceback.print_exc()
+
     print()
 
     # ── Numerical accuracy check ──────────────────────────────────────────
@@ -207,16 +247,16 @@ def bench():
     ref_pts = ref_outs[2][0]  # (406,)  ORT
     with torch.no_grad():
         pt_outs = runner(inp)
-    pt_pts = pt_outs[2][0].cpu().numpy()  # (406,)  PT
+    pt_pts = pt_outs[2][0].detach().cpu().numpy()  # (406,)  PT
 
     max_err = float(np.abs(ref_pts - pt_pts).max())
     mean_err = float(np.abs(ref_pts - pt_pts).mean())
-    print(f"  max  |Δ| = {max_err:.4f}  (output[2] / fc_pts)")
-    print(f"  mean |Δ| = {mean_err:.6f}")
+    print(f"  max  |err| = {max_err:.4f}  (output[2] / fc_pts)")
+    print(f"  mean |err| = {mean_err:.6f}")
     if max_err < 0.5:
-        print("  ✓ Accuracy OK (max error < 0.5)")
+        print("  Accuracy OK (max error < 0.5)")
     else:
-        print("  ✗ Accuracy WARNING — large deviation detected")
+        print("  Accuracy WARNING -- large deviation detected")
     print()
 
 

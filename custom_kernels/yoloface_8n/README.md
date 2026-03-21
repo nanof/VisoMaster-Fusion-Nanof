@@ -14,18 +14,23 @@ application when the *Custom* execution provider is selected.
 
 50 iterations, 10 warm-up; input 640×640:
 
-| Method | Latency | vs ORT CUDA EP |
-|--------|---------|:--------------:|
-| ORT FP32 CUDA EP | 3.29 ms | 1.00x (baseline) |
-| ORT TensorRT EP FP32 | 1.81 ms | 1.82x |
-| PyTorch FP32 | 4.49 ms | 0.73x |
-| PyTorch FP16 | 7.01 ms | 0.47x |
-| **PT FP16 + CUDA graph (Custom)** | **1.11 ms** | **2.97x** |
+| Tier | Method | Latency | vs ORT CUDA EP |
+|------|--------|---------|:--------------:|
+| 0   | ORT FP32 CUDA EP | 3.22 ms | 1.00× (baseline) |
+| 0b  | ORT TensorRT EP FP32 | 1.48 ms | 2.17× |
+| 1   | PyTorch FP32 | 5.02 ms | 0.64× |
+| 2   | PyTorch FP16 | 6.23 ms | 0.52× |
+| 2b  | PyTorch BF16 | 11.27 ms | 0.29× |
+| **3**  | **PT FP16 + CUDA graph** | **1.13 ms** | **3.09×** |
+| **4**  | **torch.compile (reduce-overhead) — `build_cuda_graph_runner(torch_compile=True)`** | **0.83 ms** | **4.19×** |
 
-The CUDA-graph path is **2.97x faster** than ORT CUDA EP.
+`torch.compile(mode="default")` + manual CUDA graph **fails** on this model: Triton-generated
+kernels call `CUDAGeneratorImpl::current_seed` during graph capture (Windows/sm_89 issue).
+The fix is to use `reduce-overhead` mode which manages its own internal CUDA graphs.
 
-> **Application uses PT FP16 + CUDA graph** (single captured graph; fixed 640×640 input).
-> If CUDA graph capture fails, falls back to FP16 eager.
+> **Application uses torch.compile reduce-overhead (Tier 4)** — **0.83 ms (4.19× vs ORT CUDA EP)**.
+> Pass `torch_compile=True` to `build_cuda_graph_runner` (default in Custom provider).
+> If compilation fails, falls back to Tier 3 (manual CUDA graph).
 
 ### Speed-up Source
 
@@ -35,9 +40,14 @@ folded at export).  Speed-up comes from:
 1. **FP16** — cuDNN dispatches Conv2d on FP16 weights to TensorCore GEMM
    kernels (~2× throughput vs FP32 on Ampere/Ada GPUs).
 2. **CUDA graph** — eliminates Python/CUDA kernel-launch overhead
-   (~15–25% additional gain).
+   (~15–25% additional gain vs FP16 eager).
+3. **torch.compile(reduce-overhead)** (Tier 4) — fuses SiLU/Conv sequences and
+   captures its own internal CUDA graphs; achieves **0.83 ms** (4.19× vs ORT).
+   `mode="default"` + separate manual CUDA graph fails for this model on Windows
+   (Triton sm_89: `current_seed` called during capture). Fixed by using
+   `reduce-overhead` mode, which bypasses the manual graph capture entirely.
 
-No Triton kernels are used (SiLU = sigmoid×x, fused by PyTorch autocast).
+No Triton kernels are used in Tier 3 (SiLU = sigmoid×x, fused by PyTorch autocast).
 
 Note that PT FP32 and PT FP16 eager are *slower* than ORT CUDA EP for this
 small model — the CUDA graph is what recovers and surpasses ORT by eliminating
@@ -149,7 +159,7 @@ Ultralytics exports them directly (no BN wrapper).
 | File | Purpose |
 |------|---------|
 | `yoloface8n_torch.py` | FP16 PyTorch YOLOv8n-face + single-graph CUDA runner |
-| `benchmark_yoloface8n.py` | 4-tier latency benchmark vs ORT baseline |
+| `benchmark_yoloface8n.py` | Multi-tier latency benchmark vs ORT baseline (Tier 4 = default+CG, Tier 4b = reduce-overhead) |
 | `__init__.py` | Package marker |
 
 ## Usage

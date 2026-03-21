@@ -95,18 +95,20 @@ and complex exchange units make a hand-coded implementation error-prone.
 
 ## Benchmark Results
 
-GPU: NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
-(50 iterations, 10 warm-up, batch=1)
+**Hardware:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
+**Conditions:** 200 iterations, 20 warm-up, input 256×256
 
-| Tier | Method | Time | vs ORT CUDA EP |
-|------|--------|------|:--------------:|
-| 0    | ORT FP32 CUDA EP (baseline) | 11.292 ms | 1.00× |
-| 0b   | ORT TRT EP FP32 | 13.052 ms | 0.87× ⚠ (slower than CUDA EP) |
-| 1    | PyTorch FP32 eager | 16.623 ms | 0.68× |
-| 2    | PyTorch FP16 eager | 31.148 ms | 0.36× |
-| 3    | **PyTorch FP16 + CUDA graph (Custom)** | **7.495 ms** | **1.51×** |
+| Tier | Method | ms | vs ORT CUDA EP |
+|------|--------|----|:--------------:|
+| 0    | ORT FP32 CUDA EP (baseline) | 10.709 ms | 1.00× |
+| 0b   | ORT TRT EP FP32 | 5.136 ms | 2.09× |
+| 1    | PyTorch FP32 eager | 36.145 ms | 0.30× |
+| 2    | PyTorch FP16 eager | 39.945 ms | 0.27× |
+| **3** | **PyTorch FP16 + CUDA graph (Custom)** | **4.876 ms** | **2.20×** |
+| **4** | **torch.compile default + FP16 + CUDA graph** | **3.213 ms** | **3.33×** |
+| 4b   | torch.compile reduce-overhead | — *(skipped by default; set `PEPPAPIG_TORCH_COMPILE=1`)* | — |
 
-The CUDA-graph path (tier 3) is **1.51× faster** than ORT CUDA EP.
+> **Application uses Tier 3** (FP16 + CUDA graph). Pass `torch_compile=True` to `build_cuda_graph_runner` to activate Tier 4 (3.33×).
 
 CUDA graph speedup is especially impactful here (839-node network) because ORT has
 significant per-kernel CPU launch overhead across all those ops.

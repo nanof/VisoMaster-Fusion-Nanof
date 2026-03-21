@@ -22,6 +22,13 @@ for _candidate in [
             str(_candidate) + _os.pathsep + _os.environ.get("PATH", "")
         )
 del _candidate, _REPO_ROOT, _os, _sys, _Path
+
+import sys as _sys_enc
+if hasattr(_sys_enc.stdout, 'reconfigure'):
+    _sys_enc.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(_sys_enc.stderr, 'reconfigure'):
+    _sys_enc.stderr.reconfigure(encoding='utf-8', errors='replace')
+del _sys_enc
 # ──────────────────────────────────────────────────────────────────────────
 
 import sys
@@ -153,6 +160,28 @@ def run_cuda_graph():
     return ms(t0, time.perf_counter(), RUNS)
 
 
+def run_compile_cuda_graph():
+    from custom_kernels.gfpgan_v1_4.gfpgan_torch import (
+        GFPGANTorch,
+        build_cuda_graph_runner,
+    )
+
+    model = GFPGANTorch.from_onnx(MODEL_PATH, compute_dtype=torch.float16).cuda().eval()
+    inp = torch.randn(1, 3, 512, 512, device="cuda")
+    with torch.no_grad():
+        runner = build_cuda_graph_runner(
+            model, inp_shape=(1, 3, 512, 512), torch_compile=True
+        )
+    for _ in range(WARMUP):
+        runner(inp)
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(RUNS):
+        runner(inp)
+    torch.cuda.synchronize()
+    return ms(t0, time.perf_counter(), RUNS)
+
+
 def main():
     print(f"\n=== GFPGAN-1024 Benchmark ({RUNS} runs, RTX GPU) ===\n")
     results = []
@@ -185,6 +214,42 @@ def main():
         print(f"  {t:.2f} ms")
     except Exception as e:
         print(f"  SKIPPED: {e}")
+
+    print("Tier 4: PyTorch FP16 + Triton demod + torch.compile + CUDA graph ...")
+    try:
+        t = run_compile_cuda_graph()
+        results.append(("PT FP16 + Triton + compile + CUDAGraph", t))
+        print(f"  {t:.2f} ms")
+    except Exception as e:
+        print(f"  SKIPPED: {e}")
+
+    print("Tier 4b: torch.compile(reduce-overhead) — no extra CUDA graph ...")
+    if not int(os.environ.get("GFPGAN1024_TORCH_COMPILE", "0")):
+        print("  Skipped — reduce-overhead may crash (MLIR segfault) on this model on Windows/sm_89.")
+        print("  Set GFPGAN1024_TORCH_COMPILE=1 to attempt.")
+    else:
+        try:
+            from custom_kernels.gfpgan_v1_4.gfpgan_torch import GFPGANTorch
+            from custom_kernels.compile_utils import apply_torch_compile
+            import time as _time
+            _m4b = GFPGANTorch.from_onnx(MODEL_PATH, compute_dtype=torch.float16).cuda().eval()
+            _inp4b = torch.randn(1, 3, 512, 512, device="cuda")
+            _m4b_compiled = apply_torch_compile(_m4b, _inp4b, compile_mode="reduce-overhead")
+            with torch.no_grad():
+                for _ in range(WARMUP):
+                    _m4b_compiled(_inp4b)
+            torch.cuda.synchronize()
+            _t0_4b = _time.perf_counter()
+            with torch.no_grad():
+                for _ in range(RUNS):
+                    _m4b_compiled(_inp4b)
+            torch.cuda.synchronize()
+            t_4b = (_time.perf_counter() - _t0_4b) / RUNS * 1000
+            results.append(("torch.compile reduce-overhead (no CUDA graph)", t_4b))
+            print(f"  {t_4b:.2f} ms")
+        except Exception as e:
+            print(f"  SKIPPED: {e}")
+            import traceback; traceback.print_exc()
 
     cuda_ep_t = results[0][1]
     trt_ep_t = t_trt  # may be None if TRT not available

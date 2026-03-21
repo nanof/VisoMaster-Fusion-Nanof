@@ -705,6 +705,7 @@ class CodeFormerTorch(nn.Module):
         elif verbose:
             print("[CodeFormerTorch] WARNING: pos_emb not found in ONNX")
 
+        model._visomaster_onnx_path = str(onnx_path)
         return model.to(compute_dtype)
 
 
@@ -937,9 +938,15 @@ def _load_transformer_anon_weights(
 class CUDAGraphRunner:
     """Wraps a module in a CUDA graph for zero-overhead repeated inference."""
 
-    def __init__(self, module: nn.Module, inp_shape: Tuple[int, ...]):
+    def __init__(
+        self,
+        module: nn.Module,
+        inp_shape: Tuple[int, ...],
+        fidelity_weight: float = 0.5,
+    ):
         self._module = module
         self._inp_shape = inp_shape
+        self._fidelity_weight = fidelity_weight
         self._graph = None
         self._static_in: Optional[torch.Tensor] = None
         self._static_out: Optional[torch.Tensor] = None
@@ -957,7 +964,7 @@ class CUDAGraphRunner:
         print("[CodeFormerTorch] Warming up (cuDNN/Triton JIT init)...")
         with torch.no_grad():
             for _ in range(3):
-                _ = self._module(self._static_in)
+                _ = self._module(self._static_in, self._fidelity_weight)
         torch.cuda.synchronize(device)
 
         # Capture: all GPU kernel launches inside this context are recorded
@@ -976,14 +983,13 @@ class CUDAGraphRunner:
                 stream=self._capture_stream,
                 capture_error_mode="relaxed",
             ):
-                self._static_out = self._module(self._static_in)
+                self._static_out = self._module(self._static_in, self._fidelity_weight)
         torch.cuda.synchronize(device)
         print("[CodeFormerTorch] CUDA graph captured.")
 
-    def __call__(self, x: torch.Tensor, w: float = 0.5) -> torch.Tensor:
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
         if self._graph is None:
             self._capture()
-        # Note: CodeFormer graph usually captures a fixed fidelity 'w'
         self._static_in.copy_(x)  # type: ignore[union-attr]
         self._graph.replay()  # type: ignore[union-attr, attr-defined]
         return self._static_out.clone()  # type: ignore[union-attr]
@@ -992,11 +998,44 @@ class CUDAGraphRunner:
 def build_cuda_graph_runner(
     model: "CodeFormerTorch",
     inp_shape: Tuple[int, ...] = (1, 3, 512, 512),
+    fidelity_weight: float = 0.5,
+    torch_compile: bool = False,
 ) -> CUDAGraphRunner:
     """
     Capture model into a CUDA graph.  Call the returned runner like a function:
 
-        runner = build_cuda_graph_runner(model)
+        runner = build_cuda_graph_runner(model, fidelity_weight=0.7)
         output = runner(face_image_f32_cuda)
+
+    Args:
+        torch_compile: If True, wrap the model with ``torch.compile`` before
+                       capturing the CUDA graph.  Requires Triton; adds ~60 s
+                       one-time compile overhead for this complex transformer but
+                       gives ~1.17x speedup over the uncompiled CUDA-graph baseline.
     """
-    return CUDAGraphRunner(model, inp_shape)
+    if torch_compile:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            device = next(model.parameters()).device
+            example_inp = torch.zeros(inp_shape, dtype=torch.float32, device=device)
+            compiled = apply_torch_compile(
+                model, example_inp,
+                extra_kwargs={"fidelity_weight": fidelity_weight},
+            )
+            print("[codeformer] torch.compile warmup done.")
+            # Return compiled model directly — CUDA graph on top of torch.compile
+            # fails on Windows (64-bit kernel handles overflow 32-bit C long).
+            # Wrap in a callable that matches the CUDAGraphRunner (x,) → tensor interface,
+            # baking in fidelity_weight so callers don't need to pass it.
+            _fw = fidelity_weight
+            _compiled = compiled
+
+            class _CompiledCodeFormerRunner:
+                def __call__(self, x: "torch.Tensor") -> "torch.Tensor":
+                    return _compiled(x, fidelity_weight=_fw)
+
+            return _CompiledCodeFormerRunner()
+        except Exception as e:
+            print(f"[codeformer] torch.compile failed ({e!s:.120}), falling back to CUDA graph.")
+
+    return CUDAGraphRunner(model, inp_shape, fidelity_weight)

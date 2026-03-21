@@ -13,25 +13,22 @@ with CUDA-graph acceleration.  Used by VisoMaster-Fusion when the
 | GPEN-BFR-1024 | 512×512 | 1024×1024 |
 | GPEN-BFR-2048 | 512×512 | 2048×2048 |
 
-## Benchmark Results (RTX-class GPU)
+## Benchmark Results
 
-**Environment:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · Triton 3.6.0 · ORT 1.22.0 · 50 iterations
+**Hardware:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
+**Conditions:** 50 iterations, 10 warm-up
 
-With Triton-accelerated kernels (demod + fused activation):
+| Model | ORT CUDA EP | ORT TRT EP | PT FP32 | PT FP16 | **PT FP16 + CUDAGraph** | torch.compile + CG | vs ORT | vs TRT |
+|-------|-------------|------------|---------|---------|-------------------------|--------------------|--------|--------|
+| 256   | 3.56 ms | 2.40 ms | 5.58 ms | 5.33 ms | **1.19 ms** | 1.27 ms *(slower)* | **2.99×** | **2.02×** |
+| 512   | 15.59 ms | 11.87 ms | 13.35 ms | 12.24 ms | **6.16 ms** | 9.76 ms *(slower)* | **2.53×** | **1.93×** |
+| 1024  | 32.94 ms | 22.37 ms | 24.95 ms | 11.62 ms | **10.68 ms** | 18.38 ms *(slower)* | **3.09×** | **2.10×** |
+| 2048  | 79.65 ms | 44.53 ms | 48.72 ms | 20.93 ms | **20.07 ms** | 35.65 ms *(slower)* | **3.97×** | **2.26×** |
 
-| Model | ORT CUDA EP | ORT TRT EP | PT FP32 | PT FP16 + Triton | PT FP16 + Triton + CUDAGraph |
-|-------|-------------|------------|---------|------------------|------------------------------|
-| 256   | 6.65 ms | 3.55 ms | 5.33 ms | 5.43 ms | **1.79 ms** (3.72× vs ORT) |
-| 512   | 19.89 ms | 15.57 ms | 17.57 ms | 19.06 ms | **14.29 ms** (1.39× vs ORT) |
-| 1024  | 73.16 ms | 45.46 ms | 38.54 ms | 12.21 ms | **18.29 ms** (4.00× vs ORT) |
-| 2048  | 120.59 ms | 67.97 ms | 72.60 ms | 30.38 ms | **27.71 ms** (4.35× vs ORT) |
-
-The CUDA-graph path (PT FP16 + Triton + CUDAGraph) is **1.39–4.35× faster** than ORT CUDA EP across model sizes.
-
-> **Note on GPEN-BFR-1024:** PT FP16 eager (12.21 ms) is faster than CUDA graph (18.29 ms) for this model size.
-> GPEN-BFR-512 shows the smallest speedup (1.39×) due to ConvTranspose upsampling at intermediate resolutions.
-> Both GPEN-BFR-1024 and 2048 achieve strong speedups (4.00× and 4.35×) thanks to large feature maps where
-> FP16 bandwidth savings dominate.
+> **Application uses PT FP16 + CUDA graph** (Tier 3) — no torch.compile.
+> torch.compile regresses performance for all GPEN sizes: StyleGAN's weight
+> demodulation kernels do not benefit from Triton fusion and the compiled graph
+> adds overhead. Set `GPEN_TORCH_COMPILE=1` to benchmark anyway.
 
 ## Accuracy
 

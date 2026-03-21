@@ -280,7 +280,7 @@ class FaceLandmarkDetectors:
             return self._landmark5_runner
         self.models_processor.show_build_dialog.emit(
             "Finalizing Custom Provider",
-            "Capturing CUDA graph for Landmark 5-point detector.\nThis only happens once and improves performance.",
+            "Compiling & capturing CUDA graph for Landmark 5-point detector…\nFirst run only — future sessions load instantly from cache.",
         )
         try:
             with self._custom_init_lock:
@@ -310,7 +310,7 @@ class FaceLandmarkDetectors:
 
                     with self.models_processor.cuda_graph_capture_lock:
                         self._landmark5_runner = build_cuda_graph_runner(
-                            self._landmark5_torch
+                            self._landmark5_torch, torch_compile=True
                         )
                 except Exception as e:
                     print(f"[Custom] res50 CUDA graph failed, using eager: {e}")
@@ -325,7 +325,7 @@ class FaceLandmarkDetectors:
             return self._1k3d68_runner
         self.models_processor.show_build_dialog.emit(
             "Finalizing Custom Provider",
-            "Capturing CUDA graph for 1K3D68 3D landmark detector.\nThis only happens once and improves performance.",
+            "Compiling & capturing CUDA graph for 1K3D68 3D landmark detector…\nFirst run only — future sessions load instantly from cache.",
         )
         try:
             with self._custom_init_lock:
@@ -359,7 +359,7 @@ class FaceLandmarkDetectors:
 
                     with self.models_processor.cuda_graph_capture_lock:
                         self._1k3d68_runner = build_cuda_graph_runner(
-                            self._1k3d68_torch
+                            self._1k3d68_torch, torch_compile=True
                         )
                 except Exception as e:
                     print(f"[Custom] 1k3d68 CUDA graph failed, using eager: {e}")
@@ -374,7 +374,7 @@ class FaceLandmarkDetectors:
             return self._landmark203_runner
         self.models_processor.show_build_dialog.emit(
             "Finalizing Custom Provider",
-            "Capturing CUDA graph for Landmark 203-point detector.\nThis only happens once and improves performance.",
+            "Compiling & capturing CUDA graph for Landmark 203-point detector…\nFirst run only — future sessions load instantly from cache.",
         )
         try:
             with self._custom_init_lock:
@@ -408,7 +408,7 @@ class FaceLandmarkDetectors:
 
                     with self.models_processor.cuda_graph_capture_lock:
                         self._landmark203_runner = build_cuda_graph_runner(
-                            self._landmark203_torch
+                            self._landmark203_torch, torch_compile=True
                         )
                 except Exception as e:
                     print(f"[Custom] landmark_203 CUDA graph failed, using eager: {e}")
@@ -423,7 +423,7 @@ class FaceLandmarkDetectors:
             return self._fan2dfan4_runner
         self.models_processor.show_build_dialog.emit(
             "Finalizing Custom Provider",
-            "Capturing CUDA graph for 2DFan4 face alignment.\nThis only happens once and improves performance.",
+            "Compiling & capturing CUDA graph for 2DFan4 face alignment…\nFirst run only — future sessions load instantly from cache.",
         )
         try:
             with self._custom_init_lock:
@@ -455,7 +455,7 @@ class FaceLandmarkDetectors:
 
                     with self.models_processor.cuda_graph_capture_lock:
                         self._fan2dfan4_runner = build_cuda_graph_runner(
-                            self._fan2dfan4_torch
+                            self._fan2dfan4_torch, torch_compile=True
                         )
                 except Exception as e:
                     print(f"[Custom] fan_2dfan4 CUDA graph failed, using eager: {e}")
@@ -470,7 +470,7 @@ class FaceLandmarkDetectors:
             return self._landmark478_runner
         self.models_processor.show_build_dialog.emit(
             "Finalizing Custom Provider",
-            "Capturing CUDA graph for Face Landmark 478 (MediaPipe).\nThis only happens once and improves performance.",
+            "Compiling & capturing CUDA graph for Face Landmark 478 (MediaPipe)…\nFirst run only — future sessions load instantly from cache.",
         )
         try:
             with self._custom_init_lock:
@@ -504,7 +504,7 @@ class FaceLandmarkDetectors:
 
                     with self.models_processor.cuda_graph_capture_lock:
                         self._landmark478_runner = build_cuda_graph_runner(
-                            self._landmark478_torch
+                            self._landmark478_torch, torch_compile=True
                         )
                 except Exception as e:
                     print(
@@ -521,7 +521,7 @@ class FaceLandmarkDetectors:
             return self._blendshapes_runner
         self.models_processor.show_build_dialog.emit(
             "Finalizing Custom Provider",
-            "Capturing CUDA graph for Face Blendshapes.\nThis only happens once and improves performance.",
+            "Compiling & capturing CUDA graph for Face Blendshapes…\nFirst run only — future sessions load instantly from cache.",
         )
         try:
             with self._custom_init_lock:
@@ -555,7 +555,7 @@ class FaceLandmarkDetectors:
 
                     with self.models_processor.cuda_graph_capture_lock:
                         self._blendshapes_runner = build_cuda_graph_runner(
-                            self._blendshapes_torch
+                            self._blendshapes_torch, torch_compile=True
                         )
                 except Exception as e:
                     print(
@@ -572,7 +572,7 @@ class FaceLandmarkDetectors:
             return self._det106_runner
         self.models_processor.show_build_dialog.emit(
             "Finalizing Custom Provider",
-            "Capturing CUDA graph for 106-point face detector.\nThis only happens once and improves performance.",
+            "Compiling & capturing CUDA graph for 106-point face detector…\nFirst run only — future sessions load instantly from cache.",
         )
         try:
             with self._custom_init_lock:
@@ -604,7 +604,7 @@ class FaceLandmarkDetectors:
 
                     with self.models_processor.cuda_graph_capture_lock:
                         self._det106_runner = build_cuda_graph_runner(
-                            self._det106_torch
+                            self._det106_torch, torch_compile=True
                         )
                 except Exception as e:
                     print(f"[Custom] det_106 CUDA graph failed, using eager: {e}")
@@ -619,7 +619,7 @@ class FaceLandmarkDetectors:
             return self._peppapig98_runner
         self.models_processor.show_build_dialog.emit(
             "Finalizing Custom Provider",
-            "Capturing CUDA graph for PeppaPig 98-point detector.\nThis only happens once and improves performance.",
+            "Compiling & capturing CUDA graph for PeppaPig 98-point detector…\nFirst run only — future sessions load instantly from cache.",
         )
         try:
             with self._custom_init_lock:
@@ -653,7 +653,7 @@ class FaceLandmarkDetectors:
 
                     with self.models_processor.cuda_graph_capture_lock:
                         self._peppapig98_runner = build_cuda_graph_runner(
-                            self._peppapig98_torch
+                            self._peppapig98_torch, torch_compile=True
                         )
                 except Exception as e:
                     print(f"[Custom] peppapig_98 CUDA graph failed, using eager: {e}")

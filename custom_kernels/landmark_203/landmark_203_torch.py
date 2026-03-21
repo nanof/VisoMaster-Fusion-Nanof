@@ -390,6 +390,7 @@ class Landmark203Torch(nn.Module):
             f"{len(anon_cln_mul) * 2} anon-CLN + {len(anon_matmul)} anon-MM "
             f"initializers"
         )
+        m._visomaster_onnx_path = str(onnx_path)
         return m
 
 
@@ -442,12 +443,27 @@ class Landmark203CUDAGraphRunner:
 def build_cuda_graph_runner(
     model: Landmark203Torch,
     input_shape: tuple = (1, 3, 224, 224),
+    torch_compile: bool = False,
 ) -> Landmark203CUDAGraphRunner:
     """
     Build and return a CUDA-graph-backed runner for Landmark203Torch.
 
     Args:
-        model        : Landmark203Torch on CUDA, already in eval() mode.
-        input_shape  : fixed input shape (default (1, 3, 224, 224)).
+        model         : Landmark203Torch on CUDA, already in eval() mode.
+        input_shape   : fixed input shape (default (1, 3, 224, 224)).
+        torch_compile : if True, apply torch.compile (mode='default') to the
+                        model before CUDA graph capture.  Triggers Triton JIT
+                        on first call (~30 s); subsequent calls use compiled
+                        kernels inside the captured graph.
     """
+    if torch_compile:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            device = next(model.parameters()).device
+            example_inp = torch.zeros((1, 3, 224, 224), dtype=torch.float32, device=device)
+            compiled = apply_torch_compile(model, example_inp)
+            print("[landmark_203] torch.compile warmup done.")
+            return compiled  # CUDA graph on top of torch.compile fails on Windows
+        except Exception as e:
+            print(f"[landmark_203] torch.compile failed ({e!s:.120}), falling back to CUDA graph.")
     return Landmark203CUDAGraphRunner(model, input_shape=input_shape)

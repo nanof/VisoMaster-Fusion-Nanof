@@ -96,15 +96,13 @@ class PerspectiveConverter:
         """
 
         self.device = device
-        # Convert NumPy HWC RGB to Torch CHW RGB tensor on GPU
-        self.base_equirect_tensor_cxhxw_rgb_uint8 = (
-            torch.from_numpy(base_equirect_image_data_rgb_uint8)
-            .permute(2, 0, 1)
-            .to(self.device)
-        )
-        self.orig_channels, self.orig_height, self.orig_width = (
-            self.base_equirect_tensor_cxhxw_rgb_uint8.shape
-        )
+        # Only store dimensions — the full pixel data is never used after __init__.
+        # Previously a full GPU uint8 tensor was kept alive permanently, wasting
+        # ~5–25 MB of VRAM per cached PerspectiveConverter instance.
+        h, w, c = base_equirect_image_data_rgb_uint8.shape
+        self.orig_height: int = h
+        self.orig_width: int = w
+        self.orig_channels: int = c
         self.sobel_x_kernel, self.sobel_y_kernel = _get_sobel_kernels(self.device)
         # Bounded LRU cache for GaussianBlur instances (keyed by kernel_size, sigma).
         # A plain dict would grow unbounded across frames with varying face sizes.
@@ -218,10 +216,18 @@ class PerspectiveConverter:
         )
         # Thread-safe cache lookup: hold the lock only for the dict read so concurrent
         # pool workers cannot race between `key in cache` and `move_to_end(key)`.
+        _mask_device = mask_torch_original_shape.device
         with _FEATHERED_MASK_CACHE_LOCK:
             feathered_mask_torch_float_1hw = _FEATHERED_MASK_CACHE.get(_fmask_key)
             if feathered_mask_torch_float_1hw is not None:
                 _FEATHERED_MASK_CACHE.move_to_end(_fmask_key)
+
+        if feathered_mask_torch_float_1hw is not None:
+            # Cache stores CPU tensors — move to device here (avoids persistent GPU fragmentation).
+            # (~36 MiB per entry at 4K; 16 entries = ~576 MiB saved on GPU)
+            feathered_mask_torch_float_1hw = feathered_mask_torch_float_1hw.to(
+                _mask_device
+            )
 
         if feathered_mask_torch_float_1hw is None:
             eye_region_mask = torch.zeros_like(
@@ -252,12 +258,14 @@ class PerspectiveConverter:
                 erosion_kernel_size=(2 * feather_radius_val + 1),  # = 25
             )
 
-            # Store result — lock briefly, only for the dict write.
+            # Store result on CPU — avoids holding large float masks in GPU memory permanently.
             with _FEATHERED_MASK_CACHE_LOCK:
                 if _fmask_key not in _FEATHERED_MASK_CACHE:
                     if len(_FEATHERED_MASK_CACHE) >= _FEATHERED_MASK_CACHE_MAX:
                         _FEATHERED_MASK_CACHE.popitem(last=False)
-                    _FEATHERED_MASK_CACHE[_fmask_key] = feathered_mask_torch_float_1hw
+                    _FEATHERED_MASK_CACHE[_fmask_key] = (
+                        feathered_mask_torch_float_1hw.cpu()
+                    )
 
             del eye_region_mask, eye_specific_mask_torch_original_shape
 

@@ -31,6 +31,13 @@ for _candidate in [
             str(_candidate) + _os.pathsep + _os.environ.get("PATH", "")
         )
 del _candidate, _REPO_ROOT, _os, _sys, _Path
+
+import sys as _sys_enc
+if hasattr(_sys_enc.stdout, 'reconfigure'):
+    _sys_enc.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(_sys_enc.stderr, 'reconfigure'):
+    _sys_enc.stderr.reconfigure(encoding='utf-8', errors='replace')
+del _sys_enc
 # ──────────────────────────────────────────────────────────────────────────
 
 import os
@@ -90,7 +97,7 @@ def _print_row(tier, label, ms_val, ref_ms):
 def _check_accuracy(ort_out: np.ndarray, pt_out: torch.Tensor) -> None:
     """Compare ORT FP32 mask vs PyTorch FP16 mask."""
     a = ort_out.flatten().astype(np.float32)
-    b = pt_out.cpu().numpy().flatten().astype(np.float32)
+    b = pt_out.detach().cpu().numpy().flatten().astype(np.float32)
     diff = np.abs(a - b)
     # Per-pixel binary agreement at threshold 0.5
     a_bin = (a > 0.5).astype(np.uint8)
@@ -220,6 +227,39 @@ def bench_xseg():
             _print_row("4", "FP16 + Triton RMSNormMax + CUDA graph", t4, t0)
     except Exception as e:
         print(f"  Tier 4 | Triton — skipped ({e})")
+
+    # ── Tier 5 — torch.compile + FP16 + CUDA graph ────────────────────────
+    print("\n  [Tier 5] torch.compile(mode='default') + CUDA graph")
+    print("  One-time compile cost: ~30 s on first run (Triton JIT).")
+    try:
+        m5 = XSegTorch.from_onnx(XSEG_ONNX, compute_dtype=torch.float16).cuda().eval()
+        runner5 = build_cuda_graph_runner(m5, torch_compile=True)
+        t5 = _bench(lambda: runner5(inp_f32))
+        _print_row("5", "torch.compile + FP16 + CUDA graph", t5, t0)
+    except Exception as e:
+        print(f"  Tier 5 | torch.compile — failed: {e}")
+        import traceback; traceback.print_exc()
+
+    # ── Tier 5b — torch.compile reduce-overhead (no separate CUDA graph) ────
+    print("\n  [Tier 5b] torch.compile(mode='reduce-overhead') — no extra CUDA graph")
+    if not int(os.environ.get("XSEG_TORCH_COMPILE", "0")):
+        print("  Skipped — reduce-overhead may crash on this model on Windows/sm_89.")
+        print("  Set XSEG_TORCH_COMPILE=1 to attempt.")
+    else:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            m5b = XSegTorch.from_onnx(XSEG_ONNX, compute_dtype=torch.float16).cuda().eval()
+            m5b_compiled = apply_torch_compile(
+                m5b,
+                inp_f32,
+                compile_mode="reduce-overhead",
+            )
+            with torch.no_grad():
+                t5b = _bench(lambda: m5b_compiled(inp_f32))
+            _print_row("5b", "torch.compile reduce-overhead (no CUDA graph)", t5b, t0)
+        except Exception as e:
+            print(f"  Tier 5b | reduce-overhead — failed: {e}")
+            import traceback; traceback.print_exc()
 
     print()
     return t0, t0b

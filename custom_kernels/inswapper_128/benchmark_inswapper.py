@@ -40,6 +40,13 @@ for _candidate in [
             str(_candidate) + _os.pathsep + _os.environ.get("PATH", "")
         )
 del _candidate, _REPO_ROOT, _os, _sys, _Path
+
+import sys as _sys_enc
+if hasattr(_sys_enc.stdout, 'reconfigure'):
+    _sys_enc.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(_sys_enc.stderr, 'reconfigure'):
+    _sys_enc.stderr.reconfigure(encoding='utf-8', errors='replace')
+del _sys_enc
 # ──────────────────────────────────────────────────────────────────────────
 
 import sys
@@ -195,7 +202,7 @@ def main():
     with torch.no_grad():
         for _ in range(WARMUP):
             m1(target_gpu, source_gpu)
-        out_t1 = m1(target_gpu, source_gpu).cpu().numpy()
+        out_t1 = m1(target_gpu, source_gpu).detach().cpu().numpy()
         ms1 = timed(lambda: m1(target_gpu, source_gpu), RUNS)
     diff1 = np.abs(out_t1 - out_ort).max()
     print(f"  Latency : {ms1:.3f} ms  ({ms0 / ms1:.2f}x vs ORT)")
@@ -214,7 +221,7 @@ def main():
         with torch.no_grad():
             for _ in range(WARMUP):
                 m2(target_gpu, source_gpu)
-            out_t2 = m2(target_gpu, source_gpu).cpu().numpy()
+            out_t2 = m2(target_gpu, source_gpu).detach().cpu().numpy()
             ms2 = timed(lambda: m2(target_gpu, source_gpu), RUNS)
         diff2 = np.abs(out_t2 - out_ort).max()
         print(f"  Latency : {ms2:.3f} ms  ({ms0 / ms2:.2f}x vs ORT)")
@@ -233,7 +240,7 @@ def main():
         with torch.no_grad():
             for _ in range(WARMUP):
                 m3(target_gpu, source_gpu)
-            out_t3 = m3(target_gpu, source_gpu).cpu().numpy()
+            out_t3 = m3(target_gpu, source_gpu).detach().cpu().numpy()
             ms3 = timed(lambda: m3(target_gpu, source_gpu), RUNS)
         diff3 = np.abs(out_t3 - out_ort).max()
         print(f"  Latency : {ms3:.3f} ms  ({ms0 / ms3:.2f}x vs ORT)")
@@ -252,7 +259,7 @@ def main():
     print("  Capturing CUDA graph...")
     run4 = build_cuda_graph_runner(m1, target_gpu, source_gpu)
     torch.cuda.synchronize()
-    out_t4 = run4(target_gpu, source_gpu).cpu().numpy()
+    out_t4 = run4(target_gpu, source_gpu).detach().cpu().numpy()
     ms4 = timed(lambda: run4(target_gpu, source_gpu), RUNS)
     diff4 = np.abs(out_t4 - out_ort).max()
     print(f"  Latency : {ms4:.3f} ms  ({ms0 / ms4:.2f}x vs ORT)")
@@ -268,7 +275,7 @@ def main():
         print("  Capturing CUDA graph...")
         run5 = build_cuda_graph_runner(m2, target_gpu, source_gpu)
         torch.cuda.synchronize()
-        out_t5 = run5(target_gpu, source_gpu).cpu().numpy()
+        out_t5 = run5(target_gpu, source_gpu).detach().cpu().numpy()
         ms5 = timed(lambda: run5(target_gpu, source_gpu), RUNS)
         diff5 = np.abs(out_t5 - out_ort).max()
         print(f"  Latency : {ms5:.3f} ms  ({ms0 / ms5:.2f}x vs ORT)")
@@ -282,7 +289,7 @@ def main():
         print("  Capturing CUDA graph...")
         run6 = build_cuda_graph_runner(m3, target_gpu, source_gpu)
         torch.cuda.synchronize()
-        out_t6 = run6(target_gpu, source_gpu).cpu().numpy()
+        out_t6 = run6(target_gpu, source_gpu).detach().cpu().numpy()
         ms6 = timed(lambda: run6(target_gpu, source_gpu), RUNS)
         diff6 = np.abs(out_t6 - out_ort).max()
         print(f"  Latency : {ms6:.3f} ms  ({ms0 / ms6:.2f}x vs ORT)")
@@ -308,7 +315,7 @@ def main():
             print("  Capturing CUDA graph (channels-last NHWC mode)...")
             run7 = build_cuda_graph_runner(m7, target_gpu, source_gpu)
             torch.cuda.synchronize()
-            out_t7 = run7(target_gpu, source_gpu).cpu().numpy()
+            out_t7 = run7(target_gpu, source_gpu).detach().cpu().numpy()
             ms7 = timed(lambda: run7(target_gpu, source_gpu), RUNS)
             diff7 = np.abs(out_t7 - out_ort).max()
             print(f"  Latency : {ms7:.3f} ms  ({ms0 / ms7:.2f}x vs ORT)")
@@ -332,7 +339,7 @@ def main():
             print("  Capturing CUDA graph (GEMM mode)...")
             run8 = build_cuda_graph_runner(m8, target_gpu, source_gpu)
             torch.cuda.synchronize()
-            out_t8 = run8(target_gpu, source_gpu).cpu().numpy()
+            out_t8 = run8(target_gpu, source_gpu).detach().cpu().numpy()
             ms8 = timed(lambda: run8(target_gpu, source_gpu), RUNS)
             diff8 = np.abs(out_t8 - out_ort).max()
             print(f"  Latency : {ms8:.3f} ms  ({ms0 / ms8:.2f}x vs ORT)")
@@ -359,7 +366,7 @@ def main():
             print("  Capturing CUDA graph (cuBLASLt mode)...")
             run8b = build_cuda_graph_runner(m8b, target_gpu, source_gpu)
             torch.cuda.synchronize()
-            out_t8b = run8b(target_gpu, source_gpu).cpu().numpy()
+            out_t8b = run8b(target_gpu, source_gpu).detach().cpu().numpy()
             ms8b = timed(lambda: run8b(target_gpu, source_gpu), RUNS)
             diff8b = np.abs(out_t8b - out_ort).max()
             print(f"  Latency : {ms8b:.3f} ms  ({ms0 / ms8b:.2f}x vs ORT)")
@@ -369,6 +376,65 @@ def main():
 
             traceback.print_exc()
             print(f"  FAILED (cuBLASLt unavailable or extension not compiled): {e}")
+
+    # ------------------------------------------------------------------ Tier 18 (torch.compile + Triton AdaIN + CUDA graph)
+    # NOTE: torch.compile crashes the process (MLIR optimizer segfault in libtriton.pyd)
+    # for inswapper_128 on Windows/sm_89 due to the custom Triton AdaIN fused kernel.
+    # Set INSWAPPER_TORCH_COMPILE=1 to attempt (process may crash).
+    print(sep)
+    print("Tier 18 -- torch.compile + Triton AdaIN + CUDA graph  [compile+CG, single-tile]")
+    ms18, diff18 = float("nan"), float("nan")
+    if not TRITON_AVAILABLE:
+        print("  Triton not available -- skipping")
+    elif not int(os.environ.get("INSWAPPER_TORCH_COMPILE", "0")):
+        print("  Skipped — torch.compile crashes (MLIR segfault) on this model on Windows/sm_89.")
+        print("  Set INSWAPPER_TORCH_COMPILE=1 to attempt.")
+    else:
+        try:
+            print("  [Tier 18] torch.compile(mode='default') — one-time ~30 s Triton JIT.")
+            m18 = make_torch_model(use_custom_kernel=True)
+            run18 = build_cuda_graph_runner(m18, target_gpu, source_gpu, torch_compile=True)
+            torch.cuda.synchronize()
+            out_t18 = run18(target_gpu, source_gpu).detach().cpu().numpy()
+            ms18 = timed(lambda: run18(target_gpu, source_gpu), RUNS)
+            diff18 = np.abs(out_t18 - out_ort).max()
+            print(f"  Latency : {ms18:.3f} ms  ({ms0 / ms18:.2f}x vs ORT)")
+            print(f"  Max |diff| vs ORT: {diff18:.5f}")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"  FAILED: {e}")
+
+    # ------------------------------------------------------------------ Tier 18b (reduce-overhead, no CUDA graph)
+    print(sep)
+    print("Tier 18b -- torch.compile(reduce-overhead) — no extra CUDA graph  [single-tile]")
+    ms18b, diff18b = float("nan"), float("nan")
+    if not TRITON_AVAILABLE:
+        print("  Triton not available -- skipping")
+    elif not int(os.environ.get("INSWAPPER_TORCH_COMPILE", "0")):
+        print("  Skipped — torch.compile crashes (MLIR segfault) on this model on Windows/sm_89.")
+        print("  Set INSWAPPER_TORCH_COMPILE=1 to attempt.")
+    else:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            print("  [Tier 18b] torch.compile(mode='reduce-overhead') — one-time ~30 s Triton JIT.")
+            m18b = make_torch_model(use_custom_kernel=True)
+            m18b_compiled = apply_torch_compile(
+                m18b,
+                target_gpu,
+                extra_args=(source_gpu,),
+                compile_mode="reduce-overhead",
+            )
+            with torch.no_grad():
+                out_t18b = m18b_compiled(target_gpu, source_gpu).detach().cpu().numpy()
+            ms18b = timed(lambda: m18b_compiled(target_gpu, source_gpu), RUNS)
+            diff18b = np.abs(out_t18b - out_ort).max()
+            print(f"  Latency : {ms18b:.3f} ms  ({ms0 / ms18b:.2f}x vs ORT)")
+            print(f"  Max |diff| vs ORT: {diff18b:.5f}")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"  FAILED: {e}")
 
     # ------------------------------------------------------------------ Batched pixel-shift tiers
     from custom_kernels.triton_ops import TRITON_AVAILABLE as _T
@@ -543,6 +609,18 @@ def main():
             ms8b,
             ms0 / ms8b if ms8b == ms8b else _nan,
             diff8b,
+        ),
+        (
+            "18  torch.compile + Triton AdaIN + CUDA graph  [compile+CG]",
+            ms18,
+            ms0 / ms18 if ms18 == ms18 else _nan,
+            diff18,
+        ),
+        (
+            "18b torch.compile reduce-overhead (no CUDA graph)",
+            ms18b,
+            ms0 / ms18b if ms18b == ms18b else _nan,
+            diff18b,
         ),
         ("--- Batched pixel-shift (256px / dim=2) ---", _nan, _nan, _nan),
         ("9   Sequential B=4  (4× single calls)", ms9, ms0 / (ms9 or _nan), _nan),

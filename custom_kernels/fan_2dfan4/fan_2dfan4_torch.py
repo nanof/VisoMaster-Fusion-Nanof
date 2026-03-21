@@ -415,6 +415,7 @@ class FAN2dfan4(nn.Module):
             f"[fan_2dfan4] loaded: {loaded} named + {len(anon_seq)} anon-Conv "
             f"initializers"
         )
+        m._visomaster_onnx_path = str(onnx_path)
         return m
 
 
@@ -464,12 +465,24 @@ class FAN2dfan4CUDAGraphRunner:
 def build_cuda_graph_runner(
     model: FAN2dfan4,
     input_shape: tuple = (1, 3, 256, 256),
+    torch_compile: bool = False,
 ) -> FAN2dfan4CUDAGraphRunner:
     """
     Build and return a CUDA-graph-backed runner for FAN2dfan4.
 
     Args:
-        model       : FAN2dfan4 on CUDA in eval() mode.
-        input_shape : fixed input shape (default (1, 3, 256, 256)).
+        model         : FAN2dfan4 on CUDA in eval() mode.
+        input_shape   : fixed input shape (default (1, 3, 256, 256)).
+        torch_compile : if True, apply torch.compile before building the CUDA graph.
     """
+    if torch_compile:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            device = next(model.parameters()).device
+            example_inp = torch.zeros(input_shape, dtype=torch.float32, device=device)
+            compiled = apply_torch_compile(model, example_inp)
+            print("[fan_2dfan4] torch.compile warmup done.")
+            return compiled  # CUDA graph on top of torch.compile fails on Windows
+        except Exception as e:
+            print(f"[fan_2dfan4] torch.compile failed ({e!s:.120}), falling back to CUDA graph.")
     return FAN2dfan4CUDAGraphRunner(model, input_shape=input_shape)

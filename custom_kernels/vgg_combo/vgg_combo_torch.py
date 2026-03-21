@@ -158,6 +158,7 @@ class VggComboTorch(nn.Module):
         _load(m.conv3_3, "model.14.weight", "model.14.bias")
 
         print("[vgg_combo] loaded: 7 Conv weight+bias tensors")
+        m._visomaster_onnx_path = str(onnx_path)
         return m
 
 
@@ -218,6 +219,17 @@ class VggComboCUDAGraphRunner:
 def build_cuda_graph_runner(
     model: VggComboTorch,
     input_shape: tuple = (1, 3, 512, 512),
+    torch_compile: bool = False,
 ) -> VggComboCUDAGraphRunner:
     """Build and return a CUDA-graph-backed runner for VggComboTorch."""
+    if torch_compile:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            device = next(model.parameters()).device
+            example_inp = torch.zeros(input_shape, dtype=torch.float32, device=device)
+            compiled = apply_torch_compile(model, example_inp)
+            print("[VggComboTorch] torch.compile warmup done.")
+            return compiled  # CUDA graph on top of torch.compile fails on Windows
+        except Exception as e:
+            print(f"[VggComboTorch] torch.compile failed ({e!s:.120}), falling back to CUDA graph.")
     return VggComboCUDAGraphRunner(model, input_shape=input_shape)

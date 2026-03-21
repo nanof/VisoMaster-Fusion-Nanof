@@ -7,20 +7,23 @@ execution provider is selected.
 
 Input: 512×512  →  Output: 1024×1024 (super-resolution face restoration)
 
-## Benchmark Results (RTX 4090, CUDA 12.9, PyTorch 2.8+cu129, ORT 1.22.0, Triton 3.6.0)
+## Benchmark Results
 
-**Environment:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · Triton 3.6.0 · ORT 1.22.0
-**Method:** 50 iterations, 10 warm-up passes · Input: (1,3,512,512) f32 → Output: (1,3,1024,1024) f32
+**Hardware:** NVIDIA GeForce RTX 4090 · PyTorch 2.8.0+cu129 · CUDA 12.9 · ORT 1.22.0
+**Conditions:** 50 iterations, 10 warm-up, input (1,3,512,512) → output (1,3,1024,1024)
 
-| Tier | Method | Latency | vs ORT CUDA EP |
-|------|--------|--------:|---------------:|
-| 0 | ORT FP32 CUDA EP | 68.49 ms | 1.00x (baseline) |
-| 0b | ORT TensorRT EP FP32 | 30.97 ms | 2.21x |
-| 1 | PyTorch FP32 pure ops | 32.09 ms | 2.13x |
-| 2 | PyTorch FP16 + Triton demod + fused-act | 20.42 ms | **3.35x** |
-| 3 | PyTorch FP16 + Triton demod + CUDA graph (Custom) | **17.90 ms** | **3.83x** |
+| Tier | Method | ms | vs ORT CUDA EP | vs TRT EP |
+|------|--------|----|---------------:|----------:|
+| 0 | ORT FP32 CUDA EP (baseline) | 24.43 ms | 1.00× | — |
+| 0b | ORT TensorRT EP FP32 | 17.62 ms | 1.39× | 1.00× |
+| 1 | PyTorch FP32 | 21.14 ms | 1.16× | 0.83× |
+| 2 | PyTorch FP16 + Triton demod | 17.74 ms | 1.38× | 0.99× |
+| **3** | **FP16 + Triton + CUDA graph (Custom)** | **11.79 ms** | **2.07×** | **1.49×** |
+| **4** | **torch.compile default + FP16 + CUDA graph** | **7.19 ms** | **3.40×** | **2.45×** |
+| 4b | torch.compile reduce-overhead | — *(may crash MLIR segfault on Windows/sm_89)* | — | — |
 
-The CUDA-graph path is **3.83x faster** than ORT CUDA EP.
+> **Application uses Tier 3** (FP16 + CUDA graph). Pass `torch_compile=True` to `build_cuda_graph_runner` to activate Tier 4 (3.40× vs ORT CUDA EP, 2.45× vs TRT EP).
+> `reduce-overhead` skipped by default; set `GFPGAN1024_TORCH_COMPILE=1` to attempt.
 
 Numerical accuracy: comparable to GFPGANv1.4 (FP16 ~1.6% mean relative error vs ORT).
 

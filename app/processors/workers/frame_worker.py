@@ -3084,8 +3084,7 @@ class FrameWorker(threading.Thread):
         use_mode_2 = parameters.get("StrengthMode2EnableToggle", False)
 
         if swapper_model == "Inswapper128":
-            # Batched path: for Custom provider with dim>1, run all tiles in one forward pass
-            _use_batched = self.models_processor.provider_name == "Custom" and dim > 1
+            _use_batched = False
 
             for k in range(itex):
                 prev_face = (

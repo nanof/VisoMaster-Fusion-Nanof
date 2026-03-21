@@ -56,6 +56,7 @@ from app.processors.models_data import (
     models_list,
     arcface_mapping_model_dict,
     models_trt_list,
+    models_dir,
 )
 from app.helpers.miscellaneous import is_file_exists
 from app.helpers.downloader import download_file
@@ -245,20 +246,11 @@ class ModelsProcessor(QtCore.QObject):
         # captures don't compete for resources.  All _get_*_runner() lazy-builders
         # MUST hold this lock while calling torch.cuda.graph() / build_cuda_graph_runner().
         self.cuda_graph_capture_lock = threading.Lock()
+        self._triton_dialog_hooks_registered = False
+        self._compile_callbacks_registered = False
 
-        # BUG-C01: Register Triton JIT build-dialog callbacks so that GFPGAN /
-        # CodeFormer eager-mode kernels show a progress dialog on first compile.
-        # Safe to call unconditionally — the hooks are only fired when a Triton
-        # kernel actually compiles, which only happens on the Custom provider.
-        try:
-            from custom_kernels.triton_ops import register_triton_build_dialog
-
-            register_triton_build_dialog(
-                lambda title, msg: self.show_build_dialog.emit(title, msg),
-                lambda: self.hide_build_dialog.emit(),
-            )
-        except Exception:
-            pass  # Triton not installed or import failed — no dialog, no crash
+        # Keep Triton and torch.compile callback setup off the default startup path.
+        # Both are registered lazily when the Custom provider is selected.
 
         # Default TensorRT options
         self.trt_ep_options = {
@@ -1149,6 +1141,38 @@ class ModelsProcessor(QtCore.QObject):
             self.face_restorers._get_gpen_runner(_gpen_size)
         print("[CustomProvider] Pre-build complete.")
 
+    def _ensure_triton_build_dialog_registered(self):
+        if self._triton_dialog_hooks_registered:
+            return
+        try:
+            from custom_kernels.triton_ops import register_triton_build_dialog
+
+            register_triton_build_dialog(
+                lambda title, msg: self.show_build_dialog.emit(title, msg),
+                lambda: self.hide_build_dialog.emit(),
+            )
+            self._triton_dialog_hooks_registered = True
+        except Exception:
+            pass  # Triton not installed or import failed — no dialog, no crash
+
+    def _ensure_compile_callbacks_registered(self):
+        if self._compile_callbacks_registered:
+            return
+        try:
+            from custom_kernels.compile_utils import register_compile_callbacks
+            from PySide6.QtCore import QCoreApplication, QEventLoop
+
+            register_compile_callbacks(
+                poll_fn=lambda: QCoreApplication.processEvents(
+                    QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+                ),
+                show_fn=lambda title, msg: self.show_build_dialog.emit(title, msg),
+                hide_fn=lambda: self.hide_build_dialog.emit(),
+            )
+            self._compile_callbacks_registered = True
+        except Exception:
+            pass  # compile_utils not available or Qt import failed
+
     def switch_providers_priority(self, provider_name):
         """
         Reconfigures the ONNX Runtime provider list and the active device.
@@ -1197,6 +1221,21 @@ class ModelsProcessor(QtCore.QObject):
                 # is used when available — fastest after the custom kernels.
                 # The normal TRT probe / engine-build dialog runs for these
                 # fallback sessions exactly as it does for the TensorRT provider.
+                self._ensure_triton_build_dialog_registered()
+                self._ensure_compile_callbacks_registered()
+
+                # Set up torch.compile environment + persistent kernel cache.
+                # Must be called before any build_cuda_graph_runner() invocation.
+                try:
+                    from custom_kernels.compile_utils import (
+                        setup_compile_env as _setup_compile_env,
+                    )
+
+                    _compile_cache_dir = str(models_dir / "torch_compile_cache")
+                    _setup_compile_env(cache_dir=_compile_cache_dir)
+                except Exception as _e:
+                    print(f"[Custom] torch.compile env setup failed (non-fatal): {_e}")
+
                 if TENSORRT_AVAILABLE and trt is not None:
                     providers = [
                         ("TensorrtExecutionProvider", self.trt_ep_options),

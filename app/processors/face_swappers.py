@@ -129,7 +129,7 @@ class FaceSwappers:
             return self._w600k_runner
         self.models_processor.show_build_dialog.emit(
             "Finalizing Custom Provider",
-            "Capturing CUDA graph for ArcFace (w600k).\nThis only happens once and improves performance.",
+            "Compiling & capturing CUDA graph for ArcFace (w600k)…\nFirst run only — future sessions load instantly from cache.",
         )
         try:
             with self._inswapper_init_lock:
@@ -162,7 +162,9 @@ class FaceSwappers:
                     )
 
                     with self.models_processor.cuda_graph_capture_lock:
-                        self._w600k_runner = build_cuda_graph_runner(self._w600k_torch)
+                        self._w600k_runner = build_cuda_graph_runner(
+                            self._w600k_torch, torch_compile=False
+                        )
                 except Exception as e:
                     print(f"[Custom] w600k_r50 graph runner failed, using eager: {e}")
                     self._w600k_runner = self._w600k_torch

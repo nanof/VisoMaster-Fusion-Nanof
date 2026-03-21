@@ -22,19 +22,19 @@ _P2E_GRID_MASK_CACHE_LOCK = threading.Lock()
 
 # calculates the 3D coordinate grid for an equirectangular output.
 # It is decorated with @lru_cache to ensure it only runs once for a given
-# height, width, and device, caching the result for all subsequent calls.
+# height and width, caching the result for all subsequent calls.
+# Always stored on CPU — callers move to device as needed, keeping GPU memory free.
 @lru_cache(maxsize=None)
-def _get_equirect_xyz_grid_cached(height: int, width: int, device_str: str) -> torch.Tensor:
+def _get_equirect_xyz_grid_cached(height: int, width: int) -> torch.Tensor:
     """
     Generates and caches a grid of 3D Cartesian unit vectors corresponding to
-    pixels in an equirectangular projection.
+    pixels in an equirectangular projection. Cached on CPU to avoid GPU fragmentation.
     """
-    print(f"[VR Grid Cache] Generating new equirectangular XYZ grid for {width}x{height} on {device_str}...")
-    device = torch.device(device_str)
+    print(f"[VR Grid Cache] Generating new equirectangular XYZ grid for {width}x{height} on cpu...")
 
-    # Create equirectangular grid
-    equ_lon_coords = torch.linspace(-180, 180, width, device=device, dtype=torch.float32)
-    equ_lat_coords = torch.linspace(90, -90, height, device=device, dtype=torch.float32)
+    # Create equirectangular grid on CPU — caller moves to device
+    equ_lon_coords = torch.linspace(-180, 180, width, dtype=torch.float32)
+    equ_lat_coords = torch.linspace(90, -90, height, dtype=torch.float32)
     equ_lon_grid, equ_lat_grid = torch.meshgrid(equ_lon_coords, equ_lat_coords, indexing='xy')
 
     # Convert equirectangular (lon, lat) to 3D Cartesian unit vectors
@@ -130,11 +130,14 @@ class Perspective:
             _cached = _P2E_GRID_MASK_CACHE.get(_cache_key)
 
         if _cached is not None:
+            # Cache stores CPU tensors — move to device here (avoids persistent GPU fragmentation).
             grid, mask_out = _cached
+            grid = grid.to(self.device)
+            mask_out = mask_out.to(self.device)
         else:
-            # Call the cached function to get the 3D coordinate grid.
-            # This grid is now computed only once for this resolution and device.
-            xyz_equ_norm = _get_equirect_xyz_grid_cached(height, width, str(self.device))
+            # Call the cached function to get the 3D coordinate grid (stored on CPU).
+            # Move to device for the matrix multiply and projection.
+            xyz_equ_norm = _get_equirect_xyz_grid_cached(height, width).to(self.device)
 
             # Rotate these 3D points (from equirect space to perspective camera's view space)
             xyz_flat = xyz_equ_norm.reshape(-1, 3).T  # (3, H*W)
@@ -170,17 +173,19 @@ class Perspective:
             grid = torch.stack((grid_x_persp, grid_y_persp), dim=2).unsqueeze(0)  # 1, H_out, W_out, 2
             mask_out = mask.unsqueeze(0)  # 1, H, W
 
-            # Store result — lock briefly, only for the dict write.
+            # Store result on CPU — avoids holding large float grids in GPU memory permanently.
+            # (~72 MiB grid + ~9 MiB mask per entry at 4K; 8 entries = ~648 MiB saved on GPU)
             with _P2E_GRID_MASK_CACHE_LOCK:
                 if _cache_key not in _P2E_GRID_MASK_CACHE:
                     if len(_P2E_GRID_MASK_CACHE) >= _P2E_GRID_MASK_CACHE_MAX:
                         _P2E_GRID_MASK_CACHE.popitem(last=False)
-                    _P2E_GRID_MASK_CACHE[_cache_key] = (grid, mask_out)
+                    _P2E_GRID_MASK_CACHE[_cache_key] = (grid.cpu(), mask_out.cpu())
 
         # Image-dependent sampling — always executed (image changes every frame)
         equirect_component_float = F.grid_sample(self._img_tensor_cxhxw_rgb_float.unsqueeze(0), grid,
                                                  mode='bilinear', padding_mode='border', align_corners=True)
 
         equirect_component_uint8 = (torch.clamp(equirect_component_float.squeeze(0) * 255.0, 0, 255)).byte()
+        del equirect_component_float  # Free 108 MiB float immediately; only uint8 (27 MiB) needed downstream
 
         return equirect_component_uint8, mask_out

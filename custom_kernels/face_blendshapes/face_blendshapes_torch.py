@@ -323,6 +323,7 @@ class FaceBlendShapesTorch(nn.Module):
         print(
             f"[face_blendshapes] loaded: {ci} Conv + 8 LN-scale + 1 CLS weight tensors"
         )
+        m._visomaster_onnx_path = str(onnx_path)
         return m
 
 
@@ -376,6 +377,24 @@ class FaceBlendShapesCUDAGraphRunner:
 def build_cuda_graph_runner(
     model: FaceBlendShapesTorch,
     input_shape: tuple = (1, 146, 2),
+    torch_compile: bool = False,
 ) -> FaceBlendShapesCUDAGraphRunner:
-    """Build and return a CUDA-graph-backed runner for FaceBlendShapesTorch."""
+    """
+    Build and return a CUDA-graph-backed runner for FaceBlendShapesTorch.
+
+    Args:
+        model         : FaceBlendShapesTorch on CUDA in eval() mode.
+        input_shape   : fixed input shape (default (1, 146, 2)).
+        torch_compile : if True, apply torch.compile before building the CUDA graph.
+    """
+    if torch_compile:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            device = next(model.parameters()).device
+            example_inp = torch.zeros(input_shape, dtype=torch.float32, device=device)
+            compiled = apply_torch_compile(model, example_inp)
+            print("[face_blendshapes] torch.compile warmup done.")
+            return compiled  # CUDA graph on top of torch.compile fails on Windows
+        except Exception as e:
+            print(f"[face_blendshapes] torch.compile failed ({e!s:.120}), falling back to CUDA graph.")
     return FaceBlendShapesCUDAGraphRunner(model, input_shape=input_shape)

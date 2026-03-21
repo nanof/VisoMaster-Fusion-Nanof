@@ -296,6 +296,7 @@ class Det10gTorch(nn.Module):
             model.backbone = model.backbone.to(memory_format=torch.channels_last)
             model.neck = model.neck.to(memory_format=torch.channels_last)
         model.eval()
+        model._visomaster_onnx_path = str(onnx_path)
         return model
 
 
@@ -489,6 +490,36 @@ class Det10gGraphRunner:
             return self._model(x)
 
 
-def build_cuda_graph_runner(model: Det10gTorch) -> Det10gGraphRunner:
-    """Factory: wrap a Det10gTorch model in a per-shape CUDA graph runner."""
+def build_cuda_graph_runner(
+    model: Det10gTorch,
+    torch_compile: bool = False,
+    compile_warmup_shape: Tuple[int, int] = (640, 640),
+) -> Det10gGraphRunner:
+    """
+    Factory: wrap a Det10gTorch model in a per-shape CUDA graph runner.
+
+    Args:
+        torch_compile:        If True, wrap the model with ``torch.compile`` before
+                              creating the runner.  Compiles for *compile_warmup_shape*
+                              on init; other shapes trigger a one-time recompile on
+                              first use (same cost as Triton JIT for that shape).
+        compile_warmup_shape: H×W to pre-compile during init (default 640×640).
+    """
+    if torch_compile:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            device = next(model.parameters()).device
+            example_inp = torch.zeros(
+                1, 3, compile_warmup_shape[0], compile_warmup_shape[1],
+                dtype=torch.float32, device=device,
+            )
+            compiled = apply_torch_compile(model, example_inp)
+            print("[det_10g] torch.compile warmup done.")
+            # Return compiled model directly — CUDA graph on top of torch.compile
+            # fails on Windows (64-bit kernel handles overflow 32-bit C long).
+            # Det10gGraphRunner's per-shape CUDA graph also fails; compiled model is used.
+            return compiled
+        except Exception as e:
+            print(f"[det_10g] torch.compile failed ({e!s:.120}), falling back to CUDA graph.")
+
     return Det10gGraphRunner(model)

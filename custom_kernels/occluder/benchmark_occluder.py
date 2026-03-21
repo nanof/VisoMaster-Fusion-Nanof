@@ -31,6 +31,13 @@ for _candidate in [
             str(_candidate) + _os.pathsep + _os.environ.get("PATH", "")
         )
 del _candidate, _REPO_ROOT, _os, _sys, _Path
+
+import sys as _sys_enc
+if hasattr(_sys_enc.stdout, 'reconfigure'):
+    _sys_enc.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(_sys_enc.stderr, 'reconfigure'):
+    _sys_enc.stderr.reconfigure(encoding='utf-8', errors='replace')
+del _sys_enc
 # ──────────────────────────────────────────────────────────────────────────
 
 import os
@@ -90,7 +97,7 @@ def _print_row(tier, label, ms_val, ref_ms):
 def _check_accuracy(ort_out: np.ndarray, pt_out: torch.Tensor) -> None:
     """Compare ORT FP32 logits vs PyTorch FP16 logits."""
     a = ort_out.flatten().astype(np.float32)
-    b = pt_out.cpu().numpy().flatten().astype(np.float32)
+    b = pt_out.detach().cpu().numpy().flatten().astype(np.float32)
     diff = np.abs(a - b)
     # Per-pixel binary agreement at threshold 0
     a_bin = (a > 0).astype(np.uint8)
@@ -208,6 +215,39 @@ def bench_occluder():
         _print_row("3", "FP16 + CUDA graph (single captured graph)", t3, t0)
     except Exception as e:
         print(f"  Tier 3 | CUDA graph — skipped ({e})")
+
+    # ── Tier 4 — torch.compile + FP16 + CUDA graph ────────────────────────
+    print("\n  [Tier 4] torch.compile(mode='default') + CUDA graph")
+    print("  One-time compile cost: ~30 s on first run (Triton JIT).")
+    try:
+        m4 = OccluderTorch.from_onnx(OCCLUDER_ONNX, compute_dtype=torch.float16).cuda().eval()
+        runner4 = build_cuda_graph_runner(m4, torch_compile=True)
+        t4 = _bench(lambda: runner4(inp_f32))
+        _print_row("4", "torch.compile + FP16 + CUDA graph", t4, t0)
+    except Exception as e:
+        print(f"  Tier 4 | torch.compile — failed: {e}")
+        import traceback; traceback.print_exc()
+
+    # ── Tier 4b — torch.compile reduce-overhead (no separate CUDA graph) ────
+    print("\n  [Tier 4b] torch.compile(mode='reduce-overhead') — no extra CUDA graph")
+    if not int(os.environ.get("OCCLUDER_TORCH_COMPILE", "0")):
+        print("  Skipped — reduce-overhead may crash on this model on Windows/sm_89.")
+        print("  Set OCCLUDER_TORCH_COMPILE=1 to attempt.")
+    else:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            m4b = OccluderTorch.from_onnx(OCCLUDER_ONNX, compute_dtype=torch.float16).cuda().eval()
+            m4b_compiled = apply_torch_compile(
+                m4b,
+                inp_f32,
+                compile_mode="reduce-overhead",
+            )
+            with torch.no_grad():
+                t4b = _bench(lambda: m4b_compiled(inp_f32))
+            _print_row("4b", "torch.compile reduce-overhead (no CUDA graph)", t4b, t0)
+        except Exception as e:
+            print(f"  Tier 4b | reduce-overhead — failed: {e}")
+            import traceback; traceback.print_exc()
 
     print()
     return t0, t0b

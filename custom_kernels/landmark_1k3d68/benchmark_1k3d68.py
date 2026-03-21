@@ -27,6 +27,13 @@ for _candidate in [
             str(_candidate) + _os.pathsep + _os.environ.get("PATH", "")
         )
 del _candidate, _REPO_ROOT, _os, _sys, _Path
+
+import sys as _sys_enc
+if hasattr(_sys_enc.stdout, 'reconfigure'):
+    _sys_enc.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(_sys_enc.stderr, 'reconfigure'):
+    _sys_enc.stderr.reconfigure(encoding='utf-8', errors='replace')
+del _sys_enc
 # ──────────────────────────────────────────────────────────────────────────
 
 import os
@@ -172,13 +179,50 @@ def bench():
     t3 = _bench(lambda: runner(inp))
     _print_row("3", "PyTorch FP16 + CUDA graph", t3, t0)
 
+    # ── Tier 4 — torch.compile + FP16 + CUDA graph ────────────────────────
+    print("\n  [Tier 4] torch.compile(mode='default') + CUDA graph")
+    print("  One-time compile cost: ~30 s on first run (Triton JIT).")
+    try:
+        m4 = (
+            Landmark1k3d68Torch.from_onnx(ONNX_PATH, compute_dtype=torch.float16)
+            .cuda()
+            .eval()
+        )
+        runner4 = build_cuda_graph_runner(m4, torch_compile=True)
+        t4 = _bench(lambda: runner4(inp))
+        _print_row("4", "torch.compile + FP16 + CUDA graph", t4, t0)
+    except Exception as e:
+        print(f"  Tier 4 | torch.compile — failed: {e}")
+        import traceback; traceback.print_exc()
+
+    # ── Tier 4b — torch.compile reduce-overhead (no separate CUDA graph) ────
+    print("\n  [Tier 4b] torch.compile(mode='reduce-overhead') — no extra CUDA graph")
+    if not int(os.environ.get("LMK1K3D68_TORCH_COMPILE", "0")):
+        print("  Skipped — reduce-overhead may crash on this model on Windows/sm_89.")
+        print("  Set LMK1K3D68_TORCH_COMPILE=1 to attempt.")
+    else:
+        try:
+            from custom_kernels.compile_utils import apply_torch_compile
+            m4b = Landmark1k3d68Torch.from_onnx(ONNX_PATH, compute_dtype=torch.float16).cuda().eval()
+            m4b_compiled = apply_torch_compile(
+                m4b,
+                inp,
+                compile_mode="reduce-overhead",
+            )
+            with torch.no_grad():
+                t4b = _bench(lambda: m4b_compiled(inp))
+            _print_row("4b", "torch.compile reduce-overhead (no CUDA graph)", t4b, t0)
+        except Exception as e:
+            print(f"  Tier 4b | reduce-overhead — failed: {e}")
+            import traceback; traceback.print_exc()
+
     print()
 
     # ── Numerical accuracy check ──────────────────────────────────────────
     print("=== Numerical accuracy (ORT FP32 vs PyTorch FP16 + CUDA graph) ===")
     ref_np = sess0.run([out_name], {in_name: inp_np})[0][0]  # (3309,)
     with torch.no_grad():
-        pt_out = runner(inp)[0].cpu().numpy()  # (3309,)
+        pt_out = runner(inp)[0].detach().cpu().numpy()  # (3309,)
     max_err = float(np.abs(ref_np - pt_out).max())
     mean_err = float(np.abs(ref_np - pt_out).mean())
     print(f"  max  |Δ| = {max_err:.4f}")
