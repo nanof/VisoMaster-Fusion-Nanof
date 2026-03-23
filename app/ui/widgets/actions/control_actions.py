@@ -634,6 +634,62 @@ def handle_face_expression_toggle_change(
     _check_and_manage_face_editor_models(main_window)
 
 
+def _set_parameter_toggle_state(
+    main_window: "MainWindow", parameter_name: str, value: bool
+) -> bool:
+    widget = main_window.parameter_widgets.get(parameter_name)
+    if widget is None or widget.isChecked() == value:
+        return False
+
+    widget.blockSignals(True)
+    widget.setChecked(value)
+    widget.blockSignals(False)
+
+    common_widget_actions.update_parameter(
+        main_window,
+        parameter_name,
+        value,
+        enable_refresh_frame=False,
+    )
+    common_widget_actions.show_hide_related_widgets(
+        main_window,
+        widget,
+        parameter_name,
+    )
+    return True
+
+
+def handle_face_expression_eye_blend_toggle(
+    main_window: "MainWindow", new_value: bool, control_name: str
+) -> None:
+    """
+    Keeps the Relative Lids + Retargeted Gaze eye mode in a valid state.
+
+    - Enabling the combined eye mode auto-enables Relative Position and
+      Retargeting Eyes.
+    - Disabling either dependency auto-disables the combined eye mode.
+    """
+    stable_toggle = "FaceExpressionStableGazeEyesToggle"
+    relative_toggle = "FaceExpressionRelativeEyesToggle"
+    retarget_toggle = "FaceExpressionRetargetingEyesBothEnableToggle"
+    changed_dependency_state = False
+
+    if control_name == stable_toggle and new_value:
+        changed_dependency_state |= _set_parameter_toggle_state(
+            main_window, relative_toggle, True
+        )
+        changed_dependency_state |= _set_parameter_toggle_state(
+            main_window, retarget_toggle, True
+        )
+    elif control_name in {relative_toggle, retarget_toggle} and not new_value:
+        changed_dependency_state |= _set_parameter_toggle_state(
+            main_window, stable_toggle, False
+        )
+
+    if changed_dependency_state:
+        common_widget_actions.refresh_frame(main_window)
+
+
 def apply_face_reaging(main_window: "MainWindow", *_args) -> None:
     """Apply age transformation to the assigned input face for the selected target face.
 

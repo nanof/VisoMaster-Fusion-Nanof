@@ -350,6 +350,46 @@ class FrameEdits:
                 x_target = x_proj + (refinement_exp - default_delta_exp) + extra_delta
                 return (x_target - x_s) * multiplier
 
+            def merge_eye_motion_candidates(
+                relative_motion, absolute_motion, normalize_eyes_enabled=False
+            ):
+                """
+                Relative Lids + Retargeted Gaze eye merge:
+                - keep horizontal gaze direction from the absolute + retargeted eye motion
+                - keep eyelid/blink shape from the relative eye motion
+                - blend back some retargeted vertical lid motion so Normalize Eyes
+                  and Eyes Multiplier still have visible influence
+                """
+                merged_motion = relative_motion.clone()
+
+                # Landmark 11/15 X is the clearest eyeball-direction signal.
+                # Keep it fully from the absolute + retargeted branch for better gaze stability.
+                merged_motion[:, 11, 0] = absolute_motion[:, 11, 0]
+                merged_motion[:, 15, 0] = absolute_motion[:, 15, 0]
+
+                # Vertical eye motion carries both lid state and some gaze drift.
+                # Blend a limited amount of the retargeted branch back in so the
+                # shipped mode still benefits from Normalize Eyes / Eyes Multiplier
+                # without losing the relative eyelid feel that made it useful.
+                eyelid_blend = 0.45 if normalize_eyes_enabled else 0.30
+                eye_center_blend = 0.35 if normalize_eyes_enabled else 0.20
+
+                for idx in (11, 15):
+                    merged_motion[:, idx, 1] = torch.lerp(
+                        relative_motion[:, idx, 1],
+                        absolute_motion[:, idx, 1],
+                        eye_center_blend,
+                    )
+
+                for idx in (13, 16):
+                    merged_motion[:, idx, 1] = torch.lerp(
+                        relative_motion[:, idx, 1],
+                        absolute_motion[:, idx, 1],
+                        eyelid_blend,
+                    )
+
+                return merged_motion
+
             accumulated_motion = torch.zeros_like(x_s)
 
             # --- MODE PROCESSING ---
@@ -430,6 +470,12 @@ class FrameEdits:
                 flag_relative_eyes = parameters.get(
                     "FaceExpressionRelativeEyesToggle", False
                 )
+                flag_retarget_eyes = parameters.get(
+                    "FaceExpressionRetargetingEyesBothEnableToggle", False
+                )
+                flag_stable_gaze_eyes = parameters.get(
+                    "FaceExpressionStableGazeEyesToggle", False
+                )
                 flag_relative_lips = parameters.get(
                     "FaceExpressionRelativeLipsToggle", False
                 )
@@ -480,9 +526,7 @@ class FrameEdits:
 
                 if flag_activate_eyes:
                     eyes_retarget_delta = 0
-                    if parameters.get(
-                        "FaceExpressionRetargetingEyesBothEnableToggle", False
-                    ):
+                    if flag_retarget_eyes:
                         eye_mult = parameters.get(
                             "FaceExpressionRetargetingEyesMultiplierBothDecimalSlider",
                             1.0,
@@ -504,15 +548,46 @@ class FrameEdits:
                             x_s, target_eye_ratio * eye_mult, face_editor_type
                         )
 
-                    accumulated_motion += get_component_motion(
-                        eye_indices,
-                        x_d_i_info["exp"],
-                        driving_multiplier_eyes,
-                        extra_delta=eyes_retarget_delta,
-                        is_relative=flag_relative_eyes,
-                        neutral_ref=0,
-                        use_boost=True,
-                    )
+                    if (
+                        flag_stable_gaze_eyes
+                        and flag_relative_eyes
+                        and flag_retarget_eyes
+                    ):
+                        relative_eye_motion = get_component_motion(
+                            eye_indices,
+                            x_d_i_info["exp"],
+                            1.0,
+                            is_relative=True,
+                            neutral_ref=0,
+                            use_boost=True,
+                        )
+                        absolute_retarget_eye_motion = get_component_motion(
+                            eye_indices,
+                            x_d_i_info["exp"],
+                            1.0,
+                            extra_delta=eyes_retarget_delta,
+                            is_relative=False,
+                            neutral_ref=0,
+                            use_boost=True,
+                        )
+                        accumulated_motion += (
+                            merge_eye_motion_candidates(
+                                relative_eye_motion,
+                                absolute_retarget_eye_motion,
+                                normalize_eyes_enabled=flag_normalize_eyes,
+                            )
+                            * driving_multiplier_eyes
+                        )
+                    else:
+                        accumulated_motion += get_component_motion(
+                            eye_indices,
+                            x_d_i_info["exp"],
+                            driving_multiplier_eyes,
+                            extra_delta=eyes_retarget_delta,
+                            is_relative=flag_relative_eyes,
+                            neutral_ref=0,
+                            use_boost=True,
+                        )
 
                 if flag_activate_lips:
                     lips_retarget_delta = 0
