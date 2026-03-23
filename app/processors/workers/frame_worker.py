@@ -196,6 +196,8 @@ class FrameWorker(threading.Thread):
         # before the P2E check executes, making them always equal and preventing P2E recreation
         # on resolution change.  This dedicated attribute fixes that race.
         self._vr_p2e_frame_size: Optional[tuple] = None
+        # VR-MEM-03: per-worker frame counter for periodic CUDA allocator flush
+        self._vr_processed_count: int = 0
 
         # Dirty-check cache for set_scaling_transforms (FW-PERF-07)
         self._last_scaling_control: dict | None = None
@@ -1860,6 +1862,18 @@ class FrameWorker(threading.Thread):
         del processed_perspective_crops_details, analyzed_faces_for_vr
         # FW-MEM-1: removed torch.cuda.empty_cache() — calling it per-frame
         # defeats the CUDA caching allocator and causes unnecessary overhead.
+
+        # VR-MEM-03: periodic CUDA allocator flush to prevent VRAM fragmentation
+        # over long recording sessions. Per-worker counter
+        # staggers flushes across 8 pool workers so they don't all flush simultaneously.
+        # empty_cache() returns fragmented free blocks to CUDA; gc.collect() clears
+        # Python cyclic garbage that may hold tensor references.
+        self._vr_processed_count += 1
+        if self._vr_processed_count % 300 == 0:
+            import gc
+
+            torch.cuda.empty_cache()
+            gc.collect()
 
         # --- VR Compare/Mask view ---
         # Build side-by-side crop strips when Face Compare or Face Mask is active.
@@ -3556,7 +3570,9 @@ class FrameWorker(threading.Thread):
         # FW-QUAL-08: warn when all tiles produced zero output (model returned blank).
         # Threshold 30.0 works for the unified [0,255] scale used by all models (incl. DFM after fix above).
         if output.abs().max() < 30.0:
-            print("[WARN] All tiles failed for face — output is near-zero")
+            print(
+                "[WARN] Swap model output near-zero for face — possible VRAM pressure"
+            )
 
         output = output.permute(2, 0, 1)
         swap = self.t512(output)

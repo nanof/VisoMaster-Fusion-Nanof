@@ -190,11 +190,25 @@ class Perspective:
                         _P2E_GRID_MASK_CACHE.popitem(last=False)
                     _P2E_GRID_MASK_CACHE[_cache_key] = (_grid_cpu, _mask_out_cpu)
 
+            # P2E-MEM-01: free all intermediate GPU tensors now that grid/mask_out are
+            # stored in the cache.  Without explicit del, Python keeps all 12+ tensors
+            # alive until the function returns — ~700 MiB for a 4K equirect frame.
+            # grid and mask_out are still needed below; all other intermediates are not.
+            del xyz_equ_norm, xyz_flat, rotated_xyz_flat, rotated_xyz_persp_view
+            del depth_val, is_in_front, safe_depth_divisor, u_norm, v_norm
+            del fov_conditions, mask, grid_x_persp, grid_y_persp
+            del _grid_cpu, _mask_out_cpu
+
         # Image-dependent sampling — always executed (image changes every frame)
         equirect_component_float = F.grid_sample(self._img_tensor_cxhxw_rgb_float.unsqueeze(0), grid,
                                                  mode='bilinear', padding_mode='border', align_corners=True)
 
-        equirect_component_uint8 = (torch.clamp(equirect_component_float.squeeze(0) * 255.0, 0, 255)).byte()
-        del equirect_component_float  # Free 108 MiB float immediately; only uint8 (27 MiB) needed downstream
+        # P2E-MEM-02: convert to uint8 in-place to avoid two ~108 MiB float32 temporaries
+        # that torch.clamp(tensor * 255.0, ...) would otherwise allocate.
+        # squeeze_(0): in-place view reshape — removes batch dim, no copy.
+        # mul_(255.0), clamp_(0, 255): in-place — reuse equirect_component_float storage.
+        # .byte(): only the final uint8 tensor is a new allocation (~27 MiB vs ~243 MiB before).
+        equirect_component_uint8 = equirect_component_float.squeeze_(0).mul_(255.0).clamp_(0, 255).byte()
+        del equirect_component_float
 
         return equirect_component_uint8, mask_out
