@@ -350,19 +350,43 @@ class FrameEdits:
                 x_target = x_proj + (refinement_exp - default_delta_exp) + extra_delta
                 return (x_target - x_s) * multiplier
 
-            def merge_eye_motion_candidates(relative_motion, absolute_motion):
+            def merge_eye_motion_candidates(
+                relative_motion, absolute_motion, normalize_eyes_enabled=False
+            ):
                 """
-                Stable gaze eye merge:
+                Relative Lids + Retargeted Gaze eye merge:
                 - keep horizontal gaze direction from the absolute + retargeted eye motion
                 - keep eyelid/blink shape from the relative eye motion
+                - blend back some retargeted vertical lid motion so Normalize Eyes
+                  and Eyes Multiplier still have visible influence
                 """
                 merged_motion = relative_motion.clone()
 
                 # Landmark 11/15 X is the clearest eyeball-direction signal.
-                # Keep vertical and depth motion relative so eyelid/open-close
-                # behavior stays as close as possible to the good relative result.
+                # Keep it fully from the absolute + retargeted branch for better gaze stability.
                 merged_motion[:, 11, 0] = absolute_motion[:, 11, 0]
                 merged_motion[:, 15, 0] = absolute_motion[:, 15, 0]
+
+                # Vertical eye motion carries both lid state and some gaze drift.
+                # Blend a limited amount of the retargeted branch back in so the
+                # shipped mode still benefits from Normalize Eyes / Eyes Multiplier
+                # without losing the relative eyelid feel that made it useful.
+                eyelid_blend = 0.45 if normalize_eyes_enabled else 0.30
+                eye_center_blend = 0.35 if normalize_eyes_enabled else 0.20
+
+                for idx in (11, 15):
+                    merged_motion[:, idx, 1] = torch.lerp(
+                        relative_motion[:, idx, 1],
+                        absolute_motion[:, idx, 1],
+                        eye_center_blend,
+                    )
+
+                for idx in (13, 16):
+                    merged_motion[:, idx, 1] = torch.lerp(
+                        relative_motion[:, idx, 1],
+                        absolute_motion[:, idx, 1],
+                        eyelid_blend,
+                    )
 
                 return merged_motion
 
@@ -548,7 +572,9 @@ class FrameEdits:
                         )
                         accumulated_motion += (
                             merge_eye_motion_candidates(
-                                relative_eye_motion, absolute_retarget_eye_motion
+                                relative_eye_motion,
+                                absolute_retarget_eye_motion,
+                                normalize_eyes_enabled=flag_normalize_eyes,
                             )
                             * driving_multiplier_eyes
                         )

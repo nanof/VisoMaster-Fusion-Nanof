@@ -354,11 +354,13 @@ COMMON_LAYOUT_DATA: Any = {
             "level": 4,
             "label": "Relative Lids + Retargeted Gaze",
             "default": False,
-            "parentToggle": "FaceExpressionRetargetingEyesBothEnableToggle & FaceExpressionEnableBothToggle & FaceExpressionEyesToggle & FaceExpressionRelativeEyesToggle",
+            "parentToggle": "FaceExpressionEnableBothToggle & FaceExpressionEyesToggle",
             "requiredToggleValue": True,
             "parentSelection": "FaceExpressionModeSelection",
             "requiredSelectionValue": "Advanced",
-            "help": "Combines Relative Position eye motion with Retargeting Eyes by preserving relative eyelid motion while using retargeted horizontal gaze. Requires Relative Position and Retargeting Eyes.",
+            "help": "Combines the eye motion from Relative Position with the gaze correction from Retargeting Eyes.\n\n- eyelid motion is biased toward Relative Position\n- gaze direction is biased toward Retargeting Eyes\n\nEnabling this mode also turns on Relative Position and Retargeting Eyes.",
+            "exec_function": control_actions.handle_face_expression_eye_blend_toggle,
+            "exec_function_args": ["FaceExpressionStableGazeEyesToggle"],
         },
         "FaceExpressionRelativeEyesToggle": {
             "level": 4,
@@ -369,6 +371,8 @@ COMMON_LAYOUT_DATA: Any = {
             "parentSelection": "FaceExpressionModeSelection",
             "requiredSelectionValue": "Advanced",
             "help": "Makes the animation relative to the initial pose of the source image. Can be better for a more natural look.",
+            "exec_function": control_actions.handle_face_expression_eye_blend_toggle,
+            "exec_function_args": ["FaceExpressionRelativeEyesToggle"],
         },
         "FaceExpressionFriendlyFactorEyesDecimalSlider": {
             "level": 4,
@@ -393,6 +397,8 @@ COMMON_LAYOUT_DATA: Any = {
             "parentSelection": "FaceExpressionModeSelection",
             "requiredSelectionValue": "Advanced",
             "help": "Adjusting or redirecting the gaze or movement of the eyes during the facial restoration process.",
+            "exec_function": control_actions.handle_face_expression_eye_blend_toggle,
+            "exec_function_args": ["FaceExpressionRetargetingEyesBothEnableToggle"],
         },
         "FaceExpressionRetargetingEyesMultiplierBothDecimalSlider": {
             "level": 5,
