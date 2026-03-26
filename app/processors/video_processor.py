@@ -186,10 +186,10 @@ class VideoProcessor(QObject):
             None  # Last frame number that was displayed/written
         )
 
-        # --- Frame Skip Tracking (for corrupted frames) ---
+        # --- Frame Skip Tracking ---
         self.skipped_frames: set[int] = (
             set()
-        )  # Track which frames were skipped due to read errors
+        )  # Track which frames were skipped during recording/segment processing
         self.consecutive_read_errors: int = 0  # Count consecutive read failures
         self.max_consecutive_errors: int = (
             MAX_CONSECUTIVE_ERRORS  # Stop after this many consecutive errors
@@ -198,6 +198,8 @@ class VideoProcessor(QObject):
         self.stopped_by_error_limit: bool = (
             False  # Track if processing stopped due to error limit
         )
+        self.manual_dropped_skip_count: int = 0
+        self.read_error_skip_count: int = 0
 
         # --- Multi-Segment Recording State ---
         self.segments_to_process: List[Tuple[int, int]] = []
@@ -685,7 +687,7 @@ class VideoProcessor(QObject):
         """
         Unified feeder logic for standard video playback AND segment recording.
         Reads frames as long as processing is active and within the limits.
-        Now supports skipping corrupted frames instead of stopping.
+        Now supports skipping unreadable or manually dropped frames instead of stopping.
         """
 
         # Determine the mode at startup
@@ -707,6 +709,8 @@ class VideoProcessor(QObject):
         self.consecutive_read_errors = 0
         self.skipped_frames.clear()
         self.total_skipped_frames = 0
+        self.manual_dropped_skip_count = 0
+        self.read_error_skip_count = 0
 
         # VP-19: Cache target input height outside the loop; only re-read on detected change.
         cached_resize_toggle = self.main_window.control.get(
@@ -751,8 +755,7 @@ class VideoProcessor(QObject):
                 if (
                     is_segment_mode or self.recording
                 ) and self.current_frame_number in self.main_window.dropped_frames:
-                    self.skipped_frames.add(self.current_frame_number)
-                    self.total_skipped_frames += 1
+                    self._mark_skipped_frame(self.current_frame_number, "manual_drop")
                     self.current_frame_number += 1
                     misc_helpers.seek_frame(
                         self.media_capture, self.current_frame_number
@@ -811,11 +814,12 @@ class VideoProcessor(QObject):
                         self.processing = False
                         break
 
-                    # 3) Standard mode: unified frame skip logic (no longer depends on potentially inaccurate max_frame_number)
-                    # Skip corrupted frames and continue, but stop if too many consecutive failures (likely reached EOF)
+                    # 3) Standard mode: unified read-failure skip logic (no longer
+                    # depends on potentially inaccurate max_frame_number). Skip the
+                    # unreadable frame and continue, but stop if too many
+                    # consecutive failures suggest we actually reached EOF.
                     self.consecutive_read_errors += 1
-                    self.skipped_frames.add(self.current_frame_number)
-                    self.total_skipped_frames += 1
+                    self._mark_skipped_frame(self.current_frame_number, "read_error")
 
                     # Check if too many consecutive errors (likely reached actual EOF)
                     if self.consecutive_read_errors > self.max_consecutive_errors:
@@ -834,7 +838,8 @@ class VideoProcessor(QObject):
 
                     # Log skip and move to next frame
                     print(
-                        f"[WARN] Feeder: Skipping corrupted frame {self.current_frame_number} (Total skipped: {self.total_skipped_frames}, Consecutive errors: {self.consecutive_read_errors})."
+                        f"[WARN] Feeder: Skipping unreadable frame {self.current_frame_number} "
+                        f"(Total skipped: {self.total_skipped_frames}, Consecutive read errors: {self.consecutive_read_errors})."
                     )
                     self.current_frame_number += 1
                     misc_helpers.seek_frame(
@@ -934,6 +939,9 @@ class VideoProcessor(QObject):
                 f"[INFO] Feeder loop finished. Total frames skipped: {self.total_skipped_frames}"
             )
             print(
+                f"[INFO] Skip reasons: manual dropped frames={self.manual_dropped_skip_count}, read errors={self.read_error_skip_count}"
+            )
+            print(
                 f"[INFO] Skipped frame numbers: {sorted(list(self.skipped_frames)[:100])}{'...' if len(self.skipped_frames) > 100 else ''}"
             )
 
@@ -985,6 +993,16 @@ class VideoProcessor(QObject):
             except Exception as e:
                 print(f"[ERROR] Error in _feed_webcam loop: {e}")
                 self.processing = False
+
+    def _mark_skipped_frame(self, frame_number: int, reason: str) -> None:
+        """Track skipped-frame reasons for later audio-rebuild diagnostics."""
+        self.skipped_frames.add(frame_number)
+        self.total_skipped_frames += 1
+
+        if reason == "manual_drop":
+            self.manual_dropped_skip_count += 1
+        elif reason == "read_error":
+            self.read_error_skip_count += 1
 
     def display_next_frame(self):
         """
@@ -1098,7 +1116,7 @@ class VideoProcessor(QObject):
             if frame_number_to_display > original_frame:
                 skipped_count = frame_number_to_display - original_frame
                 print(
-                    f"[INFO] Display: Skipping {skipped_count} corrupted frame(s), jumping to frame {frame_number_to_display}"
+                    f"[INFO] Display: Advancing past {skipped_count} skipped frame(s), jumping to frame {frame_number_to_display}"
                 )
                 self.next_frame_to_display = frame_number_to_display
 
@@ -2759,28 +2777,38 @@ class VideoProcessor(QObject):
                 )
                 continue
 
-            audio_file = os.path.join(temp_audio_dir, f"audio_segment_{idx:04d}.aac")
+            # Use a containerized AAC output rather than raw ADTS .aac.
+            # Raw AAC concatenation is brittle on some skipped-frame rebuilds,
+            # especially for MKV-derived inputs with awkward timestamps.
+            audio_file = os.path.join(temp_audio_dir, f"audio_segment_{idx:04d}.m4a")
             audio_files.append(audio_file)
 
-            # Try a fast "copy" extraction first to avoid decoding corrupted
-            # packets.  If the input stream itself is damaged this will still
-            # produce a file and skip decoding, hopefully avoiding the error
-            # message the user observed.  We always run validation afterwards
-            # and fall back to re-encoding if needed.
+            # Always normalize skipped-frame rebuild audio to AAC-in-M4A.
+            # This keeps the concat/remux path codec-agnostic for any source
+            # audio format that FFmpeg can decode from the input media.
             media_path: str = self.media_path  # type: ignore[assignment]
             args: list[str] = [
                 "ffmpeg",
                 "-hide_banner",
                 "-loglevel",
                 "warning",
+                "-err_detect",
+                "ignore_err",
                 "-i",
                 media_path,
                 "-ss",
                 str(start_time),
                 "-to",
                 str(end_time),
+                "-vn",
+                "-map",
+                "0:a:0?",
+                "-af",
+                "aresample=async=1:first_pts=0",
                 "-c:a",
-                "copy",
+                "aac",
+                "-b:a",
+                "192k",
                 "-y",
                 audio_file,
             ]
@@ -2789,33 +2817,14 @@ class VideoProcessor(QObject):
                 print(
                     f"[INFO] Extracting audio segment {idx + 1}/{len(segments)}: {start_time:.3f}s → {end_time:.3f}s"
                 )
-                result = subprocess.run(
-                    args, check=True, capture_output=True, text=True
-                )
+                subprocess.run(args, check=True, capture_output=True, text=True)
 
-                # Check for audio decoding errors in stderr (copy mode usually avoids decoding,
-                # but some containers still report warnings)
-                stderr_output = result.stderr
-                needs_rerun = False
-                if (
-                    "Error submitting packet to decoder" in stderr_output
-                    or "Invalid data found" in stderr_output
-                ):
-                    print(f"[WARN] Audio decoding errors detected in segment {idx + 1}")
-                    print(
-                        f"[WARN] FFmpeg stderr: {stderr_output[:500]}..."
-                    )  # First 500 chars
-                    needs_rerun = True
-
-                # Validate output; if it's not valid, we'll resort to re-encode
+                # Validate output; if it's not valid, retry once with the same
+                # normalized extraction settings to rule out a transient failure.
                 if not self._validate_audio_file(audio_file):
                     print(
-                        f"[WARN] Validation failed for copied segment {idx + 1}, will retry with re-encoding"
+                        f"[WARN] Validation failed for segment {idx + 1}, retrying extraction once"
                     )
-                    needs_rerun = True
-
-                if needs_rerun:
-                    # re-extract by decoding and re-encoding, ignoring errors
                     re_args: list[str] = [
                         "ffmpeg",
                         "-hide_banner",
@@ -2829,15 +2838,19 @@ class VideoProcessor(QObject):
                         str(start_time),
                         "-to",
                         str(end_time),
-                        "-q:a",
-                        "9",
+                        "-vn",
+                        "-map",
+                        "0:a:0?",
+                        "-af",
+                        "aresample=async=1:first_pts=0",
+                        "-c:a",
+                        "aac",
+                        "-b:a",
+                        "192k",
                         "-y",
                         audio_file,
                     ]
                     try:
-                        print(
-                            f"[INFO]   Re-extracting segment {idx + 1} with re-encode"
-                        )
                         subprocess.run(
                             re_args, check=True, capture_output=True, text=True
                         )
@@ -2852,8 +2865,18 @@ class VideoProcessor(QObject):
                             except OSError:
                                 pass
                         return False, []
-                else:
-                    print(f"[INFO]   ✓ Segment {idx + 1} extracted successfully")
+                    if not self._validate_audio_file(audio_file):
+                        print(
+                            f"[ERROR] Retried segment {idx + 1} is still invalid after validation"
+                        )
+                        for audio in audio_files:
+                            try:
+                                os.remove(audio)
+                            except OSError:
+                                pass
+                        return False, []
+
+                print(f"[INFO] Segment {idx + 1} extracted successfully")
             except subprocess.CalledProcessError as e:
                 print(f"[ERROR] Failed to extract audio segment {idx + 1}: {e}")
                 print(f"[ERROR] FFmpeg stderr: {e.stderr}")
@@ -3021,7 +3044,7 @@ class VideoProcessor(QObject):
             print(f"[ERROR] Failed to create concat manifest: {e}")
             return None
 
-        output_audio = os.path.join(temp_audio_dir, "audio_concatenated.aac")
+        output_audio = os.path.join(temp_audio_dir, "audio_concatenated.m4a")
 
         # FFmpeg concat demuxer command
         args = [
@@ -3035,8 +3058,15 @@ class VideoProcessor(QObject):
             "0",  # Allow absolute filenames
             "-i",
             concat_file,
-            "-c",
-            "copy",  # No re-encoding, just copy
+            "-vn",
+            # Re-encode once here to flatten the segment timestamps into a
+            # single monotonic audio stream before the final mux.
+            "-af",
+            "aresample=async=1:first_pts=0",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
             "-y",
             output_audio,
         ]
@@ -3186,6 +3216,10 @@ class VideoProcessor(QObject):
             self.processing_start_frame = previous_start_frame
 
         try:
+            print(
+                f"[INFO] Segment {segment_num}: rebuilding audio for skipped frames "
+                f"(manual dropped={self.manual_dropped_skip_count}, read errors={self.read_error_skip_count})."
+            )
             audio_ok, audio_files = self._extract_audio_segments(
                 keep_segments, temp_audio_dir
             )
@@ -3402,6 +3436,10 @@ class VideoProcessor(QObject):
                 print("[INFO] Adding audio (default-style merge)...")
                 try:
                     if self.total_skipped_frames > 0:
+                        print(
+                            "[INFO] Rebuilding audio because frames were skipped "
+                            f"(manual dropped={self.manual_dropped_skip_count}, read errors={self.read_error_skip_count})."
+                        )
                         temp_audio_root = os.path.join(
                             os.path.dirname(self.temp_file), "temp_audio"
                         )
@@ -3972,7 +4010,7 @@ class VideoProcessor(QObject):
                 f"[ERROR] Segment file '{self.temp_segment_files[-1]}' not found after processing segment {segment_num}."
             )
 
-        # If corrupted frames were skipped in this segment, rebuild segment audio
+        # If frames were skipped in this segment, rebuild segment audio
         # from valid frame ranges so concatenated output stays in sync.
         self._rebuild_segment_audio_if_needed(segment_num)
 
