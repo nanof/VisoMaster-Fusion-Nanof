@@ -1,6 +1,6 @@
 import threading
 import queue
-from typing import TYPE_CHECKING, Dict, Tuple, Optional, cast, List
+from typing import TYPE_CHECKING, Any, Dict, Tuple, Optional, cast, List
 import time
 import subprocess
 from pathlib import Path
@@ -416,6 +416,7 @@ class VideoProcessor(QObject):
         frame_rgb: numpy.ndarray,
         local_control_for_worker: dict,
         local_params_for_worker: dict | None = None,
+        frame_tensor: torch.Tensor | None = None,
     ):
         """
         Runs face detection sequentially in the feeder thread to guarantee
@@ -494,12 +495,14 @@ class VideoProcessor(QObject):
                 previous_faces_arg = self.last_detected_faces
             device = self.main_window.models_processor.device
 
-            # OPTIMISATION PCIe : non_blocking=True frees CPU immediately
-            frame_tensor = (
-                torch.from_numpy(frame_rgb)
-                .to(device, non_blocking=True)
-                .permute(2, 0, 1)  # Convert [H, W, C] -> [C, H, W]
-            )
+            owns_frame_tensor = frame_tensor is None
+            if frame_tensor is None:
+                # OPTIMISATION PCIe : non_blocking=True frees CPU immediately
+                frame_tensor = (
+                    torch.from_numpy(frame_rgb)
+                    .to(device, non_blocking=True)
+                    .permute(2, 0, 1)  # Convert [H, W, C] -> [C, H, W]
+                )
 
             # 1. Run Detection
             bboxes, kpss_5, kpss = self.main_window.models_processor.run_detect(
@@ -524,7 +527,8 @@ class VideoProcessor(QObject):
                 previous_detections=previous_faces_arg,
             )
             # Free up VRAM immediately since the tensor is no longer needed in this thread
-            del frame_tensor
+            if owns_frame_tensor:
+                del frame_tensor
 
             # CUDA Stream Sync: Safely wait for GPU on the current stream
             if local_stream:
@@ -2596,6 +2600,112 @@ class VideoProcessor(QObject):
 
         return local_control, local_params
 
+    def _build_issue_scan_state_segments(
+        self,
+        scan_ranges: List[Tuple[int, int]],
+        base_control: ControlTypes,
+        base_params: FacesParametersTypes,
+        target_faces_snapshot: dict,
+    ) -> list[tuple[int, int, ControlTypes, FacesParametersTypes]]:
+        """Group scan ranges into marker-stable segments."""
+        marker_positions = sorted(
+            int(frame_number)
+            for frame_number in getattr(self.main_window, "markers", {}).keys()
+        )
+        segments: list[tuple[int, int, ControlTypes, FacesParametersTypes]] = []
+
+        for start_frame, end_frame in scan_ranges:
+            range_markers = [
+                marker_frame
+                for marker_frame in marker_positions
+                if start_frame < marker_frame <= end_frame
+            ]
+            segment_start = start_frame
+            local_control, local_params = self._resolve_scan_state_for_frame(
+                start_frame,
+                base_control,
+                base_params,
+                target_faces_snapshot,
+            )
+
+            for next_marker_frame in range_markers + [end_frame + 1]:
+                segment_end = next_marker_frame - 1
+                if segment_end >= segment_start:
+                    segments.append(
+                        (segment_start, segment_end, local_control, local_params)
+                    )
+                if next_marker_frame <= end_frame:
+                    segment_start = next_marker_frame
+                    local_control, local_params = self._resolve_scan_state_for_frame(
+                        next_marker_frame,
+                        base_control,
+                        base_params,
+                        target_faces_snapshot,
+                    )
+
+        return segments
+
+    def _prepare_issue_scan_match_context(
+        self,
+        local_control: ControlTypes,
+        local_params: FacesParametersTypes,
+        target_faces_snapshot: dict,
+    ) -> dict[str, Any]:
+        """Precompute target embeddings and thresholds for a stable scan segment."""
+        recognition_model = str(
+            local_control.get("RecognitionModelSelection", "arcface_128")
+        )
+        similarity_type = local_control.get("SimilarityTypeSelection", "Opal")
+        default_params = dict(self.main_window.default_parameters.data)
+        prepared_targets: list[tuple[Any, float, numpy.ndarray]] = []
+
+        for target_id, target_face in target_faces_snapshot.items():
+            face_id_str = str(getattr(target_face, "face_id", target_id))
+            face_specific_params = misc_helpers.copy_mapping_data(
+                local_params.get(face_id_str)
+            )
+            params_pd = misc_helpers.ParametersDict(
+                face_specific_params, default_params
+            )
+            target_embedding = target_face.get_embedding(recognition_model)
+            if (
+                not isinstance(target_embedding, numpy.ndarray)
+                or target_embedding.size == 0
+            ):
+                continue
+            prepared_targets.append(
+                (
+                    target_face,
+                    float(params_pd["SimilarityThresholdSlider"]),
+                    target_embedding,
+                )
+            )
+
+        return {
+            "recognition_model": recognition_model,
+            "similarity_type": similarity_type,
+            "prepared_targets": prepared_targets,
+        }
+
+    def _find_best_target_match_for_scan(
+        self,
+        detected_embedding: numpy.ndarray,
+        prepared_targets: list[tuple[Any, float, numpy.ndarray]],
+    ) -> Any | None:
+        """Return the best target face using a precomputed scan match context."""
+        best_target = None
+        highest_sim = -1.0
+
+        for target_face, threshold, target_embedding in prepared_targets:
+            sim = self.main_window.models_processor.findCosineDistance(
+                detected_embedding, target_embedding
+            )
+            if sim >= threshold and sim > highest_sim:
+                highest_sim = sim
+                best_target = target_face
+
+        return best_target
+
     def scan_issue_frames(
         self,
         progress_callback=None,
@@ -2646,18 +2756,40 @@ class VideoProcessor(QObject):
             self.last_detected_faces = []
             self._smoothed_kps = {}
             self._smoothed_dense_kps = {}
+            scan_segments = self._build_issue_scan_state_segments(
+                scan_ranges,
+                base_control,
+                base_params,
+                target_faces_snapshot,
+            )
 
-            for start_frame, end_frame in scan_ranges:
+            def emit_progress(frame_number: int) -> None:
+                if progress_callback:
+                    progress_callback(total_frames_scanned, total_frames, frame_number)
+
+            for start_frame, end_frame, local_control, local_params in scan_segments:
+                match_context = self._prepare_issue_scan_match_context(
+                    local_control, local_params, target_faces_snapshot
+                )
                 misc_helpers.seek_frame(capture, start_frame)
                 self.current_frame_number = start_frame
+                frame_number = start_frame
 
-                for frame_number in range(start_frame, end_frame + 1):
+                while frame_number <= end_frame:
                     if is_cancelled and is_cancelled():
                         return None
                     if frame_number in dropped_frames_snapshot:
-                        self.current_frame_number = frame_number + 1
+                        next_frame = frame_number + 1
+                        while (
+                            next_frame <= end_frame
+                            and next_frame in dropped_frames_snapshot
+                        ):
+                            next_frame += 1
+                        self.current_frame_number = next_frame
                         misc_helpers.seek_frame(capture, self.current_frame_number)
+                        frame_number = next_frame
                         continue
+
                     ret, frame_bgr = misc_helpers.read_frame(
                         capture,
                         self.media_rotation,
@@ -2669,22 +2801,27 @@ class VideoProcessor(QObject):
                         self.current_frame_number = frame_number + 1
                         misc_helpers.seek_frame(capture, self.current_frame_number)
                         total_frames_scanned += 1
-                        if progress_callback:
-                            progress_callback(
-                                total_frames_scanned, total_frames, frame_number
-                            )
+                        emit_progress(frame_number)
+                        frame_number += 1
                         continue
 
                     frame_rgb = numpy.ascontiguousarray(frame_bgr[..., ::-1])
-                    local_control, local_params = self._resolve_scan_state_for_frame(
-                        frame_number,
-                        base_control,
-                        base_params,
-                        target_faces_snapshot,
+                    frame_rgb_uint8 = (
+                        frame_rgb
+                        if frame_rgb.dtype == numpy.uint8
+                        else frame_rgb.astype("uint8", copy=False)
+                    )
+                    frame_tensor = (
+                        torch.from_numpy(frame_rgb_uint8)
+                        .to(self.main_window.models_processor.device, non_blocking=True)
+                        .permute(2, 0, 1)
                     )
                     self.current_frame_number = frame_number
                     bboxes, kpss_5, _ = self._run_sequential_detection(
-                        frame_rgb, local_control, local_params
+                        frame_rgb,
+                        local_control,
+                        local_params,
+                        frame_tensor=frame_tensor,
                     )
                     detected_embeddings: list[numpy.ndarray] = []
                     if (
@@ -2694,19 +2831,8 @@ class VideoProcessor(QObject):
                         and kpss_5.shape[0] > 0
                     ):
                         max_faces = min(bboxes.shape[0], kpss_5.shape[0])
-                        frame_tensor = (
-                            torch.from_numpy(frame_rgb.astype("uint8"))
-                            .to(self.main_window.models_processor.device)
-                            .permute(2, 0, 1)
-                        )
-                        recognition_model = str(
-                            local_control.get(
-                                "RecognitionModelSelection", "arcface_128"
-                            )
-                        )
-                        similarity_type = local_control.get(
-                            "SimilarityTypeSelection", "Opal"
-                        )
+                        recognition_model = match_context["recognition_model"]
+                        similarity_type = match_context["similarity_type"]
                         for face_index in range(max_faces):
                             face_kps = kpss_5[face_index]
                             face_bbox = bboxes[face_index]
@@ -2729,22 +2855,13 @@ class VideoProcessor(QObject):
                                 and face_emb.size > 0
                             ):
                                 detected_embeddings.append(face_emb)
-                        del frame_tensor
+                    del frame_tensor
 
                     matched_face_ids: set[str] = set()
-                    recognition_model = str(
-                        local_control.get("RecognitionModelSelection", "arcface_128")
-                    )
-                    default_params = dict(self.main_window.default_parameters.data)
-
+                    prepared_targets = match_context["prepared_targets"]
                     for detected_embedding in detected_embeddings:
-                        best_target, _, _ = misc_helpers.find_best_target_match(
-                            detected_embedding,
-                            self.main_window.models_processor,
-                            target_faces_snapshot,
-                            local_params,
-                            default_params,
-                            recognition_model,
+                        best_target = self._find_best_target_match_for_scan(
+                            detected_embedding, prepared_targets
                         )
                         if best_target is not None:
                             matched_face_ids.add(str(best_target.face_id))
@@ -2753,10 +2870,8 @@ class VideoProcessor(QObject):
                         if face_id not in matched_face_ids:
                             issue_frames_by_face[face_id].add(frame_number)
                     total_frames_scanned += 1
-                    if progress_callback:
-                        progress_callback(
-                            total_frames_scanned, total_frames, frame_number
-                        )
+                    emit_progress(frame_number)
+                    frame_number += 1
 
             faces_with_issues = sum(
                 1 for frames in issue_frames_by_face.values() if frames

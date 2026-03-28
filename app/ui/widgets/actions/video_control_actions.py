@@ -895,11 +895,14 @@ def _handle_issue_scan_progress(
     processed: int,
     total: int,
     frame_number: int,
+    scan_fps: float,
 ):
     dialog = main_window.scan_progress_dialog
     dialog.setMaximum(max(total, 1))
     dialog.setValue(min(processed, max(total, 1)))
-    dialog.setLabelText(f"{scope_text}\nScanning frame {frame_number} of {total}...")
+    dialog.setLabelText(
+        f"{scope_text}\n{processed}/{total} processed | FPS: {scan_fps:.1f}"
+    )
     QtCore.QCoreApplication.processEvents()
 
 
@@ -1010,8 +1013,8 @@ def run_issue_scan(main_window: "MainWindow"):
     main_window.scan_issue_worker = worker
     scope_text = worker._scan_scope_text
     worker.progress.connect(
-        lambda processed, total, frame_number: _handle_issue_scan_progress(
-            main_window, scope_text, processed, total, frame_number
+        lambda processed, total, frame_number, scan_fps: _handle_issue_scan_progress(
+            main_window, scope_text, processed, total, frame_number, scan_fps
         )
     )
     worker.completed.connect(
