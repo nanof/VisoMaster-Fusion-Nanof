@@ -139,7 +139,9 @@ class FrameWorker(threading.Thread):
         # v2.Resize instances for every unique (H, W, interp) combination seen
         # across variable-resolution inputs.
         self._resize_cache: _OrderedDict = _OrderedDict()
-        self._RESIZE_CACHE_MAX = 16
+        self._RESIZE_CACHE_MAX = 40  # swap_core uses many dynamic (H,W) bilinear+AA pairs
+        self._gaussian_blur_cache: _OrderedDict = _OrderedDict()
+        self._GAUSSIAN_BLUR_CACHE_MAX = 48
 
         # --- Architecture References ---
         self.main_window = main_window
@@ -276,6 +278,43 @@ class FrameWorker(threading.Thread):
         self.t256_near = v2.Resize(
             (256, 256), interpolation=v2.InterpolationMode.NEAREST, antialias=False
         )
+
+    def _get_cached_resize_bilinear_aa(self, h: int, w: int) -> v2.Resize:
+        """LRU v2.Resize (bilinear, antialias=True) for dynamic face/swap sizes."""
+        hi, wi = int(h), int(w)
+        interp = v2.InterpolationMode.BILINEAR
+        key = (hi, wi, interp, True)
+        d = self._resize_cache
+        if key in d:
+            d.move_to_end(key)
+            return d[key]
+        if len(d) >= self._RESIZE_CACHE_MAX:
+            d.popitem(last=False)
+        op = v2.Resize((hi, wi), interpolation=interp, antialias=True)
+        d[key] = op
+        return op
+
+    def _get_cached_gaussian_blur(
+        self, kernel_size: int, sigma: float | tuple[float, ...]
+    ) -> v2.GaussianBlur:
+        """LRU v2.GaussianBlur for slider-driven kernels (swap_core / masks)."""
+        ks = int(kernel_size)
+        if isinstance(sigma, tuple):
+            key = (ks, tuple(round(float(x), 8) for x in sigma))
+            sig_arg: float | tuple[float, ...] = sigma
+        else:
+            sig_f = float(sigma)
+            key = (ks, round(sig_f, 8))
+            sig_arg = sig_f
+        d = self._gaussian_blur_cache
+        if key in d:
+            d.move_to_end(key)
+            return d[key]
+        if len(d) >= self._GAUSSIAN_BLUR_CACHE_MAX:
+            d.popitem(last=False)
+        op = v2.GaussianBlur(ks, sigma=sig_arg)
+        d[key] = op
+        return op
 
     def run(self):
         """
@@ -2493,7 +2532,7 @@ class FrameWorker(threading.Thread):
                                 else t_img.shape[2]
                             )
                             resized_imgs_to_cat.append(
-                                v2.Resize((min_h, new_w), antialias=True)(t_img)
+                                self._get_cached_resize_bilinear_aa(min_h, new_w)(t_img)
                             )
                         else:
                             resized_imgs_to_cat.append(t_img)
@@ -3053,8 +3092,7 @@ class FrameWorker(threading.Thread):
 
             # --- Frequency Separation (Micro-details) ---
             k = max(3, (H // 32) * 2 + 1)
-            sigma = k * 0.3
-            blur_tex = v2.GaussianBlur(kernel_size=k, sigma=sigma)
+            blur_tex = self._get_cached_gaussian_blur(k, k * 0.3)
 
             low_pass_first = blur_tex(first_face)
             high_pass_first = first_face - low_pass_first
@@ -3629,7 +3667,7 @@ class FrameWorker(threading.Thread):
         blur_kernel_size = blur_amount * 2 + 1
         if blur_kernel_size > 1:
             sigma_val = max(blur_amount * 0.15 + 0.1, 1e-6)
-            gauss = v2.GaussianBlur(blur_kernel_size, sigma=sigma_val)
+            gauss = self._get_cached_gaussian_blur(blur_kernel_size, sigma_val)
             border_mask = gauss(border_mask)
         return border_mask, border_mask_calc
 
@@ -3756,8 +3794,7 @@ class FrameWorker(threading.Thread):
             if blur_value2 > 0:
                 kernel_size = 2 * blur_value2 + 1
                 sigma = blur_value2 * 0.1
-                gaussian_blur = v2.GaussianBlur(kernel_size=kernel_size, sigma=sigma)
-                swap = gaussian_blur(swap_original2)
+                swap = self._get_cached_gaussian_blur(kernel_size, sigma)(swap_original2)
                 debug_info[debug_key] = f": {-blur_value2:.2f}"
             elif isinstance(alpha_auto2, torch.Tensor):
                 swap = swap2 * alpha_auto2 + swap_original2 * (1 - alpha_auto2)
@@ -4120,8 +4157,8 @@ class FrameWorker(threading.Thread):
                 prev_face = prev_face.permute(2, 0, 1)
 
                 if prev_face.shape[-1] != swap.shape[-1]:
-                    prev_face = v2.Resize(
-                        (swap.shape[-2], swap.shape[-1]), antialias=True
+                    prev_face = self._get_cached_resize_bilinear_aa(
+                        swap.shape[-2], swap.shape[-1]
                     )(prev_face)
 
                 swap = torch.mul(swap, alpha)
@@ -4151,7 +4188,9 @@ class FrameWorker(threading.Thread):
                 border_mask.shape[1] != current_swap_h
                 or border_mask.shape[2] != current_swap_w
             ):
-                resizer = v2.Resize((current_swap_h, current_swap_w), antialias=True)
+                resizer = self._get_cached_resize_bilinear_aa(
+                    current_swap_h, current_swap_w
+                )
                 border_mask = resizer(border_mask)
                 border_mask_calc = resizer(border_mask_calc)
             border_mask = border_mask * side_mask
@@ -4253,12 +4292,11 @@ class FrameWorker(threading.Thread):
                 overlay_rgb, overlay_mask = mouth_overlay_pkg
                 if overlay_rgb is not None and overlay_mask is not None:
                     if overlay_rgb.shape[-1] != swap.shape[-1]:
-                        overlay_rgb = v2.Resize(
-                            (swap.shape[-2], swap.shape[-1]), antialias=True
-                        )(overlay_rgb)
-                        overlay_mask = v2.Resize(
-                            (swap.shape[-2], swap.shape[-1]), antialias=True
-                        )(overlay_mask.unsqueeze(0)).squeeze(0)
+                        _r_ov = self._get_cached_resize_bilinear_aa(
+                            swap.shape[-2], swap.shape[-1]
+                        )
+                        overlay_rgb = _r_ov(overlay_rgb)
+                        overlay_mask = _r_ov(overlay_mask.unsqueeze(0)).squeeze(0)
 
                     swap = swap * (1.0 - overlay_mask) + overlay_rgb * overlay_mask
 
@@ -4327,20 +4365,20 @@ class FrameWorker(threading.Thread):
                 original_face_512=swap_restorecalc,
             )
             if mask.shape[-1] != swap_mask.shape[-1]:
-                mask = v2.Resize(
-                    (swap_mask.shape[-2], swap_mask.shape[-1]), antialias=True
+                mask = self._get_cached_resize_bilinear_aa(
+                    swap_mask.shape[-2], swap_mask.shape[-1]
                 )(mask)
             swap_mask = torch.mul(swap_mask, mask)
 
-            gauss = v2.GaussianBlur(
-                parameters["OccluderXSegBlurSlider"] * 2 + 1,
-                (parameters["OccluderXSegBlurSlider"] + 1) * 0.2,
+            _occ_blur = parameters["OccluderXSegBlurSlider"]
+            gauss = self._get_cached_gaussian_blur(
+                _occ_blur * 2 + 1, (_occ_blur + 1) * 0.2
             )
             swap_mask = gauss(swap_mask)
 
             if swap_mask_noFP.shape[-1] != swap_mask.shape[-1]:
-                swap_mask_noFP = v2.Resize(
-                    (swap_mask.shape[-2], swap_mask.shape[-1]), antialias=True
+                swap_mask_noFP = self._get_cached_resize_bilinear_aa(
+                    swap_mask.shape[-2], swap_mask.shape[-1]
                 )(swap_mask_noFP)
             swap_mask_noFP *= swap_mask
 
@@ -4367,8 +4405,8 @@ class FrameWorker(threading.Thread):
 
         if FaceParser_mask is not None:
             if FaceParser_mask.shape[-1] != swap_mask.shape[-1]:
-                FaceParser_mask = v2.Resize(
-                    (swap_mask.shape[-2], swap_mask.shape[-1]), antialias=True
+                FaceParser_mask = self._get_cached_resize_bilinear_aa(
+                    swap_mask.shape[-2], swap_mask.shape[-1]
                 )(FaceParser_mask)
             swap_mask = swap_mask * FaceParser_mask
 
@@ -4380,13 +4418,13 @@ class FrameWorker(threading.Thread):
                 parameters["ClipAmountSlider"],
             )
             if mask_clip.shape[-1] != swap_mask.shape[-1]:
-                mask_clip = v2.Resize(
-                    (swap_mask.shape[-2], swap_mask.shape[-1]), antialias=True
+                mask_clip = self._get_cached_resize_bilinear_aa(
+                    swap_mask.shape[-2], swap_mask.shape[-1]
                 )(mask_clip)
             swap_mask *= mask_clip
             if swap_mask_noFP.shape[-1] != mask_clip.shape[-1]:
-                swap_mask_noFP = v2.Resize(
-                    (mask_clip.shape[-2], mask_clip.shape[-1]), antialias=True
+                swap_mask_noFP = self._get_cached_resize_bilinear_aa(
+                    mask_clip.shape[-2], mask_clip.shape[-1]
                 )(swap_mask_noFP)
             swap_mask_noFP *= mask_clip
 
@@ -4436,12 +4474,13 @@ class FrameWorker(threading.Thread):
 
             if parameters.get("RestoreEyesMouthBlurSlider", 0) > 0:
                 b = parameters["RestoreEyesMouthBlurSlider"]
-                gauss = v2.GaussianBlur(b * 2 + 1, (b + 1) * 0.2)
-                img_swap_mask = gauss(img_swap_mask)
+                img_swap_mask = self._get_cached_gaussian_blur(
+                    b * 2 + 1, (b + 1) * 0.2
+                )(img_swap_mask)
 
             if img_swap_mask.shape[-1] != swap_mask.shape[-1]:
-                mask_resized = v2.Resize(
-                    (swap_mask.shape[-2], swap_mask.shape[-1]), antialias=True
+                mask_resized = self._get_cached_resize_bilinear_aa(
+                    swap_mask.shape[-2], swap_mask.shape[-1]
                 )(img_swap_mask)
             else:
                 mask_resized = img_swap_mask
@@ -4486,12 +4525,11 @@ class FrameWorker(threading.Thread):
             )
 
             if img_mask_256.shape[-1] != swap_mask.shape[-1]:
-                img_mask_res = v2.Resize(
-                    (swap_mask.shape[-2], swap_mask.shape[-1]), antialias=True
-                )(img_mask_256)
-                outpred_noFP_res = v2.Resize(
-                    (swap_mask.shape[-2], swap_mask.shape[-1]), antialias=True
-                )(outpred_noFP_256)
+                _r_xs = self._get_cached_resize_bilinear_aa(
+                    swap_mask.shape[-2], swap_mask.shape[-1]
+                )
+                img_mask_res = _r_xs(img_mask_256)
+                outpred_noFP_res = _r_xs(outpred_noFP_256)
             else:
                 img_mask_res = img_mask_256
                 outpred_noFP_res = outpred_noFP_256
@@ -4505,9 +4543,8 @@ class FrameWorker(threading.Thread):
             calc_mask_dill = mask_forcalc_dill_512
 
             if swap_mask_noFP.shape[-1] != outpred_noFP_res.shape[-1]:
-                swap_mask_noFP = v2.Resize(
-                    (outpred_noFP_res.shape[-2], outpred_noFP_res.shape[-1]),
-                    antialias=True,
+                swap_mask_noFP = self._get_cached_resize_bilinear_aa(
+                    outpred_noFP_res.shape[-2], outpred_noFP_res.shape[-1]
                 )(swap_mask_noFP)
 
             swap_mask_noFP = swap_mask_noFP * (1.0 - outpred_noFP_res)
@@ -4555,8 +4592,7 @@ class FrameWorker(threading.Thread):
             if blur_value > 0:
                 kernel_size = 2 * blur_value + 1
                 sigma = blur_value * 0.1
-                gaussian_blur = v2.GaussianBlur(kernel_size=kernel_size, sigma=sigma)
-                swap = gaussian_blur(swap_original)
+                swap = self._get_cached_gaussian_blur(kernel_size, sigma)(swap_original)
                 debug_info["Restore1"] = f": {-blur_value:.2f}"
             elif isinstance(alpha_auto, torch.Tensor):
                 swap = swap_restorecalc * alpha_auto + swap_original * (1 - alpha_auto)
@@ -4617,9 +4653,9 @@ class FrameWorker(threading.Thread):
             )
             is_geometry_altered = True
             if swap_mask_noFP.shape[-1] != swap.shape[-1]:
-                swap_mask = v2.Resize((swap.shape[-2], swap.shape[-1]), antialias=True)(
-                    swap_mask_noFP
-                )
+                swap_mask = self._get_cached_resize_bilinear_aa(
+                    swap.shape[-2], swap.shape[-1]
+                )(swap_mask_noFP)
             else:
                 swap_mask = swap_mask_noFP
 
@@ -4698,9 +4734,9 @@ class FrameWorker(threading.Thread):
             )
             is_geometry_altered = True
             if swap_mask_noFP.shape[-1] != swap.shape[-1]:
-                swap_mask = v2.Resize((swap.shape[-2], swap.shape[-1]), antialias=True)(
-                    swap_mask_noFP
-                )
+                swap_mask = self._get_cached_resize_bilinear_aa(
+                    swap.shape[-2], swap.shape[-1]
+                )(swap_mask_noFP)
             else:
                 swap_mask = swap_mask_noFP
 
@@ -4831,8 +4867,9 @@ class FrameWorker(threading.Thread):
                 # Optional VGG specific blur
                 if parameters.get("TextureBlendAmountSlider", 0) > 0:
                     b = parameters["TextureBlendAmountSlider"]
-                    gauss = v2.GaussianBlur(b * 2 + 1, (b + 1) * 0.2)
-                    mask_vgg_512 = gauss(mask_vgg_512.float())
+                    mask_vgg_512 = self._get_cached_gaussian_blur(
+                        b * 2 + 1, (b + 1) * 0.2
+                    )(mask_vgg_512.float())
 
             # 3. Features Exclusion Logic (Eyes, Mouth, etc.)
             if parameters.get("ExcludeMaskEnableToggle", False):
@@ -4845,8 +4882,9 @@ class FrameWorker(threading.Thread):
                     if blur_val > 0:
                         kernel_size = int(blur_val * 2 + 1)
                         sigma = max((blur_val + 1) * 0.2, 1e-6)
-                        blur_op = v2.GaussianBlur(kernel_size, sigma=sigma)
-                        feature_mask = blur_op(feature_mask)
+                        feature_mask = self._get_cached_gaussian_blur(
+                            kernel_size, sigma
+                        )(feature_mask)
 
                 # Combine VGG mask with the spatial FaceParser mask
                 if parameters.get("ExcludeOriginalVGGMaskEnableToggle", False):
@@ -4938,11 +4976,10 @@ class FrameWorker(threading.Thread):
 
             if parameters["FaceParserBlurTextureSlider"] > 0:
                 orig = mask_final_512.clone()
-                gauss = v2.GaussianBlur(
-                    parameters["FaceParserBlurTextureSlider"] * 2 + 1,
-                    (parameters["FaceParserBlurTextureSlider"] + 1) * 0.2,
-                )
-                mask_final_512 = gauss(mask_final_512.type(torch.float32))
+                _b_fp = parameters["FaceParserBlurTextureSlider"]
+                mask_final_512 = self._get_cached_gaussian_blur(
+                    _b_fp * 2 + 1, (_b_fp + 1) * 0.2
+                )(mask_final_512.type(torch.float32))
                 mask_final_512 = torch.max(mask_final_512, orig).clamp(0.0, 1.0)
             # 6. Final Blending
             # alpha_t modulates the overall strength, w determines the per-pixel application map
@@ -5009,8 +5046,9 @@ class FrameWorker(threading.Thread):
             mask512 = t512_mask(piece)
             if parameters.get("DifferencingBlendAmountSlider", 0) > 0:
                 b = parameters["DifferencingBlendAmountSlider"]
-                gauss = v2.GaussianBlur(b * 2 + 1, (b + 1) * 0.2)
-                mask512 = gauss(mask512.float())
+                mask512 = self._get_cached_gaussian_blur(b * 2 + 1, (b + 1) * 0.2)(
+                    mask512.float()
+                )
 
             mask512 = torch.max((mask512), 1 - calc_mask_dill)
             mask512 = (mask512).clamp(0, 1)
@@ -5041,9 +5079,9 @@ class FrameWorker(threading.Thread):
             is_geometry_altered = True
 
             if swap_mask_noFP.shape[-1] != swap.shape[-1]:
-                swap_mask = v2.Resize((swap.shape[-2], swap.shape[-1]), antialias=True)(
-                    swap_mask_noFP
-                )
+                swap_mask = self._get_cached_resize_bilinear_aa(
+                    swap.shape[-2], swap.shape[-1]
+                )(swap_mask_noFP)
             else:
                 swap_mask = swap_mask_noFP
 
@@ -5127,12 +5165,11 @@ class FrameWorker(threading.Thread):
                 overlay_rgb, overlay_mask = mouth_overlay_pkg
                 if overlay_rgb is not None and overlay_mask is not None:
                     if overlay_rgb.shape[-1] != swap.shape[-1]:
-                        overlay_rgb = v2.Resize(
-                            (swap.shape[-2], swap.shape[-1]), antialias=True
-                        )(overlay_rgb)
-                        overlay_mask = v2.Resize(
-                            (swap.shape[-2], swap.shape[-1]), antialias=True
-                        )(overlay_mask.unsqueeze(0)).squeeze(0)
+                        _r_ov = self._get_cached_resize_bilinear_aa(
+                            swap.shape[-2], swap.shape[-1]
+                        )
+                        overlay_rgb = _r_ov(overlay_rgb)
+                        overlay_mask = _r_ov(overlay_mask.unsqueeze(0)).squeeze(0)
 
                     swap = swap * (1.0 - overlay_mask) + overlay_rgb * overlay_mask
 
@@ -5151,8 +5188,8 @@ class FrameWorker(threading.Thread):
 
             if FaceParser_mask is not None:
                 if FaceParser_mask.shape[-1] != swap_mask.shape[-1]:
-                    FaceParser_mask = v2.Resize(
-                        (swap.shape[-2], swap.shape[-1]), antialias=True
+                    FaceParser_mask = self._get_cached_resize_bilinear_aa(
+                        swap.shape[-2], swap.shape[-1]
                     )(FaceParser_mask)
 
                 swap_mask = swap_mask * FaceParser_mask
@@ -5208,8 +5245,7 @@ class FrameWorker(threading.Thread):
             final_blur_strength = parameters["FinalBlendAmountSlider"]
             kernel_size = 2 * final_blur_strength + 1
             sigma = final_blur_strength * 0.1
-            gaussian_blur = v2.GaussianBlur(kernel_size=kernel_size, sigma=sigma)
-            swap = gaussian_blur(swap)
+            swap = self._get_cached_gaussian_blur(kernel_size, sigma)(swap)
 
         # Artefacts: Jpeg
         if parameters["JPEGCompressionEnableToggle"]:
@@ -5280,15 +5316,14 @@ class FrameWorker(threading.Thread):
             return t512_mask(swap), t512_mask(swap_mask), None
 
         # Mask Post-Processing (Final Blend)
-        gauss = v2.GaussianBlur(
-            parameters["OverallMaskBlendAmountSlider"] * 2 + 1,
-            (parameters["OverallMaskBlendAmountSlider"] + 1) * 0.2,
-        )
-        swap_mask = gauss(swap_mask)
+        _omb = parameters["OverallMaskBlendAmountSlider"]
+        swap_mask = self._get_cached_gaussian_blur(
+            _omb * 2 + 1, (_omb + 1) * 0.2
+        )(swap_mask)
 
         if border_mask.shape[-1] != swap_mask.shape[-1]:
-            border_mask = v2.Resize(
-                (swap_mask.shape[-2], swap_mask.shape[-1]), antialias=True
+            border_mask = self._get_cached_resize_bilinear_aa(
+                swap_mask.shape[-2], swap_mask.shape[-1]
             )(border_mask)
 
         swap_mask = torch.mul(swap_mask, border_mask)
@@ -5836,7 +5871,7 @@ class FrameWorker(threading.Thread):
         if smooth_kernel and smooth_kernel >= 3:
             k = smooth_kernel
             smap3 = smap.unsqueeze(0).unsqueeze(0)  # [1,1,H,W]
-            gb = v2.GaussianBlur(kernel_size=k, sigma=max(1, k // 2))
+            gb = self._get_cached_gaussian_blur(k, max(1, k // 2))
             smap = gb(smap3).squeeze(0).squeeze(0)
 
         return smap.clamp(0, 1)
