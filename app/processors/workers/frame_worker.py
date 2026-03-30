@@ -4262,6 +4262,40 @@ class FrameWorker(threading.Thread):
 
                     swap = swap * (1.0 - overlay_mask) + overlay_rgb * overlay_mask
 
+        # FW-PERF-12: same predicate as the mask/parser block below — computed early so
+        # we can skip a full 512² clone when nothing downstream needs a separate buffer.
+        need_any_parser = (
+            parameters.get("FaceParserEnableToggle", False)
+            or (
+                parameters.get("DFLXSegEnableToggle", False)
+                and (
+                    (
+                        parameters.get("XSegMouthEnableToggle", False)
+                        and parameters.get("DFLXSegSizeSlider", 0)
+                        != parameters.get("DFLXSeg2SizeSlider", 0)
+                    )
+                    or parameters.get("XSegExcludeInnerMouthToggle", False)
+                )
+            )
+            or (
+                (
+                    parameters.get("TransferTextureEnableToggle", False)
+                    or parameters.get("DifferencingEnableToggle", False)
+                )
+                and (parameters.get("ExcludeMaskEnableToggle", False))
+            )
+        )
+        _swap_restore_needs_clone = (
+            parameters.get("OccluderEnableToggle", False)
+            or need_any_parser
+            or (
+                parameters.get("FaceEditorEnableToggle", False)
+                and self.local_control_state_from_feeder.get("edit_enabled", True)
+                and parameters.get("FaceEditorBeforeTypeSelection", "")
+                == "After First Restorer"
+            )
+        )
+
         # --- RESTORATION 1 ---
         # FW-PERF-11: defer clone until we know it is needed (lazy snapshot)
         swap_original = None
@@ -4279,8 +4313,10 @@ class FrameWorker(threading.Thread):
                 kps_ref,
                 slot_id=1,
             )
-        else:
+        elif _swap_restore_needs_clone:
             swap_restorecalc = swap.clone()
+        else:
+            swap_restorecalc = swap
 
         # Occluder
         if parameters["OccluderEnableToggle"]:
@@ -4309,25 +4345,7 @@ class FrameWorker(threading.Thread):
             swap_mask_noFP *= swap_mask
 
         # --- MASKS (Parser / CLIPs / Restore) ---
-        need_any_parser = (
-            parameters.get("FaceParserEnableToggle", False)
-            or (
-                parameters.get("DFLXSegEnableToggle", False)
-                and (
-                    (
-                        parameters.get("XSegMouthEnableToggle", False)
-                        and parameters.get("DFLXSegSizeSlider", 0)
-                        != parameters.get("DFLXSeg2SizeSlider", 0)
-                    )
-                    or parameters.get("XSegExcludeInnerMouthToggle", False)
-                )
-            )
-            or (
-                parameters.get("TransferTextureEnableToggle", False)
-                or parameters.get("DifferencingEnableToggle", False)
-            )
-            and (parameters.get("ExcludeMaskEnableToggle", False))
-        )
+        # need_any_parser computed above (FW-PERF-12)
 
         FaceParser_mask = None
         mouth_512 = None
