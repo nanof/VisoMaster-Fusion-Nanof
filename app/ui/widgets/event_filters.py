@@ -51,6 +51,9 @@ class videoSeekSliderLineEditEventFilter(QtCore.QObject):
                 line_edit.setText(str(new_value))
                 self.main_window.videoSeekSlider.setValue(new_value)
                 self.main_window.video_processor.process_current_frame()  # Process the current frame
+                video_control_actions.resume_playback_after_seek_if_applicable(
+                    self.main_window
+                )
 
                 return True
         return False
@@ -67,10 +70,12 @@ class VideoSeekSliderEventFilter(QtCore.QObject):
                 # Allow default slider movement
                 result = super().eventFilter(slider, event)
 
-                # After the slider moves, call the custom processing function
-                QtCore.QTimer.singleShot(
-                    0, self.main_window.video_processor.process_current_frame
-                )
+                def _after_key_frame_seek():
+                    mw = self.main_window
+                    mw.video_processor.process_current_frame()
+                    video_control_actions.resume_playback_after_seek_if_applicable(mw)
+
+                QtCore.QTimer.singleShot(0, _after_key_frame_seek)
 
                 return result  # Return the result of the default handling
 

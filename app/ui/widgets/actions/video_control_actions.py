@@ -520,6 +520,7 @@ def move_slider_to_nearest_marker(main_window: "MainWindow", direction: str):
     if new_position is not None:
         main_window.videoSeekSlider.setValue(new_position)
         main_window.video_processor.process_current_frame()
+        resume_playback_after_seek_if_applicable(main_window)
 
 
 # Wrappers for specific directions
@@ -894,6 +895,7 @@ def _move_slider_to_nearest_issue(main_window: "MainWindow", direction: str):
     if new_position is not None:
         main_window.videoSeekSlider.setValue(new_position)
         main_window.video_processor.process_current_frame()
+        resume_playback_after_seek_if_applicable(main_window)
 
 
 def move_slider_to_next_issue(main_window: "MainWindow"):
@@ -1258,6 +1260,7 @@ def advance_video_slider_by_n_frames(main_window: "MainWindow", n=None):
         main_window.video_processor.process_current_frame(
             synchronous=is_single_frame_step
         )
+        resume_playback_after_seek_if_applicable(main_window)
 
 
 def rewind_video_slider_by_n_frames(main_window: "MainWindow", n=None):
@@ -1288,6 +1291,7 @@ def rewind_video_slider_by_n_frames(main_window: "MainWindow", n=None):
         main_window.video_processor.process_current_frame(
             synchronous=is_single_frame_step
         )
+        resume_playback_after_seek_if_applicable(main_window)
 
 
 def delete_all_markers(main_window: "MainWindow"):
@@ -1749,6 +1753,34 @@ def set_record_button_icon(main_window: "MainWindow"):
         main_window.buttonMediaRecord.setToolTip("Start Recording")
 
 
+def resume_playback_after_seek_if_applicable(main_window: "MainWindow") -> None:
+    """
+    If the user was playing a video file (not recording / not segment mode) before a
+    seek, restart playback after the seek completes. Slider drags use
+    `_seek_gesture_had_playback`; programmatic slider changes use
+    `_resume_playback_after_seek_pending` (set from on_change when the slider is not
+    being dragged).
+    """
+    gesture = getattr(main_window, "_seek_gesture_had_playback", False)
+    pending = getattr(main_window, "_resume_playback_after_seek_pending", False)
+    should_resume = gesture or pending
+    main_window._seek_gesture_had_playback = False
+    main_window._resume_playback_after_seek_pending = False
+    if not should_resume:
+        return
+    vp = main_window.video_processor
+    if vp.file_type != "video" or vp.processing:
+        return
+    if not vp.media_capture or not vp.media_capture.isOpened():
+        return
+    if vp.current_frame_number >= vp.max_frame_number:
+        return
+    main_window.buttonMediaPlay.blockSignals(True)
+    main_window.buttonMediaPlay.setChecked(True)
+    main_window.buttonMediaPlay.blockSignals(False)
+    play_video(main_window, True)
+
+
 def apply_av1_scrub_preview_frame(
     main_window: "MainWindow", frame_num: int, frame_bgr: Any
 ) -> None:
@@ -1781,6 +1813,12 @@ def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
     # print("Called on_change_video_seek_slider()")
     video_processor = main_window.video_processor
 
+    playback_was_active_before_seek = (
+        video_processor.file_type == "video"
+        and video_processor.processing
+        and not video_processor.recording
+        and not video_processor.is_processing_segments
+    )
     was_processing = video_processor.stop_processing()
     if was_processing:
         print("[WARN] Processing in progress. Stopping current processing.")
@@ -1788,6 +1826,8 @@ def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
     video_processor.current_frame_number = new_position
     video_processor.next_frame_to_display = new_position
     update_drop_frame_button_label(main_window)
+    if not main_window.videoSeekSlider.isSliderDown() and playback_was_active_before_seek:
+        main_window._resume_playback_after_seek_pending = True
     if video_processor.media_capture:
         slider_down = main_window.videoSeekSlider.isSliderDown()
         use_av1_light_scrub = (
@@ -1846,8 +1886,6 @@ def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
     # but fast scrubbing does not cause lag or skip marker updates.
     if not main_window.videoSeekSlider.isSliderDown():
         run_post_seek_actions(main_window, new_position)
-    # Do not automatically restart the video, let the user press Play to resume
-    # print("on_change_video_seek_slider: Video stopped after slider movement.")
 
 
 def _get_marker_data_for_position(
@@ -1959,9 +1997,14 @@ def on_slider_moved(main_window: "MainWindow"):
 
 
 def on_slider_pressed(main_window: "MainWindow"):
-    """Slot connected to sliderPressed; currently a no-op placeholder for future press-time logic."""
-    main_window.videoSeekSlider.value()
-    # print(f"\nSlider Pressed. position: {position}\n")
+    """Slot connected to sliderPressed; records whether playback was active before a drag seek."""
+    vp = main_window.video_processor
+    main_window._seek_gesture_had_playback = (
+        vp.file_type == "video"
+        and vp.processing
+        and not vp.recording
+        and not vp.is_processing_segments
+    )
 
 
 def run_post_seek_actions(main_window: "MainWindow", new_position: int):
@@ -2018,6 +2061,7 @@ def on_slider_released(main_window: "MainWindow"):
         # This is the heavy processing call that runs the AI models (swap, etc.)
         # It will now use the correct faces and parameters from the functions above.
         video_processor.process_current_frame()
+    resume_playback_after_seek_if_applicable(main_window)
 
 
 def process_swap_faces(main_window: "MainWindow"):
