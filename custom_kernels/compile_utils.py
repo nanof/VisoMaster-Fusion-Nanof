@@ -241,7 +241,11 @@ def apply_torch_compile(model: nn.Module, example_inp: torch.Tensor, warmup: int
         cache_dir = os.environ.get("TORCHINDUCTOR_CACHE_DIR") or None
         cache_ready = _ensure_compile_cache_subprocess(model, example_inp, warmup, extra_args, extra_kwargs, compile_mode, cache_dir)
         if cache_ready is None:
-            raise RuntimeError(f"torch.compile fatally failed for {type(model).__name__} (Triton AV).")
+            # Worker subprocess failed (AV, OOM, Triton/ptxas, etc.) or sentinel "fatal".
+            raise RuntimeError(
+                f"torch.compile skipped for {type(model).__name__}: "
+                "Inductor worker failed or cache marked fatal (see [compile_utils] lines above)."
+            )
         if not cache_ready:
             _need_sentinel = True
 

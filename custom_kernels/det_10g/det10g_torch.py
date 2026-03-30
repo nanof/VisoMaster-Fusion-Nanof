@@ -28,6 +28,9 @@ on every layer when weights are in NCHW format.
 from __future__ import annotations
 
 import threading
+
+# Log torch.compile fallback at most once per process (fatal sentinel triggers every load).
+_det10g_torch_compile_fallback_logged: bool = False
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -520,6 +523,13 @@ def build_cuda_graph_runner(
             # Det10gGraphRunner's per-shape CUDA graph also fails; compiled model is used.
             return compiled
         except Exception as e:
-            print(f"[det_10g] torch.compile failed ({e!s:.120}), falling back to CUDA graph.")
+            global _det10g_torch_compile_fallback_logged
+            if not _det10g_torch_compile_fallback_logged:
+                _det10g_torch_compile_fallback_logged = True
+                print(
+                    "[det_10g] torch.compile disabled this session; using CUDA graph "
+                    f"(RetinaFace remains fast). Reason: {e!s:.220}",
+                    flush=True,
+                )
 
     return Det10gGraphRunner(model)

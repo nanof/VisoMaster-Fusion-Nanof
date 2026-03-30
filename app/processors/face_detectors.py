@@ -1,3 +1,4 @@
+import os
 import threading
 import math
 from typing import TYPE_CHECKING, Dict, Any, Optional
@@ -11,6 +12,13 @@ if TYPE_CHECKING:
     from app.processors.models_processor import ModelsProcessor
 
 from app.processors.utils import faceutil
+
+
+def _env_torch_compile_enabled() -> bool:
+    """VISIOMASTER_TORCH_COMPILE=0 skips Inductor subprocess (faster boot if compile fails)."""
+    v = os.environ.get("VISIOMASTER_TORCH_COMPILE", "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
 
 try:
     from app.processors.external.yolox.tracker.byte_tracker import BYTETracker
@@ -475,7 +483,8 @@ class FaceDetectors:
 
                     with self.models_processor.cuda_graph_capture_lock:
                         self._det10g_runner = build_cuda_graph_runner(
-                            self._det10g_torch, torch_compile=True
+                            self._det10g_torch,
+                            torch_compile=_env_torch_compile_enabled(),
                         )
                 except Exception as e:
                     print(f"[Custom] det_10g graph runner failed, using eager: {e}")
@@ -524,7 +533,8 @@ class FaceDetectors:
 
                     with self.models_processor.cuda_graph_capture_lock:
                         self._yolo_runner = build_cuda_graph_runner(
-                            self._yolo_torch, torch_compile=True
+                            self._yolo_torch,
+                            torch_compile=_env_torch_compile_enabled(),
                         )
                 except Exception as e:
                     print(f"[Custom] yoloface_8n graph runner failed, using eager: {e}")

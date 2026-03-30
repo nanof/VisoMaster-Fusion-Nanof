@@ -1,9 +1,11 @@
 import traceback
 from typing import TYPE_CHECKING, Any, Dict, Optional, cast
+import os
 import threading
 import queue
 import copy
 import math
+import time
 from math import ceil
 from app.ui.widgets import widget_components
 import torch
@@ -39,6 +41,10 @@ if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
 
 torchvision.disable_beta_transforms_warning()
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 class FrameWorker(threading.Thread):
@@ -418,10 +424,26 @@ class FrameWorker(threading.Thread):
                     if not self.frame.flags["C_CONTIGUOUS"]:
                         self.frame = np.ascontiguousarray(self.frame)
 
+                    _perf_log = _env_flag("VISIOMASTER_PERF_LOG")
+                    _t0 = time.perf_counter() if _perf_log else 0.0
+
                     # Process Frame (returns BGR, uint8)
                     processed_frame_bgr_np_uint8 = self.process_frame(
                         local_control_state, self.stop_event
                     )
+
+                    if _perf_log:
+                        if (
+                            self.models_processor.device == "cuda"
+                            and torch.cuda.is_available()
+                        ):
+                            torch.cuda.synchronize()
+                        _ms = (time.perf_counter() - _t0) * 1000.0
+                        print(
+                            f"[PERF] frame={self.frame_number} "
+                            f"process_frame_ms={_ms:.2f} worker={self.name}",
+                            flush=True,
+                        )
 
                     # Ensure output is C-contiguous for Qt display
                     self.frame = np.ascontiguousarray(processed_frame_bgr_np_uint8)
@@ -3098,7 +3120,11 @@ class FrameWorker(threading.Thread):
         use_mode_2 = parameters.get("StrengthMode2EnableToggle", False)
 
         if swapper_model == "Inswapper128":
-            _use_batched = False
+            # Custom provider: one batched forward for all pixel-shift tiles (dim>1).
+            # ORT/TRT stay per-tile — IOBinding is fixed batch 1.
+            _use_batched = (
+                self.models_processor.provider_name == "Custom" and dim > 1
+            )
 
             for k in range(itex):
                 prev_face = (
@@ -3123,9 +3149,6 @@ class FrameWorker(threading.Thread):
                     self.models_processor.run_inswapper_batched(
                         batch_input, latent, batch_output
                     )
-
-                    if self.models_processor.device == "cuda":
-                        torch.cuda.current_stream().synchronize()
 
                     # Replace any near-zero output tile with the input tile
                     tile_sums = batch_output.abs().sum(dim=(1, 2, 3))
@@ -3188,7 +3211,12 @@ class FrameWorker(threading.Thread):
                                 tile_inputs[idx], latent, tile_outputs[idx]
                             )
 
-                    if self.models_processor.device == "cuda":
+                    # Custom: run_inswapper already syncs after each tile (B=1 lock path).
+                    # ORT/TRT: need one barrier before .sum() / CPU reads of tile outputs.
+                    if (
+                        self.models_processor.device == "cuda"
+                        and self.models_processor.provider_name != "Custom"
+                    ):
                         torch.cuda.current_stream().synchronize()
 
                     # --- MODE 2 ---
@@ -3268,8 +3296,8 @@ class FrameWorker(threading.Thread):
                             tile_inputs[idx], latent, tile_outputs[idx], version
                         )
 
-                if self.models_processor.device == "cuda":
-                    torch.cuda.current_stream().synchronize()
+                # ORT/TRT Run() completes each tile before return; first .sum()/.max()
+                # below already serializes the stream — avoid an extra global barrier.
 
                 # --- MODE 2 ---
                 if use_mode_2:
@@ -3333,9 +3361,6 @@ class FrameWorker(threading.Thread):
                     input_face_disc, latent, swapper_output
                 )
 
-                if self.models_processor.device == "cuda":
-                    torch.cuda.current_stream().synchronize()
-
                 # FW-BUG-08: use abs().max() instead of sum() for zero-face heuristic
                 if swapper_output.abs().max() < 1e-4:
                     swapper_output = input_face_disc
@@ -3386,9 +3411,6 @@ class FrameWorker(threading.Thread):
                 self.models_processor.run_swapper_ghostface(
                     input_face_disc, latent, swapper_output, swapper_model
                 )
-
-                if self.models_processor.device == "cuda":
-                    torch.cuda.current_stream().synchronize()
 
                 swapper_output = swapper_output[0]
                 # FW-BUG-11: use abs().mean() instead of sum() for zero-output heuristic
@@ -3449,9 +3471,6 @@ class FrameWorker(threading.Thread):
                 self.models_processor.run_swapper_cscs(
                     input_face_disc, latent, swapper_output
                 )
-
-                if self.models_processor.device == "cuda":
-                    torch.cuda.current_stream().synchronize()
 
                 swapper_output = torch.squeeze(swapper_output)
                 swapper_output = torch.add(torch.mul(swapper_output, 0.5), 0.5)

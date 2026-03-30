@@ -22,7 +22,6 @@ class FaceSwappers:
         self._inswapper_init_lock = threading.Lock()
         self._w600k_lock = threading.Lock()
         self._inswapper_b1_lock = threading.Lock()
-        self._inswapper_batched_lock = threading.Lock()
         self._inswapper_torch = None  # InSwapperTorch instance
         self._inswapper_runner_b1: Optional[object] = None  # CUDA graph runner for B=1
         self._w600k_torch: Optional[object] = None  # IResNet50Torch
@@ -696,8 +695,18 @@ class FaceSwappers:
 
         torch_model = self._get_inswapper_torch()
         with torch.no_grad():
-            result = torch_model(images, embedding)  # [B, 3, 128, 128] float32
-        output.copy_(result)
+            # Same lock as B=1 CUDA-graph path: one shared InSwapperTorch instance.
+            with self._inswapper_b1_lock:
+                inp = images if images.is_contiguous() else images.contiguous()
+                emb = (
+                    embedding
+                    if embedding.is_contiguous()
+                    else embedding.contiguous()
+                )
+                result = torch_model(inp, emb)  # [B, 3, 128, 128] float32
+                output.copy_(result)
+                if self.models_processor.device == "cuda":
+                    torch.cuda.current_stream().synchronize()
 
     def calc_swapper_latent_ghost(self, source_embedding):
         latent = source_embedding.reshape((1, -1))
