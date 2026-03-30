@@ -1,6 +1,7 @@
 import os
 import threading
 import math
+from collections import OrderedDict
 from typing import TYPE_CHECKING, Dict, Any, Optional
 
 import torch
@@ -97,6 +98,12 @@ class FaceDetectors:
         self._tracker_lock = threading.Lock()
         self.lambda_s = 0.3  # Smoothing factor for cumulative scores
 
+        # LRU v2.Resize for _prepare_detection_image (aspect-ratio-dependent H×W per frame).
+        self._det_prep_resize_cache: OrderedDict[tuple[int, int], v2.Resize] = (
+            OrderedDict()
+        )
+        self._DET_PREP_RESIZE_CACHE_MAX = 32
+
         # This map links a detector name (from the UI) to its model file and processing function.
         self.detector_map: Dict[str, Dict[str, Any]] = {
             "RetinaFace": {
@@ -114,6 +121,20 @@ class FaceDetectors:
             if r_id not in self._runner_locks:
                 self._runner_locks[r_id] = threading.Lock()
             return self._runner_locks[r_id]
+
+    def _get_cached_resize_det_prep(self, new_height: int, new_width: int) -> v2.Resize:
+        """LRU v2.Resize for detection tensor prep (default bilinear, antialias=True)."""
+        hi, wi = int(new_height), int(new_width)
+        key = (hi, wi)
+        d = self._det_prep_resize_cache
+        if key in d:
+            d.move_to_end(key)
+            return d[key]
+        if len(d) >= self._DET_PREP_RESIZE_CACHE_MAX:
+            d.popitem(last=False)
+        op = v2.Resize((hi, wi), antialias=True)
+        d[key] = op
+        return op
 
     def _prepare_detection_image(
         self, img: torch.Tensor, input_size: tuple, normalization_mode: str
@@ -143,7 +164,7 @@ class FaceDetectors:
             new_height / float(img_height), device=self.models_processor.device
         )
 
-        resize = v2.Resize((new_height, new_width), antialias=True)
+        resize = self._get_cached_resize_det_prep(new_height, new_width)
         resized_img = resize(img)
 
         # --- OPTIMIZATION: Native Zero-Copy Padding ---

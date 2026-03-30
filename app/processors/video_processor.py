@@ -181,6 +181,12 @@ class VideoProcessor(QObject):
             None  # torch.cuda.Stream() if torch.cuda.is_available() else None
         )
 
+        # Main thread writes, feeder thread reads: skip GPU face detect when preview is idle.
+        self._feeder_ui_swap_enabled: bool = True
+        self._feeder_ui_edit_enabled: bool = True
+        self._feeder_ui_face_compare: bool = False
+        self._feeder_ui_face_mask: bool = False
+
         # --- Default Recording State ---
         self.temp_file: str = ""  # Temporary video file (without audio)
         # Counters for accurate duration calculation
@@ -414,12 +420,54 @@ class VideoProcessor(QObject):
             )
             return None
 
+    def sync_feeder_ui_face_flags_from_main_window(self) -> None:
+        """Call from the Qt main thread only. Updates flags read by the feeder detection fast-path."""
+        mw = self.main_window
+        self._feeder_ui_swap_enabled = mw.swapfacesButton.isChecked()
+        self._feeder_ui_edit_enabled = mw.editFacesButton.isChecked()
+        self._feeder_ui_face_compare = mw.faceCompareCheckBox.isChecked()
+        self._feeder_ui_face_mask = mw.faceMaskCheckBox.isChecked()
+
+    def _sequential_detection_required(
+        self,
+        local_control_for_worker: dict,
+        local_params_for_worker: dict | None,
+    ) -> bool:
+        """True if the feeder must run GPU face detection for this frame."""
+        if self._feeder_ui_swap_enabled or self._feeder_ui_edit_enabled:
+            return True
+        if self._feeder_ui_face_compare or self._feeder_ui_face_mask:
+            return True
+        if local_control_for_worker.get(
+            "FaceEditorEnableToggle", False
+        ) or local_control_for_worker.get("FaceExpressionEnableBothToggle", False):
+            return True
+        if local_control_for_worker.get("ModeEnableToggle", False):
+            return True
+        if local_params_for_worker:
+            for face_params in local_params_for_worker.values():
+                if not isinstance(face_params, dict):
+                    continue
+                if (
+                    face_params.get("FaceEditorEnableToggle", False)
+                    or face_params.get("FaceExpressionEnableBothToggle", False)
+                    or face_params.get("AutoMouthExpressionEnableToggle", False)
+                    or face_params.get("FaceMakeupEnableToggle", False)
+                    or face_params.get("HairMakeupEnableToggle", False)
+                    or face_params.get("EyeBrowsMakeupEnableToggle", False)
+                    or face_params.get("LipsMakeupEnableToggle", False)
+                ):
+                    return True
+        return False
+
     def _run_sequential_detection(
         self,
         frame_rgb: numpy.ndarray,
         local_control_for_worker: dict,
         local_params_for_worker: dict | None = None,
         frame_tensor: torch.Tensor | None = None,
+        *,
+        force_detection: bool = False,
     ):
         """
         Runs face detection sequentially in the feeder thread to guarantee
@@ -429,6 +477,16 @@ class VideoProcessor(QObject):
         # VR180 requires specialized spherical detection in the FrameWorker, skip sequential here.
         if local_control_for_worker.get("VR180ModeEnableToggle", False):
             return None, None, None
+
+        if not force_detection and not self._sequential_detection_required(
+            local_control_for_worker, local_params_for_worker
+        ):
+            self.last_detected_faces = []
+            return (
+                numpy.empty((0, 4), dtype=numpy.float32),
+                numpy.empty((0, 5, 2), dtype=numpy.float32),
+                numpy.empty((0, 68, 2), dtype=numpy.float32),
+            )
 
         import contextlib
 
@@ -1317,6 +1375,8 @@ class VideoProcessor(QObject):
         with self.state_lock:
             self.feeder_parameters = copy.deepcopy(self.main_window.parameters)
             self.feeder_control = copy.deepcopy(self.main_window.control)
+
+        self.sync_feeder_ui_face_flags_from_main_window()
 
         # Seed global PyTorch/CUDA RNG once per video session from the denoiser seed
         # slider. This ensures reproducible denoiser output for the whole video without
@@ -2997,6 +3057,7 @@ class VideoProcessor(QObject):
                         local_control,
                         local_params,
                         frame_tensor=frame_tensor,
+                        force_detection=True,
                     )
                     detected_embeddings: list[numpy.ndarray] = []
                     if (
@@ -4232,6 +4293,7 @@ class VideoProcessor(QObject):
         with self.state_lock:
             self.feeder_parameters = self.main_window.parameters.copy()
             self.feeder_control = self.main_window.control.copy()
+        self.sync_feeder_ui_face_flags_from_main_window()
         print(
             f"[INFO] Starting feeder thread (Mode: segment {self.current_segment_index})..."
         )
@@ -4826,6 +4888,7 @@ class VideoProcessor(QObject):
         self.processing = True
         self.is_processing_segments = False
         self.recording = False
+        self.sync_feeder_ui_face_flags_from_main_window()
 
         # 6. Clear Containers
         self.frames_to_display.clear()

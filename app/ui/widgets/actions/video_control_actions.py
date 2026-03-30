@@ -1984,6 +1984,7 @@ def process_swap_faces(main_window: "MainWindow"):
     call processEvents() so the dialog paints even while the main thread is occupied.
     """
     video_processor = main_window.video_processor
+    video_processor.sync_feeder_ui_face_flags_from_main_window()
     video_processor.process_current_frame(synchronous=True)
 
 
@@ -1993,12 +1994,15 @@ def process_edit_faces(main_window: "MainWindow"):
     Runs synchronously for the same reason as process_swap_faces.
     """
     video_processor = main_window.video_processor
+    video_processor.sync_feeder_ui_face_flags_from_main_window()
     video_processor.process_current_frame(synchronous=True)
 
 
 def process_compare_checkboxes(main_window: "MainWindow"):
     """Triggers a single-frame re-process and view resize after a compare/mask checkbox changes."""
-    main_window.video_processor.process_current_frame()
+    vp = main_window.video_processor
+    vp.sync_feeder_ui_face_flags_from_main_window()
+    vp.process_current_frame()
     layout_actions.fit_image_to_view_onchange(main_window)
 
 

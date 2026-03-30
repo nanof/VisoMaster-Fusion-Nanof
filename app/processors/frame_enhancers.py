@@ -1,4 +1,5 @@
 import math
+from collections import OrderedDict
 from typing import TYPE_CHECKING
 
 import torch
@@ -43,6 +44,9 @@ class FrameEnhancers:
             "DDColor-Artistic": "DDColorArt",
             "DDColor": "DDcolor",
         }
+        # LRU v2.Resize for enhance_core (dynamic output sizes; bilinear, antialias=False).
+        self._enhance_resize_cache: OrderedDict[tuple, v2.Resize] = OrderedDict()
+        self._ENHANCE_RESIZE_CACHE_MAX = 48
 
     def unload_models(self):
         """
@@ -393,6 +397,27 @@ class FrameEnhancers:
         """
         self._run_enhancer_model("DDcolor", image, output)
 
+    def _get_cached_resize_enhance(
+        self,
+        h: int,
+        w: int,
+        *,
+        interpolation: v2.InterpolationMode = v2.InterpolationMode.BILINEAR,
+        antialias: bool = False,
+    ) -> v2.Resize:
+        """LRU v2.Resize keyed by (H, W, interpolation, antialias)."""
+        hi, wi = int(h), int(w)
+        key = (hi, wi, interpolation, antialias)
+        d = self._enhance_resize_cache
+        if key in d:
+            d.move_to_end(key)
+            return d[key]
+        if len(d) >= self._ENHANCE_RESIZE_CACHE_MAX:
+            d.popitem(last=False)
+        op = v2.Resize((hi, wi), interpolation=interpolation, antialias=antialias)
+        d[key] = op
+        return op
+
     def enhance_core(self, img, control):
         enhancer_type = control["FrameEnhancerTypeSelection"]
 
@@ -436,8 +461,9 @@ class FrameEnhancers:
                 # Blend
                 alpha = float(control["FrameEnhancerBlendSlider"]) / 100.0
 
-                t_scale = v2.Resize(
-                    (img.shape[1] * scale, img.shape[2] * scale),
+                t_scale = self._get_cached_resize_enhance(
+                    img.shape[1] * scale,
+                    img.shape[2] * scale,
                     interpolation=v2.InterpolationMode.BILINEAR,
                     antialias=False,
                 )
@@ -452,8 +478,9 @@ class FrameEnhancers:
                 render_factor = 384  # 12 * 32 | highest quality = 20 * 32 == 640
 
                 _, h, w = img.shape
-                t_resize_i = v2.Resize(
-                    (render_factor, render_factor),
+                t_resize_i = self._get_cached_resize_enhance(
+                    render_factor,
+                    render_factor,
                     interpolation=v2.InterpolationMode.BILINEAR,
                     antialias=False,
                 )
@@ -477,8 +504,11 @@ class FrameEnhancers:
                         self.models_processor.run_deoldify_video(image, output)
 
                 output = torch.squeeze(output)
-                t_resize_o = v2.Resize(
-                    (h, w), interpolation=v2.InterpolationMode.BILINEAR, antialias=False
+                t_resize_o = self._get_cached_resize_enhance(
+                    h,
+                    w,
+                    interpolation=v2.InterpolationMode.BILINEAR,
+                    antialias=False,
                 )
                 output = t_resize_o(output)
 
@@ -515,8 +545,9 @@ class FrameEnhancers:
                 orig_l = orig_l[0:1, :, :]  # (1, h, w)
 
                 # Resize per il modello
-                t_resize_i = v2.Resize(
-                    (render_factor, render_factor),
+                t_resize_i = self._get_cached_resize_enhance(
+                    render_factor,
+                    render_factor,
                     interpolation=v2.InterpolationMode.BILINEAR,
                     antialias=False,
                 )
@@ -568,8 +599,9 @@ class FrameEnhancers:
 
                 output_ab = output_ab.squeeze(0)  # (2, render_factor, render_factor)
 
-                t_resize_o = v2.Resize(
-                    (img.size(1), img.size(2)),
+                t_resize_o = self._get_cached_resize_enhance(
+                    img.size(1),
+                    img.size(2),
                     interpolation=v2.InterpolationMode.BILINEAR,
                     antialias=False,
                 )
