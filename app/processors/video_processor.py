@@ -1,5 +1,6 @@
 import threading
 import queue
+from collections import OrderedDict
 from typing import TYPE_CHECKING, Any, Dict, Tuple, Optional, cast, List
 import time
 import subprocess
@@ -20,7 +21,7 @@ import copy
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
 # Internal project imports
-from app.processors.workers.frame_worker import FrameWorker
+from app.processors.workers.frame_worker import FrameWorker, _env_flag
 from app.ui.widgets.actions import graphics_view_actions
 from app.ui.widgets.actions import common_actions as common_widget_actions
 from app.ui.widgets.actions import video_control_actions
@@ -40,6 +41,26 @@ if TYPE_CHECKING:
 
 IssueScanTargetEmbeddings = dict[str, dict[str, numpy.ndarray]]
 IssueScanTargetSnapshot = dict[str, dict[str, Any]]
+
+
+def _bbox_iou_xyxy(a: numpy.ndarray, b: numpy.ndarray) -> float:
+    """IoU for two boxes [x1,y1,x2,y2] in pixel space."""
+    a = numpy.asarray(a, dtype=numpy.float64).reshape(-1)
+    b = numpy.asarray(b, dtype=numpy.float64).reshape(-1)
+    if a.shape[0] < 4 or b.shape[0] < 4:
+        return 0.0
+    x1 = max(float(a[0]), float(b[0]))
+    y1 = max(float(a[1]), float(b[1]))
+    x2 = min(float(a[2]), float(b[2]))
+    y2 = min(float(a[3]), float(b[3]))
+    iw = max(0.0, x2 - x1)
+    ih = max(0.0, y2 - y1)
+    inter = iw * ih
+    aw = max(0.0, float(a[2]) - float(a[0])) * max(0.0, float(a[3]) - float(a[1]))
+    bw = max(0.0, float(b[2]) - float(b[0])) * max(0.0, float(b[3]) - float(b[1]))
+    union = aw + bw - inter + 1e-6
+    return float(inter / union)
+
 
 TAIL_TOLERANCE = 30  # BUG-07: 10 was too tight — codec trailing B-frames can cause read
 # failures in the last ~10 frames on H.264/H.265 content, dropping valid end frames.
@@ -230,6 +251,13 @@ class VideoProcessor(QObject):
         # Fallback frame cached during slider seek preview so process_current_frame()
         # can use it when the near-EOF re-read fails (OpenCV seek unreliability).
         self._seek_cached_frame: Optional[Tuple[int, numpy.ndarray]] = None
+
+        # Consecutive-frame ArcFace cache: key (frame_num, face_idx) — video pool only.
+        self._recognition_cache_by_frame: "OrderedDict[tuple[int, int], dict[str, Any]]" = (
+            OrderedDict()
+        )
+        self._recognition_cache_max: int = 256
+        self._recognition_cache_lock = threading.Lock()
         self.webcam_frames_to_display: queue.Queue[numpy.ndarray] = (
             queue.Queue()
         )  # Processed webcam frames
@@ -427,6 +455,62 @@ class VideoProcessor(QObject):
         self._feeder_ui_edit_enabled = mw.editFacesButton.isChecked()
         self._feeder_ui_face_compare = mw.faceCompareCheckBox.isChecked()
         self._feeder_ui_face_mask = mw.faceMaskCheckBox.isChecked()
+
+    def clear_recognition_embedding_cache(self) -> None:
+        with self._recognition_cache_lock:
+            self._recognition_cache_by_frame.clear()
+
+    def try_reuse_recognition_embedding(
+        self,
+        frame_num: int,
+        face_idx: int,
+        bbox: numpy.ndarray,
+        kps_5: numpy.ndarray,
+        model: str,
+        sim_type: str,
+    ) -> numpy.ndarray | None:
+        """Reuse embedding from (F-1, same face index) when bbox/kps are stable."""
+        if frame_num <= 0:
+            return None
+        prev_key = (frame_num - 1, face_idx)
+        with self._recognition_cache_lock:
+            prev = self._recognition_cache_by_frame.get(prev_key)
+            if prev is None:
+                return None
+            if prev["model"] != model or prev["sim"] != sim_type:
+                return None
+            if _bbox_iou_xyxy(bbox, prev["bbox"]) < 0.88:
+                return None
+            if numpy.max(numpy.abs(kps_5.astype(numpy.float32) - prev["kps_5"])) > 4.0:
+                return None
+            return cast(numpy.ndarray, prev["emb"])
+
+    def store_recognition_embedding(
+        self,
+        frame_num: int,
+        face_idx: int,
+        bbox: numpy.ndarray,
+        kps_5: numpy.ndarray,
+        emb: numpy.ndarray,
+        model: str,
+        sim_type: str,
+    ) -> None:
+        if frame_num <= 0:
+            return
+        emb_c = numpy.asarray(emb, dtype=numpy.float32).copy()
+        row = {
+            "bbox": numpy.asarray(bbox, dtype=numpy.float32).copy(),
+            "kps_5": numpy.asarray(kps_5, dtype=numpy.float32).copy(),
+            "emb": emb_c,
+            "model": model,
+            "sim": sim_type,
+        }
+        store_key = (frame_num, face_idx)
+        with self._recognition_cache_lock:
+            self._recognition_cache_by_frame[store_key] = row
+            self._recognition_cache_by_frame.move_to_end(store_key)
+            while len(self._recognition_cache_by_frame) > self._recognition_cache_max:
+                self._recognition_cache_by_frame.popitem(last=False)
 
     def _sequential_detection_required(
         self,
@@ -961,9 +1045,23 @@ class VideoProcessor(QObject):
                 frame_rgb = numpy.ascontiguousarray(frame_bgr[..., ::-1])
 
                 # --- Inject Sequential Detection ---
+                _perf_stages_feed = _env_flag("VISIOMASTER_PERF_STAGES")
+                _t_seq_det = time.perf_counter()
                 bboxes, kpss_5, kpss = self._run_sequential_detection(
                     frame_rgb, local_control_for_worker, local_params_for_worker
                 )
+                if _perf_stages_feed:
+                    if (
+                        self.main_window.models_processor.device == "cuda"
+                        and torch.cuda.is_available()
+                    ):
+                        torch.cuda.synchronize()
+                    _det_ms = (time.perf_counter() - _t_seq_det) * 1000.0
+                    print(
+                        f"[PERF-STAGES] frame={frame_num_to_process} role=feeder "
+                        f"sequential_detect_ms={_det_ms:.2f}",
+                        flush=True,
+                    )
 
                 # The worker will use the feeder's state *from this exact moment*
                 task = (
@@ -1037,9 +1135,23 @@ class VideoProcessor(QObject):
                     local_control_for_worker = self.main_window.control.copy()
 
                 # --- Inject Sequential Detection ---
+                _perf_stages_wcam = _env_flag("VISIOMASTER_PERF_STAGES")
+                _t_seq_det_w = time.perf_counter()
                 bboxes, kpss_5, kpss = self._run_sequential_detection(
                     frame_rgb, local_control_for_worker, local_params_for_worker
                 )
+                if _perf_stages_wcam:
+                    if (
+                        self.main_window.models_processor.device == "cuda"
+                        and torch.cuda.is_available()
+                    ):
+                        torch.cuda.synchronize()
+                    _det_ms_w = (time.perf_counter() - _t_seq_det_w) * 1000.0
+                    print(
+                        f"[PERF-STAGES] frame=webcam role=feeder "
+                        f"sequential_detect_ms={_det_ms_w:.2f}",
+                        flush=True,
+                    )
 
                 # Create the 7-tuple task
                 task = (
@@ -1377,6 +1489,7 @@ class VideoProcessor(QObject):
             self.feeder_control = copy.deepcopy(self.main_window.control)
 
         self.sync_feeder_ui_face_flags_from_main_window()
+        self.clear_recognition_embedding_cache()
 
         # Seed global PyTorch/CUDA RNG once per video session from the denoiser seed
         # slider. This ensures reproducible denoiser output for the whole video without
@@ -1807,6 +1920,7 @@ class VideoProcessor(QObject):
         # VP-24: We clear the queue and then send poison pills to wake workers
         # blocked on queue.get().
         self.frames_to_display.clear()
+        self.clear_recognition_embedding_cache()
         self._seek_cached_frame = None  # release seek-preview frame (~6–25 MB at HD/4K)
         self.webcam_frames_to_display.queue.clear()
         with self.frame_queue.mutex:
@@ -4294,6 +4408,7 @@ class VideoProcessor(QObject):
             self.feeder_parameters = self.main_window.parameters.copy()
             self.feeder_control = self.main_window.control.copy()
         self.sync_feeder_ui_face_flags_from_main_window()
+        self.clear_recognition_embedding_cache()
         print(
             f"[INFO] Starting feeder thread (Mode: segment {self.current_segment_index})..."
         )
@@ -4889,6 +5004,7 @@ class VideoProcessor(QObject):
         self.is_processing_segments = False
         self.recording = False
         self.sync_feeder_ui_face_flags_from_main_window()
+        self.clear_recognition_embedding_cache()
 
         # 6. Clear Containers
         self.frames_to_display.clear()

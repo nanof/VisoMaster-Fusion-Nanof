@@ -47,6 +47,36 @@ def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
+class _PerfStageCollector:
+    """GPU-aware stage timings: optional cuda.synchronize() between marks."""
+
+    def __init__(self, cuda_sync: bool) -> None:
+        self.cuda_sync = cuda_sync
+        self._t0 = time.perf_counter()
+        self._last = self._t0
+        self.stages: list[tuple[str, float]] = []
+
+    def mark(self, name: str) -> None:
+        if self.cuda_sync:
+            torch.cuda.synchronize()
+        now = time.perf_counter()
+        self.stages.append((name, (now - self._last) * 1000.0))
+        self._last = now
+
+    def emit(
+        self, frame_num: int, worker_name: str, label: str = "[PERF-STAGES]"
+    ) -> None:
+        if self.cuda_sync:
+            torch.cuda.synchronize()
+        total = (time.perf_counter() - self._t0) * 1000.0
+        parts = " ".join(f"{n}={ms:.2f}" for n, ms in self.stages)
+        print(
+            f"{label} frame={frame_num} worker={worker_name} "
+            f"{parts}ms total={total:.2f}ms",
+            flush=True,
+        )
+
+
 class FrameWorker(threading.Thread):
     """
     Worker thread responsible for processing a single video frame or image.
@@ -142,6 +172,8 @@ class FrameWorker(threading.Thread):
         self._RESIZE_CACHE_MAX = 40  # swap_core uses many dynamic (H,W) bilinear+AA pairs
         self._gaussian_blur_cache: _OrderedDict = _OrderedDict()
         self._GAUSSIAN_BLUR_CACHE_MAX = 48
+        self._d2h_pin_hwc: torch.Tensor | None = None
+        self._d2h_pin_shape: tuple[int, ...] | None = None
 
         # --- Architecture References ---
         self.main_window = main_window
@@ -315,6 +347,28 @@ class FrameWorker(threading.Thread):
         op = v2.GaussianBlur(ks, sigma=sig_arg)
         d[key] = op
         return op
+
+    def _hwc_rgb_uint8_from_chw_tensor(self, chw_uint8: torch.Tensor) -> np.ndarray:
+        """CHW uint8 tensor → contiguous HWC uint8 numpy (RGB). Pinned path on CUDA."""
+        if (
+            chw_uint8.device.type == "cuda"
+            and torch.cuda.is_available()
+            and not _env_flag("VISIOMASTER_DISABLE_PINNED_D2H")
+        ):
+            hwc = chw_uint8.permute(1, 2, 0).contiguous()
+            shape = tuple(int(x) for x in hwc.shape)
+            if self._d2h_pin_hwc is None or self._d2h_pin_shape != shape:
+                self._d2h_pin_hwc = torch.empty(
+                    shape, dtype=torch.uint8, device="cpu", pin_memory=True
+                )
+                self._d2h_pin_shape = shape
+            self._d2h_pin_hwc.copy_(hwc, non_blocking=True)
+            torch.cuda.current_stream().synchronize()
+            return np.ascontiguousarray(self._d2h_pin_hwc.numpy())
+        x = chw_uint8.permute(1, 2, 0).contiguous()
+        if x.device.type != "cpu":
+            x = x.cpu()
+        return np.ascontiguousarray(x.numpy())
 
     def run(self):
         """
@@ -939,21 +993,33 @@ class FrameWorker(threading.Thread):
         img_numpy_rgb_uint8 = self.frame
         assert img_numpy_rgb_uint8 is not None, "frame must be set before processing"
 
+        _perf_stages_on = _env_flag("VISIOMASTER_PERF_STAGES")
+        _cuda_stage_sync = (
+            _perf_stages_on
+            and self.models_processor.device == "cuda"
+            and torch.cuda.is_available()
+        )
+        perf_stages = _PerfStageCollector(_cuda_stage_sync) if _perf_stages_on else None
+
         # Prepare the base tensor
         processed_tensor_rgb_uint8 = (
             torch.from_numpy(img_numpy_rgb_uint8)
             .to(self.models_processor.device)
             .permute(2, 0, 1)
         )
+        if perf_stages is not None:
+            perf_stages.mark("prep_scaling_h2d")
 
         # --- ROUTING LOGIC ---
         if control.get("VR180ModeEnableToggle", False):
             processed_tensor_rgb_uint8 = self._process_frame_vr180(
                 processed_tensor_rgb_uint8, img_numpy_rgb_uint8, control, stop_event
             )
+            if perf_stages is not None:
+                perf_stages.mark("vr180")
         else:
             processed_tensor_rgb_uint8 = self._process_frame_standard(
-                processed_tensor_rgb_uint8, control, stop_event
+                processed_tensor_rgb_uint8, control, stop_event, perf_stages=perf_stages
             )
 
         # --- Common Post-Processing (Enhancers, etc.) ---
@@ -968,12 +1034,20 @@ class FrameWorker(threading.Thread):
             processed_tensor_rgb_uint8 = self.frame_enhancers.enhance_core(
                 processed_tensor_rgb_uint8, control=control
             )
+        if perf_stages is not None:
+            perf_stages.mark("frame_enhancer")
 
-        final_img_np_rgb_uint8 = (
-            processed_tensor_rgb_uint8.permute(1, 2, 0).cpu().numpy().astype(np.uint8)
+        final_img_np_rgb_uint8 = self._hwc_rgb_uint8_from_chw_tensor(
+            processed_tensor_rgb_uint8
         )
+        if perf_stages is not None:
+            perf_stages.mark("d2h_numpy")
+
         if not final_img_np_rgb_uint8.flags["C_CONTIGUOUS"]:
             final_img_np_rgb_uint8 = np.ascontiguousarray(final_img_np_rgb_uint8)
+
+        if perf_stages is not None:
+            perf_stages.emit(self.frame_number, self.name)
 
         return final_img_np_rgb_uint8[..., ::-1]
 
@@ -1969,6 +2043,7 @@ class FrameWorker(threading.Thread):
         processed_tensor_rgb_uint8: torch.Tensor,
         control: dict,
         stop_event: threading.Event,
+        perf_stages: Optional[_PerfStageCollector] = None,
     ) -> torch.Tensor:
         """
         Handles the standard (flat) processing logic:
@@ -2059,6 +2134,9 @@ class FrameWorker(threading.Thread):
                 expand=True,
             )
 
+        if perf_stages is not None:
+            perf_stages.mark("std_upscale_rotate")
+
         # --- DETECTION PHASE ---
         # The workers are now "Stateless Render Engines". They no longer track time or state.
         # They consume perfectly sequenced and EMA-smoothed detections from the Feeder thread.
@@ -2097,6 +2175,19 @@ class FrameWorker(threading.Thread):
                 bypass_bytetrack=True,  # Bypassing ByteTrack to avoid corrupting the global Kalman filter state
             )
 
+        if perf_stages is not None:
+            perf_stages.mark("std_detect_feeder_or_fallback")
+
+        _rec_model = control["RecognitionModelSelection"]
+        _rec_sim = control["SimilarityTypeSelection"]
+        _use_recognition_cache = (
+            self.is_pool_worker
+            and self.video_processor.file_type == "video"
+            and self.frame_number > 0
+            and not _env_flag("VISIOMASTER_DISABLE_RECOG_CACHE")
+            and not control.get("AutoRotationToggle", False)
+        )
+
         if (
             isinstance(kpss_5, np.ndarray)
             and kpss_5.shape[0] > 0
@@ -2109,12 +2200,43 @@ class FrameWorker(threading.Thread):
                     kpss_5[i], _bbox_i, self._MIN_FACE_PIXELS
                 ):
                     continue  # too small to produce meaningful swap
-                face_emb, _ = self.models_processor.run_recognize_direct(
-                    img,
-                    kpss_5[i],
-                    control["SimilarityTypeSelection"],
-                    control["RecognitionModelSelection"],
-                )
+                face_emb: np.ndarray
+                if _use_recognition_cache:
+                    _cached_emb = (
+                        self.video_processor.try_reuse_recognition_embedding(
+                            self.frame_number,
+                            i,
+                            _bbox_i,
+                            kpss_5[i],
+                            _rec_model,
+                            _rec_sim,
+                        )
+                    )
+                    if _cached_emb is not None:
+                        face_emb = _cached_emb
+                    else:
+                        face_emb, _ = self.models_processor.run_recognize_direct(
+                            img,
+                            kpss_5[i],
+                            _rec_sim,
+                            _rec_model,
+                        )
+                        self.video_processor.store_recognition_embedding(
+                            self.frame_number,
+                            i,
+                            _bbox_i,
+                            kpss_5[i],
+                            face_emb,
+                            _rec_model,
+                            _rec_sim,
+                        )
+                else:
+                    face_emb, _ = self.models_processor.run_recognize_direct(
+                        img,
+                        kpss_5[i],
+                        _rec_sim,
+                        _rec_model,
+                    )
                 # FW-BUG-01: bounds check before indexing kpss
                 kps_all_i = kpss[i] if kpss is not None and i < len(kpss) else None
                 det_faces_data_for_display.append(
@@ -2128,6 +2250,9 @@ class FrameWorker(threading.Thread):
                         "matched_target": None,  # FW-BUG-09: cache slot
                     }
                 )
+
+        if perf_stages is not None:
+            perf_stages.mark("std_recognize")
 
         # Swapping / Editing Loop
         if det_faces_data_for_display:
@@ -2377,6 +2502,9 @@ class FrameWorker(threading.Thread):
                             )
                             continue
 
+        if perf_stages is not None:
+            perf_stages.mark("std_swap_edit")
+
         # Undo Rotation / Scaling
         if control["ManualRotationEnableToggle"]:
             img = v2.functional.rotate(
@@ -2400,6 +2528,9 @@ class FrameWorker(threading.Thread):
                     antialias=False,
                 )
             img = self._resize_cache[_down_key](img)
+
+        if perf_stages is not None:
+            perf_stages.mark("std_undo_resize")
 
         processed_tensor_rgb_uint8 = img
 
@@ -2430,6 +2561,9 @@ class FrameWorker(threading.Thread):
             processed_tensor_rgb_uint8 = self.get_compare_faces_image(
                 processed_tensor_rgb_uint8, det_faces_data_for_display, control
             )
+
+        if perf_stages is not None:
+            perf_stages.mark("std_overlays_compare")
 
         return processed_tensor_rgb_uint8
 
@@ -4027,6 +4161,11 @@ class FrameWorker(threading.Thread):
         control = control if control is not None else {}
         swapper_model = parameters["SwapModelSelection"]
         itex = 1  # FW-BUG-10: default before any branching to prevent NameError
+        _swap_core_perf: _PerfStageCollector | None = None
+        if _env_flag("VISIOMASTER_PERF_SWAP_CORE"):
+            _swap_core_perf = _PerfStageCollector(
+                self.models_processor.device == "cuda" and torch.cuda.is_available()
+            )
 
         # FW-PERF-4: set_scaling_transforms is already called in process_frame;
         # calling it again here per-face-per-frame rebuilds 12 transform objects
@@ -4077,6 +4216,9 @@ class FrameWorker(threading.Thread):
         # tensor, even when get_swapped_and_prev_face is skipped (e.g. DFM
         # selected but no model file chosen, or input_face_affined is None).
         prev_face = torch.div(original_face_512.float(), 255.0).permute(1, 2, 0)
+
+        if _swap_core_perf is not None:
+            _swap_core_perf.mark("sc_align_crop")
 
         # --- SWAPPING INFERENCE ---
         if valid_s_e is not None or (
@@ -4165,6 +4307,9 @@ class FrameWorker(threading.Thread):
                 prev_face = torch.mul(prev_face, 1 - alpha)
                 swap = torch.add(swap, prev_face)
 
+        if _swap_core_perf is not None:
+            _swap_core_perf.mark("sc_swap_strength")
+
         # --- DYNAMIC MASKS INITIALIZATION ---
         current_swap_h, current_swap_w = swap.shape[1], swap.shape[2]
 
@@ -4232,6 +4377,9 @@ class FrameWorker(threading.Thread):
         kps_ref = np.hstack([kps_5, ones_column_ref]) @ M_ref.T
 
         swap = torch.clamp(swap, 0.0, 255.0)
+
+        if _swap_core_perf is not None:
+            _swap_core_perf.mark("sc_border_mask_init")
 
         # --- FACE EDITING (Beginning) ---
         # Expression Restorer beginning
@@ -4556,6 +4704,9 @@ class FrameWorker(threading.Thread):
 
         mask_autocolor = calc_mask.clone()
         mask_autocolor = mask_autocolor > 0.05
+
+        if _swap_core_perf is not None:
+            _swap_core_perf.mark("sc_maskcalc_xseg")
 
         # Auto Restore (First Pass)
         if (
@@ -5237,6 +5388,9 @@ class FrameWorker(threading.Thread):
         if control.get("DenoiserAfterRestorersToggle", False):
             swap = self._apply_denoiser_pass(swap, control, "After", kv_map)
 
+        if _swap_core_perf is not None:
+            _swap_core_perf.mark("sc_restore_color_fx")
+
         # Final blending
         if (
             parameters["FinalBlendAdjEnableToggle"]
@@ -5313,6 +5467,11 @@ class FrameWorker(threading.Thread):
             print(f"[DEBUG] {one_liner}")
 
         if is_perspective_crop:
+            if _swap_core_perf is not None:
+                _swap_core_perf.mark("sc_perspective_out")
+                _swap_core_perf.emit(
+                    self.frame_number, self.name, "[PERF-SWAP-CORE]"
+                )
             return t512_mask(swap), t512_mask(swap_mask), None
 
         # Mask Post-Processing (Final Blend)
@@ -5369,6 +5528,9 @@ class FrameWorker(threading.Thread):
                 swap_mask_clone = swap_mask_clone.permute(1, 2, 0)
                 swap_mask_clone = torch.mul(swap_mask_clone, 255.0).type(torch.uint8)
 
+        if _swap_core_perf is not None:
+            _swap_core_perf.mark("sc_tail_view_maskpost")
+
         # --- OPTIMIZED UNTRANSFORM (PASTE BACK) USING KORNIA ---
         # Eliminates CPU bound calculations, manual slicing, and memory-heavy paddings.
         # Warps directly to the full frame resolution in one highly optimized GPU pass.
@@ -5408,6 +5570,10 @@ class FrameWorker(threading.Thread):
         img_float = swap_full + (img_float * swap_mask_minus)
 
         img = img_float.clamp_(0, 255).type(torch.uint8)
+
+        if _swap_core_perf is not None:
+            _swap_core_perf.mark("sc_warp_paste")
+            _swap_core_perf.emit(self.frame_number, self.name, "[PERF-SWAP-CORE]")
 
         return img, original_face_512_clone, swap_mask_clone
 
