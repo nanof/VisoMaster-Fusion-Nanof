@@ -11,6 +11,19 @@ if TYPE_CHECKING:
     from app.processors.models_processor import ModelsProcessor
 
 
+class _CodeFormerDirectRunner:
+    """Runs CodeFormerTorch without CUDA graph (same interface as CUDAGraphRunner)."""
+
+    __slots__ = ("_model", "_fw")
+
+    def __init__(self, model, fidelity_weight: float):
+        self._model = model
+        self._fw = float(fidelity_weight)
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        return self._model(x, fidelity_weight=self._fw)
+
+
 class FaceRestorers:
     def __init__(self, models_processor: "ModelsProcessor"):
         self.models_processor = models_processor
@@ -485,16 +498,21 @@ class FaceRestorers:
                     )
 
                     with self.models_processor.cuda_graph_capture_lock:
+                        # FP16 + Triton + CUDA graph (Tier 3). torch.compile (Tier 6) is
+                        # skipped: Inductor subprocess often fails on Windows; it only
+                        # added ~15% speed when it worked and blocked first-run for minutes.
                         runner = build_cuda_graph_runner(
                             model,
                             inp_shape=(1, 3, 512, 512),
                             fidelity_weight=w,
-                            torch_compile=True,
+                            torch_compile=False,
                         )
                     self._codeformer_runner = runner
                     self._codeformer_runner_w = w
                 except Exception as e:
                     print(f"[Custom] CodeFormer CUDA graph build failed: {e}")
+                    self._codeformer_runner = _CodeFormerDirectRunner(model, w)
+                    self._codeformer_runner_w = w
         finally:
             self.models_processor.hide_build_dialog.emit()
         return self._codeformer_runner
@@ -1288,14 +1306,26 @@ class FaceRestorers:
             model = self._get_codeformer_torch()
             if model is not None:
                 w = float(fidelity_weight_value)
+                dev = next(model.parameters()).device
+                image = image.to(device=dev, dtype=torch.float32).contiguous()
                 runner = self._get_codeformer_runner(model, w)
                 with torch.no_grad():
                     with self._get_runner_lock(model):
-                        if runner is not None:
-                            result = runner(image)
-                        else:
-                            # Runner not yet ready (first frame after weight change):
-                            # fall back to direct FP16 inference.
+                        try:
+                            if runner is not None:
+                                result = runner(image)
+                            else:
+                                result = model(image, fidelity_weight=w)
+                        except Exception as e:
+                            print(
+                                f"[Custom] CodeFormer runner failed, using direct "
+                                f"inference: {e}"
+                            )
+                            with self._custom_init_lock:
+                                self._codeformer_runner = _CodeFormerDirectRunner(
+                                    model, w
+                                )
+                                self._codeformer_runner_w = w
                             result = model(image, fidelity_weight=w)
                 output.copy_(result)
                 return

@@ -89,9 +89,16 @@ class _GN(nn.GroupNorm):
                 fuse_silu=self.fuse_silu,
             )
         else:
-            out = super().forward(x_in.float()).to(x_in.dtype)
+            # nn.GroupNorm.forward(float32 input) still uses FP16 affine params after
+            # model.to(half) — CPU/CUDA backends then raise:
+            # "mixed dtype (CPU): expect parameter to have scalar type of Float".
+            x_f = x_in.float()
+            w = self.weight.float()
+            b = self.bias.float()
+            out = F.group_norm(x_f, self.num_groups, w, b, self.eps)
             if self.fuse_silu:
-                out = out * torch.sigmoid(out)
+                out = F.silu(out)
+            out = out.to(dtype=x_in.dtype)
 
         return out.contiguous(memory_format=torch.channels_last) if was_cl else out
 

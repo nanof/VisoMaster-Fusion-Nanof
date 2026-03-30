@@ -13,6 +13,20 @@ import kornia.geometry.transform as kgm
 
 torchvision.disable_beta_transforms_warning()
 
+
+def similarity_transform_from_correspondences(src: np.ndarray, dst: np.ndarray):
+    """Similarity transform from point pairs (src → dst).
+
+    ``SimilarityTransform.from_estimate`` exists in scikit-image ≥0.21; older
+    releases only provide ``estimate(src, dst)`` on an instance.
+    """
+    if hasattr(trans.SimilarityTransform, "from_estimate"):
+        return trans.SimilarityTransform.from_estimate(src, dst)
+    tform = trans.SimilarityTransform()
+    tform.estimate(src, dst)
+    return tform
+
+
 # <--left profile
 src1 = np.array(
     [
@@ -577,7 +591,7 @@ def warp_face_by_bounding_box(img, bboxes, image_size=112):
         [[0, 0], [image_size, 0], [0, image_size], [image_size, image_size]]
     ).astype(np.float32)
 
-    tform = trans.SimilarityTransform.from_estimate(source_points, target_points)
+    tform = similarity_transform_from_correspondences(source_points, target_points)
     M = tform.params[0:2]
 
     M_tensor = torch.from_numpy(M).float().unsqueeze(0).to(img.device)

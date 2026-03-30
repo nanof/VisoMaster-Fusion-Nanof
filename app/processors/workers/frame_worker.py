@@ -3316,7 +3316,11 @@ class FrameWorker(threading.Thread):
                             )
                             tile_coords.append((j, i))
                     batch_input = torch.stack(tiles_list, dim=0)  # [B, 3, 128, 128]
-                    batch_output = torch.empty_like(batch_input)
+                    batch_output = torch.empty(
+                        batch_input.shape,
+                        dtype=torch.float32,
+                        device=batch_input.device,
+                    )
 
                     self.models_processor.run_inswapper_batched(
                         batch_input, latent, batch_output
@@ -3928,7 +3932,9 @@ class FrameWorker(threading.Thread):
             if blur_value2 > 0:
                 kernel_size = 2 * blur_value2 + 1
                 sigma = blur_value2 * 0.1
-                swap = self._get_cached_gaussian_blur(kernel_size, sigma)(swap_original2)
+                swap = self._get_cached_gaussian_blur(kernel_size, sigma)(
+                    swap_original2.float()
+                )
                 debug_info[debug_key] = f": {-blur_value2:.2f}"
             elif isinstance(alpha_auto2, torch.Tensor):
                 swap = swap2 * alpha_auto2 + swap_original2 * (1 - alpha_auto2)
@@ -4377,6 +4383,10 @@ class FrameWorker(threading.Thread):
         kps_ref = np.hstack([kps_5, ones_column_ref]) @ M_ref.T
 
         swap = torch.clamp(swap, 0.0, 255.0)
+        # Custom batched Inswapper uses empty_like(batch_input); if the affine path
+        # ever yields FP16, torchvision GaussianBlur + CPU conv sharpness hit
+        # "mixed dtype (CPU): expect parameter to have scalar type of Float".
+        swap = swap.float()
 
         if _swap_core_perf is not None:
             _swap_core_perf.mark("sc_border_mask_init")
@@ -4481,6 +4491,10 @@ class FrameWorker(threading.Thread):
                 == "After First Restorer"
             )
         )
+
+        # Denoiser / expression / editor may yield FP16; restorers + sharpness auto
+        # need float32 for CPU-side convs (see swap.float() note above).
+        swap = swap.float()
 
         # --- RESTORATION 1 ---
         # FW-PERF-11: defer clone until we know it is needed (lazy snapshot)
@@ -4813,6 +4827,8 @@ class FrameWorker(threading.Thread):
         # Second Denoiser pass - After First Restorer
         if control.get("DenoiserAfterFirstRestorerToggle", False):
             swap = self._apply_denoiser_pass(swap, control, "AfterFirst", kv_map)
+
+        swap = swap.float()
 
         # --- RESTORATION 2 ---
         # FW-QUAL-01/02: duplicated ~60-line block extracted to _apply_restorer_with_auto
@@ -5272,6 +5288,8 @@ class FrameWorker(threading.Thread):
             swap = v2.functional.adjust_hue(swap, parameters["ColorHueDecimalSlider"])
 
             swap = swap * 255.0
+
+        swap = swap.float()
 
         # --- RESTORATION 2 (END) ---
         # FW-QUAL-01/02: duplicated ~60-line block extracted to _apply_restorer_with_auto
@@ -5766,6 +5784,13 @@ class FrameWorker(threading.Thread):
         self._gabor_kernels_cache[cache_key] = result
         return result
 
+    def _ensure_laplacian_kernels_on(self, device: torch.device) -> None:
+        """Match Laplacian/Sobel conv weights to ``device`` (provider / tensor moves)."""
+        if self.kernel_lap.device != device:
+            self.kernel_lap = self.kernel_lap.to(device)
+            self.kernel_sobel_x = self.kernel_sobel_x.to(device)
+            self.kernel_sobel_y = self.kernel_sobel_y.to(device)
+
     def face_restorer_auto(
         self,
         original_face_512,  # [3,H,W], float in [0..255]
@@ -5833,7 +5858,7 @@ class FrameWorker(threading.Thread):
                     for bs in range(0, max_blur_strength + 1)
                 ]
                 for bs, gaussian_blur in enumerate(blur_kernels_for_auto):
-                    swap2_blurred = gaussian_blur(base)
+                    swap2_blurred = gaussian_blur(base.float())
                     scores_swap_b = self.sharpness_score(swap2_blurred)
                     score_new_swap_b = scores_swap_b["combined"].item() * 100.0
                     sharpness_diff_b = score_new_swap_b - score_new_original
@@ -5928,7 +5953,8 @@ class FrameWorker(threading.Thread):
               "combined": float Tensor
             }
         """
-        image = image / 255.0
+        image = image.float() / 255.0
+        self._ensure_laplacian_kernels_on(image.device)
 
         # 1) Grayscale [1,1,H,W]
         gray = image.mean(dim=0, keepdim=True).unsqueeze(0)
@@ -5986,9 +6012,10 @@ class FrameWorker(threading.Thread):
         """
         eps = 1e-8
         device = image.device
+        self._ensure_laplacian_kernels_on(device)
 
         # [3,H,W] -> [1,1,H,W] gray, range [0..1]
-        gray = (image / 255.0).mean(dim=0, keepdim=True).unsqueeze(0)
+        gray = (image.float() / 255.0).mean(dim=0, keepdim=True).unsqueeze(0)
 
         # OPTIMIZED: Convs using pre-allocated VRAM kernels
         lap = F.conv2d(gray, self.kernel_lap, padding=1).squeeze(0).squeeze(0)  # [H,W]

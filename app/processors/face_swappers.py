@@ -1,6 +1,5 @@
 import torch
 import threading
-from skimage import transform as trans
 from torchvision.transforms import v2
 from app.processors.utils import faceutil
 import numpy as np
@@ -238,7 +237,7 @@ class FaceSwappers:
         elif similarity_type == "Pearl":
             dst = self.models_processor.arcface_dst.copy()
             dst[:, 0] += 8.0
-            tform = trans.SimilarityTransform.from_estimate(face_kps, dst)
+            tform = faceutil.similarity_transform_from_correspondences(face_kps, dst)
 
             # OPTIMIZED: Direct GPU Warp to 128x128 using Kornia
             M_tensor = (
@@ -258,7 +257,7 @@ class FaceSwappers:
 
         else:
             # Mode 3: Opal (Standard / Default)
-            tform = trans.SimilarityTransform.from_estimate(
+            tform = faceutil.similarity_transform_from_correspondences(
                 face_kps, self.models_processor.arcface_dst
             )
 
@@ -357,7 +356,7 @@ class FaceSwappers:
         return np.array(io_binding.copy_outputs_to_cpu()).flatten(), cropped_image
 
     def preprocess_image_cscs(self, img, face_kps):
-        tform = trans.SimilarityTransform.from_estimate(
+        tform = faceutil.similarity_transform_from_correspondences(
             face_kps, self.models_processor.FFHQ_kps
         )
 
