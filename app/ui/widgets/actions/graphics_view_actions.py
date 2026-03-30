@@ -1,8 +1,16 @@
+import time
+from collections import deque
+
 from PySide6 import QtWidgets, QtGui, QtCore
 from typing import TYPE_CHECKING
 
+import app.helpers.miscellaneous as misc_helpers
+
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
+
+_PREVIEW_FPS_WINDOW_SEC = 1.0
+_PREVIEW_FPS_STALE_SEC = 0.85
 
 
 # @misc_helpers.benchmark  (Keep this decorator if you have it)
@@ -67,10 +75,85 @@ def update_graphics_view(
     if reset_fit:
         fit_image_to_view(main_window, pixmap_item, scene_rect)
 
+    record_preview_frame_tick(main_window)
+
 
 def zoom_andfit_image_to_view_onchange(main_window: "MainWindow", new_transform):
     """Restore the previous transform (zoom and pan state) and update the view."""
     main_window.graphicsViewFrame.setTransform(new_transform, combine=False)
+
+
+def position_preview_overlay_labels(main_window: "MainWindow") -> None:
+    """Coloca FPS y metadatos en la esquina superior izquierda del visor."""
+    margin = 8
+    gap = 4
+    fps_lbl = main_window.previewFpsLabel
+    meta_lbl = main_window.previewMediaMetaLabel
+    fps_lbl.move(margin, margin)
+    if meta_lbl.isVisible() and meta_lbl.text().strip():
+        meta_lbl.move(margin, margin + fps_lbl.height() + gap)
+        meta_lbl.raise_()
+    fps_lbl.raise_()
+
+
+def position_preview_fps_label(main_window: "MainWindow") -> None:
+    """Compatibilidad: reposiciona la superposición del preview."""
+    position_preview_overlay_labels(main_window)
+
+
+def update_preview_media_metadata(main_window: "MainWindow") -> None:
+    """Actualiza el bloque de metadatos (formato, resolución, códec, etc.)."""
+    vp = main_window.video_processor
+    wi = wb = None
+    sb = getattr(main_window, "selected_video_button", None)
+    if sb is not None and getattr(sb, "file_type", None) == "webcam":
+        wi = sb.webcam_index
+        wb = sb.webcam_backend
+    text = misc_helpers.build_preview_media_metadata_text(
+        file_type=vp.file_type,
+        media_path=vp.media_path,
+        fps=float(vp.fps or 0),
+        max_frame_number=int(vp.max_frame_number),
+        media_capture=vp.media_capture,
+        frame=vp.current_frame,
+        webcam_index=wi if wi is not None else -1,
+        webcam_backend=wb if wb is not None else -1,
+    )
+    meta = main_window.previewMediaMetaLabel
+    meta.setText(text)
+    meta.setVisible(bool(text.strip()))
+    meta.adjustSize()
+    position_preview_overlay_labels(main_window)
+
+
+def record_preview_frame_tick(main_window: "MainWindow") -> None:
+    """
+    Cuenta cuántos frames del preview se pintan por segundo (ventana móvil).
+    Debe llamarse en el hilo de UI cada vez que se actualiza el pixmap del preview.
+    """
+    now = time.perf_counter()
+    main_window._preview_fps_last_tick = now
+    times: deque[float] = main_window._preview_fps_times
+    times.append(now)
+    cutoff = now - _PREVIEW_FPS_WINDOW_SEC
+    while times and times[0] < cutoff:
+        times.popleft()
+    if len(times) < 2:
+        main_window.previewFpsLabel.setText("— FPS")
+        return
+    span = now - times[0]
+    if span <= 0:
+        return
+    fps = (len(times) - 1) / span
+    main_window.previewFpsLabel.setText(f"{fps:.1f} FPS")
+
+
+def refresh_preview_fps_stale(main_window: "MainWindow") -> None:
+    """Si no hay frames nuevos, baja el contador a 0 para no dejar un valor obsoleto."""
+    if main_window._preview_fps_last_tick == 0.0:
+        return
+    if time.perf_counter() - main_window._preview_fps_last_tick > _PREVIEW_FPS_STALE_SEC:
+        main_window.previewFpsLabel.setText("0 FPS")
 
 
 def fit_image_to_view(

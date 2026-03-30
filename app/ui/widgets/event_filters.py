@@ -4,6 +4,7 @@ from functools import partial
 from PySide6 import QtWidgets, QtGui, QtCore
 from app.ui.widgets.actions import list_view_actions
 from app.ui.widgets.actions import video_control_actions
+from app.ui.widgets.actions import graphics_view_actions
 from app.ui.widgets import ui_workers
 import app.helpers.miscellaneous as misc_helpers
 
@@ -17,6 +18,8 @@ class GraphicsViewEventFilter(QtCore.QObject):
         self.main_window = main_window
 
     def eventFilter(self, graphics_object: QtWidgets.QGraphicsView, event):
+        if event.type() == QtCore.QEvent.Type.Resize:
+            graphics_view_actions.position_preview_overlay_labels(self.main_window)
         if event.type() == QtCore.QEvent.Type.MouseButtonPress:
             if event.button() == QtCore.Qt.MouseButton.LeftButton:
                 self.main_window.buttonMediaPlay.click()

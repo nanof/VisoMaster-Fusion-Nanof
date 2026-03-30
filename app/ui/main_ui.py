@@ -1,3 +1,4 @@
+from collections import deque
 from typing import Dict, Optional
 from pathlib import Path
 from functools import partial
@@ -172,6 +173,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.last_seek_read_failed = False
         self.embedding_editor_window = None
 
+        self._preview_fps_times: deque[float] = deque()
+        self._preview_fps_last_tick = 0.0
+
     def initialize_widgets(self):
         # Initialize QListWidget for target media
         self.targetVideosList.setFlow(QtWidgets.QListWidget.LeftToRight)
@@ -222,6 +226,39 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             self.graphicsViewFrame,
         )
         self.graphicsViewFrame.installEventFilter(graphics_event_filter)
+
+        self.previewFpsLabel = QtWidgets.QLabel("— FPS", self.graphicsViewFrame)
+        self.previewFpsLabel.setStyleSheet(
+            "QLabel { background-color: rgba(0, 0, 0, 140); color: #ffffff; "
+            "padding: 4px 8px; border-radius: 4px; font-size: 12px; "
+            "font-family: 'Consolas', 'Cascadia Mono', monospace; }"
+        )
+        self.previewFpsLabel.setAttribute(
+            QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+        )
+        self.previewFpsLabel.adjustSize()
+
+        self.previewMediaMetaLabel = QtWidgets.QLabel("", self.graphicsViewFrame)
+        self.previewMediaMetaLabel.setStyleSheet(
+            "QLabel { background-color: rgba(0, 0, 0, 140); color: #e8e8e8; "
+            "padding: 4px 8px; border-radius: 4px; font-size: 11px; "
+            "font-family: 'Segoe UI', 'Segoe UI Historic', sans-serif; }"
+        )
+        self.previewMediaMetaLabel.setAttribute(
+            QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+        )
+        self.previewMediaMetaLabel.setWordWrap(True)
+        self.previewMediaMetaLabel.setMaximumWidth(440)
+        self.previewMediaMetaLabel.setVisible(False)
+
+        graphics_view_actions.position_preview_overlay_labels(self)
+
+        self._preview_fps_stale_timer = QtCore.QTimer(self)
+        self._preview_fps_stale_timer.setInterval(300)
+        self._preview_fps_stale_timer.timeout.connect(
+            partial(graphics_view_actions.refresh_preview_fps_stale, self)
+        )
+        self._preview_fps_stale_timer.start()
 
         video_control_actions.enable_zoom_and_pan(self.graphicsViewFrame)
 

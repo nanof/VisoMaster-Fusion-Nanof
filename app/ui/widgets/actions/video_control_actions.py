@@ -2481,6 +2481,8 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
             main_window.videoSeekSlider.blockSignals(False)
             main_window.video_processor.max_frame_number = 0
 
+        graphics_view_actions.update_preview_media_metadata(main_window)
+
 
 def toggle_live_sound(main_window: "MainWindow", toggle_value: bool):
     """

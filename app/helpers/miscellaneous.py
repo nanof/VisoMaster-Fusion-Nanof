@@ -1280,3 +1280,142 @@ def paint_landmarks_on_image(img: torch.Tensor, landmarks_data: list) -> torch.T
                     img_out_hwc[y_min:y_max, x_min:x_max] = kcolor_tensor
 
     return img_out_hwc
+
+
+def cv_fourcc_to_tag(fourcc_val: Any) -> str:
+    """Convierte el entero FOURCC de OpenCV a una etiqueta legible (p. ej. 'avc1')."""
+    try:
+        v = int(round(float(fourcc_val)))
+    except (TypeError, ValueError):
+        return "—"
+    raw = "".join(chr((v >> (8 * i)) & 0xFF) for i in range(4))
+    tag = raw.rstrip("\x00").strip()
+    return tag if tag else "—"
+
+
+def format_media_duration_hms(total_seconds: Optional[float]) -> str:
+    if total_seconds is None:
+        return "—"
+    try:
+        sec = int(round(float(total_seconds)))
+    except (TypeError, ValueError, OverflowError):
+        return "—"
+    if sec < 0:
+        return "—"
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+
+def _opencv_backend_display_name(api_preference: int) -> str:
+    from app.ui.widgets.settings_layout_data import CAMERA_BACKENDS
+
+    for label, val in CAMERA_BACKENDS.items():
+        if val == api_preference:
+            return label
+    return f"API {int(api_preference)}"
+
+
+def _frame_display_size(frame: Any) -> Optional[Tuple[int, int]]:
+    if frame is None:
+        return None
+    if isinstance(frame, np.ndarray) and frame.ndim >= 2 and frame.size > 0:
+        h, w = int(frame.shape[0]), int(frame.shape[1])
+        return w, h
+    return None
+
+
+def build_preview_media_metadata_text(
+    *,
+    file_type: Optional[str],
+    media_path: Any,
+    fps: float,
+    max_frame_number: int,
+    media_capture: Any,
+    frame: Any,
+    webcam_index: int = -1,
+    webcam_backend: int = -1,
+) -> str:
+    """
+    Texto multilínea con metadatos principales del clip para la superposición del preview.
+    """
+    if not file_type:
+        return ""
+
+    if isinstance(media_path, bool) or media_path is None:
+        path_str: Optional[str] = None
+    else:
+        path_str = str(media_path)
+
+    path_obj = Path(path_str) if path_str else None
+    ext = (path_obj.suffix.upper().lstrip(".") if path_obj and path_obj.suffix else "") or "—"
+
+    if file_type == "image":
+        wh = _frame_display_size(frame)
+        if wh:
+            w, h = wh
+            return f"Imagen · {ext} · {w}×{h}"
+        return f"Imagen · {ext}"
+
+    if file_type == "webcam":
+        backend_lbl = _opencv_backend_display_name(webcam_backend)
+        w = h = 0
+        fps_dev = 0.0
+        if media_capture is not None and getattr(media_capture, "isOpened", lambda: False)():
+            w = int(media_capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(media_capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps_dev = float(media_capture.get(cv2.CAP_PROP_FPS) or 0.0)
+        wh = _frame_display_size(frame)
+        if wh:
+            w, h = wh
+        line1 = f"Webcam · índice {webcam_index} · {backend_lbl}"
+        if w > 0 and h > 0:
+            line2 = (
+                f"{w}×{h} · {fps_dev:.1f} fps (dispositivo)"
+                if fps_dev > 0
+                else f"{w}×{h}"
+            )
+        else:
+            line2 = "—" if fps_dev <= 0 else f"{fps_dev:.1f} fps (dispositivo)"
+        return f"{line1}\n{line2}"
+
+    if file_type != "video":
+        return ""
+
+    fourcc = "—"
+    cw = ch = 0
+    if media_capture is not None and getattr(media_capture, "isOpened", lambda: False)():
+        fourcc = cv_fourcc_to_tag(media_capture.get(cv2.CAP_PROP_FOURCC))
+        cw = int(media_capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        ch = int(media_capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    wh = _frame_display_size(frame)
+    if wh:
+        disp = f"{wh[0]}×{wh[1]}"
+    elif cw > 0 and ch > 0:
+        disp = f"{cw}×{ch}"
+    else:
+        disp = "—"
+
+    base_name = path_obj.name if path_obj else "—"
+    if len(base_name) > 48:
+        base_name = base_name[:45] + "…"
+
+    nf = max_frame_number + 1
+    fps_eff = float(fps or 0)
+    if media_capture is not None and getattr(media_capture, "isOpened", lambda: False)():
+        cap_fps = float(media_capture.get(cv2.CAP_PROP_FPS) or 0)
+        if cap_fps > 0:
+            fps_eff = cap_fps
+    if fps_eff > 0:
+        fps_str = f"{fps_eff:.3f}".rstrip("0").rstrip(".")
+        dur = format_media_duration_hms(nf / fps_eff)
+    else:
+        fps_str = "—"
+        dur = "—"
+
+    line1 = f"{base_name}\n{ext} · {disp} · {fourcc}"
+    line2 = f"{fps_str} fps · {nf} fotogr. · {dur}"
+    return f"{line1}\n{line2}"
