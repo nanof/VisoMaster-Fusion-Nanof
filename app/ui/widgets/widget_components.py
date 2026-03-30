@@ -268,6 +268,13 @@ class TargetMediaCardButton(CardButton):
         self.reset_related_widgets_and_values()
 
         main_window.video_processor.file_type = self.file_type
+        main_window.video_processor._av1_scrub_preview_last_t = 0.0
+        main_window.video_processor.reset_av1_scrub_pipeline()
+        if self.file_type == "video":
+            main_window.video_processor.refresh_video_codec_flags()
+        else:
+            main_window.video_processor.is_av1_codec = False
+
         main_window.videoSeekSlider.blockSignals(
             True
         )  # Block signals to prevent unnecessary updates
@@ -347,6 +354,9 @@ class TargetMediaCardButton(CardButton):
             main_window.graphicsViewFrame.update()
 
             main_window.video_processor.file_type = None
+            main_window.video_processor.is_av1_codec = False
+            main_window.video_processor._av1_scrub_preview_last_t = 0.0
+            main_window.video_processor.reset_av1_scrub_pipeline()
 
             graphics_view_actions.update_preview_media_metadata(main_window)
 

@@ -1,4 +1,5 @@
 import os
+import sys
 import shutil
 import cv2
 import time
@@ -904,6 +905,16 @@ def read_frame(
     return ret, frame
 
 
+# OpenCV-reported FOURCC tags for AV1 in MP4/MKV (used for lighter scrub heuristics).
+AV1_FOURCC_TAGS = frozenset({"av01", "dav1"})
+
+
+def is_av1_fourcc_tag(tag: str) -> bool:
+    """True if *tag* (from :func:`cv_fourcc_to_tag`) names an AV1 bitstream."""
+    t = (tag or "").strip().lower().rstrip("\x00")
+    return t in AV1_FOURCC_TAGS
+
+
 def seek_frame(capture_obj: cv2.VideoCapture, frame_number: int) -> bool:
     """
     Seeks a video capture object to a specific frame number in a thread-safe manner.
@@ -918,6 +929,29 @@ def seek_frame(capture_obj: cv2.VideoCapture, frame_number: int) -> bool:
     """
     capture_lock = _get_capture_lock(capture_obj)
     with capture_lock:
+        return capture_obj.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+
+
+def seek_frame_fast_keypoint(
+    capture_obj: cv2.VideoCapture, frame_number: int, fps: float
+) -> bool:
+    """
+    Seek using presentation timestamp (milliseconds) when FPS is known.
+
+    Intended for AV1 scrub previews: the demuxer often snaps to a nearby sync
+    point, which is faster than strict frame-index seeks but not frame-accurate.
+    Falls back to :func:`seek_frame` if FPS is unusable or ``POS_MSEC`` fails.
+    """
+    capture_lock = _get_capture_lock(capture_obj)
+    try:
+        f = float(fps)
+    except (TypeError, ValueError):
+        f = 0.0
+    with capture_lock:
+        if f > 0.25:
+            msec = max(0.0, (float(frame_number) / f) * 1000.0)
+            if capture_obj.set(cv2.CAP_PROP_POS_MSEC, msec):
+                return True
         return capture_obj.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
 
 
@@ -1023,6 +1057,84 @@ def is_ffmpeg_in_path():
         print("[ERROR] FFMPEG Not found in your system!")
         return False
     return True
+
+
+def read_video_frame_ffmpeg_input_seek(
+    media_path: str,
+    frame_index: int,
+    fps: float,
+    *,
+    max_height: int = 480,
+    timeout_sec: float = 14.0,
+) -> Tuple[bool, Optional[np.ndarray]]:
+    """
+    Decode a single preview frame using FFmpeg with *input* seeking (-ss before -i).
+
+    This skips most demux/decode work before the seek point (much faster than
+    OpenCV frame-index seek on AV1), but timing is only as accurate as
+    ``frame_index / fps`` and keyframe spacing.
+
+    Returns BGR uint8 image or (False, None) on failure.
+    """
+    if not media_path or not cmd_exist("ffmpeg"):
+        return False, None
+    try:
+        f = float(fps)
+    except (TypeError, ValueError):
+        f = 0.0
+    eff_fps = f if f > 0.25 else 30.0
+    sec = max(0.0, float(frame_index) / eff_fps)
+    mh = max(64, min(int(max_height), 2160))
+
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-ss",
+        f"{sec:.6f}",
+        "-i",
+        os.path.normpath(str(media_path)),
+        "-an",
+        "-map",
+        "0:v:0",
+        "-frames:v",
+        "1",
+        "-vf",
+        f"scale=-2:{mh}:flags=fast_bilinear",
+        "-f",
+        "image2pipe",
+        "-vcodec",
+        "mjpeg",
+        "-q:v",
+        "8",
+        "-",
+    ]
+    popen_kw: Dict[str, Any] = {}
+    if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+        popen_kw["creationflags"] = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_sec,
+            **popen_kw,
+        )
+    except subprocess.TimeoutExpired:
+        return False, None
+    except OSError:
+        return False, None
+
+    if proc.returncode != 0 or not proc.stdout:
+        return False, None
+
+    buf = np.frombuffer(proc.stdout, dtype=np.uint8)
+    frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+    if frame is None:
+        return False, None
+    return True, frame
 
 
 def cmd_exist(cmd):

@@ -1,8 +1,9 @@
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import copy
 from functools import partial
 import os
+import time
 from pathlib import Path
 import traceback
 
@@ -1748,6 +1749,25 @@ def set_record_button_icon(main_window: "MainWindow"):
         main_window.buttonMediaRecord.setToolTip("Start Recording")
 
 
+def apply_av1_scrub_preview_frame(
+    main_window: "MainWindow", frame_num: int, frame_bgr: Any
+) -> None:
+    """
+    GUI-thread handler for FFmpeg AV1 scrub previews (see VideoProcessor._av1_scrub_worker_loop).
+    Drops stale results when the slider has already moved.
+    """
+    if main_window.videoSeekSlider.value() != frame_num:
+        return
+    if frame_bgr is None:
+        return
+    vp = main_window.video_processor
+    if vp.media_rotation != 0:
+        frame_bgr = misc_helpers._apply_frame_rotation(frame_bgr, vp.media_rotation)
+    vp._seek_cached_frame = None
+    pixmap = common_widget_actions.get_pixmap_from_frame(main_window, frame_bgr)
+    graphics_view_actions.update_graphics_view(main_window, pixmap, frame_num)
+
+
 # @misc_helpers.benchmark
 @QtCore.Slot(int)
 def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
@@ -1769,16 +1789,43 @@ def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
     video_processor.next_frame_to_display = new_position
     update_drop_frame_button_label(main_window)
     if video_processor.media_capture:
-        misc_helpers.seek_frame(video_processor.media_capture, new_position)
+        slider_down = main_window.videoSeekSlider.isSliderDown()
+        use_av1_light_scrub = (
+            video_processor.is_av1_codec
+            and video_processor.file_type == "video"
+            and slider_down
+        )
+        if use_av1_light_scrub:
+            # FFmpeg input-seek + small MJPEG decode in a worker thread (fast on AV1).
+            # Falls back to OpenCV if ffmpeg is not installed.
+            if misc_helpers.cmd_exist("ffmpeg"):
+                video_processor.enqueue_av1_scrub_preview(new_position)
+                return
+            now = time.perf_counter()
+            if now - video_processor._av1_scrub_preview_last_t < 0.15:
+                return
+            video_processor._av1_scrub_preview_last_t = now
+            misc_helpers.seek_frame_fast_keypoint(
+                video_processor.media_capture,
+                new_position,
+                float(video_processor.fps or 0.0),
+            )
+        else:
+            misc_helpers.seek_frame(video_processor.media_capture, new_position)
 
         # Read the raw frame without triggering the full pipeline.
         ret, frame = misc_helpers.read_frame(
             video_processor.media_capture, video_processor.media_rotation
         )
         if ret:
-            # Cache the raw frame so process_current_frame() can use it as a
-            # fallback when the near-EOF re-read fails (OpenCV reliability issue).
-            video_processor._seek_cached_frame = (new_position, frame)
+            # Approximate AV1 scrub can land on a different frame; do not cache for
+            # process_current_frame EOF fallback (release uses a precise seek+read).
+            if use_av1_light_scrub:
+                video_processor._seek_cached_frame = None
+            else:
+                # Cache the raw frame so process_current_frame() can use it as a
+                # fallback when the near-EOF re-read fails (OpenCV reliability issue).
+                video_processor._seek_cached_frame = (new_position, frame)
             # For preview, show the raw frame immediately.
             # The processed frame will be shown when the slider is released.
             pixmap = common_widget_actions.get_pixmap_from_frame(main_window, frame)
@@ -2251,6 +2298,8 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
                     main_window.video_processor.fps = media_capture.get(
                         cv2.CAP_PROP_FPS
                     )
+                    main_window.video_processor.refresh_video_codec_flags()
+                    main_window.video_processor.reset_av1_scrub_pipeline()
 
                     # Update the slider for this video
                     main_window.videoSeekSlider.blockSignals(True)
@@ -2460,6 +2509,9 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
                     main_window.videoSeekSlider.setValue(original_frame_num)
                     main_window.videoSeekSlider.blockSignals(False)
                     main_window.video_processor.max_frame_number = original_max_frames
+                    main_window.video_processor._av1_scrub_preview_last_t = 0.0
+                    main_window.video_processor.refresh_video_codec_flags()
+                    main_window.video_processor.reset_av1_scrub_pipeline()
                 else:
                     print(
                         f"[ERROR] Failed to re-open original media capture: {original_media_path}"

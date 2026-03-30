@@ -72,6 +72,12 @@ MAX_CONSECUTIVE_ERRORS = (
 # Simple extraction used when no frames are skipped (no sync issues)
 
 
+class Av1ScrubPreviewEmitter(QObject):
+    """Delivers FFmpeg scrub previews from a background thread to the GUI thread."""
+
+    frame_ready = Signal(int, object)
+
+
 class VideoProcessor(QObject):
     """
     Manages all video, image, and webcam processing pipelines.
@@ -147,6 +153,19 @@ class VideoProcessor(QObject):
         self.media_rotation: int = 0
         self.current_frame_number = 0  # The *next* frame to be read/processed
         self.max_frame_number = 0
+        # AV1 (av01): lighter, imprecise scrub while dragging the seek slider.
+        self.is_av1_codec: bool = False
+        self._av1_scrub_preview_last_t: float = 0.0
+        self._av1_scrub_queue: "queue.Queue[int]" = queue.Queue(maxsize=1)
+        self._av1_scrub_session: int = 0
+        self._av1_scrub_worker_lock = threading.Lock()
+        self._av1_scrub_worker_running: bool = False
+        self._av1_scrub_emitter = Av1ScrubPreviewEmitter(self)
+        self._av1_scrub_emitter.frame_ready.connect(
+            lambda fn, bgr: video_control_actions.apply_av1_scrub_preview_frame(
+                self.main_window, fn, bgr
+            )
+        )
         self.current_frame: Optional[numpy.ndarray] = (
             None  # The most recently read/processed frame
         )
@@ -2141,6 +2160,8 @@ class VideoProcessor(QObject):
                         self.current_frame_number = seek_frame
                         self.next_frame_to_display = seek_frame
                         misc_helpers.seek_frame(self.media_capture, seek_frame)
+                        self.refresh_video_codec_flags()
+                        self.reset_av1_scrub_pipeline()
                         print(
                             f"[INFO] Video capture re-opened and verified at frame {seek_frame}."
                         )
@@ -2165,6 +2186,77 @@ class VideoProcessor(QObject):
 
         print("[ERROR] Failed to re-open functional video capture after 3 attempts.")
         return False
+
+    def refresh_video_codec_flags(self) -> None:
+        """Set ``is_av1_codec`` from the open capture (for scrub heuristics)."""
+        self.is_av1_codec = False
+        if self.file_type != "video" or not self.media_capture:
+            return
+        try:
+            fourcc = self.media_capture.get(cv2.CAP_PROP_FOURCC)
+            tag = misc_helpers.cv_fourcc_to_tag(fourcc)
+        except Exception:
+            return
+        self.is_av1_codec = misc_helpers.is_av1_fourcc_tag(tag)
+
+    def reset_av1_scrub_pipeline(self) -> None:
+        """Invalidate in-flight AV1 scrub decodes (new clip or capture replaced)."""
+        self._av1_scrub_session += 1
+        try:
+            while True:
+                self._av1_scrub_queue.get_nowait()
+        except queue.Empty:
+            pass
+
+    def enqueue_av1_scrub_preview(self, frame_num: int) -> None:
+        """Queue latest frame index for background FFmpeg preview (coalesces under load)."""
+        if not self.media_path or self.file_type != "video":
+            return
+        try:
+            self._av1_scrub_queue.put_nowait(frame_num)
+        except queue.Full:
+            try:
+                self._av1_scrub_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._av1_scrub_queue.put_nowait(frame_num)
+            except queue.Full:
+                pass
+
+        with self._av1_scrub_worker_lock:
+            if not self._av1_scrub_worker_running:
+                self._av1_scrub_worker_running = True
+                threading.Thread(
+                    target=self._av1_scrub_worker_loop, daemon=True
+                ).start()
+
+    def _av1_scrub_worker_loop(self) -> None:
+        while True:
+            try:
+                fn = self._av1_scrub_queue.get(timeout=2.0)
+            except queue.Empty:
+                with self._av1_scrub_worker_lock:
+                    self._av1_scrub_worker_running = False
+                return
+            while True:
+                try:
+                    fn = self._av1_scrub_queue.get_nowait()
+                except queue.Empty:
+                    break
+
+            sess = self._av1_scrub_session
+            path = self.media_path
+            fps = float(self.fps or 0.0)
+            if not path:
+                continue
+
+            ok, bgr = misc_helpers.read_video_frame_ffmpeg_input_seek(
+                path, fn, fps, max_height=480
+            )
+            if sess != self._av1_scrub_session:
+                continue
+            self._av1_scrub_emitter.frame_ready.emit(fn, bgr if ok else None)
 
     # --- Utility Methods ---
 

@@ -8,6 +8,7 @@ from app.helpers.miscellaneous import (
     count_issue_scan_frames,
     ParametersDict,
     find_best_target_match,
+    is_av1_fourcc_tag,
     is_image_file,
     is_detected_face_eligible_for_matching,
     is_video_file,
@@ -81,6 +82,21 @@ def test_get_file_type_video():
 
 def test_get_file_type_unknown():
     assert get_file_type("notes.txt") is None
+
+
+@pytest.mark.parametrize(
+    "tag, expected",
+    [
+        ("av01", True),
+        ("AV01", True),
+        ("dav1", True),
+        ("h264", False),
+        ("avc1", False),
+        ("", False),
+    ],
+)
+def test_is_av1_fourcc_tag(tag, expected):
+    assert is_av1_fourcc_tag(tag) is expected
 
 
 # ---------------------------------------------------------------------------
