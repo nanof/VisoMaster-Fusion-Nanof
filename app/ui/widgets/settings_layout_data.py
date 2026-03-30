@@ -151,6 +151,18 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "default": False,
             "help": "Opens the output folder after recording ends.",
         },
+        "OutputToTargetLocationToggle": {
+            "level": 1,
+            "label": "Output to Target Location",
+            "default": False,
+            "help": "Save processed output next to the current target media instead of the global output folder.",
+        },
+        "ClusterOutputBySourceToggle": {
+            "level": 1,
+            "label": "Cluster Output by Source Name",
+            "default": False,
+            "help": "Save processed output into a subfolder named after the selected merged embedding.",
+        },
         "HDREncodeToggle": {
             "level": 1,
             "label": "HDR Encoding - Use on HDR videos only (CPU)",
