@@ -1442,6 +1442,7 @@ def play_video(main_window: "MainWindow", checked: bool):
             video_processor.stop_processing()
         print("[INFO] Starting webcam stream processing.")
         set_play_button_icon_to_stop(main_window)
+        graphics_view_actions.start_playback_fps_preview_session(main_window)
         video_processor.process_webcam()
         return
     if checked:
@@ -1456,6 +1457,7 @@ def play_video(main_window: "MainWindow", checked: bool):
             return
         print("[INFO] Starting video processing.")
         set_play_button_icon_to_stop(main_window)
+        graphics_view_actions.start_playback_fps_preview_session(main_window)
         video_processor.process_video()
     else:
         video_processor = main_window.video_processor

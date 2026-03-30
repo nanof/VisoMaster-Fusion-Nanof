@@ -83,8 +83,53 @@ def zoom_andfit_image_to_view_onchange(main_window: "MainWindow", new_transform)
     main_window.graphicsViewFrame.setTransform(new_transform, combine=False)
 
 
+def _instant_fps_text_from_deque(main_window: "MainWindow", now: float) -> str:
+    times = main_window._preview_fps_times
+    if len(times) < 2:
+        return "— FPS"
+    span = now - times[0]
+    if span <= 0:
+        return "— FPS"
+    return f"{(len(times) - 1) / span:.1f} FPS"
+
+
+def _session_fps_line(main_window: "MainWindow", now: float) -> str | None:
+    """Second line: 'session: X.X' live while playing or frozen after Stop."""
+    vp = main_window.video_processor
+    frozen = getattr(main_window, "_preview_session_fps_frozen", None)
+    active = getattr(main_window, "_playback_preview_fps_active", False)
+
+    live_avg: float | None = None
+    if active and vp.processing and vp.file_type in ("video", "webcam"):
+        n = main_window._playback_preview_fps_frames
+        elapsed = now - main_window._playback_preview_fps_start
+        if elapsed >= 0.12 and n >= 2:
+            live_avg = n / elapsed
+
+    if live_avg is not None:
+        return f"session: {live_avg:.1f}"
+    if frozen is not None:
+        return f"session: {frozen:.1f}"
+    return None
+
+
+def _set_preview_fps_label(main_window: "MainWindow", inst_text: str, now: float) -> None:
+    line2 = _session_fps_line(main_window, now)
+    if line2:
+        main_window.previewFpsLabel.setText(f"{inst_text}\n{line2}")
+    else:
+        main_window.previewFpsLabel.setText(inst_text)
+    _layout_preview_fps_label(main_window)
+
+
+def _layout_preview_fps_label(main_window: "MainWindow") -> None:
+    """Resize the FPS label so multi-line text (e.g. session line) is not clipped."""
+    main_window.previewFpsLabel.adjustSize()
+    position_preview_overlay_labels(main_window)
+
+
 def position_preview_overlay_labels(main_window: "MainWindow") -> None:
-    """Coloca FPS y metadatos en la esquina superior izquierda del visor."""
+    """Position FPS and metadata overlays at the top-left of the preview view."""
     margin = 8
     gap = 4
     fps_lbl = main_window.previewFpsLabel
@@ -97,12 +142,13 @@ def position_preview_overlay_labels(main_window: "MainWindow") -> None:
 
 
 def position_preview_fps_label(main_window: "MainWindow") -> None:
-    """Compatibilidad: reposiciona la superposición del preview."""
+    """Backward-compatible alias: reposition preview overlays."""
     position_preview_overlay_labels(main_window)
 
 
 def update_preview_media_metadata(main_window: "MainWindow") -> None:
-    """Actualiza el bloque de metadatos (formato, resolución, códec, etc.)."""
+    """Update the preview metadata block (container, resolution, codec, etc.)."""
+    main_window._preview_session_fps_frozen = None
     vp = main_window.video_processor
     wi = wb = None
     sb = getattr(main_window, "selected_video_button", None)
@@ -123,13 +169,44 @@ def update_preview_media_metadata(main_window: "MainWindow") -> None:
     meta.setText(text)
     meta.setVisible(bool(text.strip()))
     meta.adjustSize()
-    position_preview_overlay_labels(main_window)
+    now = time.perf_counter()
+    _set_preview_fps_label(
+        main_window, _instant_fps_text_from_deque(main_window, now), now
+    )
+
+
+def start_playback_fps_preview_session(main_window: "MainWindow") -> None:
+    """Start session-average FPS measurement from Play (video or webcam)."""
+    main_window._playback_preview_fps_active = True
+    main_window._playback_preview_fps_start = time.perf_counter()
+    main_window._playback_preview_fps_frames = 0
+
+
+def reset_playback_fps_preview_session(main_window: "MainWindow") -> None:
+    """On stop, freeze session-average FPS; value remains visible on the 'session:' line."""
+    now = time.perf_counter()
+    frozen_new: float | None = None
+    if main_window._playback_preview_fps_active:
+        n = main_window._playback_preview_fps_frames
+        elapsed = now - main_window._playback_preview_fps_start
+        if elapsed > 0 and n > 0:
+            frozen_new = n / elapsed
+
+    main_window._playback_preview_fps_active = False
+    main_window._playback_preview_fps_start = 0.0
+    main_window._playback_preview_fps_frames = 0
+
+    if frozen_new is not None:
+        main_window._preview_session_fps_frozen = frozen_new
+
+    inst_text = _instant_fps_text_from_deque(main_window, now)
+    _set_preview_fps_label(main_window, inst_text, now)
 
 
 def record_preview_frame_tick(main_window: "MainWindow") -> None:
     """
-    Cuenta cuántos frames del preview se pintan por segundo (ventana móvil).
-    Debe llamarse en el hilo de UI cada vez que se actualiza el pixmap del preview.
+    Track preview redraw rate with a ~1s sliding window for instant FPS.
+    While playing, update the second line 'session:' live; after stop it shows the frozen average.
     """
     now = time.perf_counter()
     main_window._preview_fps_last_tick = now
@@ -138,22 +215,27 @@ def record_preview_frame_tick(main_window: "MainWindow") -> None:
     cutoff = now - _PREVIEW_FPS_WINDOW_SEC
     while times and times[0] < cutoff:
         times.popleft()
-    if len(times) < 2:
-        main_window.previewFpsLabel.setText("— FPS")
-        return
-    span = now - times[0]
-    if span <= 0:
-        return
-    fps = (len(times) - 1) / span
-    main_window.previewFpsLabel.setText(f"{fps:.1f} FPS")
+
+    inst_text = _instant_fps_text_from_deque(main_window, now)
+
+    vp = main_window.video_processor
+    if (
+        getattr(main_window, "_playback_preview_fps_active", False)
+        and vp.processing
+        and vp.file_type in ("video", "webcam")
+    ):
+        main_window._playback_preview_fps_frames += 1
+
+    _set_preview_fps_label(main_window, inst_text, now)
 
 
 def refresh_preview_fps_stale(main_window: "MainWindow") -> None:
-    """Si no hay frames nuevos, baja el contador a 0 para no dejar un valor obsoleto."""
+    """If no new frames arrive, show 0 FPS for the instant line (session line may remain)."""
     if main_window._preview_fps_last_tick == 0.0:
         return
     if time.perf_counter() - main_window._preview_fps_last_tick > _PREVIEW_FPS_STALE_SEC:
-        main_window.previewFpsLabel.setText("0 FPS")
+        now = time.perf_counter()
+        _set_preview_fps_label(main_window, "0 FPS", now)
 
 
 def fit_image_to_view(

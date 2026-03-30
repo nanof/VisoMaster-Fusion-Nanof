@@ -1707,6 +1707,8 @@ class VideoProcessor(QObject):
             return False  # Nothing was active and capture seems OK
 
         print("[INFO] Aborting active processing...")
+        if was_active:
+            graphics_view_actions.reset_playback_fps_preview_session(self.main_window)
 
         # 1. Reset flags FIRST to stop all loops immediately.
         # VP-29: Set recording=False early to prevent further frames from being

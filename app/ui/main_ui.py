@@ -175,6 +175,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         self._preview_fps_times: deque[float] = deque()
         self._preview_fps_last_tick = 0.0
+        self._playback_preview_fps_active = False
+        self._playback_preview_fps_start = 0.0
+        self._playback_preview_fps_frames = 0
+        self._preview_session_fps_frozen: float | None = None
 
     def initialize_widgets(self):
         # Initialize QListWidget for target media
@@ -232,6 +236,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             "QLabel { background-color: rgba(0, 0, 0, 140); color: #ffffff; "
             "padding: 4px 8px; border-radius: 4px; font-size: 12px; "
             "font-family: 'Consolas', 'Cascadia Mono', monospace; }"
+        )
+        self.previewFpsLabel.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop
+        )
+        self.previewFpsLabel.setToolTip(
+            "First line: instant FPS (~1 s window).\n"
+            "Second line: session: value — live while playing; after Stop the last average stays visible."
         )
         self.previewFpsLabel.setAttribute(
             QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True

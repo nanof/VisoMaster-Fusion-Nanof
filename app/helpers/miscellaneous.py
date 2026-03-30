@@ -1283,7 +1283,7 @@ def paint_landmarks_on_image(img: torch.Tensor, landmarks_data: list) -> torch.T
 
 
 def cv_fourcc_to_tag(fourcc_val: Any) -> str:
-    """Convierte el entero FOURCC de OpenCV a una etiqueta legible (p. ej. 'avc1')."""
+    """Convert OpenCV's FOURCC integer to a readable tag (e.g. 'avc1')."""
     try:
         v = int(round(float(fourcc_val)))
     except (TypeError, ValueError):
@@ -1339,7 +1339,7 @@ def build_preview_media_metadata_text(
     webcam_backend: int = -1,
 ) -> str:
     """
-    Texto multilínea con metadatos principales del clip para la superposición del preview.
+    Multi-line summary of main media metadata for the preview overlay.
     """
     if not file_type:
         return ""
@@ -1356,8 +1356,8 @@ def build_preview_media_metadata_text(
         wh = _frame_display_size(frame)
         if wh:
             w, h = wh
-            return f"Imagen · {ext} · {w}×{h}"
-        return f"Imagen · {ext}"
+            return f"Image · {ext} · {w}×{h}"
+        return f"Image · {ext}"
 
     if file_type == "webcam":
         backend_lbl = _opencv_backend_display_name(webcam_backend)
@@ -1370,15 +1370,15 @@ def build_preview_media_metadata_text(
         wh = _frame_display_size(frame)
         if wh:
             w, h = wh
-        line1 = f"Webcam · índice {webcam_index} · {backend_lbl}"
+        line1 = f"Webcam · index {webcam_index} · {backend_lbl}"
         if w > 0 and h > 0:
             line2 = (
-                f"{w}×{h} · {fps_dev:.1f} fps (dispositivo)"
+                f"{w}×{h} · {fps_dev:.1f} fps (device)"
                 if fps_dev > 0
                 else f"{w}×{h}"
             )
         else:
-            line2 = "—" if fps_dev <= 0 else f"{fps_dev:.1f} fps (dispositivo)"
+            line2 = "—" if fps_dev <= 0 else f"{fps_dev:.1f} fps (device)"
         return f"{line1}\n{line2}"
 
     if file_type != "video":
@@ -1399,10 +1399,6 @@ def build_preview_media_metadata_text(
     else:
         disp = "—"
 
-    base_name = path_obj.name if path_obj else "—"
-    if len(base_name) > 48:
-        base_name = base_name[:45] + "…"
-
     nf = max_frame_number + 1
     fps_eff = float(fps or 0)
     if media_capture is not None and getattr(media_capture, "isOpened", lambda: False)():
@@ -1416,6 +1412,6 @@ def build_preview_media_metadata_text(
         fps_str = "—"
         dur = "—"
 
-    line1 = f"{base_name}\n{ext} · {disp} · {fourcc}"
-    line2 = f"{fps_str} fps · {nf} fotogr. · {dur}"
+    line1 = f"{ext} · {disp} · {fourcc}"
+    line2 = f"{fps_str} fps · {nf} frames · {dur}"
     return f"{line1}\n{line2}"
