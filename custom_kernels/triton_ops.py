@@ -11,6 +11,7 @@ Optimized for:
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 import torch
 
@@ -147,6 +148,18 @@ def _triton_hide() -> None:
             pass
 
 
+def _windows_python_has_triton_host_build_deps() -> bool:
+    """Triton on Windows JIT-builds a host extension that links Python.h + pythonXY.lib."""
+    if sys.platform != "win32":
+        return True
+    root = Path(sys.base_exec_prefix)
+    vi = sys.version_info
+    nodot = f"{vi.major}{vi.minor}"
+    return (root / "Include" / "Python.h").is_file() and (
+        root / "libs" / f"python{nodot}.lib"
+    ).is_file()
+
+
 # ---------------------------------------------------------------------------
 # Triton availability check & Windows Monkeypatching
 # ---------------------------------------------------------------------------
@@ -157,6 +170,23 @@ try:
     import triton.compiler.compiler as triton_compiler
 
     TRITON_AVAILABLE = True
+
+    # Portable/embeddable Windows Python often has no Include/ or libs/ — Triton then
+    # fails at runtime ("Python.h not found"). Prefer PyTorch CUDA fallbacks.
+    if os.environ.get("VISOMASTER_DISABLE_TRITON", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        TRITON_AVAILABLE = False
+    elif sys.platform == "win32" and not _windows_python_has_triton_host_build_deps():
+        TRITON_AVAILABLE = False
+        print(
+            "[TritonOps] Triton disabled: embeddable/portable Python lacks "
+            "Include/Python.h and libs/pythonXY.lib. Custom provider uses CUDA/PyTorch "
+            "paths instead. Install a full CPython 3.11+ with dev headers, or use "
+            "TensorRT / CUDA provider. (Optional: VISOMASTER_DISABLE_TRITON=1 to force.)"
+        )
 
     # Patch 1: Missing triton_key in triton-windows
     if not hasattr(triton_compiler, "triton_key"):
