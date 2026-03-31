@@ -220,6 +220,13 @@ class VideoProcessor(QObject):
         self._playback_use_wall_clock: bool = False
         self._playback_clock_t0: float = 0.0
         self._playback_clock_anchor_frame: int = 0
+        # Optional: derive wall-clock target from ffplay start + file fps * atempo (preview + live sound)
+        self._wall_clock_use_audio_file_rate: bool = False
+        self._audio_sync_wall_t0: float = 0.0
+        self._audio_sync_anchor_fn: int = 0
+        self._audio_sync_fps_file: float = 0.0
+        self._audio_sync_rate: float = 1.0
+        self._audio_sync_last_seek_monotonic: float = 0.0
 
         # Adding Cuda Streams for thread safety
         self.feeder_stream = (
@@ -390,10 +397,36 @@ class VideoProcessor(QObject):
             # Record the time when the display *actually* starts
             self.playback_display_start_time = time.perf_counter()
             if self._playback_use_wall_clock:
-                self._playback_clock_t0 = time.perf_counter()
-                self._playback_clock_anchor_frame = self.next_frame_to_display
+                want_audio_master = (
+                    self.main_window.control.get(
+                        "VideoPlaybackAudioSyncPreviewToggle", False
+                    )
+                    and self.main_window.liveSoundButton.isChecked()
+                    and not self.recording
+                    and self.file_type == "video"
+                    and self._audio_sync_wall_t0 > 0.0
+                )
+                if want_audio_master:
+                    # Re-read slider so stop/play/seek cannot leave a stale anchor vs ffplay -ss.
+                    anchor_ui = self._timeline_frame_from_ui()
+                    self._audio_sync_anchor_fn = anchor_ui
+                    self._playback_clock_t0 = self._audio_sync_wall_t0
+                    self._playback_clock_anchor_frame = anchor_ui
+                    self._wall_clock_use_audio_file_rate = True
+                    with self.state_lock:
+                        self.next_frame_to_display = anchor_ui
+                    print(
+                        "[INFO] Preview: audio-master wall clock (target frame from ffplay timeline)."
+                    )
+                else:
+                    self._wall_clock_use_audio_file_rate = False
+                    self._playback_clock_t0 = time.perf_counter()
+                    self._playback_clock_anchor_frame = self._timeline_frame_from_ui()
+                    with self.state_lock:
+                        self.next_frame_to_display = self._playback_clock_anchor_frame
             else:
                 self._playback_clock_t0 = 0.0
+                self._wall_clock_use_audio_file_rate = False
 
         # Start the metronome loop
         self.last_display_schedule_time_sec = time.perf_counter()
@@ -972,6 +1005,58 @@ class VideoProcessor(QObject):
                     time.sleep(0.005)  # Wait 5ms (buffer full)
                     continue
 
+                # 2b. Audio-master preview: seek read position toward the ffplay timeline
+                # when processing cannot keep up; otherwise preview stays in slow motion while
+                # audio runs at real time.
+                if (
+                    not is_segment_mode
+                    and not self.recording
+                    and self._wall_clock_use_audio_file_rate
+                    and self._playback_use_wall_clock
+                ):
+                    now_seek = time.perf_counter()
+                    min_lag, slices, max_step, min_interval = (
+                        self._get_audio_sync_feeder_tuning()
+                    )
+                    if now_seek - self._audio_sync_last_seek_monotonic >= min_interval:
+                        target_eff = self._advance_past_skipped_for_display(
+                            self._expected_frame_from_wall_clock()
+                        )
+                        cur_fn = int(self.current_frame_number)
+                        lag = int(target_eff) - cur_fn
+                        if lag >= min_lag:
+                            # Spread correction: move only a fraction of the lag per seek (capped).
+                            raw_step = max(1, (lag + slices - 1) // slices)
+                            step = min(raw_step, max_step)
+                            jump_to = min(
+                                cur_fn + step,
+                                int(target_eff),
+                                int(self.max_frame_number),
+                            )
+                            if jump_to > cur_fn:
+                                self._audio_sync_last_seek_monotonic = now_seek
+                                with self.state_lock:
+                                    self.current_frame_number = jump_to
+                                    # Do not bump next_frame_to_display here: the display loop
+                                    # picks the best frame <= wall-clock target; forcing it ahead
+                                    # of decoded frames made store_frame_to_display reject work and
+                                    # starve the UI when catch-up retried without a read (issue: loop
+                                    # of seek+clear+continue never reached read_frame/enqueue).
+                                    self.frames_to_display.clear()
+                                misc_helpers.seek_frame(
+                                    self.media_capture, jump_to
+                                )
+                                with self.frame_queue.mutex:
+                                    self.frame_queue.queue.clear()
+                                print(
+                                    f"[INFO] Feeder: audio-sync catch-up +{jump_to - cur_fn}f "
+                                    f"({cur_fn}→{jump_to}, lag≈{lag}, target={target_eff}).",
+                                    flush=True,
+                                )
+                                # Fall through: must read/enqueue at least one frame this iteration
+                                # so workers can refill frames_to_display; otherwise lag stays high
+                                # and we only seek+clear in a tight loop (frozen preview).
+
                 if (
                     is_segment_mode or self.recording
                 ) and self.current_frame_number in self.main_window.dropped_frames:
@@ -1271,16 +1356,68 @@ class VideoProcessor(QObject):
         elif reason == "read_error":
             self.read_error_skip_count += 1
 
+    def _get_audio_sync_feeder_tuning(self) -> tuple[int, int, int, float]:
+        """Catch-up tuning from settings (Video Playback → audio sync child controls)."""
+        c = self.main_window.control
+        try:
+            min_lag = int(c.get("VideoPlaybackAudioSyncMinLagSlider", 8))
+        except (TypeError, ValueError):
+            min_lag = 8
+        try:
+            slices = int(c.get("VideoPlaybackAudioSyncCatchupSlicesSlider", 5))
+        except (TypeError, ValueError):
+            slices = 5
+        try:
+            max_step = int(c.get("VideoPlaybackAudioSyncMaxStepSlider", 12))
+        except (TypeError, ValueError):
+            max_step = 12
+        try:
+            interval = float(
+                c.get("VideoPlaybackAudioSyncMinSeekIntervalDecimalSlider", 0.04)
+            )
+        except (TypeError, ValueError):
+            interval = 0.04
+
+        min_lag = max(2, min(60, min_lag))
+        slices = max(2, min(15, slices))
+        max_step = max(1, min(90, max_step))
+        interval = max(0.01, min(0.30, interval))
+        return min_lag, slices, max_step, interval
+
+    def _timeline_frame_from_ui(self) -> int:
+        """Playback timeline index from the seek slider (clamped). Used to keep audio/ffplay aligned after seek/stop/play."""
+        if self.file_type != "video":
+            return int(self.next_frame_to_display)
+        try:
+            fn = int(self.main_window.videoSeekSlider.value())
+        except (TypeError, ValueError):
+            fn = int(self.next_frame_to_display)
+        try:
+            max_fn = int(self.max_frame_number)
+        except (TypeError, ValueError):
+            max_fn = fn
+        if max_fn < 0:
+            max_fn = fn
+        return max(0, min(fn, max_fn))
+
     def _expected_frame_from_wall_clock(self) -> int:
         """Frame index the wall clock says we should have reached (playback preview only)."""
-        if (
-            not self._playback_use_wall_clock
-            or self._playback_clock_t0 <= 0.0
-            or self.fps <= 0
-        ):
+        if not self._playback_use_wall_clock or self._playback_clock_t0 <= 0.0:
             return self.next_frame_to_display
+
         elapsed = time.perf_counter() - self._playback_clock_t0
-        fn = self._playback_clock_anchor_frame + int(elapsed * float(self.fps))
+
+        if self._wall_clock_use_audio_file_rate:
+            r = max(0.5, float(self._audio_sync_rate))
+            f = float(self._audio_sync_fps_file)
+            if f <= 0:
+                f = float(self.fps) if self.fps > 0 else 30.0
+            fn = self._playback_clock_anchor_frame + int(elapsed * r * f)
+        else:
+            if self.fps <= 0:
+                return self.next_frame_to_display
+            fn = self._playback_clock_anchor_frame + int(elapsed * float(self.fps))
+
         return max(0, min(fn, self.max_frame_number))
 
     def _advance_past_skipped_for_display(self, fn: int) -> int:
@@ -1509,6 +1646,21 @@ class VideoProcessor(QObject):
         if self.file_type != "webcam":
             # Increment for next frame
             self.next_frame_to_display += 1
+
+        # Audio-master preview: if still behind the ffplay timeline, repaint soon so we
+        # can consume newer frames from the buffer without waiting a full metronome step.
+        if (
+            self._wall_clock_use_audio_file_rate
+            and self.file_type == "video"
+            and self._playback_use_wall_clock
+            and not self.recording
+        ):
+            tgt_follow = self._advance_past_skipped_for_display(
+                self._expected_frame_from_wall_clock()
+            )
+            if tgt_follow - self.next_frame_to_display >= 2:
+                self._arm_display_metronome_retry_ms(max(1, min(6, _retry_ms // 2)))
+                return
 
         # Advance cadence and schedule the next display tick only after painting.
         self._arm_display_metronome_after_frame_shown()
@@ -1774,6 +1926,7 @@ class VideoProcessor(QObject):
         self.current_frame_number = (
             actual_start_frame  # Feeder reads this frame first when it starts
         )
+        self._audio_sync_last_seek_monotonic = 0.0
 
         # Calculate play_start_time
         self.play_start_time = (
@@ -2041,6 +2194,13 @@ class VideoProcessor(QObject):
         self.triggered_by_job_manager = False
         self._playback_use_wall_clock = False
         self._playback_clock_t0 = 0.0
+        self._playback_clock_anchor_frame = 0
+        self._wall_clock_use_audio_file_rate = False
+        self._audio_sync_wall_t0 = 0.0
+        self._audio_sync_anchor_fn = 0
+        self._audio_sync_fps_file = 0.0
+        self._audio_sync_rate = 1.0
+        self._audio_sync_last_seek_monotonic = 0.0
 
         # 2. Stop utility timers and audio
         self.gpu_memory_update_timer.stop()
@@ -5033,10 +5193,18 @@ class VideoProcessor(QObject):
             print("[WARN] start_live_sound: media_capture is None, cannot start audio.")
             return
 
-        # Calculate seek time based on the *next* frame to be displayed
-        seek_time = (self.next_frame_to_display) / self.media_capture.get(
-            cv2.CAP_PROP_FPS
-        )
+        if self.ffplay_sound_sp:
+            self.stop_live_sound()
+
+        anchor_fn = self._timeline_frame_from_ui()
+        cap_fps = self.media_capture.get(cv2.CAP_PROP_FPS)
+        try:
+            cap_fps_f = float(cap_fps)
+        except (TypeError, ValueError):
+            cap_fps_f = 0.0
+        if cap_fps_f <= 0:
+            cap_fps_f = float(self.fps) if self.fps > 0 else 30.0
+        seek_time = anchor_fn / cap_fps_f
 
         # Adjust audio speed if custom FPS is used
         fpsdiv = 1.0
@@ -5050,6 +5218,27 @@ class VideoProcessor(QObject):
                 fpsdiv = fpscust / fpsorig
         if fpsdiv < 0.5:
             fpsdiv = 0.5  # Don't allow less than 0.5x speed
+
+        fps_file = float(self.media_capture.get(cv2.CAP_PROP_FPS) or 0.0)
+        if fps_file <= 0:
+            fps_file = float(self.fps) if self.fps > 0 else 30.0
+        self._audio_sync_wall_t0 = time.perf_counter()
+        self._audio_sync_anchor_fn = anchor_fn
+        self._audio_sync_fps_file = fps_file
+        self._audio_sync_rate = float(fpsdiv)
+
+        with self.state_lock:
+            self.next_frame_to_display = anchor_fn
+            cur = int(self.current_frame_number)
+            if cur != anchor_fn:
+                self.current_frame_number = anchor_fn
+                try:
+                    misc_helpers.seek_frame(self.media_capture, anchor_fn)
+                except Exception as e:
+                    print(
+                        f"[WARN] audio-sync: could not realign capture to frame {anchor_fn}: {e}"
+                    )
+        self._audio_sync_last_seek_monotonic = 0.0
 
         args = [
             "ffplay",
@@ -5110,6 +5299,16 @@ class VideoProcessor(QObject):
         if not self.processing:  # Check in case the user stopped processing
             return
         print("[INFO] Audio startup delay complete. Starting video metronome.")
+        if (
+            self.main_window.control.get("VideoPlaybackAudioSyncPreviewToggle", False)
+            and self.main_window.liveSoundButton.isChecked()
+            and self._audio_sync_wall_t0 > 0.0
+        ):
+            anchor_fn = self._timeline_frame_from_ui()
+            self._audio_sync_anchor_fn = anchor_fn
+            self._audio_sync_last_seek_monotonic = 0.0
+            with self.state_lock:
+                self.next_frame_to_display = anchor_fn
         self._start_metronome(self.fps, is_first_start=True)
 
     def stop_live_sound(self):
