@@ -437,8 +437,11 @@ def select_output_media_folder(main_window: "MainWindow"):
         )
 
 
-def open_output_media_folder(main_window: "MainWindow"):
-    folder_name = main_window.control.get("OutputMediaFolder")
+def open_output_media_folder(
+    main_window: "MainWindow", folder_name: str | None = None
+):
+    if not folder_name:
+        folder_name = main_window.control.get("OutputMediaFolder")
     if isinstance(folder_name, str) and folder_name:
         if os.path.exists(folder_name):
             # Normalize path

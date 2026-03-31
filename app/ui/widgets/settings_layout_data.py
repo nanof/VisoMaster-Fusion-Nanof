@@ -74,6 +74,20 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "help": "Target height resolution (e.g. 720p). The aspect ratio is preserved.",
         },
     },
+    "Output Settings": {
+        "OutputToTargetLocationToggle": {
+            "level": 1,
+            "label": "Output to Target Location",
+            "default": False,
+            "help": "Save processed output next to the current target media instead of the global output folder.",
+        },
+        "ClusterOutputBySourceToggle": {
+            "level": 1,
+            "label": "Cluster Output by Source Name",
+            "default": False,
+            "help": "Save processed output into a subfolder named after the selected merged embedding.",
+        },
+    },
     "Video Playback Settings": {
         "VideoPlaybackCustomFpsToggle": {
             "level": 1,

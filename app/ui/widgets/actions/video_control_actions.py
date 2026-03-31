@@ -2015,15 +2015,39 @@ def save_current_frame_to_file(main_window: "MainWindow"):
             main_window,
         )
         return
+    output_folder = str(main_window.control.get("OutputMediaFolder", "")).strip()
+    if main_window.control.get("OutputToTargetLocationToggle", False):
+        output_folder = os.path.dirname(str(main_window.video_processor.media_path))
+    if main_window.control.get("ClusterOutputBySourceToggle", False):
+        target_face_button = getattr(main_window, "cur_selected_target_face_button", None)
+        assigned_embeddings = (
+            getattr(target_face_button, "assigned_merged_embeddings", None)
+            if target_face_button
+            else None
+        )
+        embedding_id = next(iter(assigned_embeddings), None) if assigned_embeddings else None
+        embedding_button = (
+            main_window.merged_embeddings.get(embedding_id)
+            if embedding_id is not None
+            else None
+        )
+        embedding_name = (
+            str(getattr(embedding_button, "embedding_name", "")).strip()
+            if embedding_button is not None
+            else ""
+        )
+        if embedding_name:
+            output_folder = os.path.join(output_folder, embedding_name)
     frame = main_window.video_processor.current_frame.copy()
     image_format = "image"
     if main_window.control["ImageFormatToggle"]:
         image_format = "jpegimage"
 
     if isinstance(frame, numpy.ndarray):
+        os.makedirs(output_folder, exist_ok=True)
         save_filename = misc_helpers.get_output_file_path(
             main_window.video_processor.media_path,
-            str(main_window.control["OutputMediaFolder"]),
+            output_folder,
             media_type=image_format,
         )
         if save_filename:
@@ -2318,9 +2342,39 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
                     image_format = "image"
                     if main_window.control["ImageFormatToggle"]:
                         image_format = "jpegimage"
+                    output_folder = str(main_window.control.get("OutputMediaFolder", "")).strip()
+                    if main_window.control.get("OutputToTargetLocationToggle", False):
+                        output_folder = os.path.dirname(str(media_path))
+                    if main_window.control.get("ClusterOutputBySourceToggle", False):
+                        target_face_button = getattr(
+                            main_window, "cur_selected_target_face_button", None
+                        )
+                        assigned_embeddings = (
+                            getattr(target_face_button, "assigned_merged_embeddings", None)
+                            if target_face_button
+                            else None
+                        )
+                        embedding_id = (
+                            next(iter(assigned_embeddings), None)
+                            if assigned_embeddings
+                            else None
+                        )
+                        embedding_button = (
+                            main_window.merged_embeddings.get(embedding_id)
+                            if embedding_id is not None
+                            else None
+                        )
+                        embedding_name = (
+                            str(getattr(embedding_button, "embedding_name", "")).strip()
+                            if embedding_button is not None
+                            else ""
+                        )
+                        if embedding_name:
+                            output_folder = os.path.join(output_folder, embedding_name)
+                    os.makedirs(output_folder, exist_ok=True)
                     save_filename = misc_helpers.get_output_file_path(
                         media_path,
-                        str(main_window.control["OutputMediaFolder"]),
+                        output_folder,
                         media_type=image_format,
                     )
 

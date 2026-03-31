@@ -142,6 +142,7 @@ class VideoProcessor(QObject):
             False  # True if "multi-segment" recording is active
         )
         self.triggered_by_job_manager: bool = False  # For multi-segment job integration
+        self.active_output_folder: str = ""
 
         # --- Subprocesses ---
         self.virtcam: pyvirtualcam.Camera | None = None
@@ -1342,6 +1343,34 @@ class VideoProcessor(QObject):
 
         # 4. Setup Recording (if applicable)
         if self.recording:
+            output_folder = str(self.main_window.control.get("OutputMediaFolder", "")).strip()
+            if self.main_window.control.get("OutputToTargetLocationToggle", False):
+                output_folder = os.path.dirname(str(self.media_path))
+            if self.main_window.control.get("ClusterOutputBySourceToggle", False):
+                target_face_button = getattr(
+                    self.main_window, "cur_selected_target_face_button", None
+                )
+                assigned_embeddings = (
+                    getattr(target_face_button, "assigned_merged_embeddings", None)
+                    if target_face_button
+                    else None
+                )
+                embedding_id = (
+                    next(iter(assigned_embeddings), None) if assigned_embeddings else None
+                )
+                embedding_button = (
+                    self.main_window.merged_embeddings.get(embedding_id)
+                    if embedding_id is not None
+                    else None
+                )
+                embedding_name = (
+                    str(getattr(embedding_button, "embedding_name", "")).strip()
+                    if embedding_button is not None
+                    else ""
+                )
+                if embedding_name:
+                    output_folder = os.path.join(output_folder, embedding_name)
+            self.active_output_folder = output_folder
             # Disable UI elements
             if not self.main_window.control["KeepControlsToggle"]:
                 layout_actions.disable_all_parameters_and_control_widget(
@@ -1715,6 +1744,7 @@ class VideoProcessor(QObject):
         self.is_processing_segments = False
         self.recording = False
         self.triggered_by_job_manager = False
+        self.active_output_folder = ""
 
         # 2. Stop utility timers and audio
         self.gpu_memory_update_timer.stop()
@@ -2579,6 +2609,7 @@ class VideoProcessor(QObject):
                 cast(ControlTypes, copy.deepcopy(base_control)),
                 cast(FacesParametersTypes, copy.deepcopy(base_params)),
             )
+            output_folder = self.active_output_folder
 
         local_params = cast(
             FacesParametersTypes, copy.deepcopy(marker_data.get("parameters", {}))
@@ -4072,6 +4103,32 @@ class VideoProcessor(QObject):
         self.current_segment_index = -1
         self.temp_segment_files = []
         self.segment_temp_dir = None
+        output_folder = str(self.main_window.control.get("OutputMediaFolder", "")).strip()
+        if self.main_window.control.get("OutputToTargetLocationToggle", False):
+            output_folder = os.path.dirname(str(self.media_path))
+        if self.main_window.control.get("ClusterOutputBySourceToggle", False):
+            target_face_button = getattr(
+                self.main_window, "cur_selected_target_face_button", None
+            )
+            assigned_embeddings = (
+                getattr(target_face_button, "assigned_merged_embeddings", None)
+                if target_face_button
+                else None
+            )
+            embedding_id = next(iter(assigned_embeddings), None) if assigned_embeddings else None
+            embedding_button = (
+                self.main_window.merged_embeddings.get(embedding_id)
+                if embedding_id is not None
+                else None
+            )
+            embedding_name = (
+                str(getattr(embedding_button, "embedding_name", "")).strip()
+                if embedding_button is not None
+                else ""
+            )
+            if embedding_name:
+                output_folder = os.path.join(output_folder, embedding_name)
+        self.active_output_folder = output_folder
 
         # 3. Disable UI
         if not self.main_window.control["KeepControlsToggle"]:
@@ -4388,6 +4445,7 @@ class VideoProcessor(QObject):
             self.current_segment_index = -1
             self.temp_segment_files = []
             self.triggered_by_job_manager = False
+            self.active_output_folder = ""
             return
 
         # 3. Determine final output path
@@ -4406,6 +4464,7 @@ class VideoProcessor(QObject):
             if was_triggered_by_job
             else None
         )
+        output_folder = self.active_output_folder
 
         job_name, output_file_name = self._apply_job_timestamp_to_output_name(
             was_triggered_by_job,
@@ -4416,7 +4475,7 @@ class VideoProcessor(QObject):
 
         final_file_path = misc_helpers.get_output_file_path(
             self.media_path,
-            self.main_window.control["OutputMediaFolder"],
+            output_folder,
             job_name=job_name,
             use_job_name_for_output=use_job_name,
             output_file_name=output_file_name,
@@ -4452,6 +4511,7 @@ class VideoProcessor(QObject):
                     self.main_window
                 )
                 video_control_actions.reset_media_buttons(self.main_window)
+                self.active_output_folder = ""
                 return
 
         if Path(final_file_path).is_file():
@@ -4470,6 +4530,7 @@ class VideoProcessor(QObject):
                     self.main_window
                 )
                 video_control_actions.reset_media_buttons(self.main_window)
+                self.active_output_folder = ""
                 return
 
         # 4. Create FFmpeg list file
@@ -4547,6 +4608,7 @@ class VideoProcessor(QObject):
             self.temp_segment_files = []
             self.current_segment_end_frame = None
             self.triggered_by_job_manager = False
+            self.active_output_folder = ""
             print("[INFO] Clearing frame queue of residual pills...")
             with self.frame_queue.mutex:
                 self.frame_queue.queue.clear()
@@ -4596,7 +4658,9 @@ class VideoProcessor(QObject):
 
             if self.main_window.control["OpenOutputToggle"]:
                 try:
-                    list_view_actions.open_output_media_folder(self.main_window)
+                    list_view_actions.open_output_media_folder(
+                        self.main_window, output_dir
+                    )
                 except Exception:
                     pass
 
