@@ -7,7 +7,6 @@ import torch
 from torchvision.transforms import v2
 from PIL import Image
 
-import qdarkstyle
 from PySide6 import QtWidgets
 import qdarktheme
 
@@ -153,15 +152,14 @@ def change_theme(main_window: "MainWindow", new_theme):
             "light",
         )
     elif new_theme == "Dark-Blue":
-        _style = (
-            get_style_data(
-                "dark_styles.qss",
-                "dark",
-            )
-            + qdarkstyle.load_stylesheet()
+        _style = get_style_data(
+            "dark_blue.qss",
+            "dark",
         )
     elif new_theme == "True-Dark":
         _style = get_style_data("true_dark.qss", "dark")
+    elif new_theme == "OLED-Black":
+        _style = get_style_data("oled_black.qss", "dark")
     elif new_theme == "Windows11-Dark":
         _style = get_style_data(
             "windows11_dark.qss",
@@ -178,8 +176,12 @@ def change_theme(main_window: "MainWindow", new_theme):
         _style = get_style_data("nord.qss", "dark")
     elif new_theme == "Gruvbox":
         _style = get_style_data("gruvbox.qss", "dark")
+    elif new_theme == "Monokai":
+        _style = get_style_data("monokai.qss", "dark")
 
     app.setStyleSheet(_style)
+    main_window._vram_high_style_active = None
+    common_widget_actions.update_gpu_memory_progressbar(main_window)
     main_window.update()
 
 

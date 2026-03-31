@@ -9,6 +9,7 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "label": "Theme",
             "options": [
                 "True-Dark",
+                "OLED-Black",
                 "Windows11-Dark",
                 "Dark",
                 "Dark-Blue",
@@ -18,6 +19,7 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
                 "Dracula",
                 "Nord",
                 "Gruvbox",
+                "Monokai",
             ],
             "default": "True-Dark",
             "help": "Select the theme to be used",

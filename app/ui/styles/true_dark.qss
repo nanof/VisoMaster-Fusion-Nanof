@@ -21,9 +21,21 @@ QPushButton {
     font-weight: bold;
 }
 
+QPushButton[flat="true"] {
+    background-color: #202020;
+    border: 1px solid #363636;
+    padding: 5px 10px;
+    border-radius: 4px;
+}
+
 QPushButton:hover {
     background-color: #2b2b2b; /* Darker Slightly lighter grey on hover */
     border: 1px solid #4090a3; /* Accent border on hover */
+}
+
+QPushButton[flat="true"]:hover {
+    background-color: #2b2b2b;
+    border: 1px solid #4090a3;
 }
 
 QPushButton:pressed {
@@ -32,8 +44,19 @@ QPushButton:pressed {
     border: 1px solid #156a7d; /* Darker accent border */
 }
 
+QPushButton[flat="true"]:pressed {
+    background-color: #4090a3;
+    color: #101010;
+    border: 1px solid #156a7d;
+}
+
 QPushButton:checked {
     background-color: #307a8d; /* Slightly darker accent for checked */
+    border: 1px solid #4090a3;
+}
+
+QPushButton[flat="true"]:checked {
+    background-color: #307a8d;
     border: 1px solid #4090a3;
 }
 
@@ -41,6 +64,20 @@ QPushButton:disabled {
     background-color: #2b2b2b; /* Use hover grey for disabled */
     color: #6a6a6a; /* Darker disabled text */
     border: 1px solid #363636;
+}
+
+QPushButton[flat="true"]:disabled {
+    background-color: #2b2b2b;
+    color: #6a6a6a;
+    border: 1px solid #363636;
+}
+
+QPushButton:focus {
+    border: 1px solid #4090a3;
+}
+
+QPushButton[flat="true"]:focus {
+    border: 1px solid #4090a3;
 }
 
 QToolTip {
@@ -53,7 +90,7 @@ QToolTip {
 
 /* Base button style for custom cards */
 TargetMediaCardButton, TargetFaceCardButton, InputFaceCardButton, EmbeddingCardButton {
-    background-color: #202020;  /* Darker secondary background */
+    background-color: #1a1a1a;  /* Neutral inactive card background */
     border-radius: 5px;        /* Rounded corners */
     border: 1px solid #363636;  /* Darkest Subtle border */
     color: #f0f0f0;             /* Lighter text */
@@ -68,21 +105,26 @@ TargetMediaCardButton::icon, TargetFaceCardButton::icon, InputFaceCardButton::ic
 
 /* Hover state */
 TargetMediaCardButton:hover, TargetFaceCardButton:hover, InputFaceCardButton:hover, EmbeddingCardButton:hover {
-    background-color: #2b2b2b;  /* Darker Slightly lighter on hover */
-    border: 1px solid #4090a3;  /* Accent border on hover */
+    background-color: #1f1f1f;  /* Keep hover subtle and neutral */
+    border: 1px solid #4090a3;  /* Match regular button blue hover outline */
+}
+
+TargetMediaCardButton:hover:focus:!checked, TargetFaceCardButton:hover:focus:!checked, InputFaceCardButton:hover:focus:!checked, EmbeddingCardButton:hover:focus:!checked {
+    background-color: #1f1f1f;
+    border: 1px solid #4090a3;  /* Preserve hover when focused */
 }
 
 /* Pressed state */
 TargetMediaCardButton:pressed, TargetFaceCardButton:pressed, InputFaceCardButton:pressed, EmbeddingCardButton:pressed {
-    background-color: #4090a3;  /* Accent background when pressed */
-    border: 1px solid #156a7d;  /* Darker accent border */
-    color: #101010;
+    background-color: #2c4a52;  /* Temporary stronger active press */
+    border: 1px solid #307a8d;
+    color: #f0f0f0;
 }
 
 /* Checked state */
 TargetMediaCardButton:checked, TargetFaceCardButton:checked, InputFaceCardButton:checked, EmbeddingCardButton:checked {
     border: 2px solid #4090a3;  /* Thicker accent border */
-    background-color: #307a8d; /* Slightly darker accent background */
+    background-color: #274d57; /* Distinct active background */
     color: #ffffff;
 }
 
@@ -96,7 +138,25 @@ TargetMediaCardButton:disabled, TargetFaceCardButton:disabled, InputFaceCardButt
 /* Focused state */
 TargetMediaCardButton:focus, TargetFaceCardButton:focus, InputFaceCardButton:focus, EmbeddingCardButton:focus {
     outline: none;              /* Remove default focus outline */
-    border: 2px solid #4090a3;  /* Accent border on focus */
+}
+
+TargetMediaCardButton:focus:!checked, TargetFaceCardButton:focus:!checked, InputFaceCardButton:focus:!checked, EmbeddingCardButton:focus:!checked {
+    background-color: #1a1a1a;
+    border: 1px solid #363636;  /* Near-idle focus state so mouse-off looks inactive */
+}
+
+TargetMediaCardButton:focus:checked, TargetFaceCardButton:focus:checked, InputFaceCardButton:focus:checked, EmbeddingCardButton:focus:checked {
+    border: 2px solid #4090a3;
+}
+
+#targetVideosList::item:selected, #targetFacesList::item:selected, #inputFacesList::item:selected, #inputEmbeddingsList::item:selected {
+    background: transparent;
+    border: none;
+}
+
+#targetVideosList::item:hover, #targetFacesList::item:hover, #inputFacesList::item:hover, #inputEmbeddingsList::item:hover {
+    background: transparent;
+    border: none;
 }
 
 
