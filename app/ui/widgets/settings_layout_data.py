@@ -149,6 +149,16 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "decimals": 2,
             "help": "Set the audio starting delay to adjust for latency.",
         },
+        "VideoPlaybackAudioSyncPreviewToggle": {
+            "level": 1,
+            "label": "Sync preview to live audio",
+            "default": False,
+            "help": "Preview only: when Live Sound is on, drive the preview timeline from "
+            "the same wall-clock origin as ffplay (container fps × playback speed), so video "
+            "stays aligned with what you hear. If swap/decode is slower than realtime, the "
+            "feeder may seek forward and drop intermediate frames to resync. Disable for "
+            "classic metronome pacing. No effect without Live Sound or while recording.",
+        },
     },
     "Video Recording Settings": {
         "FrameEnhancerDownToggle": {

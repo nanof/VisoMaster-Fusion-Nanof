@@ -511,6 +511,26 @@ def extract_frame_as_pixmap(
     return None  # Return None if everything failed.
 
 
+def extract_frame_as_image(
+    main_window: "MainWindow",
+    media_file_path,
+    file_type,
+    webcam_index=False,
+    webcam_backend=False,
+):
+    """Like :func:`extract_frame_as_pixmap` but returns a ``QImage`` for thread thumbnail signals."""
+    pix = extract_frame_as_pixmap(
+        main_window,
+        media_file_path,
+        file_type,
+        webcam_index=webcam_index,
+        webcam_backend=webcam_backend,
+    )
+    if pix is None or pix.isNull():
+        return None
+    return pix.toImage()
+
+
 def set_widgets_values_using_face_id_parameters(
     main_window: "MainWindow", face_id=False
 ):
