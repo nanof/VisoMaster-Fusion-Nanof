@@ -697,6 +697,20 @@ class FaceDetectors:
         Main dispatcher for running face detection. Selects and runs the appropriate model.
         Supports tracking via 'previous_detections'.
         """
+        rotation_angles = rotation_angles or [0]
+        use_multi_rotation = len(rotation_angles) > 1
+
+        # Multi-angle detection must run the full detector path. Tracking shortcuts
+        # can reuse stale landmarks from a different orientation and destabilize
+        # swaps on upside-down faces during recording.
+        # Also force from_points=True so the secondary landmark model uses kpss-aligned
+        # crops. Without this, the bbox-only crop path (from_points=False) produces an
+        # upside-down face crop that landmark detectors cannot handle, which corrupts
+        # kpss_5 and causes wrong embeddings / ghost-face artifacts.
+        if use_multi_rotation:
+            previous_detections = None
+            from_points = True
+
         control = self.models_processor.main_window.control
         use_bytetrack = control.get("FaceTrackingEnableToggle", False)
         # bypass_bytetrack=True disables ByteTrack for this call only (e.g. per-eye VR
@@ -831,7 +845,7 @@ class FaceDetectors:
             "landmark_detect_mode": landmark_detect_mode,
             "landmark_score": landmark_score,
             "from_points": from_points,
-            "rotation_angles": rotation_angles or [0],
+            "rotation_angles": rotation_angles,
             "ort_session": ort_session,
         }
         args.update(kwargs)
