@@ -301,6 +301,9 @@ class TargetMediaCardButton(CardButton):
             # Re-initialize virtualcam to reset its dimensions with that of the new video
             main_window.video_processor.enable_virtualcam()
 
+        # Preview overlay: codec/resolution/duration under the FPS label
+        graphics_view_actions.update_preview_media_metadata(main_window)
+
         # list_view_actions.find_target_faces(main_window)
 
     def deselect_currently_selected_video(self, main_window):
@@ -338,6 +341,7 @@ class TargetMediaCardButton(CardButton):
             main_window.graphicsViewFrame.update()
 
             main_window.video_processor.file_type = None
+            graphics_view_actions.update_preview_media_metadata(main_window)
 
             if self.media_capture:
                 self.media_capture.release()

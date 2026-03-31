@@ -2073,19 +2073,28 @@ def process_swap_faces(main_window: "MainWindow"):
     advance button.  For the Custom provider, build-progress dialogs are shown via
     show_build_dialog signals emitted before each CUDA graph capture; those signals
     call processEvents() so the dialog paints even while the main thread is occupied.
+
+    During active playback/recording/webcam/segments, toggling swap only updates
+    feeder flags and worker-visible state; we do not stop the pipeline (workers
+    already snapshot swap from the button each frame).
     """
     video_processor = main_window.video_processor
     video_processor.sync_feeder_ui_face_flags_from_main_window()
+    if video_processor.processing or video_processor.is_processing_segments:
+        return
     video_processor.process_current_frame(synchronous=True)
 
 
 def process_edit_faces(main_window: "MainWindow"):
     """Triggers a single-frame re-process after the Edit Faces button state changes.
 
-    Runs synchronously for the same reason as process_swap_faces.
+    Runs synchronously for the same reason as process_swap_faces when idle.
+    During active processing, only syncs feeder flags (same as swap toggle).
     """
     video_processor = main_window.video_processor
     video_processor.sync_feeder_ui_face_flags_from_main_window()
+    if video_processor.processing or video_processor.is_processing_segments:
+        return
     video_processor.process_current_frame(synchronous=True)
 
 
