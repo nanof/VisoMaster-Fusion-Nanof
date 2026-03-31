@@ -155,9 +155,56 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "default": False,
             "help": "Preview only: when Live Sound is on, drive the preview timeline from "
             "the same wall-clock origin as ffplay (container fps × playback speed), so video "
-            "stays aligned with what you hear. If swap/decode is slower than realtime, the "
-            "feeder may seek forward and drop intermediate frames to resync. Disable for "
-            "classic metronome pacing. No effect without Live Sound or while recording.",
+            "stays aligned with what you hear. If swap/decode lags, the feeder catches up in "
+            "several small seeks (smoother than one big jump). Disable for classic metronome "
+            "pacing. No effect without Live Sound or while recording.",
+        },
+        "VideoPlaybackAudioSyncMinLagSlider": {
+            "level": 2,
+            "label": "Audio sync — min lag (frames)",
+            "min_value": "2",
+            "max_value": "60",
+            "default": "8",
+            "parentToggle": "VideoPlaybackAudioSyncPreviewToggle",
+            "requiredToggleValue": True,
+            "step": 1,
+            "help": "Start catch-up only when preview is at least this many frames behind the "
+            "audio timeline. Higher = fewer seeks, more risk of visible desync before action.",
+        },
+        "VideoPlaybackAudioSyncCatchupSlicesSlider": {
+            "level": 2,
+            "label": "Audio sync — spread lag over (steps)",
+            "min_value": "2",
+            "max_value": "15",
+            "default": "5",
+            "parentToggle": "VideoPlaybackAudioSyncPreviewToggle",
+            "requiredToggleValue": True,
+            "step": 1,
+            "help": "Roughly how many seeks to close each lag gap (larger = smaller steps per seek, smoother).",
+        },
+        "VideoPlaybackAudioSyncMaxStepSlider": {
+            "level": 2,
+            "label": "Audio sync — max frames per seek",
+            "min_value": "2",
+            "max_value": "90",
+            "default": "12",
+            "parentToggle": "VideoPlaybackAudioSyncPreviewToggle",
+            "requiredToggleValue": True,
+            "step": 1,
+            "help": "Cap on how many frames one catch-up seek may skip. Lower = gentler; very low may "
+            "struggle if the pipeline is much slower than realtime.",
+        },
+        "VideoPlaybackAudioSyncMinSeekIntervalDecimalSlider": {
+            "level": 2,
+            "label": "Audio sync — min seek interval (s)",
+            "min_value": "0.01",
+            "max_value": "0.30",
+            "default": "0.04",
+            "step": 0.01,
+            "decimals": 2,
+            "parentToggle": "VideoPlaybackAudioSyncPreviewToggle",
+            "requiredToggleValue": True,
+            "help": "Minimum time between catch-up seeks. Higher reduces seek thrashing; lower reacts faster.",
         },
     },
     "Video Recording Settings": {
