@@ -31,7 +31,7 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "label": "Providers Priority",
             "options": ["CUDA", "TensorRT", "TensorRT-Engine", "Custom", "CPU"],
             "default": "TensorRT",
-            "help": "Select the providers priority to be used with the system. 'Custom' uses TensorRT for all models except those with a custom CUDA kernel (e.g. Inswapper128).",
+            "help": "Execution providers: try TensorRT vs Custom and measure with VISIOMASTER_PERF_BUNDLE=1. FP16/mixed precision: profile with ORT or Nsight before changing builds. Engine cache: set VISIOMASTER_LOG_TRT_CACHE=1 on load to print cache-hit lines.",
             "exec_function": control_actions.change_execution_provider,
             "exec_function_args": [],
         },
@@ -72,6 +72,18 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "parentToggle": "GlobalInputResizeToggle",
             "requiredToggleValue": True,
             "help": "Target height resolution (e.g. 720p). The aspect ratio is preserved.",
+        },
+        "PerformancePresetSelection": {
+            "level": 1,
+            "label": "FPS preset (layer A)",
+            "options": [
+                "Custom (no preset)",
+                "High FPS — 720p input, interval 3, det 416, Inswapper 128",
+            ],
+            "default": "Custom (no preset)",
+            "help": "Applies a reversible bundle aligned with the aggressive-FPS plan. Measure impact with VISIOMASTER_PERF_BUNDLE=1 (enables PERF_LOG + STAGES + SWAP_CORE).",
+            "exec_function": control_actions.apply_fps_aggressive_preset,
+            "exec_function_args": [],
         },
     },
     "Video Playback Settings": {
@@ -322,7 +334,7 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "label": "Face Detect Model",
             "options": ["RetinaFace", "Yolov8", "SCRFD", "Yunet"],
             "default": "RetinaFace",
-            "help": "Select the face detection model to use for detecting faces in the input image or video.",
+            "help": "Select the face detection model. To benchmark alternatives, use the same video and VISIOMASTER_PERF_BUNDLE=1; keep RecognitionModel matched to the swapper (e.g. Inswapper128ArcFace with Inswapper128).",
         },
         "DetectorScoreSlider": {
             "level": 1,
@@ -341,6 +353,13 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "default": "1",
             "step": 1,
             "help": "How often to run the full face detector. Higher values improve FPS but may lose fast-moving faces. 1 = Detect every frame (Slowest).",
+        },
+        "DetectorInternalSizeSelection": {
+            "level": 1,
+            "label": "Detector internal size",
+            "options": ["512", "416", "384", "320", "256"],
+            "default": "512",
+            "help": "Letterbox side length for the detector (smaller = faster, more false negatives on small faces). Layer D / quality trade-off.",
         },
         "MaxFacesToDetectSlider": {
             "level": 1,

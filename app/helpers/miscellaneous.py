@@ -57,6 +57,41 @@ video_extensions = (
     ".gif",
 )
 
+
+def bgr_uint8_to_rgb_contiguous(frame_bgr: np.ndarray) -> np.ndarray:
+    """
+    OpenCV BGR ``uint8`` HWC image → row-major RGB ``uint8``.
+
+    Prefer this over ``np.ascontiguousarray(frame_bgr[..., ::-1])`` for video
+    frames: ``cvtColor`` uses an optimized channel-reorder path instead of a
+    strided slice plus a generic contiguous copy.
+    """
+    if frame_bgr.dtype != np.uint8:
+        frame_bgr = np.ascontiguousarray(frame_bgr, dtype=np.uint8)
+    return cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+
+
+def rgb_uint8_to_bgr_contiguous(frame_rgb: np.ndarray) -> np.ndarray:
+    """RGB ``uint8`` HWC → OpenCV BGR ``uint8`` (contiguous)."""
+    if frame_rgb.dtype != np.uint8:
+        frame_rgb = np.ascontiguousarray(frame_rgb, dtype=np.uint8)
+    return cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+
+
+def detector_input_size_from_control(control: Mapping[str, Any]) -> Tuple[int, int]:
+    """
+    Square letterbox side for `run_detect` (UI: Detector internal size).
+    Lower values improve FPS; very low sizes miss small faces.
+    """
+    raw = control.get("DetectorInternalSizeSelection", 512)
+    try:
+        side = int(str(raw).strip())
+    except (TypeError, ValueError):
+        side = 512
+    side = max(256, min(640, side))
+    return (side, side)
+
+
 # --- Class Definitions ---
 
 
@@ -862,18 +897,34 @@ def read_frame(
 
     The 'lock' (Point 5) is critical as 'capture_obj' is a shared resource.
     It prevents race conditions between the feeder thread and seek operations.
+
+    Set ``VISIOMASTER_PERF_READ_FRAME_DETAIL=1`` for a per-call line:
+    ``cap_read_ms`` (OpenCV decode/read), ``rotate_ms``, ``resize_ms``.
     """
+    _read_detail = os.environ.get(
+        "VISIOMASTER_PERF_READ_FRAME_DETAIL", ""
+    ).strip().lower() in ("1", "true", "yes", "on")
+    _cap_ms = _rot_ms = _rsz_ms = 0.0
+
     capture_lock = _get_capture_lock(capture_obj)
 
+    if _read_detail:
+        _t_cap0 = time.perf_counter()
     with capture_lock:
         ret, frame = capture_obj.read()
+    if _read_detail:
+        _cap_ms = (time.perf_counter() - _t_cap0) * 1000.0
 
     if not ret:
         return False, None  # Return immediately if read fails
 
     # 1. Apply rotation (if necessary)
     if media_rotation != 0:
+        if _read_detail:
+            _t_rot0 = time.perf_counter()
         frame = _apply_frame_rotation(frame, media_rotation)
+        if _read_detail:
+            _rot_ms = (time.perf_counter() - _t_rot0) * 1000.0
 
     # 2. Apply resizing (if necessary)
     # This is done *after* the lock to avoid holding it during resizing.
@@ -893,13 +944,24 @@ def read_frame(
                 target_width += 1
 
             # cv2.INTER_AREA is generally the fastest and best for downscaling
+            if _read_detail:
+                _t_rsz0 = time.perf_counter()
             frame = cv2.resize(
                 frame, (target_width, target_height), interpolation=cv2.INTER_AREA
             )
+            if _read_detail:
+                _rsz_ms = (time.perf_counter() - _t_rsz0) * 1000.0
         except Exception as e:
             print(f"[ERROR] Failed to resize frame in preview_mode: {e}")
             # Fallback: return the original (rotated) frame if resize fails
             return ret, frame
+
+    if _read_detail:
+        print(
+            f"[PERF-READ-FRAME] cap_read_ms={_cap_ms:.2f} rotate_ms={_rot_ms:.2f} "
+            f"resize_ms={_rsz_ms:.2f}",
+            flush=True,
+        )
 
     # Return the (potentially rotated and resized) frame
     return ret, frame

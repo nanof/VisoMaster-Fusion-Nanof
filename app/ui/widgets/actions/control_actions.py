@@ -8,11 +8,12 @@ from torchvision.transforms import v2
 from PIL import Image
 
 import qdarkstyle
-from PySide6 import QtWidgets
+from PySide6 import QtCore, QtWidgets
 import qdarktheme
 
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
+import app.helpers.miscellaneous as misc_helpers
 from app.ui.widgets.actions import common_actions as common_widget_actions
 
 #'''
@@ -735,7 +736,7 @@ def apply_face_reaging(main_window: "MainWindow", *_args) -> None:
         models_processor = main_window.models_processor
 
         # BGR numpy → RGB CHW uint8 tensor
-        face_rgb_np = np.ascontiguousarray(cropped_face_bgr[..., ::-1])
+        face_rgb_np = misc_helpers.bgr_uint8_to_rgb_contiguous(cropped_face_bgr)
         face_chw = torch.from_numpy(face_rgb_np).permute(2, 0, 1)  # CHW uint8
 
         # Ensure 512 × 512
@@ -872,3 +873,93 @@ def handle_auto_mouth_toggle(main_window: "MainWindow", new_value: bool) -> None
         print(f"[WARN] Auto Mouth Expression: detector unavailable — {err}")
     else:
         print("[INFO] Auto Mouth Expression enabled. Mouth action detector ready.")
+
+
+_FPS_AGGRESSIVE_PRESET_LABEL = (
+    "High FPS — 720p input, interval 3, det 416, Inswapper 128"
+)
+_FPS_PRESET_CUSTOM = "Custom (no preset)"
+
+
+def apply_fps_aggressive_preset(main_window: "MainWindow", value: str) -> None:
+    """Settings → General: apply layer-A style defaults (plan: FPS agresivo x2)."""
+    if value != _FPS_AGGRESSIVE_PRESET_LABEL:
+        return
+
+    ca = common_widget_actions
+    prev_batch = getattr(main_window, "_batch_update_in_progress", False)
+    main_window._batch_update_in_progress = True
+    try:
+        main_window.control["GlobalInputResizeToggle"] = True
+        main_window.control["GlobalInputResizeSizeSelection"] = "720p"
+        main_window.control["FaceDetectionIntervalSlider"] = 3
+        main_window.control["DetectorInternalSizeSelection"] = "416"
+
+        if main_window.video_processor.processing:
+            with main_window.video_processor.state_lock:
+                fc = main_window.video_processor.feeder_control
+                if fc:
+                    fc["GlobalInputResizeToggle"] = True
+                    fc["GlobalInputResizeSizeSelection"] = "720p"
+                    fc["FaceDetectionIntervalSlider"] = 3
+                    fc["DetectorInternalSizeSelection"] = "416"
+                fp = main_window.video_processor.feeder_parameters
+                if fp:
+                    for _fid, p in fp.items():
+                        if isinstance(p, dict) and p.get("SwapModelSelection") == "Inswapper128":
+                            p["SwapperResSelection"] = "128"
+
+        for key, val in (
+            ("GlobalInputResizeToggle", True),
+            ("GlobalInputResizeSizeSelection", "720p"),
+            ("FaceDetectionIntervalSlider", 3),
+            ("DetectorInternalSizeSelection", "416"),
+        ):
+            w = main_window.parameter_widgets.get(key)
+            if w:
+                w.enable_refresh_frame = False
+                ca._set_single_widget_value(w, val)
+                w.enable_refresh_frame = True
+
+        for _fid, params in list(main_window.parameters.items()):
+            if isinstance(params, dict) and params.get("SwapModelSelection") == "Inswapper128":
+                params["SwapperResSelection"] = "128"
+
+        if (
+            isinstance(main_window.default_parameters, dict)
+            and main_window.default_parameters.get("SwapModelSelection")
+            == "Inswapper128"
+        ):
+            main_window.default_parameters["SwapperResSelection"] = "128"
+
+        if isinstance(main_window.current_widget_parameters, dict):
+            if (
+                main_window.current_widget_parameters.get("SwapModelSelection")
+                == "Inswapper128"
+            ):
+                main_window.current_widget_parameters["SwapperResSelection"] = "128"
+
+        sw = main_window.parameter_widgets.get("SwapperResSelection")
+        if sw:
+            sw.enable_refresh_frame = False
+            ca._set_single_widget_value(sw, "128")
+            sw.enable_refresh_frame = True
+    finally:
+        main_window._batch_update_in_progress = prev_batch
+
+    print(
+        "[INFO] FPS preset applied: 720p input resize ON, detection interval 3, "
+        "detector internal 416, Inswapper resolution 128 (where applicable). "
+        "Compare EPs with VISIOMASTER_PERF_BUNDLE=1.",
+        flush=True,
+    )
+
+    def _reset_preset_combo() -> None:
+        main_window.control["PerformancePresetSelection"] = _FPS_PRESET_CUSTOM
+        pre = main_window.parameter_widgets.get("PerformancePresetSelection")
+        if pre:
+            pre.blockSignals(True)
+            ca._set_single_widget_value(pre, _FPS_PRESET_CUSTOM)
+            pre.blockSignals(False)
+
+    QtCore.QTimer.singleShot(0, _reset_preset_combo)

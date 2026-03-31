@@ -177,6 +177,7 @@ def update_preview_media_metadata(main_window: "MainWindow") -> None:
 
 def start_playback_fps_preview_session(main_window: "MainWindow") -> None:
     """Start session-average FPS measurement from Play (video or webcam)."""
+    main_window._preview_fps_label_last_ui_sec = 0.0
     main_window._playback_preview_fps_active = True
     main_window._playback_preview_fps_start = time.perf_counter()
     main_window._playback_preview_fps_frames = 0
@@ -184,6 +185,7 @@ def start_playback_fps_preview_session(main_window: "MainWindow") -> None:
 
 def reset_playback_fps_preview_session(main_window: "MainWindow") -> None:
     """On stop, freeze session-average FPS; value remains visible on the 'session:' line."""
+    main_window._preview_fps_label_last_ui_sec = 0.0
     now = time.perf_counter()
     frozen_new: float | None = None
     if main_window._playback_preview_fps_active:
@@ -219,12 +221,22 @@ def record_preview_frame_tick(main_window: "MainWindow") -> None:
     inst_text = _instant_fps_text_from_deque(main_window, now)
 
     vp = main_window.video_processor
-    if (
+    active = (
         getattr(main_window, "_playback_preview_fps_active", False)
         and vp.processing
         and vp.file_type in ("video", "webcam")
-    ):
+    )
+    if active:
         main_window._playback_preview_fps_frames += 1
+
+    # Repositioning labels and setText every frame competes with the display metronome
+    # (~30 Hz). Throttle overlay updates during active playback; deque/session counters
+    # stay per-frame accurate.
+    _throttle_sec = 0.1
+    last_ui = getattr(main_window, "_preview_fps_label_last_ui_sec", 0.0)
+    if active and (now - last_ui) < _throttle_sec:
+        return
+    main_window._preview_fps_label_last_ui_sec = now
 
     _set_preview_fps_label(main_window, inst_text, now)
 

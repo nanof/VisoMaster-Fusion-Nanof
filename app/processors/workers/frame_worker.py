@@ -24,6 +24,8 @@ from app.processors.utils import faceutil
 
 from app.helpers.miscellaneous import (
     ParametersDict,
+    detector_input_size_from_control,
+    rgb_uint8_to_bgr_contiguous,
     find_best_target_match,
     get_scaling_transforms,
     draw_bounding_boxes_on_detected_faces,
@@ -43,8 +45,29 @@ if TYPE_CHECKING:
 torchvision.disable_beta_transforms_warning()
 
 
+_PERF_BUNDLE_FLAGS = frozenset(
+    {
+        "VISIOMASTER_PERF_LOG",
+        "VISIOMASTER_PERF_STAGES",
+        "VISIOMASTER_PERF_SWAP_CORE",
+    }
+)
+
+
 def _env_flag(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+    """
+    Single switch for baseline telemetry: set VISIOMASTER_PERF_BUNDLE=1 to enable
+    PERF_LOG, PERF_STAGES and PERF_SWAP_CORE together.
+    """
+    v = os.environ.get(name, "").strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if name in _PERF_BUNDLE_FLAGS:
+        return (
+            os.environ.get("VISIOMASTER_PERF_BUNDLE", "").strip().lower()
+            in ("1", "true", "yes", "on")
+        )
+    return False
 
 
 class _PerfStageCollector:
@@ -512,12 +535,13 @@ class FrameWorker(threading.Thread):
                     or is_view_face_mask
                 )
 
+                _perf_log = _env_flag("VISIOMASTER_PERF_LOG")
+
                 if needs_processing:
                     # Ensure input frame is C-contiguous for PyTorch/OpenCV compatibility
                     if not self.frame.flags["C_CONTIGUOUS"]:
                         self.frame = np.ascontiguousarray(self.frame)
 
-                    _perf_log = _env_flag("VISIOMASTER_PERF_LOG")
                     _t0 = time.perf_counter() if _perf_log else 0.0
 
                     # Process Frame (returns BGR, uint8)
@@ -541,9 +565,17 @@ class FrameWorker(threading.Thread):
                     # Ensure output is C-contiguous for Qt display
                     self.frame = np.ascontiguousarray(processed_frame_bgr_np_uint8)
                 else:
-                    # If no processing, just convert RGB to BGR for display
-                    self.frame = self.frame[..., ::-1]
-                    self.frame = np.ascontiguousarray(self.frame)
+                    # If no processing, convert RGB (feeder) → BGR for Qt/OpenCV display.
+                    # Use cvtColor like the feeder path — faster than [:: -1] + ascontiguousarray.
+                    _t_pt = time.perf_counter() if _perf_log else 0.0
+                    self.frame = rgb_uint8_to_bgr_contiguous(self.frame)
+                    if _perf_log:
+                        _ms_pt = (time.perf_counter() - _t_pt) * 1000.0
+                        print(
+                            f"[PERF] frame={self.frame_number} "
+                            f"pass_through_ms={_ms_pt:.2f} worker={self.name}",
+                            flush=True,
+                        )
 
                 # Sync thread before returning to cpu
                 if self.worker_stream:
@@ -580,7 +612,7 @@ class FrameWorker(threading.Thread):
                 and isinstance(_fallback_frame_rgb, np.ndarray)
             ):
                 try:
-                    fallback_bgr = np.ascontiguousarray(_fallback_frame_rgb[..., ::-1])
+                    fallback_bgr = rgb_uint8_to_bgr_contiguous(_fallback_frame_rgb)
                     self.video_processor.frame_processed_signal.emit(
                         self.frame_number, fallback_bgr
                     )
@@ -1209,6 +1241,7 @@ class FrameWorker(threading.Thread):
                 control["DetectorModelSelection"],
                 max_num=control["MaxFacesToDetectSlider"],
                 score=det_score,
+                input_size=detector_input_size_from_control(control),
                 use_landmark_detection=False,
                 landmark_detect_mode=control["LandmarkDetectModelSelection"],
                 landmark_score=control["LandmarkDetectScoreSlider"] / 100.0,
@@ -1348,6 +1381,7 @@ class FrameWorker(threading.Thread):
         _lm_mode = control["LandmarkDetectModelSelection"]
         _lm_score = control["LandmarkDetectScoreSlider"] / 100.0
         _use_mean_eyes = control.get("LandmarkMeanEyesToggle", False)
+        _det_input_size = detector_input_size_from_control(control)
 
         def _run_det(tensor, prev_dets=None, bypass_bytetrack=False):
             return self.models_processor.run_detect(
@@ -1355,6 +1389,7 @@ class FrameWorker(threading.Thread):
                 _det_mode,
                 max_num=_det_max,
                 score=_det_score,
+                input_size=_det_input_size,
                 use_landmark_detection=False,
                 landmark_detect_mode=_lm_mode,
                 landmark_score=_lm_score,
@@ -2162,7 +2197,7 @@ class FrameWorker(threading.Thread):
                 control.get("DetectorModelSelection", "RetinaFace"),
                 max_num=control.get("MaxFacesToDetectSlider", 1),
                 score=control.get("DetectorScoreSlider", 50) / 100.0,
-                input_size=(512, 512),
+                input_size=detector_input_size_from_control(control),
                 use_landmark_detection=use_landmark,
                 landmark_detect_mode=landmark_mode,
                 landmark_score=control.get("LandmarkDetectScoreSlider", 50) / 100.0,

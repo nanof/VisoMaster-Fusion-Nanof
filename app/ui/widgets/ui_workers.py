@@ -323,10 +323,9 @@ class InputFacesLoaderWorker(qtc.QThread):
             if frame is None:
                 continue
 
-            # Frame must be in RGB format
-            frame = frame[..., ::-1]  # Swap the channels from BGR to RGB
+            frame_rgb = misc_helpers.bgr_uint8_to_rgb_contiguous(frame)
 
-            img = torch.from_numpy(frame.astype("uint8")).to(
+            img = torch.from_numpy(frame_rgb).to(
                 self.main_window.models_processor.device
             )
             img = img.permute(2, 0, 1)
@@ -336,7 +335,7 @@ class InputFacesLoaderWorker(qtc.QThread):
                 control.get("DetectorModelSelection", "RetinaFace"),
                 max_num=1,
                 score=control.get("DetectorScoreSlider", 50) / 100.0,
-                input_size=(512, 512),
+                input_size=misc_helpers.detector_input_size_from_control(control),
                 use_landmark_detection=control.get("LandmarkDetectToggle", False),
                 landmark_detect_mode=control.get("LandmarkDetectModelSelection", "203"),
                 landmark_score=control.get("LandmarkDetectScoreSlider", 50) / 100.0,
@@ -368,8 +367,7 @@ class InputFacesLoaderWorker(qtc.QThread):
                     continue
 
                 cropped_img_np = cropped_img.cpu().numpy()
-                # Swap channels from RGB to BGR for pixmap creation
-                face_img = numpy.ascontiguousarray(cropped_img_np[..., ::-1])
+                face_img = misc_helpers.rgb_uint8_to_bgr_contiguous(cropped_img_np)
 
                 # QIMAGE THREAD-SAFE
                 height, width, channel = face_img.shape

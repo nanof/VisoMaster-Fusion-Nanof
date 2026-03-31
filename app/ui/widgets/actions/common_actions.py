@@ -356,11 +356,22 @@ def get_pixmap_from_frame(main_window: "MainWindow", frame: np.ndarray):
             QtGui.QImage.Format.Format_Grayscale8,
         )
     else:
-        # Frame in color
+        # Frame in color — pipeline uses OpenCV BGR uint8. Format_BGR888 avoids a full
+        # buffer copy from rgbSwapped() on every preview frame (major UI-thread win).
         bytes_per_line = 3 * width
-        q_img = QtGui.QImage(
-            frame.data, width, height, bytes_per_line, QtGui.QImage.Format.Format_RGB888
-        ).rgbSwapped()
+        fmt_bgr = getattr(QtGui.QImage.Format, "Format_BGR888", None)
+        if fmt_bgr is not None:
+            q_img = QtGui.QImage(
+                frame.data, width, height, bytes_per_line, fmt_bgr
+            )
+        else:
+            q_img = QtGui.QImage(
+                frame.data,
+                width,
+                height,
+                bytes_per_line,
+                QtGui.QImage.Format.Format_RGB888,
+            ).rgbSwapped()
     pixmap = QtGui.QPixmap.fromImage(q_img)
     return pixmap
 

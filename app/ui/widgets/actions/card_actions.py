@@ -105,10 +105,9 @@ def find_target_faces(main_window: "MainWindow"):
             ret, frame = misc_helpers.read_frame(media_capture, 0)
 
         if frame is not None:
-            # Frame must be in RGB format
-            frame = frame[..., ::-1]  # Swap the channels from BGR to RGB
+            frame_rgb = misc_helpers.bgr_uint8_to_rgb_contiguous(frame)
 
-            img = torch.from_numpy(frame.astype("uint8")).to(
+            img = torch.from_numpy(frame_rgb).to(
                 main_window.models_processor.device
             )
             img = img.permute(2, 0, 1)
@@ -125,7 +124,7 @@ def find_target_faces(main_window: "MainWindow"):
                 control.get("DetectorModelSelection", "retinaface_10g"),
                 max_num=control.get("MaxFacesToDetectSlider", 1),
                 score=float(control.get("DetectorScoreSlider", 50)) / 100.0,
-                input_size=(512, 512),
+                input_size=misc_helpers.detector_input_size_from_control(control),
                 use_landmark_detection=control.get("LandmarkDetectToggle", False),
                 landmark_detect_mode=control.get(
                     "LandmarkDetectModelSelection", "2D106Det"

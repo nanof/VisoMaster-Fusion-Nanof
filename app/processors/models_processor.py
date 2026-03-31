@@ -631,6 +631,16 @@ class ModelsProcessor(QtCore.QObject):
                 if is_tensorrt_load:
                     # Check if engine config file exists...
                     cache_is_valid = self._check_tensorrt_cache(model_name, onnx_path)
+                    if os.environ.get("VISIOMASTER_LOG_TRT_CACHE", "").strip().lower() in (
+                        "1",
+                        "true",
+                        "yes",
+                        "on",
+                    ):
+                        print(
+                            f"[TRT-CACHE] model={model_name} onnx_cache_valid={cache_is_valid}",
+                            flush=True,
+                        )
 
                     # If no engine config file or cache file exists run the probe
                     if not cache_is_valid:
