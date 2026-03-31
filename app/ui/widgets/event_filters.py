@@ -3,6 +3,8 @@ from functools import partial
 
 from PySide6 import QtWidgets, QtGui, QtCore
 from app.ui.widgets.actions import list_view_actions
+from app.ui.widgets.actions import video_control_actions
+from app.ui.widgets.actions import graphics_view_actions
 from app.ui.widgets import ui_workers
 import app.helpers.miscellaneous as misc_helpers
 
@@ -16,6 +18,8 @@ class GraphicsViewEventFilter(QtCore.QObject):
         self.main_window = main_window
 
     def eventFilter(self, graphics_object: QtWidgets.QGraphicsView, event):
+        if event.type() == QtCore.QEvent.Type.Resize:
+            graphics_view_actions.position_preview_overlay_labels(self.main_window)
         if event.type() == QtCore.QEvent.Type.MouseButtonPress:
             if event.button() == QtCore.Qt.MouseButton.LeftButton:
                 self.main_window.buttonMediaPlay.click()
@@ -47,6 +51,9 @@ class videoSeekSliderLineEditEventFilter(QtCore.QObject):
                 line_edit.setText(str(new_value))
                 self.main_window.videoSeekSlider.setValue(new_value)
                 self.main_window.video_processor.process_current_frame()  # Process the current frame
+                video_control_actions.resume_playback_after_seek_if_applicable(
+                    self.main_window
+                )
 
                 return True
         return False
@@ -63,21 +70,27 @@ class VideoSeekSliderEventFilter(QtCore.QObject):
                 # Allow default slider movement
                 result = super().eventFilter(slider, event)
 
-                # After the slider moves, call the custom processing function
-                QtCore.QTimer.singleShot(
-                    0, self.main_window.video_processor.process_current_frame
-                )
+                def _after_key_frame_seek():
+                    mw = self.main_window
+                    mw.video_processor.process_current_frame()
+                    video_control_actions.resume_playback_after_seek_if_applicable(mw)
+
+                QtCore.QTimer.singleShot(0, _after_key_frame_seek)
 
                 return result  # Return the result of the default handling
-        elif event.type() == QtCore.QEvent.Type.Wheel:
-            # Allow default slider movement
-            result = super().eventFilter(slider, event)
 
-            # After the slider moves, call the custom processing function
-            QtCore.QTimer.singleShot(
-                0, self.main_window.video_processor.process_current_frame
-            )
-            return result
+        elif event.type() == QtCore.QEvent.Type.Wheel:
+            # Intercept mousewheel to force FrameSkipStepSlider
+            delta = event.angleDelta().y()
+            if delta > 0:
+                # If wheel up (Advance)
+                video_control_actions.advance_video_slider_by_n_frames(self.main_window)
+            elif delta < 0:
+                # If wheel up (Rewind)
+                video_control_actions.rewind_video_slider_by_n_frames(self.main_window)
+
+            # Return True to stop QT from applying default values
+            return True
 
         # For other events, use the default behavior
         return super().eventFilter(slider, event)
