@@ -216,6 +216,11 @@ class VideoProcessor(QObject):
         self.play_start_time = 0.0  # Used by default style for audio segmenting
         self.play_end_time = 0.0  # Used by default style for audio segmenting
 
+        # Playback-only: wall-clock master frame index (keeps preview in sync with ffplay)
+        self._playback_use_wall_clock: bool = False
+        self._playback_clock_t0: float = 0.0
+        self._playback_clock_anchor_frame: int = 0
+
         # Adding Cuda Streams for thread safety
         self.feeder_stream = (
             None  # torch.cuda.Stream() if torch.cuda.is_available() else None
@@ -370,6 +375,13 @@ class VideoProcessor(QObject):
         else:
             self.target_delay_sec = 1.0 / target_fps
 
+        self._playback_use_wall_clock = (
+            self.file_type == "video"
+            and not self.recording
+            and not self.is_processing_segments
+            and target_fps <= 9000
+        )
+
         # Start utility timers and emit signal
         self.gpu_memory_update_timer.start(5000)
 
@@ -377,6 +389,11 @@ class VideoProcessor(QObject):
             self.processing_started_signal.emit()  # Emit unified signal
             # Record the time when the display *actually* starts
             self.playback_display_start_time = time.perf_counter()
+            if self._playback_use_wall_clock:
+                self._playback_clock_t0 = time.perf_counter()
+                self._playback_clock_anchor_frame = self.next_frame_to_display
+            else:
+                self._playback_clock_t0 = 0.0
 
         # Start the metronome loop
         self.last_display_schedule_time_sec = time.perf_counter()
@@ -1200,6 +1217,23 @@ class VideoProcessor(QObject):
         elif reason == "read_error":
             self.read_error_skip_count += 1
 
+    def _expected_frame_from_wall_clock(self) -> int:
+        """Frame index the wall clock says we should have reached (playback preview only)."""
+        if (
+            not self._playback_use_wall_clock
+            or self._playback_clock_t0 <= 0.0
+            or self.fps <= 0
+        ):
+            return self.next_frame_to_display
+        elapsed = time.perf_counter() - self._playback_clock_t0
+        fn = self._playback_clock_anchor_frame + int(elapsed * float(self.fps))
+        return max(0, min(fn, self.max_frame_number))
+
+    def _advance_past_skipped_for_display(self, fn: int) -> int:
+        while fn in self.skipped_frames and fn <= self.max_frame_number:
+            fn += 1
+        return fn
+
     def display_next_frame(self):
         """
         The core metronome loop.
@@ -1297,24 +1331,61 @@ class VideoProcessor(QObject):
 
         else:
             # --- Video/Image Logic (Dictionary) ---
-            frame_number_to_display = self.next_frame_to_display
-
-            # Skip frames that were corrupted/skipped during processing
-            # Find the next non-skipped frame to display
-            original_frame = frame_number_to_display
-            while (
-                frame_number_to_display in self.skipped_frames
-                and frame_number_to_display <= self.max_frame_number
-            ):
-                frame_number_to_display += 1
-
-            # Update next_frame_to_display to skip all consecutive skipped frames
-            if frame_number_to_display > original_frame:
-                skipped_count = frame_number_to_display - original_frame
-                print(
-                    f"[INFO] Display: Advancing past {skipped_count} skipped frame(s), jumping to frame {frame_number_to_display}"
+            if self.file_type == "video" and self._playback_use_wall_clock:
+                target = self._advance_past_skipped_for_display(
+                    self._expected_frame_from_wall_clock()
                 )
-                self.next_frame_to_display = frame_number_to_display
+
+                low = self.next_frame_to_display
+                while low in self.skipped_frames and low <= self.max_frame_number:
+                    low += 1
+                self.next_frame_to_display = low
+
+                if low > target:
+                    return
+
+                candidates = [
+                    k
+                    for k in self.frames_to_display
+                    if low <= k <= target and k not in self.skipped_frames
+                ]
+                if not candidates:
+                    return
+
+                best = max(candidates)
+                if best > low:
+                    for k in list(self.frames_to_display.keys()):
+                        if low <= k < best:
+                            arr = self.frames_to_display.pop(k, None)
+                            if arr is not None:
+                                del arr
+                    self.next_frame_to_display = best
+                    if best - low >= 10:
+                        print(
+                            f"[INFO] Display: Wall-clock catch-up, skipping to frame {best} "
+                            f"(target≤{target}, had been at {low})"
+                        )
+
+                frame_number_to_display = self.next_frame_to_display
+            else:
+                frame_number_to_display = self.next_frame_to_display
+
+                # Skip frames that were corrupted/skipped during processing
+                # Find the next non-skipped frame to display
+                original_frame = frame_number_to_display
+                while (
+                    frame_number_to_display in self.skipped_frames
+                    and frame_number_to_display <= self.max_frame_number
+                ):
+                    frame_number_to_display += 1
+
+                # Update next_frame_to_display to skip all consecutive skipped frames
+                if frame_number_to_display > original_frame:
+                    skipped_count = frame_number_to_display - original_frame
+                    print(
+                        f"[INFO] Display: Advancing past {skipped_count} skipped frame(s), jumping to frame {frame_number_to_display}"
+                    )
+                    self.next_frame_to_display = frame_number_to_display
 
             if frame_number_to_display not in self.frames_to_display:
                 # Frame not ready.
@@ -1909,6 +1980,8 @@ class VideoProcessor(QObject):
         self.is_processing_segments = False
         self.recording = False
         self.triggered_by_job_manager = False
+        self._playback_use_wall_clock = False
+        self._playback_clock_t0 = 0.0
 
         # 2. Stop utility timers and audio
         self.gpu_memory_update_timer.stop()
