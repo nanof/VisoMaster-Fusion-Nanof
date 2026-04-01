@@ -81,6 +81,17 @@ def test_ghostface_models_is_frozenset():
 
 
 # ---------------------------------------------------------------------------
+# FS-05b: HYPERSWAP model name set (mirrors FrameWorker.HYPERSWAP_MODELS)
+# ---------------------------------------------------------------------------
+
+
+def test_hyperswap_models_frozenset_contents():
+    HYPERSWAP_MODELS = frozenset({"HyperSwap-v1", "HyperSwap-v2", "HyperSwap-v3"})
+    assert len(HYPERSWAP_MODELS) == 3
+    assert "HyperSwap-v1" in HYPERSWAP_MODELS
+
+
+# ---------------------------------------------------------------------------
 # FS-04: GhostFace fallback to input face when model fails
 # ---------------------------------------------------------------------------
 

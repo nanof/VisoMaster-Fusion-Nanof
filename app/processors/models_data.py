@@ -68,6 +68,9 @@ arcface_mapping_model_dict = {
     "GhostFace-v1": "GhostArcFace",
     "GhostFace-v2": "GhostArcFace",
     "GhostFace-v3": "GhostArcFace",
+    "HyperSwap-v1": "Inswapper128ArcFace",
+    "HyperSwap-v2": "Inswapper128ArcFace",
+    "HyperSwap-v3": "Inswapper128ArcFace",
     "CSCS": "CSCSArcFace",
 }
 
@@ -137,6 +140,24 @@ models_list = [
         "local_path": f"{models_dir}/ghost_unet_3_block.onnx",
         "hash": "f471d4f322903da2bca360aa0d7ab9922e3b0001d683f825ca6b15d865382935",
         "url": f"{assets_repo}/v0.1.0/ghost_unet_3_block.onnx",
+    },
+    {
+        "model_name": "HyperSwapv1",
+        "local_path": f"{models_dir}/hyperswap_1a_256.onnx",
+        "hash": "c0e98a8a03a238f461ed3d2570e426b49f46745ee400854a60dceeb70c246add",
+        "url": "https://huggingface.co/facefusion/models-3.3.0/resolve/main/hyperswap_1a_256.onnx",
+    },
+    {
+        "model_name": "HyperSwapv2",
+        "local_path": f"{models_dir}/hyperswap_1b_256.onnx",
+        "hash": "5124031789c42f71b9558fb71954ef7aedb6da7ed9fac79293e23c61a792a73e",
+        "url": "https://huggingface.co/facefusion/models-3.3.0/resolve/main/hyperswap_1b_256.onnx",
+    },
+    {
+        "model_name": "HyperSwapv3",
+        "local_path": f"{models_dir}/hyperswap_1c_256.onnx",
+        "hash": "5528c2d76fe9986c99d829278987ef9f3a630cb606db7628d02b57b330f406a5",
+        "url": "https://huggingface.co/facefusion/models-3.3.0/resolve/main/hyperswap_1c_256.onnx",
     },
     {
         "model_name": "CSCS",

@@ -448,3 +448,7 @@ def test_ghostface_models_frozenset():
         expected = {"GhostFace-v1", "GhostFace-v2", "GhostFace-v3"}
         assert FrameWorker.GHOSTFACE_MODELS == expected
         assert isinstance(FrameWorker.GHOSTFACE_MODELS, frozenset)
+
+        expected_hs = {"HyperSwap-v1", "HyperSwap-v2", "HyperSwap-v3"}
+        assert FrameWorker.HYPERSWAP_MODELS == expected_hs
+        assert isinstance(FrameWorker.HYPERSWAP_MODELS, frozenset)

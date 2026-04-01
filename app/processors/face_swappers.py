@@ -37,6 +37,9 @@ class FaceSwappers:
             "GhostFacev1",
             "GhostFacev2",
             "GhostFacev3",
+            "HyperSwapv1",
+            "HyperSwapv2",
+            "HyperSwapv3",
             "CSCS",
         ]
         self.arcface_models = [
@@ -859,3 +862,59 @@ class FaceSwappers:
         self._run_model_with_lazy_build_check(
             model_name, ghostfaceswap_model, io_binding
         )
+
+    def calc_hyperswap_latent(self, source_embedding):
+        """FaceFusion HyperSwap: L2-normalized 512-D ArcFace row (1, 512)."""
+        if source_embedding is None or len(source_embedding) == 0:
+            return None
+        v = np.asarray(source_embedding, dtype=np.float32).reshape(-1)
+        n = float(np.linalg.norm(v))
+        if n < 1e-8:
+            return v.reshape(1, -1)
+        return (v / n).reshape(1, -1)
+
+    def run_hyperswap(
+        self, image, embedding, output, swapper_model="HyperSwap-v3"
+    ):
+        if swapper_model == "HyperSwap-v1":
+            model_name = "HyperSwapv1"
+        elif swapper_model == "HyperSwap-v2":
+            model_name = "HyperSwapv2"
+        elif swapper_model == "HyperSwap-v3":
+            model_name = "HyperSwapv3"
+        else:
+            print(f"[ERROR] Unknown HyperSwap model: {swapper_model}")
+            return
+
+        model = self._load_swapper_model(model_name)
+        if not model:
+            print(f"[ERROR] {model_name} model not loaded.")
+            return
+
+        io_binding = model.io_binding()
+        io_binding.bind_input(
+            name="target",
+            device_type=self.models_processor.device,
+            device_id=0,
+            element_type=np.float32,
+            shape=(1, 3, 256, 256),
+            buffer_ptr=image.data_ptr(),
+        )
+        io_binding.bind_input(
+            name="source",
+            device_type=self.models_processor.device,
+            device_id=0,
+            element_type=np.float32,
+            shape=(1, 512),
+            buffer_ptr=embedding.data_ptr(),
+        )
+        io_binding.bind_output(
+            name="output",
+            device_type=self.models_processor.device,
+            device_id=0,
+            element_type=np.float32,
+            shape=(1, 3, 256, 256),
+            buffer_ptr=output.data_ptr(),
+        )
+
+        self._run_model_with_lazy_build_check(model_name, model, io_binding)
