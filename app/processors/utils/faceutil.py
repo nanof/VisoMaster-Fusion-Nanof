@@ -487,6 +487,25 @@ def align_crop(
     return warped, matrix
 
 
+# FaceFusion warp template ``mtcnn_512`` (ReHiFace-S / hififace_unofficial_256), normalized × crop size
+MTCNN_512_TEMPLATE = np.array(
+    [
+        [0.36562865, 0.46733799],
+        [0.63305391, 0.46585885],
+        [0.50019127, 0.61942959],
+        [0.39032951, 0.77598822],
+        [0.61178945, 0.77476328],
+    ],
+    dtype=np.float32,
+)
+
+
+def get_mtcnn_512_template(image_size: int) -> np.ndarray:
+    """5-point template in pixel coords for a square crop of ``image_size`` (FaceFusion HiFiFace)."""
+    s = np.array([float(image_size), float(image_size)], dtype=np.float32)
+    return MTCNN_512_TEMPLATE * s
+
+
 def get_arcface_template(image_size=112, mode="arcface112"):
     if mode == "arcface112":
         template = float(image_size) / 112.0 * arcface_src

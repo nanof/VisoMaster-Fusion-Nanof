@@ -50,6 +50,8 @@ MODEL_EXCEPTIONS = {
     "hyperswap_1a_256.onnx",
     "hyperswap_1b_256.onnx",
     "hyperswap_1c_256.onnx",
+    "hififace_unofficial_256.onnx",
+    "crossface_hififace.onnx",
     "RealESRGAN_x2plus.fp16.onnx",
     "realesr-general-x4v3.onnx",
     "BSRGANx2.fp16.onnx",

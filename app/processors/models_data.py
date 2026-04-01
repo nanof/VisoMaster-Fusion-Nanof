@@ -71,6 +71,7 @@ arcface_mapping_model_dict = {
     "HyperSwap-v1": "Inswapper128ArcFace",
     "HyperSwap-v2": "Inswapper128ArcFace",
     "HyperSwap-v3": "Inswapper128ArcFace",
+    "ReHiFace-S": "Inswapper128ArcFace",
     "CSCS": "CSCSArcFace",
 }
 
@@ -158,6 +159,18 @@ models_list = [
         "local_path": f"{models_dir}/hyperswap_1c_256.onnx",
         "hash": "5528c2d76fe9986c99d829278987ef9f3a630cb606db7628d02b57b330f406a5",
         "url": "https://huggingface.co/facefusion/models-3.3.0/resolve/main/hyperswap_1c_256.onnx",
+    },
+    {
+        "model_name": "ReHiFaceS",
+        "local_path": f"{models_dir}/hififace_unofficial_256.onnx",
+        "hash": "9de9751617976195114d7f067b9b6cf933748363355cf473cab2da57a739c2ef",
+        "url": "https://huggingface.co/facefusion/models-3.1.0/resolve/main/hififace_unofficial_256.onnx",
+    },
+    {
+        "model_name": "CrossFaceHiFaceS",
+        "local_path": f"{models_dir}/crossface_hififace.onnx",
+        "hash": "dfb75f960cb8ef1967a82838e64963b9ff621c4af3e22f9fda48ad958dddec9a",
+        "url": "https://huggingface.co/facefusion/models-3.4.0/resolve/main/crossface_hififace.onnx",
     },
     {
         "model_name": "CSCS",

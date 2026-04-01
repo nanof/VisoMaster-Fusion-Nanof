@@ -40,8 +40,11 @@ class FaceSwappers:
             "HyperSwapv1",
             "HyperSwapv2",
             "HyperSwapv3",
+            "ReHiFaceS",
             "CSCS",
         ]
+        # ONNX used only with ReHiFace-S (FaceFusion crossface_hififace); unload with swapper cleanup
+        self._crossface_aux_model_names = ("CrossFaceHiFaceS",)
         self.arcface_models = [
             "Inswapper128ArcFace",
             "SimSwapArcFace",
@@ -52,7 +55,10 @@ class FaceSwappers:
 
     def unload_models(self):
         with self.models_processor.model_lock:
-            for model_name in self.swapper_models:
+            for model_name in (
+                *self.swapper_models,
+                *self._crossface_aux_model_names,
+            ):
                 self.models_processor.unload_model(model_name)
             for model_name in self.arcface_models:
                 self.models_processor.unload_model(model_name)
@@ -886,6 +892,88 @@ class FaceSwappers:
             print(f"[ERROR] Unknown HyperSwap model: {swapper_model}")
             return
 
+        model = self._load_swapper_model(model_name)
+        if not model:
+            print(f"[ERROR] {model_name} model not loaded.")
+            return
+
+        io_binding = model.io_binding()
+        io_binding.bind_input(
+            name="target",
+            device_type=self.models_processor.device,
+            device_id=0,
+            element_type=np.float32,
+            shape=(1, 3, 256, 256),
+            buffer_ptr=image.data_ptr(),
+        )
+        io_binding.bind_input(
+            name="source",
+            device_type=self.models_processor.device,
+            device_id=0,
+            element_type=np.float32,
+            shape=(1, 512),
+            buffer_ptr=embedding.data_ptr(),
+        )
+        io_binding.bind_output(
+            name="output",
+            device_type=self.models_processor.device,
+            device_id=0,
+            element_type=np.float32,
+            shape=(1, 3, 256, 256),
+            buffer_ptr=output.data_ptr(),
+        )
+
+        self._run_model_with_lazy_build_check(model_name, model, io_binding)
+
+    def calc_rehiface_source_latent(self, source_embedding):
+        """ReHiFace-S: ArcFace 512-D → crossface_hififace → L2-normalized (1, 512)."""
+        if source_embedding is None or len(source_embedding) == 0:
+            return None
+        cross = self.models_processor.models.get("CrossFaceHiFaceS")
+        if cross is None:
+            cross = self.models_processor.load_model("CrossFaceHiFaceS")
+        if cross is None:
+            print("[ERROR] CrossFaceHiFaceS model not loaded.")
+            return None
+
+        emb = (
+            torch.from_numpy(np.asarray(source_embedding, dtype=np.float32).reshape(1, -1))
+            .contiguous()
+            .to(self.models_processor.device)
+        )
+        out_t = torch.empty(
+            (1, 512),
+            dtype=torch.float32,
+            device=self.models_processor.device,
+        ).contiguous()
+        io_binding = cross.io_binding()
+        io_binding.bind_input(
+            name="input",
+            device_type=self.models_processor.device,
+            device_id=0,
+            element_type=np.float32,
+            shape=(1, 512),
+            buffer_ptr=emb.data_ptr(),
+        )
+        io_binding.bind_output(
+            name="output",
+            device_type=self.models_processor.device,
+            device_id=0,
+            element_type=np.float32,
+            shape=(1, 512),
+            buffer_ptr=out_t.data_ptr(),
+        )
+        self._run_model_with_lazy_build_check("CrossFaceHiFaceS", cross, io_binding)
+
+        v = out_t.detach().float().cpu().numpy().reshape(-1)
+        n = float(np.linalg.norm(v))
+        if n < 1e-8:
+            return v.reshape(1, -1)
+        return (v / n).reshape(1, -1).astype(np.float32)
+
+    def run_rehiface(self, image, embedding, output):
+        """HiFiFace unofficial 256 (FaceFusion): target NCHW [-1,1], source (1,512) L2-normalized."""
+        model_name = "ReHiFaceS"
         model = self._load_swapper_model(model_name)
         if not model:
             print(f"[ERROR] {model_name} model not loaded.")

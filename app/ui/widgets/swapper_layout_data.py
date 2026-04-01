@@ -20,6 +20,7 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
                 "HyperSwap-v1",
                 "HyperSwap-v2",
                 "HyperSwap-v3",
+                "ReHiFace-S",
                 "CSCS",
             ],
             "default": "Inswapper128",
