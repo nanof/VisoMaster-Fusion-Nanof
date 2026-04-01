@@ -112,6 +112,8 @@ class FrameWorker(threading.Thread):
 
     # FW-QUAL-10: frozenset of GhostFace model names for cleaner membership tests
     GHOSTFACE_MODELS = frozenset({"GhostFace-v1", "GhostFace-v2", "GhostFace-v3"})
+    HYPERSWAP_MODELS = frozenset({"HyperSwap-v1", "HyperSwap-v2", "HyperSwap-v3"})
+    REHIFACE_MODELS = frozenset({"ReHiFace-S"})
 
     # Q-IMP-01: interpolation mode constants for face alignment
     _BICUBIC_INTERP = "bicubic"
@@ -2784,8 +2786,24 @@ class FrameWorker(threading.Thread):
         Raises:
             ValueError: If the transform estimation fails (degenerate face geometry).
         """
+        # ReHiFace-S (FaceFusion hififace): mtcnn_512 landmark template at 512 px
+        if swapper_model in self.REHIFACE_MODELS:
+            dst = faceutil.get_mtcnn_512_template(512)
+            dst = np.squeeze(dst)
+            if hasattr(trans.SimilarityTransform, "from_estimate"):
+                tform = trans.SimilarityTransform.from_estimate(kps_5, dst)
+                if np.any(np.isnan(tform.params)) or np.any(np.isinf(tform.params)):
+                    raise ValueError(
+                        "Similarity transform estimation produced NaN/Inf (degenerate face geometry)"
+                    )
+            else:
+                tform = trans.SimilarityTransform()
+                if not tform.estimate(kps_5, dst):
+                    raise ValueError(
+                        "Similarity transform estimation failed for ReHiFace-S face"
+                    )
         # FW-QUAL-10: use GHOSTFACE_MODELS frozenset instead of chained != comparisons
-        if swapper_model not in self.GHOSTFACE_MODELS and swapper_model != "CSCS":
+        elif swapper_model not in self.GHOSTFACE_MODELS and swapper_model != "CSCS":
             dst = faceutil.get_arcface_template(image_size=512, mode="arcface128")
             dst = np.squeeze(dst)
             # Use instance initialization + .estimate() for older skimage versions
@@ -3124,6 +3142,48 @@ class FrameWorker(threading.Thread):
                 torch.from_numpy(self.models_processor.calc_swapper_latent_ghost(t_e))
                 .float()
                 .to(self.models_processor.device)
+            )
+
+            latent = self._apply_likeness(latent, dst_latent, parameters)
+
+            dim = 2
+            input_face_affined = original_face_256
+
+        # --- HyperSwap (FaceFusion 3.3, 256 px, arcface_128 crop + L2-normalized w600k embedding) ---
+        elif swapper_model in self.HYPERSWAP_MODELS:
+            _s_lat = self.models_processor.calc_hyperswap_latent(s_e)
+            _t_lat = self.models_processor.calc_hyperswap_latent(t_e)
+            if _s_lat is None or _t_lat is None:
+                print(
+                    "[ERROR] calc_hyperswap_latent returned None (invalid embedding). Skipping swap."
+                )
+                return input_face_affined, dfm_model_instance, dim, latent
+            latent = (
+                torch.from_numpy(_s_lat).float().to(self.models_processor.device)
+            )
+            dst_latent = (
+                torch.from_numpy(_t_lat).float().to(self.models_processor.device)
+            )
+
+            latent = self._apply_likeness(latent, dst_latent, parameters)
+
+            dim = 2
+            input_face_affined = original_face_256
+
+        # --- ReHiFace-S (FaceFusion hififace_unofficial_256 + crossface_hififace, mtcnn_512 crop) ---
+        elif swapper_model in self.REHIFACE_MODELS:
+            _s_lat = self.models_processor.calc_rehiface_source_latent(s_e)
+            _t_lat = self.models_processor.calc_hyperswap_latent(t_e)
+            if _s_lat is None or _t_lat is None:
+                print(
+                    "[ERROR] ReHiFace-S latent prep returned None (invalid embedding). Skipping swap."
+                )
+                return input_face_affined, dfm_model_instance, dim, latent
+            latent = (
+                torch.from_numpy(_s_lat).float().to(self.models_processor.device)
+            )
+            dst_latent = (
+                torch.from_numpy(_t_lat).float().to(self.models_processor.device)
             )
 
             latent = self._apply_likeness(latent, dst_latent, parameters)
@@ -3649,6 +3709,108 @@ class FrameWorker(threading.Thread):
                     output = torch.clamp(curr_chw.permute(1, 2, 0) * 255.0, 0, 255)
 
                 # --- NORMAL MODE ---
+                else:
+                    if swapper_output.sum() < 1.0:
+                        pass
+                    swapper_output = swapper_output.permute(1, 2, 0)
+                    swapper_output = torch.mul(swapper_output, 127.5)
+                    swapper_output = torch.add(swapper_output, 127.5)
+
+                    prev_face = input_face_affined.clone()
+                    input_face_affined = swapper_output.clone()
+                    input_face_affined = torch.div(input_face_affined, 255)
+
+                    output = swapper_output.clone()
+                    output = torch.clamp(output, 0, 255)
+
+        elif swapper_model in self.HYPERSWAP_MODELS:
+            for k in range(itex):
+                prev_face = input_face_affined.clone()
+                input_face_disc = torch.mul(input_face_affined, 255.0).permute(2, 0, 1)
+                input_face_disc = torch.div(input_face_disc.float(), 127.5)
+                input_face_disc = torch.sub(input_face_disc, 1)
+                input_face_disc = torch.unsqueeze(input_face_disc, 0).contiguous()
+                swapper_output = torch.empty(
+                    (1, 3, 256, 256),
+                    dtype=torch.float32,
+                    device=self.models_processor.device,
+                ).contiguous()
+
+                self.models_processor.run_hyperswap(
+                    input_face_disc, latent, swapper_output, swapper_model
+                )
+
+                swapper_output = swapper_output[0]
+                if swapper_output.abs().mean() < 0.01:
+                    swapper_output = input_face_affined.permute(2, 0, 1) * 2.0 - 1.0
+
+                if use_mode_2:
+                    swapper_output = torch.add(torch.mul(swapper_output, 127.5), 127.5)
+                    curr_chw = torch.div(swapper_output, 255.0)
+
+                    if k == 0:
+                        first_pass_face = curr_chw.clone()
+                    else:
+                        prev_chw = prev_face.permute(2, 0, 1)
+                        curr_chw = self._fix_drift_and_texture(
+                            curr_chw, prev_chw, first_pass_face
+                        )
+
+                    temp_output = curr_chw.permute(1, 2, 0)
+                    prev_face = input_face_affined.clone()
+                    input_face_affined = temp_output.clone()
+                    output = torch.clamp(curr_chw.permute(1, 2, 0) * 255.0, 0, 255)
+                else:
+                    if swapper_output.sum() < 1.0:
+                        pass
+                    swapper_output = swapper_output.permute(1, 2, 0)
+                    swapper_output = torch.mul(swapper_output, 127.5)
+                    swapper_output = torch.add(swapper_output, 127.5)
+
+                    prev_face = input_face_affined.clone()
+                    input_face_affined = swapper_output.clone()
+                    input_face_affined = torch.div(input_face_affined, 255)
+
+                    output = swapper_output.clone()
+                    output = torch.clamp(output, 0, 255)
+
+        elif swapper_model in self.REHIFACE_MODELS:
+            for k in range(itex):
+                prev_face = input_face_affined.clone()
+                input_face_disc = torch.mul(input_face_affined, 255.0).permute(2, 0, 1)
+                input_face_disc = torch.div(input_face_disc.float(), 127.5)
+                input_face_disc = torch.sub(input_face_disc, 1)
+                input_face_disc = torch.unsqueeze(input_face_disc, 0).contiguous()
+                swapper_output = torch.empty(
+                    (1, 3, 256, 256),
+                    dtype=torch.float32,
+                    device=self.models_processor.device,
+                ).contiguous()
+
+                self.models_processor.run_rehiface(
+                    input_face_disc, latent, swapper_output
+                )
+
+                swapper_output = swapper_output[0]
+                if swapper_output.abs().mean() < 0.01:
+                    swapper_output = input_face_affined.permute(2, 0, 1) * 2.0 - 1.0
+
+                if use_mode_2:
+                    swapper_output = torch.add(torch.mul(swapper_output, 127.5), 127.5)
+                    curr_chw = torch.div(swapper_output, 255.0)
+
+                    if k == 0:
+                        first_pass_face = curr_chw.clone()
+                    else:
+                        prev_chw = prev_face.permute(2, 0, 1)
+                        curr_chw = self._fix_drift_and_texture(
+                            curr_chw, prev_chw, first_pass_face
+                        )
+
+                    temp_output = curr_chw.permute(1, 2, 0)
+                    prev_face = input_face_affined.clone()
+                    input_face_affined = temp_output.clone()
+                    output = torch.clamp(curr_chw.permute(1, 2, 0) * 255.0, 0, 255)
                 else:
                     if swapper_output.sum() < 1.0:
                         pass

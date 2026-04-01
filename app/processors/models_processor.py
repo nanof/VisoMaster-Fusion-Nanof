@@ -1796,6 +1796,20 @@ class ModelsProcessor(QtCore.QObject):
             image, embedding, output, swapper_model
         )
 
+    def calc_hyperswap_latent(self, source_embedding):
+        return self.face_swappers.calc_hyperswap_latent(source_embedding)
+
+    def run_hyperswap(
+        self, image, embedding, output, swapper_model="HyperSwap-v3"
+    ):
+        self.face_swappers.run_hyperswap(image, embedding, output, swapper_model)
+
+    def calc_rehiface_source_latent(self, source_embedding):
+        return self.face_swappers.calc_rehiface_source_latent(source_embedding)
+
+    def run_rehiface(self, image, embedding, output):
+        self.face_swappers.run_rehiface(image, embedding, output)
+
     def calc_swapper_latent_cscs(self, source_embedding):
         return self.face_swappers.calc_swapper_latent_cscs(source_embedding)
 
