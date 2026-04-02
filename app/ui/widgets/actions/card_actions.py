@@ -92,13 +92,10 @@ def find_target_faces(main_window: "MainWindow"):
         if video_processor.file_type == "image":
             frame = misc_helpers.read_image_file(video_processor.media_path)
         elif video_processor.file_type == "video" and media_capture:
-            # Position frame before read
-            media_capture.set(
-                cv2.CAP_PROP_POS_FRAMES, video_processor.current_frame_number
-            )
-            # Pass rotation
             ret, frame = misc_helpers.read_frame(
-                media_capture, video_processor.media_rotation
+                media_capture,
+                video_processor.media_rotation,
+                seek_to_frame_first=video_processor.current_frame_number,
             )
         elif video_processor.file_type == "webcam" and media_capture:
             # Pass 0 for webcam rotation

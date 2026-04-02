@@ -214,6 +214,7 @@ class VideoProcessor(QObject):
         self.playback_display_start_time = (
             0.0  # Time when frames *actually* started displaying
         )
+        self.playback_frames_displayed: int = 0  # Frames painted in display_next_frame (preview FPS)
         self.play_start_time = 0.0  # Used by default style for audio segmenting
         self.play_end_time = 0.0  # Used by default style for audio segmenting
 
@@ -1736,6 +1737,8 @@ class VideoProcessor(QObject):
                 flush=True,
             )
 
+        self.playback_frames_displayed += 1
+
         # --- 8. Clean up and Increment ---
         if self.file_type != "webcam":
             # Increment for next frame
@@ -1918,6 +1921,7 @@ class VideoProcessor(QObject):
 
         # 6a. Reset Timers and Containers
         self.start_time = time.perf_counter()
+        self.playback_frames_displayed = 0
         self.frames_to_display.clear()
         self.frames_pipeline_profile.clear()
 
@@ -1964,7 +1968,11 @@ class VideoProcessor(QObject):
         print(f"[INFO] Sync: Initial read complete (Result: {ret}).")
 
         if not ret:
-            fallback_frame = int(self.media_capture.get(cv2.CAP_PROP_POS_FRAMES))
+            fallback_frame = int(
+                misc_helpers.capture_get_prop(
+                    self.media_capture, cv2.CAP_PROP_POS_FRAMES
+                )
+            )
             fallback_frame_to_try = max(0, fallback_frame - 1)
             print(
                 f"[WARN] Failed initial read for frame {actual_start_frame}. Retrying from frame {fallback_frame_to_try}."
@@ -2379,7 +2387,6 @@ class VideoProcessor(QObject):
         self.current_segment_index = -1
         self.temp_segment_files = []
         self.current_segment_end_frame = None
-        self.playback_display_start_time = 0.0
         self.last_detected_faces.clear()
         self._smoothed_kps.clear()
 
@@ -2457,6 +2464,7 @@ class VideoProcessor(QObject):
             num_frames_processed = 0
 
         self._log_processing_summary(processing_time_sec, num_frames_processed)
+        self.playback_display_start_time = 0.0
         self.processing_stopped_signal.emit()
 
         return True  # Processing was stopped
@@ -2543,8 +2551,11 @@ class VideoProcessor(QObject):
                     self.media_capture.set(cv2.CAP_PROP_ORIENTATION_AUTO, 1)
                 if self.media_capture and self.media_capture.isOpened():
                     # PERFORM TEST READ: essential on Windows to detect silent handle failures
-                    misc_helpers.seek_frame(self.media_capture, seek_frame)
-                    ret, _ = self.media_capture.read()
+                    ret, _ = misc_helpers.read_frame(
+                        self.media_capture,
+                        self.media_rotation,
+                        seek_to_frame_first=seek_frame,
+                    )
                     if ret:
                         # Success! Reset counters and seek back to the target frame.
                         self.current_frame_number = seek_frame
@@ -2583,7 +2594,9 @@ class VideoProcessor(QObject):
         if self.file_type != "video" or not self.media_capture:
             return
         try:
-            fourcc = self.media_capture.get(cv2.CAP_PROP_FOURCC)
+            fourcc = misc_helpers.capture_get_prop(
+                self.media_capture, cv2.CAP_PROP_FOURCC
+            )
             tag = misc_helpers.cv_fourcc_to_tag(fourcc)
         except Exception:
             return
@@ -2737,12 +2750,24 @@ class VideoProcessor(QObject):
                 )
 
         try:
+            # Prefer frames actually painted (preview metronome); timeline span inflates FPS
+            # when wall-clock catch-up skips many indices in one tick.
+            frames_for_fps = (
+                self.playback_frames_displayed
+                if self.playback_frames_displayed > 0
+                else num_frames_processed
+            )
             if (
-                display_duration_sec > 0.01 and num_frames_processed > 0
+                display_duration_sec > 0.01 and frames_for_fps > 0
             ):  # Use a small threshold for duration
-                avg_fps = num_frames_processed / display_duration_sec
-                print(f"[INFO] Average Display FPS: {avg_fps:.2f}\n")
-            elif num_frames_processed > 0:
+                avg_fps = frames_for_fps / display_duration_sec
+                label = (
+                    "Average Display FPS (frames painted)"
+                    if self.playback_frames_displayed > 0
+                    else "Average Display FPS (timeline span)"
+                )
+                print(f"[INFO] {label}: {avg_fps:.2f}\n")
+            elif frames_for_fps > 0:
                 print(
                     "[WARN] Display duration too short to calculate meaningful FPS.\n"
                 )
@@ -4618,14 +4643,21 @@ class VideoProcessor(QObject):
         ):
             frame_height, frame_width, _ = self.current_frame.shape
         elif self.media_capture and self.media_capture.isOpened():
-            frame_height = int(self.media_capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            frame_width = int(self.media_capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-            if current_fps == 30:
-                current_fps = (
-                    self.media_capture.get(cv2.CAP_PROP_FPS)
-                    if self.media_capture.get(cv2.CAP_PROP_FPS) > 0
-                    else 30
+            frame_height = int(
+                misc_helpers.capture_get_prop(
+                    self.media_capture, cv2.CAP_PROP_FRAME_HEIGHT
                 )
+            )
+            frame_width = int(
+                misc_helpers.capture_get_prop(
+                    self.media_capture, cv2.CAP_PROP_FRAME_WIDTH
+                )
+            )
+            if current_fps == 30:
+                cap_fps_v = misc_helpers.capture_get_prop(
+                    self.media_capture, cv2.CAP_PROP_FPS
+                )
+                current_fps = cap_fps_v if cap_fps_v > 0 else 30
 
         if frame_width <= 0 or frame_height <= 0:
             print(
@@ -4759,6 +4791,7 @@ class VideoProcessor(QObject):
 
         # 5. Start Process
         self.start_time = time.perf_counter()
+        self.playback_frames_displayed = 0
 
         # 6. Start the first segment
         self.process_next_segment()
@@ -5295,7 +5328,7 @@ class VideoProcessor(QObject):
             self.stop_live_sound()
 
         anchor_fn = self._timeline_frame_from_ui()
-        cap_fps = self.media_capture.get(cv2.CAP_PROP_FPS)
+        cap_fps = misc_helpers.capture_get_prop(self.media_capture, cv2.CAP_PROP_FPS)
         try:
             cap_fps_f = float(cap_fps)
         except (TypeError, ValueError):
@@ -5310,14 +5343,18 @@ class VideoProcessor(QObject):
             self.main_window.control["VideoPlaybackCustomFpsToggle"]
             and not self.recording
         ):
-            fpsorig = self.media_capture.get(cv2.CAP_PROP_FPS)
+            fpsorig = misc_helpers.capture_get_prop(
+                self.media_capture, cv2.CAP_PROP_FPS
+            )
             fpscust = self.main_window.control["VideoPlaybackCustomFpsSlider"]
             if fpsorig > 0 and fpscust > 0:
                 fpsdiv = fpscust / fpsorig
         if fpsdiv < 0.5:
             fpsdiv = 0.5  # Don't allow less than 0.5x speed
 
-        fps_file = float(self.media_capture.get(cv2.CAP_PROP_FPS) or 0.0)
+        fps_file = float(
+            misc_helpers.capture_get_prop(self.media_capture, cv2.CAP_PROP_FPS) or 0.0
+        )
         if fps_file <= 0:
             fps_file = float(self.fps) if self.fps > 0 else 30.0
         self._audio_sync_wall_t0 = time.perf_counter()

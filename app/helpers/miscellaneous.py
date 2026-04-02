@@ -886,6 +886,19 @@ def _get_capture_lock(capture_obj: cv2.VideoCapture) -> threading.Lock:
         return _capture_locks[obj_id]
 
 
+def capture_get_prop(capture_obj: cv2.VideoCapture, prop_id: int) -> float:
+    """
+    Thread-safe ``VideoCapture.get`` for captures shared across threads.
+
+    Unsynchronized ``get`` while another thread holds the decoder (e.g. inside
+    ``read()``) can trigger libavcodec threaded-decode assertions such as
+    ``fctx->async_lock`` on some builds/backends.
+    """
+    capture_lock = _get_capture_lock(capture_obj)
+    with capture_lock:
+        return capture_obj.get(prop_id)
+
+
 def read_frame(
     capture_obj: cv2.VideoCapture,
     media_rotation: int = 0,
