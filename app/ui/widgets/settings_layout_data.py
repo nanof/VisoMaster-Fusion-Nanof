@@ -1,4 +1,5 @@
 from app.ui.widgets.actions import control_actions
+from app.ui.widgets.actions import graphics_view_actions
 import cv2
 from typing import Any
 
@@ -67,11 +68,11 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
         "GlobalInputResizeSizeSelection": {
             "level": 2,
             "label": "Input Resolution Target",
-            "options": ["540p", "720p", "1080p"],
+            "options": ["240p", "360p", "480p", "540p", "720p", "1080p"],
             "default": "720p",
             "parentToggle": "GlobalInputResizeToggle",
             "requiredToggleValue": True,
-            "help": "Target height resolution (e.g. 720p). The aspect ratio is preserved.",
+            "help": "Target height in lines (240p–1080p). The aspect ratio is preserved.",
         },
         "PerformancePresetSelection": {
             "level": 1,
@@ -84,6 +85,55 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "help": "Applies a reversible bundle aligned with the aggressive-FPS plan. Measure impact with VISIOMASTER_PERF_BUNDLE=1 (enables PERF_LOG + STAGES + SWAP_CORE).",
             "exec_function": control_actions.apply_fps_aggressive_preset,
             "exec_function_args": [],
+        },
+        "PipelineProfileOverlayEnableToggle": {
+            "level": 1,
+            "label": "Pipeline profile overlay (preview)",
+            "default": False,
+            "help": "Show per-stage timings (feeder + worker) on the preview. Reads live while playing. "
+            "VISIOMASTER_PERF_STAGES=1 still logs to the console separately.",
+            "exec_function": graphics_view_actions.on_pipeline_profile_overlay_toggle,
+            "exec_function_args": [],
+        },
+        "PipelineProfileAggregationSelection": {
+            "level": 2,
+            "label": "Profile aggregation",
+            "options": ["EMA", "Window"],
+            "default": "EMA",
+            "parentToggle": "PipelineProfileOverlayEnableToggle",
+            "requiredToggleValue": True,
+            "help": "EMA: exponential moving average per stage. Window: mean of the last N frames.",
+        },
+        "PipelineProfileWindowFramesSlider": {
+            "level": 2,
+            "label": "Profile window (frames)",
+            "min_value": "5",
+            "max_value": "120",
+            "default": "30",
+            "step": 1,
+            "parentToggle": "PipelineProfileOverlayEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Number of frames for Window mode; also bounds history for EMA updates.",
+        },
+        "PipelineProfileEmaAlphaDecimalSlider": {
+            "level": 2,
+            "label": "EMA alpha",
+            "min_value": "0.05",
+            "max_value": "0.95",
+            "default": "0.25",
+            "step": 0.05,
+            "decimals": 2,
+            "parentToggle": "PipelineProfileOverlayEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Smoothing factor for EMA (higher = react faster to changes).",
+        },
+        "PipelineProfileGpuSyncToggle": {
+            "level": 2,
+            "label": "CUDA sync between stages (accurate, slower)",
+            "default": False,
+            "parentToggle": "PipelineProfileOverlayEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Call cuda.synchronize() at each stage mark for faithful GPU times; reduces preview FPS.",
         },
     },
     "Video Playback Settings": {
@@ -305,6 +355,12 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "label": "Swap Input Face only once",
             "default": False,
             "help": "only swap highest face match per face (not every match above treshold)",
+        },
+        "SequentialTargetMatchEnableToggle": {
+            "level": 1,
+            "label": "Rotate checked Input Faces on detections",
+            "default": False,
+            "help": "No Find Faces required. Uses only checked Input Faces in list order: detection 0 gets input 0, detection 1 gets input 1, and if there are more detections than inputs, wraps to input 0 again (round-robin). Cosine similarity is not used. Swap/restorer/mask settings use the same parameter set as normal swap: the selected Find Faces card if any, otherwise the current face-parameter panel (current_widget_parameters). Recognition uses the active swapper's ArcFace model for the target embedding. Ignored when 'Swap Input Face only once' is enabled.",
         },
         "VR180ModeEnableToggle": {
             "level": 1,

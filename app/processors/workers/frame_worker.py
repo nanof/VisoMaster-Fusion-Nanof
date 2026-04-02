@@ -1,4 +1,5 @@
 import traceback
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Dict, Optional, cast
 import os
 import threading
@@ -24,6 +25,7 @@ from app.processors.utils import faceutil
 
 from app.helpers.miscellaneous import (
     ParametersDict,
+    copy_mapping_data,
     detector_input_size_from_control,
     rgb_uint8_to_bgr_contiguous,
     find_best_target_match,
@@ -52,6 +54,20 @@ _PERF_BUNDLE_FLAGS = frozenset(
         "VISIOMASTER_PERF_SWAP_CORE",
     }
 )
+
+
+def _pipeline_profile_collect_enabled(main_window: "MainWindow") -> bool:
+    return _env_flag("VISIOMASTER_PERF_STAGES") or bool(
+        main_window.control.get("PipelineProfileOverlayEnableToggle", False)
+    )
+
+
+def _pipeline_profile_cuda_sync(main_window: "MainWindow") -> bool:
+    if main_window.models_processor.device != "cuda" or not torch.cuda.is_available():
+        return False
+    return bool(
+        main_window.control.get("PipelineProfileGpuSyncToggle", False)
+    ) or _env_flag("VISIOMASTER_PERF_STAGES")
 
 
 def _env_flag(name: str) -> bool:
@@ -86,13 +102,23 @@ class _PerfStageCollector:
         self.stages.append((name, (now - self._last) * 1000.0))
         self._last = now
 
-    def emit(
-        self, frame_num: int, worker_name: str, label: str = "[PERF-STAGES]"
-    ) -> None:
+    def to_payload(self) -> dict[str, Any]:
         if self.cuda_sync:
             torch.cuda.synchronize()
         total = (time.perf_counter() - self._t0) * 1000.0
-        parts = " ".join(f"{n}={ms:.2f}" for n, ms in self.stages)
+        return {
+            "stages": list(self.stages),
+            "total_ms": float(total),
+        }
+
+    def emit(
+        self, frame_num: int, worker_name: str, label: str = "[PERF-STAGES]"
+    ) -> None:
+        if not _env_flag("VISIOMASTER_PERF_STAGES"):
+            return
+        payload = self.to_payload()
+        total = payload["total_ms"]
+        parts = " ".join(f"{n}={ms:.2f}" for n, ms in payload["stages"])
         print(
             f"{label} frame={frame_num} worker={worker_name} "
             f"{parts}ms total={total:.2f}ms",
@@ -286,6 +312,7 @@ class FrameWorker(threading.Thread):
         self.precomputed_bboxes: Optional[list] = None
         self.precomputed_kpss_5: Optional[list] = None
         self.precomputed_kpss: Optional[list] = None
+        self._feeder_perf_from_task: dict[str, float] | None = None
 
         # --- OPTIMIZATION: Cached Convolution Kernels (VRAM) ---
         # Pre-allocating mathematical filters prevents massive CPU-to-GPU
@@ -428,7 +455,13 @@ class FrameWorker(threading.Thread):
                         self.precomputed_bboxes,
                         self.precomputed_kpss_5,
                         self.precomputed_kpss,
+                        _feeder_perf_task,
                     ) = task
+                    self._feeder_perf_from_task: dict[str, float] | None = (
+                        _feeder_perf_task
+                        if isinstance(_feeder_perf_task, dict)
+                        else None
+                    )
 
                     # Store them locally in the worker
                     self.parameters = local_params_from_feeder
@@ -458,6 +491,7 @@ class FrameWorker(threading.Thread):
 
         else:
             # --- Single-Frame Mode ---
+            self._feeder_perf_from_task = None
             if self.stop_event.is_set():
                 print(f"[WARN] {self.name} cancelled before start.")
                 return
@@ -497,6 +531,8 @@ class FrameWorker(threading.Thread):
         try:
             import contextlib
 
+            self._pipeline_profile_merged = None
+
             # Setup the dedicated asynchronous context for HPC parallel processing
             stream_context = (
                 torch.cuda.stream(self.worker_stream)
@@ -506,6 +542,7 @@ class FrameWorker(threading.Thread):
 
             with stream_context:
                 local_control_state = self.local_control_state_from_feeder
+                _profile_collect = _pipeline_profile_collect_enabled(self.main_window)
 
                 # FW-RACE-04: use local variables instead of instance-level assignments
                 # to prevent cross-frame data races in the pool worker.
@@ -569,7 +606,7 @@ class FrameWorker(threading.Thread):
                 else:
                     # If no processing, convert RGB (feeder) → BGR for Qt/OpenCV display.
                     # Use cvtColor like the feeder path — faster than [:: -1] + ascontiguousarray.
-                    _t_pt = time.perf_counter() if _perf_log else 0.0
+                    _t_pt = time.perf_counter() if (_perf_log or _profile_collect) else 0.0
                     self.frame = rgb_uint8_to_bgr_contiguous(self.frame)
                     if _perf_log:
                         _ms_pt = (time.perf_counter() - _t_pt) * 1000.0
@@ -577,6 +614,14 @@ class FrameWorker(threading.Thread):
                             f"[PERF] frame={self.frame_number} "
                             f"pass_through_ms={_ms_pt:.2f} worker={self.name}",
                             flush=True,
+                        )
+                    if _profile_collect:
+                        _ms_prof = (time.perf_counter() - _t_pt) * 1000.0
+                        self._pipeline_profile_merged = self._build_merged_pipeline_profile(
+                            {
+                                "stages": [("pass_through", _ms_prof)],
+                                "total_ms": _ms_prof,
+                            }
                         )
 
                 # Sync thread before returning to cpu
@@ -589,15 +634,22 @@ class FrameWorker(threading.Thread):
                 return
 
             # Emit Signals directly with numpy.ndarray (JIT QPixmap creation is now handled by the GUI Thread)
+            _prof_out = (
+                getattr(self, "_pipeline_profile_merged", None)
+                if _pipeline_profile_collect_enabled(self.main_window)
+                else None
+            )
             if self.video_processor.file_type == "webcam" and not self.is_single_frame:
-                self.video_processor.webcam_frame_processed_signal.emit(self.frame)
+                self.video_processor.webcam_frame_processed_signal.emit(
+                    self.frame, _prof_out
+                )
             elif not self.is_single_frame:
                 self.video_processor.frame_processed_signal.emit(
-                    self.frame_number, self.frame
+                    self.frame_number, self.frame, _prof_out
                 )
             else:  # Single frame processing (image or paused video)
                 self.video_processor.single_frame_processed_signal.emit(
-                    self.frame_number, self.frame
+                    self.frame_number, self.frame, _prof_out
                 )
 
         except Exception as e:
@@ -616,7 +668,7 @@ class FrameWorker(threading.Thread):
                 try:
                     fallback_bgr = rgb_uint8_to_bgr_contiguous(_fallback_frame_rgb)
                     self.video_processor.frame_processed_signal.emit(
-                        self.frame_number, fallback_bgr
+                        self.frame_number, fallback_bgr, None
                     )
                 except Exception as fb_err:
                     print(
@@ -711,6 +763,21 @@ class FrameWorker(threading.Thread):
             cast(dict, default_params_dict),
             str(control_global["RecognitionModelSelection"]),
         )
+
+    def _parameters_for_input_rotate_mode(self) -> ParametersDict:
+        """Face swap toggles/sliders (restorers, masks, etc.) use data_type *parameter*,
+        stored in parameters[face_id] / current_widget_parameters — not in *control*.
+        Match the normal swap path: ParametersDict(face_specific, defaults).
+        """
+        with self.lock:
+            default_params = dict(self.main_window.default_parameters.data)
+        sel = getattr(self.main_window, "selected_target_face_id", None)
+        if sel and str(sel) in self.parameters:
+            face_specific = copy_mapping_data(self.parameters[str(sel)])
+        else:
+            cwp = getattr(self.main_window, "current_widget_parameters", None)
+            face_specific = copy_mapping_data(cwp)
+        return ParametersDict(face_specific, default_params)
 
     def _process_single_vr_perspective_crop_multi(
         self,
@@ -997,6 +1064,7 @@ class FrameWorker(threading.Thread):
         # Check 1: At the very beginning
         if stop_event.is_set():
             assert self.frame is not None
+            self._pipeline_profile_merged = None
             return self.frame[..., ::-1]  # Return original BGR frame
 
         # Keep last frame number for reference (this is the single-frame path read; pool
@@ -1027,13 +1095,9 @@ class FrameWorker(threading.Thread):
         img_numpy_rgb_uint8 = self.frame
         assert img_numpy_rgb_uint8 is not None, "frame must be set before processing"
 
-        _perf_stages_on = _env_flag("VISIOMASTER_PERF_STAGES")
-        _cuda_stage_sync = (
-            _perf_stages_on
-            and self.models_processor.device == "cuda"
-            and torch.cuda.is_available()
-        )
-        perf_stages = _PerfStageCollector(_cuda_stage_sync) if _perf_stages_on else None
+        _collect = _pipeline_profile_collect_enabled(self.main_window)
+        _cuda_stage_sync = _pipeline_profile_cuda_sync(self.main_window)
+        perf_stages = _PerfStageCollector(_cuda_stage_sync) if _collect else None
 
         # Prepare the base tensor
         processed_tensor_rgb_uint8 = (
@@ -1063,6 +1127,7 @@ class FrameWorker(threading.Thread):
             # Check 5: Before final heavy operation
             if stop_event.is_set():
                 assert img_numpy_rgb_uint8 is not None
+                self._pipeline_profile_merged = None
                 return img_numpy_rgb_uint8[..., ::-1]
 
             processed_tensor_rgb_uint8 = self.frame_enhancers.enhance_core(
@@ -1081,9 +1146,35 @@ class FrameWorker(threading.Thread):
             final_img_np_rgb_uint8 = np.ascontiguousarray(final_img_np_rgb_uint8)
 
         if perf_stages is not None:
-            perf_stages.emit(self.frame_number, self.name)
+            pl = perf_stages.to_payload()
+            if _env_flag("VISIOMASTER_PERF_STAGES"):
+                total = pl["total_ms"]
+                parts = " ".join(f"{n}={ms:.2f}" for n, ms in pl["stages"])
+                print(
+                    f"[PERF-STAGES] frame={self.frame_number} worker={self.name} "
+                    f"{parts}ms total={total:.2f}ms",
+                    flush=True,
+                )
+            self._pipeline_profile_merged = self._build_merged_pipeline_profile(pl)
+        else:
+            self._pipeline_profile_merged = None
 
         return final_img_np_rgb_uint8[..., ::-1]
+
+    def _build_merged_pipeline_profile(
+        self, worker_payload: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        fd = self._feeder_perf_from_task
+        if not fd and not worker_payload:
+            return None
+        stages = list(worker_payload["stages"]) if worker_payload else []
+        total = float(worker_payload["total_ms"]) if worker_payload else 0.0
+        return {
+            "feeder": dict(fd) if fd else {},
+            "worker": stages,
+            "worker_total_ms": total,
+            "worker_thread": self.name,
+        }
 
     # ------------------------------------------------------------------
     # VR180 helpers
@@ -2101,6 +2192,11 @@ class FrameWorker(threading.Thread):
         # iterates the live dict while the UI thread may be modifying it.
         with self.lock:
             target_faces_snapshot = dict(self.main_window.target_faces)
+            _checked_inputs_ordered = [
+                b
+                for _fid, b in self.main_window.input_faces.items()
+                if b.isChecked()
+            ]
 
         det_faces_data_for_display = []
 
@@ -2217,6 +2313,21 @@ class FrameWorker(threading.Thread):
 
         _rec_model = control["RecognitionModelSelection"]
         _rec_sim = control["SimilarityTypeSelection"]
+        _sequential_match_active = control.get(
+            "SequentialTargetMatchEnableToggle", False
+        ) and not control.get("SwapOnlyBestMatchEnableToggle", False)
+        if _sequential_match_active:
+            _swap_name_for_arc = control.get("SwapModelSelection")
+            if _swap_name_for_arc is None:
+                with self.lock:
+                    _swap_name_for_arc = dict(
+                        self.main_window.default_parameters.data
+                    ).get("SwapModelSelection", "Inswapper128")
+            _recognition_arc_model = self.models_processor.get_arcface_model(
+                _swap_name_for_arc
+            )
+        else:
+            _recognition_arc_model = _rec_model
         _use_recognition_cache = (
             self.is_pool_worker
             and self.video_processor.file_type == "video"
@@ -2245,7 +2356,7 @@ class FrameWorker(threading.Thread):
                             i,
                             _bbox_i,
                             kpss_5[i],
-                            _rec_model,
+                            _recognition_arc_model,
                             _rec_sim,
                         )
                     )
@@ -2256,7 +2367,7 @@ class FrameWorker(threading.Thread):
                             img,
                             kpss_5[i],
                             _rec_sim,
-                            _rec_model,
+                            _recognition_arc_model,
                         )
                         self.video_processor.store_recognition_embedding(
                             self.frame_number,
@@ -2264,7 +2375,7 @@ class FrameWorker(threading.Thread):
                             _bbox_i,
                             kpss_5[i],
                             face_emb,
-                            _rec_model,
+                            _recognition_arc_model,
                             _rec_sim,
                         )
                 else:
@@ -2272,7 +2383,7 @@ class FrameWorker(threading.Thread):
                         img,
                         kpss_5[i],
                         _rec_sim,
-                        _rec_model,
+                        _recognition_arc_model,
                     )
                 # FW-BUG-01: bounds check before indexing kpss
                 kps_all_i = kpss[i] if kpss is not None and i < len(kpss) else None
@@ -2429,17 +2540,148 @@ class FrameWorker(threading.Thread):
 
             else:
                 # --- Branch: Swap All Matches ---
-                for fface in det_faces_data_for_display:
+                _params_rr_rotate: ParametersDict | None = None
+                if _sequential_match_active:
+                    _params_rr_rotate = self._parameters_for_input_rotate_mode()
+
+                for det_index, fface in enumerate(det_faces_data_for_display):
                     if stop_event.is_set():
                         break
-                    # FW-BUG-09: pass the target_faces snapshot to avoid re-iterating live dict
+
+                    if _sequential_match_active:
+                        fface["matched_target"] = None
+                        if not _checked_inputs_ordered:
+                            continue
+                        in_btn = _checked_inputs_ordered[
+                            det_index % len(_checked_inputs_ordered)
+                        ]
+                        params_rr = cast(ParametersDict, _params_rr_rotate)
+                        denoiser_on_rr = (
+                            control.get(
+                                "DenoiserUNetEnableBeforeRestorersToggle", False
+                            )
+                            or control.get("DenoiserAfterFirstRestorerToggle", False)
+                            or control.get("DenoiserAfterRestorersToggle", False)
+                        )
+                        _kv_rr = None
+                        if denoiser_on_rr:
+                            if getattr(in_btn, "kv_map", None) is None:
+                                with self.main_window.models_processor.kv_extraction_lock:
+                                    if getattr(in_btn, "kv_map", None) is None:
+                                        try:
+                                            from PIL import Image
+
+                                            _crop_bgr = in_btn.cropped_face
+                                            if (
+                                                _crop_bgr is not None
+                                                and _crop_bgr.size > 0
+                                            ):
+                                                pil_img = Image.fromarray(
+                                                    _crop_bgr[..., ::-1]
+                                                )
+                                                if pil_img.size != (512, 512):
+                                                    pil_img = pil_img.resize(
+                                                        (512, 512),
+                                                        Image.Resampling.LANCZOS,
+                                                    )
+                                                in_btn.kv_map = (
+                                                    self.models_processor.get_kv_map_for_face(
+                                                        pil_img
+                                                    )
+                                                )
+                                            else:
+                                                in_btn.kv_map = {}
+                                        except Exception as _e_kv:
+                                            print(
+                                                f"[ERROR] KV map for input face: {_e_kv}"
+                                            )
+                                            in_btn.kv_map = {}
+                            _kv_rr = getattr(in_btn, "kv_map", None)
+
+                        _mouth_holder = fface.get("_input_rr_mouth_holder")
+                        if _mouth_holder is None:
+                            _mouth_holder = SimpleNamespace()
+                            fface["_input_rr_mouth_holder"] = _mouth_holder
+
+                        fface["kps_5"] = keypoints_adjustments(
+                            fface["kps_5"], params_rr, source_kps=None
+                        )
+                        arcface_model_rr = self.models_processor.get_arcface_model(
+                            params_rr["SwapModelSelection"]
+                        )
+                        s_e_rr = None
+                        if (
+                            swap_button_is_checked_global
+                            and params_rr["SwapModelSelection"] != "DeepFaceLive (DFM)"
+                        ):
+                            s_e_rr = in_btn.get_embedding(arcface_model_rr)
+                            if s_e_rr is not None and (
+                                not isinstance(s_e_rr, np.ndarray)
+                                or s_e_rr.size == 0
+                                or np.isnan(s_e_rr).any()
+                            ):
+                                s_e_rr = None
+
+                        _params_swap_rr = self._apply_auto_mouth(
+                            cast(dict, params_rr),
+                            _mouth_holder,
+                            face_bbox=fface["bbox"],
+                        )
+                        _t_e_rr = fface.get("embedding")
+                        if (
+                            not isinstance(_t_e_rr, np.ndarray)
+                            or _t_e_rr.size == 0
+                        ):
+                            _t_e_rr = None
+
+                        if (
+                            swap_button_is_checked_global
+                            or edit_button_is_checked_global
+                        ):
+                            try:
+                                img, fface["original_face"], fface["swap_mask"] = (
+                                    self.swap_core(
+                                        img,
+                                        fface["kps_5"],
+                                        fface["kps_all"],
+                                        s_e=s_e_rr,
+                                        t_e=_t_e_rr,
+                                        parameters=_params_swap_rr,
+                                        control=control,
+                                        dfm_model_name=params_rr["DFMModelSelection"],
+                                        kv_map=_kv_rr,
+                                    )
+                                )
+                                if edit_button_is_checked_global and any(
+                                    params_rr[f]
+                                    for f in (
+                                        "FaceMakeupEnableToggle",
+                                        "HairMakeupEnableToggle",
+                                        "EyeBrowsMakeupEnableToggle",
+                                        "LipsMakeupEnableToggle",
+                                    )
+                                ):
+                                    img = self.frame_edits.swap_edit_face_core_makeup(
+                                        img,
+                                        fface["kps_all"],
+                                        params_rr.data,
+                                        control,
+                                    )
+                            except Exception as e:
+                                print(
+                                    f"[ERROR] Standard mode swap_core failed "
+                                    f"(input rotate): {e}"
+                                )
+                                continue
+                        continue
+
+                    # --- Similarity match (default Swap All) ---
                     best_target, params, _ = self._find_best_target_match(
                         fface["embedding"], control, target_faces_snapshot
                     )
-                    # FW-BUG-09: cache matched target so downstream helpers can reuse it
                     fface["matched_target"] = best_target
 
-                    if best_target and (
+                    if best_target and params and (
                         swap_button_is_checked_global or edit_button_is_checked_global
                     ):
                         denoiser_on = (
@@ -2608,6 +2850,12 @@ class FrameWorker(threading.Thread):
         """
         Helper to determine which landmarks to draw and in what color based on matches.
         """
+        _rotate_mode_params = None
+        if control.get(
+            "SequentialTargetMatchEnableToggle", False
+        ) and not control.get("SwapOnlyBestMatchEnableToggle", False):
+            _rotate_mode_params = self._parameters_for_input_rotate_mode()
+
         landmarks_to_draw = []
         for fface_data in det_faces_data:
             # FW-BUG-09: use cached matched_target if available to avoid re-running match
@@ -2624,9 +2872,12 @@ class FrameWorker(threading.Thread):
                 )
                 matched_params = ParametersDict(dict(face_specific), _default_params)
             else:
-                _, matched_params, _ = self._find_best_target_match(
-                    fface_data["embedding"], control
-                )
+                if _rotate_mode_params is not None:
+                    matched_params = _rotate_mode_params
+                else:
+                    _, matched_params, _ = self._find_best_target_match(
+                        fface_data["embedding"], control
+                    )
             if matched_params:
                 use_adj = matched_params["LandmarksPositionAdjEnableToggle"]
                 keypoints = (
@@ -2650,6 +2901,12 @@ class FrameWorker(threading.Thread):
         All strips are vertically stacked and returned as a single CHW tensor.
         Returns the original *img* unchanged if no matched faces are found.
         """
+        _rotate_mode_params_cmp = None
+        if control.get(
+            "SequentialTargetMatchEnableToggle", False
+        ) and not control.get("SwapOnlyBestMatchEnableToggle", False):
+            _rotate_mode_params_cmp = self._parameters_for_input_rotate_mode()
+
         imgs_to_vstack = []
         for _, fface in enumerate(det_faces_data):
             # FW-BUG-09 / FW-PERF-01/02/03: use cached match result when available
@@ -2669,10 +2926,14 @@ class FrameWorker(threading.Thread):
                 )
                 best_target_for_compare = cached_tgt
             else:
-                best_target_for_compare, parameters_for_face, _ = (
-                    self._find_best_target_match(fface["embedding"], control)
-                )
-            if best_target_for_compare and parameters_for_face:
+                if _rotate_mode_params_cmp is not None:
+                    parameters_for_face = _rotate_mode_params_cmp
+                    best_target_for_compare = None
+                else:
+                    best_target_for_compare, parameters_for_face, _ = (
+                        self._find_best_target_match(fface["embedding"], control)
+                    )
+            if parameters_for_face:
                 modified_face = self.get_cropped_face_using_kps(
                     img, fface["kps_5"], cast(dict, parameters_for_face)
                 )
