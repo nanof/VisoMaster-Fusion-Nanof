@@ -211,6 +211,33 @@ def _fused_demod(
 # ---------------------------------------------------------------------------
 
 
+def _bias_key_after_conv(m, conv_out: str, init_shapes: dict) -> Optional[str]:
+    """
+    Some exports (e.g. Hugging Face FP16) use Conv with only (data, weight);
+    bias is a separate Add(conv_out, initializer). Return that initializer name.
+    """
+    if not conv_out:
+        return None
+    for node in m.graph.node:
+        if node.op_type != "Add":
+            continue
+        if len(node.input) < 2:
+            continue
+        a, b = node.input[0], node.input[1]
+        if a == conv_out:
+            other = b
+        elif b == conv_out:
+            other = a
+        else:
+            continue
+        if other not in init_shapes:
+            continue
+        sh = init_shapes[other]
+        if len(sh) == 1:
+            return other
+    return None
+
+
 def _load_onnx_weights(path: str) -> dict:
     """
     Load all ONNX initializers by name, then attach additional positional
@@ -245,7 +272,8 @@ def _load_onnx_weights(path: str) -> dict:
     w["_meta_out_hw"] = np.array(out_shape[2:4] if out_shape else [0, 0])
 
     # ── Collect Conv nodes (ignore 4×4 FIR blur convs that have no bias) ──
-    # Encoder strided convs have shape [C_out, C_in, 3, 3] and bias [C_out]
+    # Standard ONNX: Conv(data, weight, bias). HF FP16 export: Conv(data, weight)
+    # then Add(conv_out, bias_initializer).
     enc_conv_weights: list = []  # (weight_key, bias_key)
     enc_conv0_weight: Optional[str] = None  # 1×1 first layer
     enc_conv0_bias: Optional[str] = None
@@ -253,15 +281,25 @@ def _load_onnx_weights(path: str) -> dict:
     for node in m.graph.node:
         if node.op_type != "Conv":
             continue
-        if len(node.input) < 3:
-            continue  # FIR blur conv has only weight (no bias input)
+        if len(node.input) < 2:
+            continue
         wk = node.input[1]
-        bk = node.input[2]
-        if wk not in init_shapes or bk not in init_shapes:
+        if wk not in init_shapes:
             continue
         ws = init_shapes[wk]
+        if len(ws) != 4:
+            continue
+        bk: Optional[str] = None
+        if len(node.input) >= 3 and node.input[2] in init_shapes:
+            cand = node.input[2]
+            if len(init_shapes[cand]) == 1:
+                bk = cand
+        if bk is None and node.output:
+            bk = _bias_key_after_conv(m, node.output[0], init_shapes)
+        if bk is None or bk not in init_shapes:
+            continue
         bs = init_shapes[bk]
-        if len(ws) != 4 or len(bs) != 1:
+        if len(bs) != 1:
             continue
         C_out, C_in, kH, kW = ws
         if C_in == 1:
