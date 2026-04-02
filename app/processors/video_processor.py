@@ -30,6 +30,10 @@ from app.ui.widgets.actions import list_view_actions
 from app.ui.widgets.actions import save_load_actions
 from app.ui.widgets.settings_layout_data import CAMERA_BACKENDS
 import app.helpers.miscellaneous as misc_helpers
+from app.helpers.screen_capture import (
+    create_screen_capture_from_control,
+    mss_available,
+)
 from app.helpers.typing_helper import (
     ControlTypes,
     FacesParametersTypes,
@@ -61,6 +65,8 @@ def _bbox_iou_xyxy(a: numpy.ndarray, b: numpy.ndarray) -> float:
     union = aw + bw - inter + 1e-6
     return float(inter / union)
 
+
+LIVE_STREAM_FILE_TYPES = frozenset({"webcam", "screen"})
 
 TAIL_TOLERANCE = 30  # BUG-07: 10 was too tight — codec trailing B-frames can cause read
 # failures in the last ~10 frames on H.264/H.265 content, dropping valid end frames.
@@ -148,7 +154,7 @@ class VideoProcessor(QObject):
 
         # --- Media State ---
         self.media_capture: cv2.VideoCapture | None = None
-        self.file_type: str | None = None  # "video", "image", or "webcam"
+        self.file_type: str | None = None  # "video", "image", "webcam", or "screen"
         self.fps = 0.0  # Target FPS for playback or recording
         self.media_path: str | None = None
         self.media_rotation: int = 0
@@ -522,7 +528,7 @@ class VideoProcessor(QObject):
 
         # Determine which feed logic to use
         try:
-            if self.file_type == "webcam":
+            if self.file_type in LIVE_STREAM_FILE_TYPES:
                 self._feed_webcam()
             elif (
                 self.file_type == "video"
@@ -627,6 +633,18 @@ class VideoProcessor(QObject):
             self._recognition_cache_by_frame.move_to_end(store_key)
             while len(self._recognition_cache_by_frame) > self._recognition_cache_max:
                 self._recognition_cache_by_frame.popitem(last=False)
+
+    def _clear_sequential_detection_feed_state(self) -> None:
+        """Drop ByteTrack / EMA state after a timeline jump or new playback anchor.
+
+        _run_sequential_detection reuses last_detected_faces when
+        current_frame_number % FaceDetectionIntervalSlider != 0. If the timeline
+        moved (scrub, audio-sync catch-up, reopen) but this state was not cleared,
+        the next frame can inherit bbox/keypoints from the wrong image — no faces,
+        broken swap (Find Faces bypasses the feeder and still works).
+        """
+        self.last_detected_faces.clear()
+        self._smoothed_kps.clear()
 
     def _sequential_detection_required(
         self,
@@ -1014,6 +1032,7 @@ class VideoProcessor(QObject):
                     seek_before_read = pending_interactive_seek
                     self.consecutive_read_errors = 0
                     self._audio_sync_last_seek_monotonic = time.perf_counter()
+                    self._clear_sequential_detection_feed_state()
 
                 # 1. Mode-specific stop logic
                 if is_segment_mode:
@@ -1085,6 +1104,7 @@ class VideoProcessor(QObject):
                                 seek_before_read = jump_to
                                 with self.frame_queue.mutex:
                                     self.frame_queue.queue.clear()
+                                self._clear_sequential_detection_feed_state()
                                 print(
                                     f"[INFO] Feeder: audio-sync catch-up +{jump_to - cur_fn}f "
                                     f"({cur_fn}→{jump_to}, lag≈{lag}, target={target_eff}).",
@@ -1356,7 +1376,7 @@ class VideoProcessor(QObject):
                 )
                 _t_w_after_read = time.perf_counter()
                 if not ret:
-                    print("[WARN] Feeder: Failed to read webcam frame.")
+                    print("[WARN] Feeder: Failed to read live capture frame.")
                     continue  # Try again
 
                 _t_w_before_rgb = time.perf_counter()
@@ -1364,7 +1384,7 @@ class VideoProcessor(QObject):
                 _t_w_after_rgb = time.perf_counter()
 
                 # The worker pool expects a task.
-                # For webcam, we must read the *current* global parameters
+                # For live capture (webcam/screen), read the *current* global parameters
                 _t_w_before_params = time.perf_counter()
                 with self.main_window.models_processor.model_lock:
                     local_params_for_worker = self.main_window.parameters.copy()
@@ -1404,7 +1424,7 @@ class VideoProcessor(QObject):
                     }
                     if _env_flag("VISIOMASTER_PERF_STAGES"):
                         print(
-                            f"[PERF-STAGES] frame=webcam role=feeder "
+                            f"[PERF-STAGES] frame=live role=feeder "
                             f"read_frame_ms={_read_ms_w:.2f} rgb_pack_ms={_rgb_ms_w:.2f} "
                             f"feeder_params_lock_ms={_param_ms_w:.2f} "
                             f"sequential_detect_ms={_det_ms_w:.2f}",
@@ -1412,7 +1432,7 @@ class VideoProcessor(QObject):
                         )
 
                 task = (
-                    0,  # frame_number is always 0 for webcam
+                    0,  # frame_number is always 0 for live streams
                     frame_rgb,
                     local_params_for_worker,
                     local_control_for_worker,
@@ -1424,6 +1444,12 @@ class VideoProcessor(QObject):
 
                 # Put the task in the queue for the worker pool
                 self.frame_queue.put(task)
+                # Live streams must advance this counter each fed frame: _run_sequential_detection
+                # uses current_frame_number % FaceDetectionIntervalSlider to choose full detect vs
+                # ByteTrack carry-over. It never advanced here (unlike _feed_video_loop), so after
+                # video playback the index could stay odd/even-stuck and skip real detection on
+                # every screen/webcam frame — swap/find-faces diverge (find faces bypasses feeder).
+                self.current_frame_number += 1
 
             except Exception as e:
                 print(f"[ERROR] Error in _feed_webcam loop: {e}")
@@ -1572,8 +1598,8 @@ class VideoProcessor(QObject):
         frame_number_to_display = 0  # Used for UI update
         profile_for_overlay = None
 
-        if self.file_type == "webcam":
-            # --- Webcam Logic (Queue) ---
+        if self.file_type in LIVE_STREAM_FILE_TYPES:
+            # --- Live stream (webcam / screen) — queue of latest processed frames ---
             if self.webcam_frames_to_display.empty():
                 self._arm_display_metronome_retry_ms(_retry_ms)
                 return  # Frame not ready, skip display
@@ -1582,7 +1608,7 @@ class VideoProcessor(QObject):
                 frame, profile_for_overlay = _w_item[0], _w_item[1]
             else:
                 frame = _w_item  # type: ignore[assignment]
-            frame_number_to_display = 0  # Not relevant for webcam
+            frame_number_to_display = 0  # Not relevant for live streams
 
         else:
             # --- Video/Image Logic (Dictionary) ---
@@ -1658,7 +1684,7 @@ class VideoProcessor(QObject):
         self.current_frame = frame  # Update current frame state
 
         # Emit a signal every 500 frames to notify JobProcessor we are still alive
-        if self.file_type != "webcam":  # Don't spam on webcam
+        if self.file_type not in LIVE_STREAM_FILE_TYPES:  # Don't spam on live streams
             self.heartbeat_frame_counter += 1
             if self.heartbeat_frame_counter >= 500:
                 self.heartbeat_frame_counter = 0
@@ -1699,7 +1725,7 @@ class VideoProcessor(QObject):
                 )
 
         # Update UI
-        if self.file_type != "webcam":
+        if self.file_type not in LIVE_STREAM_FILE_TYPES:
             # This is the metronome tick.
             if frame_number_to_display in self.main_window.markers:
                 # Acquire lock to safely modify parameters and controls
@@ -1740,7 +1766,7 @@ class VideoProcessor(QObject):
         self.playback_frames_displayed += 1
 
         # --- 8. Clean up and Increment ---
-        if self.file_type != "webcam":
+        if self.file_type not in LIVE_STREAM_FILE_TYPES:
             # Increment for next frame
             self.next_frame_to_display += 1
 
@@ -2027,6 +2053,7 @@ class VideoProcessor(QObject):
         self.current_frame_number = (
             actual_start_frame  # Feeder reads this frame first when it starts
         )
+        self._clear_sequential_detection_feed_state()
         self._audio_sync_last_seek_monotonic = 0.0
 
         # Calculate play_start_time
@@ -2142,7 +2169,7 @@ class VideoProcessor(QObject):
         # Set frame number for processing
         if self.file_type == "video":
             self.current_frame_number = self.main_window.videoSeekSlider.value()
-        elif self.file_type == "image" or self.file_type == "webcam":
+        elif self.file_type == "image" or self.file_type in LIVE_STREAM_FILE_TYPES:
             self.current_frame_number = 0
 
         self.next_frame_to_display = self.current_frame_number
@@ -2230,8 +2257,8 @@ class VideoProcessor(QObject):
             else:
                 print("[ERROR] Unable to read image file for processing.")
 
-        elif self.file_type == "webcam" and self.media_capture:
-            # DO NOT apply target_height for WEBCAM (Use native resolution)
+        elif self.file_type in LIVE_STREAM_FILE_TYPES and self.media_capture:
+            # DO NOT apply target_height for live capture (native resolution)
             ret, frame_bgr = misc_helpers.read_frame(
                 self.media_capture, 0, preview_target_height=None
             )
@@ -2241,7 +2268,7 @@ class VideoProcessor(QObject):
                 )  # BGR to RGB
                 read_successful = True
             else:
-                print("[ERROR] Unable to read Webcam frame for processing!")
+                print("[ERROR] Unable to read live capture frame for processing!")
 
         # --- Process if read was successful ---
         if read_successful and frame_to_process is not None:
@@ -2415,6 +2442,18 @@ class VideoProcessor(QObject):
             except Exception as e:
                 print(f"[WARN] Error re-opening webcam capture: {e}")
                 self.media_capture = None
+        elif self.file_type == "screen":
+            try:
+                if mss_available():
+                    self.media_capture = create_screen_capture_from_control(
+                        self.main_window.control
+                    )
+                else:
+                    print("[WARN] mss not available; cannot re-open screen capture.")
+                    self.media_capture = None
+            except Exception as e:
+                print(f"[WARN] Error re-opening screen capture: {e}")
+                self.media_capture = None
 
         # 9. Final cleanup and UI reset
         layout_actions.enable_all_parameters_and_control_widget(self.main_window)
@@ -2560,6 +2599,7 @@ class VideoProcessor(QObject):
                         # Success! Reset counters and seek back to the target frame.
                         self.current_frame_number = seek_frame
                         self.next_frame_to_display = seek_frame
+                        self._clear_sequential_detection_feed_state()
                         misc_helpers.seek_frame(self.media_capture, seek_frame)
                         self.refresh_video_codec_flags()
                         self.reset_av1_scrub_pipeline()
@@ -5362,6 +5402,7 @@ class VideoProcessor(QObject):
         self._audio_sync_fps_file = fps_file
         self._audio_sync_rate = float(fpsdiv)
 
+        _did_audio_realign = False
         with self.state_lock:
             self.next_frame_to_display = anchor_fn
             cur = int(self.current_frame_number)
@@ -5373,6 +5414,10 @@ class VideoProcessor(QObject):
                     print(
                         f"[WARN] audio-sync: could not realign capture to frame {anchor_fn}: {e}"
                     )
+                else:
+                    _did_audio_realign = True
+        if _did_audio_realign:
+            self._clear_sequential_detection_feed_state()
         self._audio_sync_last_seek_monotonic = 0.0
 
         args = [
@@ -5574,6 +5619,11 @@ class VideoProcessor(QObject):
         with self.frame_queue.mutex:
             self.frame_queue.queue.clear()
 
+        # Feeder detection interval / smoothing state must not carry over from video sessions.
+        self.current_frame_number = 0
+        self.last_detected_faces.clear()
+        self._smoothed_kps.clear()
+
         # 7. Start Metronome ET Feeder
         fps = self.media_capture.get(cv2.CAP_PROP_FPS)
         if fps <= 0:
@@ -5599,4 +5649,77 @@ class VideoProcessor(QObject):
         self.feeder_thread.start()
 
         # Start the display metronome
+        self._start_metronome(self.fps, is_first_start=True)
+
+    def process_screen(self):
+        """Starts desktop screen capture as a live stream (same pipeline as webcam)."""
+        if self.processing:
+            print("[WARN] Processing already active, cannot start screen capture.")
+            return
+        if self.file_type != "screen":
+            print("[WARN] process_screen: Only applicable for screen input.")
+            return
+        if not mss_available():
+            print("[ERROR] mss is not installed; cannot start screen capture.")
+            video_control_actions.reset_media_buttons(self.main_window)
+            return
+        try:
+            self.media_capture = create_screen_capture_from_control(
+                self.main_window.control
+            )
+        except Exception as e:
+            print(f"[ERROR] Failed to initialize screen capture: {e}")
+            video_control_actions.reset_media_buttons(self.main_window)
+            self.media_capture = None
+            return
+
+        ok, _probe = misc_helpers.read_frame(self.media_capture, 0)
+        if not ok:
+            print("[ERROR] Screen capture test read failed.")
+            misc_helpers.release_capture(self.media_capture)
+            self.media_capture = None
+            video_control_actions.reset_media_buttons(self.main_window)
+            return
+
+        print("[INFO] Starting screen capture processing setup...")
+
+        self.processing = True
+        self.is_processing_segments = False
+        self.recording = False
+        self.sync_feeder_ui_face_flags_from_main_window()
+        self.clear_recognition_embedding_cache()
+
+        self.frames_to_display.clear()
+        self.frames_pipeline_profile.clear()
+        self.webcam_frames_to_display.queue.clear()
+        with self.frame_queue.mutex:
+            self.frame_queue.queue.clear()
+
+        # Same as process_webcam: sequential detection uses current_frame_number; reset so
+        # interval/ByteTrack logic matches each live session (fixes screen swap after video).
+        self.current_frame_number = 0
+        self.last_detected_faces.clear()
+        self._smoothed_kps.clear()
+
+        fps = float(self.media_capture.get(cv2.CAP_PROP_FPS) or 0)
+        if fps <= 0:
+            fps = 30.0
+        self.fps = fps
+        print(f"[INFO] Screen capture target FPS: {self.fps}")
+
+        self.join_and_clear_threads()
+        self.worker_threads = []
+        for i in range(self.num_threads):
+            worker = FrameWorker(
+                frame_queue=self.frame_queue,
+                main_window=self.main_window,
+                worker_id=i,
+            )
+            worker.start()
+            self.worker_threads.append(worker)
+
+        print("[INFO] Starting feeder thread (Mode: screen)...")
+        self.feeder_thread = threading.Thread(target=self._feeder_loop, daemon=True)
+        self.feeder_thread.start()
+
         self._start_metronome(self.fps, is_first_start=True)

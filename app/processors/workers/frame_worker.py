@@ -639,7 +639,10 @@ class FrameWorker(threading.Thread):
                 if _pipeline_profile_collect_enabled(self.main_window)
                 else None
             )
-            if self.video_processor.file_type == "webcam" and not self.is_single_frame:
+            if (
+                self.video_processor.file_type in ("webcam", "screen")
+                and not self.is_single_frame
+            ):
                 self.video_processor.webcam_frame_processed_signal.emit(
                     self.frame, _prof_out
                 )
@@ -662,7 +665,7 @@ class FrameWorker(threading.Thread):
             if (
                 not self.stop_event.is_set()
                 and not self.is_single_frame
-                and self.video_processor.file_type != "webcam"
+                and self.video_processor.file_type not in ("webcam", "screen")
                 and isinstance(_fallback_frame_rgb, np.ndarray)
             ):
                 try:
@@ -729,11 +732,33 @@ class FrameWorker(threading.Thread):
         )
         return torch.clamp(denoised_image, 0, 255)
 
+    def _arc_model_for_detected_embeddings(self, control: dict) -> str:
+        """ArcFace model key used when building det_faces embeddings in standard mode.
+
+        With sequential input matching, run_recognize_direct uses the swapper's paired
+        ArcFace model; target lookup must use the same key or similarity is meaningless
+        and swap never matches.
+        """
+        _sequential_match_active = control.get(
+            "SequentialTargetMatchEnableToggle", False
+        ) and not control.get("SwapOnlyBestMatchEnableToggle", False)
+        if _sequential_match_active:
+            _swap_name_for_arc = control.get("SwapModelSelection")
+            if _swap_name_for_arc is None:
+                with self.lock:
+                    _swap_name_for_arc = dict(
+                        self.main_window.default_parameters.data
+                    ).get("SwapModelSelection", "Inswapper128")
+            return self.models_processor.get_arcface_model(_swap_name_for_arc)
+        return str(control["RecognitionModelSelection"])
+
     def _find_best_target_match(
         self,
         detected_embedding_np,
         control_global,
         target_faces_snapshot: dict | None = None,
+        *,
+        target_recognition_model: str | None = None,
     ):
         """Finds the best matching source face for a detected target face.
 
@@ -743,6 +768,9 @@ class FrameWorker(threading.Thread):
             target_faces_snapshot: Optional pre-snapshotted copy of target_faces dict
                 taken under self.lock.  If None, falls back to reading the live dict
                 (single-frame / legacy callers).
+            target_recognition_model: Key for target_face.get_embedding(...). When None,
+                uses the same ArcFace as standard detection (_arc_model_for_detected_embeddings).
+                VR / callers that embed with RecognitionModelSelection only must pass that explicitly.
         """
         # FW-RACE-01: use the snapshot when available; otherwise fall back to live dict.
         if target_faces_snapshot is not None:
@@ -755,13 +783,18 @@ class FrameWorker(threading.Thread):
         with self.lock:
             default_params_dict = dict(self.main_window.default_parameters.data)
 
+        _rec_for_match = (
+            target_recognition_model
+            if target_recognition_model is not None
+            else self._arc_model_for_detected_embeddings(control_global)
+        )
         return find_best_target_match(
             detected_embedding_np,
             self.models_processor,
             faces_to_iterate,
             self.parameters,
             cast(dict, default_params_dict),
-            str(control_global["RecognitionModelSelection"]),
+            _rec_for_match,
         )
 
     def _parameters_for_input_rotate_mode(self) -> ParametersDict:
@@ -1948,7 +1981,11 @@ class FrameWorker(threading.Thread):
             )
 
             best_target_button_vr, best_params_for_target_vr, _ = (
-                self._find_best_target_match(face_emb_crop, control)
+                self._find_best_target_match(
+                    face_emb_crop,
+                    control,
+                    target_recognition_model=str(control["RecognitionModelSelection"]),
+                )
             )
 
             if best_target_button_vr:
@@ -2311,23 +2348,11 @@ class FrameWorker(threading.Thread):
         if perf_stages is not None:
             perf_stages.mark("std_detect_feeder_or_fallback")
 
-        _rec_model = control["RecognitionModelSelection"]
         _rec_sim = control["SimilarityTypeSelection"]
         _sequential_match_active = control.get(
             "SequentialTargetMatchEnableToggle", False
         ) and not control.get("SwapOnlyBestMatchEnableToggle", False)
-        if _sequential_match_active:
-            _swap_name_for_arc = control.get("SwapModelSelection")
-            if _swap_name_for_arc is None:
-                with self.lock:
-                    _swap_name_for_arc = dict(
-                        self.main_window.default_parameters.data
-                    ).get("SwapModelSelection", "Inswapper128")
-            _recognition_arc_model = self.models_processor.get_arcface_model(
-                _swap_name_for_arc
-            )
-        else:
-            _recognition_arc_model = _rec_model
+        _recognition_arc_model = self._arc_model_for_detected_embeddings(control)
         _use_recognition_cache = (
             self.is_pool_worker
             and self.video_processor.file_type == "video"

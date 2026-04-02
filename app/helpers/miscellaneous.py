@@ -20,6 +20,8 @@ import torch
 from PIL import Image
 from skimage import transform as trans
 
+from app.helpers.screen_capture import ScreenCaptureSource
+
 # --- Global Scope ---
 
 # Scaling transforms cache — bounded LRU so long sessions with many interpolation
@@ -933,22 +935,25 @@ def read_frame(
     if _read_detail:
         _t_cap0 = time.perf_counter()
     with capture_lock:
-        if seek_to_frame_first is not None:
-            fn = int(seek_to_frame_first)
-            if seek_msec_keypoint:
-                try:
-                    f = float(seek_keypoint_fps)
-                except (TypeError, ValueError):
-                    f = 0.0
-                if f > 0.25:
-                    msec = max(0.0, (float(fn) / f) * 1000.0)
-                    if not capture_obj.set(cv2.CAP_PROP_POS_MSEC, msec):
+        if isinstance(capture_obj, ScreenCaptureSource):
+            ret, frame = capture_obj.read()
+        else:
+            if seek_to_frame_first is not None:
+                fn = int(seek_to_frame_first)
+                if seek_msec_keypoint:
+                    try:
+                        f = float(seek_keypoint_fps)
+                    except (TypeError, ValueError):
+                        f = 0.0
+                    if f > 0.25:
+                        msec = max(0.0, (float(fn) / f) * 1000.0)
+                        if not capture_obj.set(cv2.CAP_PROP_POS_MSEC, msec):
+                            capture_obj.set(cv2.CAP_PROP_POS_FRAMES, fn)
+                    else:
                         capture_obj.set(cv2.CAP_PROP_POS_FRAMES, fn)
                 else:
                     capture_obj.set(cv2.CAP_PROP_POS_FRAMES, fn)
-            else:
-                capture_obj.set(cv2.CAP_PROP_POS_FRAMES, fn)
-        ret, frame = capture_obj.read()
+            ret, frame = capture_obj.read()
     if _read_detail:
         _cap_ms = (time.perf_counter() - _t_cap0) * 1000.0
 
@@ -1026,6 +1031,8 @@ def seek_frame(capture_obj: cv2.VideoCapture, frame_number: int) -> bool:
     Returns:
         bool: The result of capture_obj.set().
     """
+    if isinstance(capture_obj, ScreenCaptureSource):
+        return True
     capture_lock = _get_capture_lock(capture_obj)
     with capture_lock:
         return capture_obj.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
@@ -1041,6 +1048,8 @@ def seek_frame_fast_keypoint(
     point, which is faster than strict frame-index seeks but not frame-accurate.
     Falls back to :func:`seek_frame` if FPS is unusable or ``POS_MSEC`` fails.
     """
+    if isinstance(capture_obj, ScreenCaptureSource):
+        return True
     capture_lock = _get_capture_lock(capture_obj)
     try:
         f = float(fps)
@@ -1066,7 +1075,9 @@ def release_capture(capture_obj: cv2.VideoCapture):
     capture_lock = _get_capture_lock(capture_obj)
 
     with capture_lock:
-        if capture_obj.isOpened():
+        if isinstance(capture_obj, ScreenCaptureSource):
+            capture_obj.release()
+        elif capture_obj.isOpened():
             capture_obj.release()
 
     with _locks_mutex:
@@ -1548,6 +1559,7 @@ def build_preview_media_metadata_text(
     frame: Any,
     webcam_index: int = -1,
     webcam_backend: int = -1,
+    screen_monitor_index: int = -1,
 ) -> str:
     """
     Multi-line summary of main media metadata for the preview overlay.
@@ -1590,6 +1602,28 @@ def build_preview_media_metadata_text(
             )
         else:
             line2 = "—" if fps_dev <= 0 else f"{fps_dev:.1f} fps (device)"
+        return f"{line1}\n{line2}"
+
+    if file_type == "screen":
+        w = h = 0
+        fps_cap = 0.0
+        if media_capture is not None and getattr(media_capture, "isOpened", lambda: False)():
+            w = int(media_capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(media_capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps_cap = float(media_capture.get(cv2.CAP_PROP_FPS) or 0.0)
+        wh = _frame_display_size(frame)
+        if wh:
+            w, h = wh
+        mon = int(screen_monitor_index) if screen_monitor_index >= 0 else 1
+        line1 = f"Screen capture · mss monitor {mon}"
+        if w > 0 and h > 0:
+            line2 = (
+                f"{w}×{h} · {fps_cap:.1f} fps (target)"
+                if fps_cap > 0
+                else f"{w}×{h}"
+            )
+        else:
+            line2 = "—" if fps_cap <= 0 else f"{fps_cap:.1f} fps (target)"
         return f"{line1}\n{line2}"
 
     if file_type != "video":
