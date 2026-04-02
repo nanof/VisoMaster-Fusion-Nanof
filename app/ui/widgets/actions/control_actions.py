@@ -38,9 +38,33 @@ def handle_face_detector_tracking_reset(main_window: "MainWindow", value):
 
 
 def change_execution_provider(main_window: "MainWindow", new_provider):
+    if new_provider == main_window.models_processor.provider_name:
+        common_widget_actions.update_gpu_memory_progressbar(main_window)
+        return
     main_window.video_processor.stop_processing()
     main_window.models_processor.switch_providers_priority(new_provider)
     main_window.models_processor.clear_gpu_memory()
+    common_widget_actions.update_gpu_memory_progressbar(main_window)
+
+
+def apply_saved_execution_provider(main_window: "MainWindow") -> None:
+    """Sync ONNX/custom provider from control before any preview runs (e.g. workspace load).
+
+    Without this, the first process_current_frame can load models with the default
+    TensorRT stack while control already says Custom; a later change_execution_provider
+    then clears GPU and fights parameter restore.
+    """
+    key = "ProvidersPrioritySelection"
+    if key not in main_window.control:
+        return
+    desired = main_window.control[key]
+    if desired == main_window.models_processor.provider_name:
+        return
+    main_window.video_processor.stop_processing()
+    try:
+        main_window.models_processor.switch_providers_priority(desired)
+    except (RuntimeError, ValueError) as e:
+        print(f"[WARN] Could not apply saved execution provider '{desired}': {e}")
     common_widget_actions.update_gpu_memory_progressbar(main_window)
     # Custom provider uses lazy initialisation: each CUDA graph runner is built
     # on first use and a build-progress dialog is shown at that point.  Do NOT

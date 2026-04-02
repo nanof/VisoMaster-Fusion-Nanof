@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Callable, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Optional, cast
 
 import cv2
 import numpy as np
@@ -183,6 +183,8 @@ def update_parameter(
 
 
 def refresh_frame(main_window: "MainWindow", synchronous: bool = False):
+    if getattr(main_window, "_loading_workspace", False):
+        return
     video_processor = main_window.video_processor
     if not video_processor.processing:
         video_processor.process_current_frame(synchronous=synchronous)
@@ -531,6 +533,57 @@ def extract_frame_as_image(
     return pix.toImage()
 
 
+def read_parameter_widget_value(widget) -> Any:
+    """Current value from a parameter tab widget (for save / exec hooks)."""
+    if isinstance(widget, widget_components.ToggleButton):
+        return widget.isChecked()
+    if isinstance(widget, widget_components.SelectionBox):
+        return widget.currentText()
+    if isinstance(widget, widget_components.ParameterDecimalSlider):
+        return float(widget.value())
+    if isinstance(widget, widget_components.ParameterSlider):
+        return int(widget.value())
+    if isinstance(widget, widget_components.ParameterText):
+        return widget.text()
+    raise TypeError(f"Unsupported parameter widget: {type(widget).__name__}")
+
+
+def flush_parameter_widgets_into_storage(main_window: "MainWindow") -> None:
+    """Copy visible parameter widget values into current_widget_parameters and the selected face.
+
+    ParametersDict.data is sparse (only keys ever written by signals). Sliders can also
+    lag behind the UI until debounce fires. Call this before saving workspace.
+    """
+    fid = main_window.selected_target_face_id
+    for name in main_window.default_parameters:
+        w = main_window.parameter_widgets.get(name)
+        if w is None:
+            continue
+        try:
+            val = read_parameter_widget_value(w)
+        except TypeError:
+            continue
+        if main_window.current_widget_parameters is not None:
+            main_window.current_widget_parameters[name] = val
+        if fid and fid in main_window.parameters:
+            main_window.parameters[fid][name] = val
+
+
+def merged_parameter_dict_for_save(
+    main_window: "MainWindow",
+    source: misc_helpers.ParametersDict | dict | None,
+) -> dict:
+    """Full parameter map for JSON: layout defaults merged with explicit overrides."""
+    base = dict(main_window.default_parameters)
+    if source is None:
+        return base
+    if isinstance(source, misc_helpers.ParametersDict):
+        base.update(source.data)
+        return base
+    base.update(source)
+    return base
+
+
 def set_widgets_values_using_face_id_parameters(
     main_window: "MainWindow", face_id=False
 ):
@@ -543,6 +596,10 @@ def set_widgets_values_using_face_id_parameters(
     else:
         # print(f"Set widgets values using face_id {face_id}")
         parameters = main_window.parameters[face_id].copy()
+        # Restorer / swapper exec handlers read current_widget_parameters; sync the
+        # full per-face dict before touching widgets so signal order cannot leave a
+        # mix of stale defaults and new values (e.g. type selection vs enable toggle).
+        main_window.current_widget_parameters = main_window.parameters[face_id]
     parameter_widgets = main_window.parameter_widgets
     for parameter_name, parameter_value in parameters.items():
         widget = parameter_widgets.get(parameter_name)
@@ -580,6 +637,39 @@ def set_widgets_values_using_face_id_parameters(
             else:
                 widget.set_value(parameter_value)
             widget.enable_refresh_frame = True
+
+
+def run_parameter_layout_exec_functions(main_window: "MainWindow") -> None:
+    """Run exec_function hooks for Face Restorer, Face Swap, and Face Editor tabs.
+
+    After a bulk restore (workspace load), Qt may not emit value-changed signals
+    when the widget already matches the programmatic value, so model load/unload
+    callbacks would be skipped. Call this once the parameter widgets reflect the
+    saved data.
+    """
+    from app.ui.widgets.face_editor_layout_data import FACE_EDITOR_LAYOUT_DATA
+    from app.ui.widgets.swapper_layout_data import SWAPPER_LAYOUT_DATA
+
+    for layout_data in (COMMON_LAYOUT_DATA, SWAPPER_LAYOUT_DATA, FACE_EDITOR_LAYOUT_DATA):
+        for _category, widgets in layout_data.items():
+            for widget_name, widget_data in widgets.items():
+                exec_fn = widget_data.get("exec_function")
+                if not exec_fn:
+                    continue
+                widget = main_window.parameter_widgets.get(widget_name)
+                if not widget:
+                    continue
+                try:
+                    value = read_parameter_widget_value(widget)
+                except TypeError:
+                    continue
+                args = list(widget_data.get("exec_function_args", []))
+                try:
+                    exec_fn(main_window, value, *args)
+                except Exception as e:
+                    print(
+                        f"[WARN] run_parameter_layout_exec_functions({widget_name}): {e}"
+                    )
 
 
 def set_control_widgets_values(main_window: "MainWindow", enable_exec_func=True):

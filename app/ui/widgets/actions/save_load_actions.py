@@ -12,6 +12,7 @@ import torch
 
 from app.ui.widgets import widget_components
 from app.ui.widgets.actions import common_actions as common_widget_actions
+from app.ui.widgets.actions import control_actions
 from app.ui.widgets.actions import card_actions
 from app.ui.widgets.actions import list_view_actions
 from app.ui.widgets.actions import video_control_actions
@@ -23,6 +24,26 @@ import app.helpers.miscellaneous as misc_helpers
 
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
+
+
+def _click_target_face_for_workspace_restore(main_window: "MainWindow", data: dict) -> None:
+    """Apply Face Swap / Restorer panel from the same target face that was active when saving."""
+    if not main_window.target_faces:
+        return
+    saved_id = data.get("selected_target_face_id")
+    button = None
+    if saved_id not in (None, False, ""):
+        key = str(saved_id)
+        if key in main_window.target_faces:
+            button = main_window.target_faces[key]
+        else:
+            for fid, btn in main_window.target_faces.items():
+                if str(fid) == key:
+                    button = btn
+                    break
+    if button is None:
+        button = next(iter(main_window.target_faces.values()))
+    button.click()
 
 
 def open_embeddings_from_file(main_window: "MainWindow"):
@@ -211,8 +232,8 @@ def get_auto_load_workspace_toggle(
                 data = json.load(data_file)
             except json.JSONDecodeError:
                 return False
-            control = data["control"]
-            return control.get("AutoLoadWorkspaceToggle", False)
+            control = data.get("control") or {}
+            return bool(control.get("AutoLoadWorkspaceToggle", False))
 
 
 def load_saved_workspace(
@@ -229,6 +250,7 @@ def load_saved_workspace(
         with open(data_filename, "r") as data_file:  # pylint: disable=unspecified-encoding
             data = json.load(data_file)
         try:
+            main_window._loading_workspace = True
             list_view_actions.clear_stop_loading_input_media(main_window)
             list_view_actions.clear_stop_loading_target_media(main_window)
             main_window.target_videos = {}
@@ -240,6 +262,9 @@ def load_saved_workspace(
             control = data.get("control", {})
             for control_name, control_value in control.items():
                 main_window.control[control_name] = control_value
+
+            # Match provider before thumbnails / refresh_frame load the wrong stack
+            control_actions.apply_saved_execution_provider(main_window)
 
             # Add target medias
             target_medias_data = data.get("target_medias_data", [])
@@ -499,7 +524,7 @@ def load_saved_workspace(
             layout_actions.fit_image_to_view_onchange(main_window)
 
             if main_window.target_faces:
-                list(main_window.target_faces.values())[0].click()
+                _click_target_face_for_workspace_restore(main_window, data)
             else:
                 main_window.current_widget_parameters = data.get(
                     "current_widget_parameters", main_window.default_parameters.copy()
@@ -516,6 +541,8 @@ def load_saved_workspace(
                 common_widget_actions.set_widgets_values_using_face_id_parameters(
                     main_window, face_id=None
                 )
+
+            common_widget_actions.run_parameter_layout_exec_functions(main_window)
 
             # Restore Window State
             window_state = data.get("window_state_data", {})
@@ -579,6 +606,9 @@ def load_saved_workspace(
                 main_window, "Error", f"Failed to load workspace: {e}"
             )
             return
+        finally:
+            main_window._loading_workspace = False
+        common_widget_actions.refresh_frame(main_window)
 
 
 def save_current_workspace(
@@ -660,18 +690,22 @@ def save_current_workspace(
             "kv_map": kv_map_path,
         }
 
+    # Sync Face Swap / Restorer / etc. from widgets (ParametersDict.data is sparse; sliders may debounce)
+    common_widget_actions.flush_parameter_widgets_into_storage(main_window)
+
     # --- Serialize Target Faces & Parameters ---
     for face_id, target_face in main_window.target_faces.items():
         assigned_kv_map_serializable = None
+        pd = main_window.parameters.get(str(face_id))
         target_faces_data[face_id] = {
             "cropped_face": target_face.cropped_face.tolist(),
             "embedding_store": {
                 embed_model: embedding.tolist()
                 for embed_model, embedding in target_face.embedding_store.items()
             },
-            "parameters": main_window.parameters.get(
-                str(face_id), main_window.default_parameters
-            ).data.copy(),  # Use .get with default, ensure it's dict
+            "parameters": common_widget_actions.merged_parameter_dict_for_save(
+                main_window, pd
+            ),
             "assigned_input_faces": list(target_face.assigned_input_faces.keys()),
             "assigned_merged_embeddings": list(
                 target_face.assigned_merged_embeddings.keys()
@@ -711,17 +745,21 @@ def save_current_workspace(
         )
 
     # --- Prepare Workspace Data ---
-    current_params_to_save = {}
-    if isinstance(main_window.current_widget_parameters, misc_helpers.ParametersDict):
-        # If it's the expected custom class, get its underlying data dictionary
-        current_params_to_save = main_window.current_widget_parameters.data.copy()
-    elif isinstance(main_window.current_widget_parameters, dict):
-        # If it's already a dictionary (the unexpected case), just copy it
-        current_params_to_save = main_window.current_widget_parameters.copy()
+    if isinstance(
+        main_window.current_widget_parameters,
+        (misc_helpers.ParametersDict, dict),
+    ):
+        current_params_to_save = common_widget_actions.merged_parameter_dict_for_save(
+            main_window,
+            cast(
+                Union[misc_helpers.ParametersDict, dict],
+                main_window.current_widget_parameters,
+            ),
+        )
     else:
-        # Fallback for safety, log a warning
+        current_params_to_save = dict(main_window.default_parameters)
         print(
-            f"[WARN] Unexpected type for current widget parameters: {type(main_window.current_widget_parameters)}. Saving empty dict."
+            f"[WARN] Unexpected type for current widget parameters: {type(main_window.current_widget_parameters)}. Saving defaults only."
         )
 
     data = {
@@ -732,6 +770,11 @@ def save_current_workspace(
             main_window.selected_video_button, widget_components.TargetMediaCardButton
         )
         else False,
+        "selected_target_face_id": (
+            str(main_window.selected_target_face_id)
+            if getattr(main_window, "selected_target_face_id", None) not in (None, False, "")
+            else False
+        ),
         "input_faces_data": input_faces_data,
         "target_faces_data": target_faces_data,
         "embeddings_data": embeddings_data,
@@ -761,6 +804,11 @@ def save_current_workspace(
                     data, indent=4
                 )  # Save with indentation for readability
                 data_file.write(data_as_json)
+                data_file.flush()
+                try:
+                    os.fsync(data_file.fileno())
+                except (OSError, AttributeError):
+                    pass
             if isinstance(data_filename, str) and data_filename.endswith(
                 "last_workspace.json"
             ):
@@ -856,6 +904,8 @@ def save_current_job(main_window: "MainWindow"):
             "kv_map": kv_map_path,
         }
 
+    common_widget_actions.flush_parameter_widgets_into_storage(main_window)
+
     # Prepare job data
     job_data = {
         "job_name": job_name,
@@ -896,25 +946,24 @@ def save_current_job(main_window: "MainWindow"):
         "control": main_window.control.copy(),
         "job_marker_pairs": main_window.job_marker_pairs,
         "scan_tools_expanded": getattr(main_window, "scan_tools_expanded", False),
-        "current_widget_parameters": main_window.current_widget_parameters.data.copy()
-        if isinstance(
-            main_window.current_widget_parameters, misc_helpers.ParametersDict
-        )
-        else main_window.current_widget_parameters.copy(),
+        "current_widget_parameters": common_widget_actions.merged_parameter_dict_for_save(
+            main_window,
+            main_window.current_widget_parameters
+            if isinstance(
+                main_window.current_widget_parameters,
+                (misc_helpers.ParametersDict, dict),
+            )
+            else None,
+        ),
         "last_target_media_folder_path": main_window.last_target_media_folder_path,
         "last_input_media_folder_path": main_window.last_input_media_folder_path,
     }
 
     # Serialize target face specifics for the job
     for face_id, target_face in main_window.target_faces.items():
-        # Security to handle either custom ParametersDict or native dict
-        params_source = main_window.parameters.get(
-            str(face_id), main_window.default_parameters
-        )
-        params_to_save = (
-            params_source.data.copy()
-            if isinstance(params_source, misc_helpers.ParametersDict)
-            else params_source.copy()
+        params_source = main_window.parameters.get(str(face_id))
+        params_to_save = common_widget_actions.merged_parameter_dict_for_save(
+            main_window, params_source
         )
 
         job_data["target_faces_data"][face_id] = {

@@ -1411,7 +1411,8 @@ class LoadLastWorkspaceDialog(QtWidgets.QDialog):
 
     def load_workspace(self):
         self.accept()
-        save_load_actions.load_saved_workspace(self.main_window, "last_workspace.json")
+        last_path = str(self.main_window.project_root_path / "last_workspace.json")
+        save_load_actions.load_saved_workspace(self.main_window, last_path)
 
 
 class JobLoadingDialog(QtWidgets.QDialog):
@@ -1554,9 +1555,14 @@ class SelectionBox(QtWidgets.QComboBox, ParametersWidget):
 
     def set_value(self, value):
         if callable(value):
-            self.setCurrentText(value())
+            text = value()
         else:
-            self.setCurrentText(value)
+            text = str(value)
+        idx = self.findText(text)
+        if idx >= 0:
+            self.setCurrentIndex(idx)
+        else:
+            self.setCurrentText(text)
 
 
 class ToggleButton(QtWidgets.QPushButton, ParametersWidget):
