@@ -1812,6 +1812,7 @@ def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
     """
     # print("Called on_change_video_seek_slider()")
     video_processor = main_window.video_processor
+    slider_down = main_window.videoSeekSlider.isSliderDown()
 
     playback_was_active_before_seek = (
         video_processor.file_type == "video"
@@ -1819,6 +1820,63 @@ def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
         and not video_processor.recording
         and not video_processor.is_processing_segments
     )
+
+    # Scrubbing during file playback: seek cooperatively (feeder clears buffers + CAP seek)
+    # instead of stop_processing() per tick (feeder join, capture release, reopen, gc).
+    interactive_playback_scrub = playback_was_active_before_seek and slider_down
+    if interactive_playback_scrub:
+        use_av1_light_scrub = (
+            video_processor.is_av1_codec
+            and video_processor.file_type == "video"
+            and slider_down
+        )
+        with video_processor.state_lock:
+            video_processor._interactive_playback_seek_pending = new_position
+        video_processor.current_frame_number = new_position
+        video_processor.next_frame_to_display = new_position
+        update_drop_frame_button_label(main_window)
+
+        if use_av1_light_scrub and misc_helpers.cmd_exist("ffmpeg"):
+            video_processor.enqueue_av1_scrub_preview(new_position)
+            return
+
+        if use_av1_light_scrub and not misc_helpers.cmd_exist("ffmpeg"):
+            now = time.perf_counter()
+            if now - video_processor._av1_scrub_preview_last_t < 0.15:
+                return
+            video_processor._av1_scrub_preview_last_t = now
+
+        if video_processor.media_capture:
+            ret, frame = misc_helpers.read_frame(
+                video_processor.media_capture,
+                video_processor.media_rotation,
+                seek_to_frame_first=new_position,
+                seek_msec_keypoint=(
+                    use_av1_light_scrub
+                    and not misc_helpers.cmd_exist("ffmpeg")
+                ),
+                seek_keypoint_fps=float(video_processor.fps or 0.0),
+            )
+            if ret:
+                if use_av1_light_scrub:
+                    video_processor._seek_cached_frame = None
+                else:
+                    video_processor._seek_cached_frame = (new_position, frame)
+                pixmap = common_widget_actions.get_pixmap_from_frame(
+                    main_window, frame
+                )
+                graphics_view_actions.update_graphics_view(
+                    main_window, pixmap, new_position
+                )
+            else:
+                print(
+                    f"[WARN] on_change_video_seek_slider: Read failed at frame {new_position}. Attempting recovery..."
+                )
+                video_processor._seek_cached_frame = None
+                main_window.last_seek_read_failed = True
+                video_processor.stop_processing()
+        return
+
     was_processing = video_processor.stop_processing()
     if was_processing:
         print("[WARN] Processing in progress. Stopping current processing.")
@@ -1826,10 +1884,9 @@ def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
     video_processor.current_frame_number = new_position
     video_processor.next_frame_to_display = new_position
     update_drop_frame_button_label(main_window)
-    if not main_window.videoSeekSlider.isSliderDown() and playback_was_active_before_seek:
+    if not slider_down and playback_was_active_before_seek:
         main_window._resume_playback_after_seek_pending = True
     if video_processor.media_capture:
-        slider_down = main_window.videoSeekSlider.isSliderDown()
         use_av1_light_scrub = (
             video_processor.is_av1_codec
             and video_processor.file_type == "video"
@@ -1845,17 +1902,14 @@ def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
             if now - video_processor._av1_scrub_preview_last_t < 0.15:
                 return
             video_processor._av1_scrub_preview_last_t = now
-            misc_helpers.seek_frame_fast_keypoint(
-                video_processor.media_capture,
-                new_position,
-                float(video_processor.fps or 0.0),
-            )
-        else:
-            misc_helpers.seek_frame(video_processor.media_capture, new_position)
 
-        # Read the raw frame without triggering the full pipeline.
+        # Seek + read under one capture lock (safe vs feeder / libavcodec threads).
         ret, frame = misc_helpers.read_frame(
-            video_processor.media_capture, video_processor.media_rotation
+            video_processor.media_capture,
+            video_processor.media_rotation,
+            seek_to_frame_first=new_position,
+            seek_msec_keypoint=use_av1_light_scrub,
+            seek_keypoint_fps=float(video_processor.fps or 0.0),
         )
         if ret:
             # Approximate AV1 scrub can land on a different frame; do not cache for
@@ -1884,7 +1938,7 @@ def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
     # Only update parameters and widgets if the slider is NOT being actively dragged.
     # This ensures playback, clicks, and button presses update the UI,
     # but fast scrubbing does not cause lag or skip marker updates.
-    if not main_window.videoSeekSlider.isSliderDown():
+    if not slider_down:
         run_post_seek_actions(main_window, new_position)
 
 
@@ -2005,6 +2059,9 @@ def on_slider_pressed(main_window: "MainWindow"):
         and not vp.recording
         and not vp.is_processing_segments
     )
+    # Avoid ffplay running ahead of the video while the user scrubs the timeline.
+    if main_window._seek_gesture_had_playback:
+        vp.stop_live_sound()
 
 
 def run_post_seek_actions(main_window: "MainWindow", new_position: int):
