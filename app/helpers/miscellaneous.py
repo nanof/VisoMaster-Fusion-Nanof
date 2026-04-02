@@ -890,6 +890,10 @@ def read_frame(
     capture_obj: cv2.VideoCapture,
     media_rotation: int = 0,
     preview_target_height: Optional[int] = None,
+    *,
+    seek_to_frame_first: Optional[int] = None,
+    seek_msec_keypoint: bool = False,
+    seek_keypoint_fps: float = 0.0,
 ) -> Tuple[bool, Optional[np.ndarray]]:
     """
     Reads a single frame from the video capture object in a thread-safe manner
@@ -897,6 +901,11 @@ def read_frame(
 
     The 'lock' (Point 5) is critical as 'capture_obj' is a shared resource.
     It prevents race conditions between the feeder thread and seek operations.
+
+    When ``seek_to_frame_first`` is set, seek and ``read()`` run under the *same*
+    lock acquisition. A separate ``seek_frame`` + ``read_frame`` pair can let
+    another thread use the capture between seek and read and corrupt libavcodec
+    threaded decode (e.g. ``fctx->async_lock`` assertion).
 
     Set ``VISIOMASTER_PERF_READ_FRAME_DETAIL=1`` for a per-call line:
     ``cap_read_ms`` (OpenCV decode/read), ``rotate_ms``, ``resize_ms``.
@@ -911,6 +920,21 @@ def read_frame(
     if _read_detail:
         _t_cap0 = time.perf_counter()
     with capture_lock:
+        if seek_to_frame_first is not None:
+            fn = int(seek_to_frame_first)
+            if seek_msec_keypoint:
+                try:
+                    f = float(seek_keypoint_fps)
+                except (TypeError, ValueError):
+                    f = 0.0
+                if f > 0.25:
+                    msec = max(0.0, (float(fn) / f) * 1000.0)
+                    if not capture_obj.set(cv2.CAP_PROP_POS_MSEC, msec):
+                        capture_obj.set(cv2.CAP_PROP_POS_FRAMES, fn)
+                else:
+                    capture_obj.set(cv2.CAP_PROP_POS_FRAMES, fn)
+            else:
+                capture_obj.set(cv2.CAP_PROP_POS_FRAMES, fn)
         ret, frame = capture_obj.read()
     if _read_detail:
         _cap_ms = (time.perf_counter() - _t_cap0) * 1000.0

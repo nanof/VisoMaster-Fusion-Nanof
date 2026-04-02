@@ -283,6 +283,10 @@ class VideoProcessor(QObject):
         # Fallback frame cached during slider seek preview so process_current_frame()
         # can use it when the near-EOF re-read fails (OpenCV seek unreliability).
         self._seek_cached_frame: Optional[Tuple[int, numpy.ndarray]] = None
+        # Playback scrub: UI sets latest target; feeder applies seek without stop_processing().
+        self._interactive_playback_seek_pending: int | None = None
+        # Feeder: seek target to combine with next read_frame (same lock; see manual drop skip).
+        self._feeder_deferred_seek_read: int | None = None
 
         # Consecutive-frame ArcFace cache: key (frame_num, face_idx) — video pool only.
         self._recognition_cache_by_frame: "OrderedDict[tuple[int, int], dict[str, Any]]" = (
@@ -982,10 +986,33 @@ class VideoProcessor(QObject):
 
         while stop_flag_check():
             try:
+                seek_before_read: int | None = None
+                if self._feeder_deferred_seek_read is not None:
+                    seek_before_read = self._feeder_deferred_seek_read
+                    self._feeder_deferred_seek_read = None
+
                 # 0. Guard: feeder_parameters must be initialised before we can process.
                 if self.feeder_parameters is None:
                     time.sleep(0.005)
                     continue
+
+                # 0b. Interactive timeline scrub during playback (no full pipeline teardown).
+                pending_interactive_seek: int | None = None
+                with self.state_lock:
+                    if self._interactive_playback_seek_pending is not None:
+                        pending_interactive_seek = self._interactive_playback_seek_pending
+                        self._interactive_playback_seek_pending = None
+                if pending_interactive_seek is not None:
+                    with self.state_lock:
+                        self.frames_to_display.clear()
+                        self.frames_pipeline_profile.clear()
+                        self.current_frame_number = pending_interactive_seek
+                        self.next_frame_to_display = pending_interactive_seek
+                    with self.frame_queue.mutex:
+                        self.frame_queue.queue.clear()
+                    seek_before_read = pending_interactive_seek
+                    self.consecutive_read_errors = 0
+                    self._audio_sync_last_seek_monotonic = time.perf_counter()
 
                 # 1. Mode-specific stop logic
                 if is_segment_mode:
@@ -1018,7 +1045,8 @@ class VideoProcessor(QObject):
                 # when processing cannot keep up; otherwise preview stays in slow motion while
                 # audio runs at real time.
                 if (
-                    not is_segment_mode
+                    seek_before_read is None
+                    and not is_segment_mode
                     and not self.recording
                     and self._wall_clock_use_audio_file_rate
                     and self._playback_use_wall_clock
@@ -1053,9 +1081,7 @@ class VideoProcessor(QObject):
                                     # of seek+clear+continue never reached read_frame/enqueue).
                                     self.frames_to_display.clear()
                                     self.frames_pipeline_profile.clear()
-                                misc_helpers.seek_frame(
-                                    self.media_capture, jump_to
-                                )
+                                seek_before_read = jump_to
                                 with self.frame_queue.mutex:
                                     self.frame_queue.queue.clear()
                                 print(
@@ -1072,9 +1098,7 @@ class VideoProcessor(QObject):
                 ) and self.current_frame_number in self.main_window.dropped_frames:
                     self._mark_skipped_frame(self.current_frame_number, "manual_drop")
                     self.current_frame_number += 1
-                    misc_helpers.seek_frame(
-                        self.media_capture, self.current_frame_number
-                    )
+                    self._feeder_deferred_seek_read = self.current_frame_number
                     continue
 
                 # 3. Determine Input Resolution (Global Resize)
@@ -1100,6 +1124,7 @@ class VideoProcessor(QObject):
                     self.media_capture,
                     self.media_rotation,
                     preview_target_height=target_height,
+                    seek_to_frame_first=seek_before_read,
                 )
                 _t_feed_after_read = time.perf_counter()
                 if not ret:
@@ -1167,9 +1192,7 @@ class VideoProcessor(QObject):
                         f"(Total skipped: {self.total_skipped_frames}, Consecutive read errors: {self.consecutive_read_errors})."
                     )
                     self.current_frame_number += 1
-                    misc_helpers.seek_frame(
-                        self.media_capture, self.current_frame_number
-                    )
+                    self._feeder_deferred_seek_read = self.current_frame_number
                     continue  # Skip this frame and try the next one
 
                 # Successfully read a frame, reset consecutive error counter
@@ -1926,10 +1949,7 @@ class VideoProcessor(QObject):
         actual_start_frame = self.main_window.videoSeekSlider.value()
         print(f"[INFO] Sync: Seeking directly to frame {actual_start_frame}...")
 
-        # 7b. Set the capture position
-        misc_helpers.seek_frame(self.media_capture, actual_start_frame)
-
-        # 7c. Read the frame using the LOCKED helper function ONCE for dimensions.
+        # 7b–7c. Seek + read under one capture lock (avoids libavcodec races vs other threads).
         target_height = self._get_target_input_height()
 
         print(
@@ -1939,6 +1959,7 @@ class VideoProcessor(QObject):
             self.media_capture,
             self.media_rotation,
             preview_target_height=target_height,
+            seek_to_frame_first=actual_start_frame,
         )
         print(f"[INFO] Sync: Initial read complete (Result: {ret}).")
 
@@ -1952,7 +1973,6 @@ class VideoProcessor(QObject):
                 print("[ERROR] Fallback frame is the same. Cannot proceed.")
                 self.stop_processing()
                 return
-            self.media_capture.set(cv2.CAP_PROP_POS_FRAMES, fallback_frame_to_try)
             print(
                 f"[INFO] Sync: Retrying read for frame {fallback_frame_to_try} using locked helper..."
             )
@@ -1960,6 +1980,7 @@ class VideoProcessor(QObject):
                 self.media_capture,
                 self.media_rotation,
                 preview_target_height=target_height,
+                seek_to_frame_first=fallback_frame_to_try,
             )
             print(f"[INFO] Sync: Retry read complete (Result: {ret}).")
             if not ret:
@@ -2126,13 +2147,12 @@ class VideoProcessor(QObject):
 
         # --- Read the frame based on file type ---
         if self.file_type == "video" and self.media_capture:
-            misc_helpers.seek_frame(self.media_capture, self.current_frame_number)
-
-            # Apply target_height for VIDEO
+            # Apply target_height for VIDEO (seek + read atomically under capture lock)
             ret, frame_bgr = misc_helpers.read_frame(
                 self.media_capture,
                 self.media_rotation,
                 preview_target_height=target_height,
+                seek_to_frame_first=self.current_frame_number,
             )
 
             if ret and frame_bgr is not None:
@@ -2273,6 +2293,8 @@ class VideoProcessor(QObject):
         self._audio_sync_fps_file = 0.0
         self._audio_sync_rate = 1.0
         self._audio_sync_last_seek_monotonic = 0.0
+        self._interactive_playback_seek_pending = None
+        self._feeder_deferred_seek_read = None
 
         # 2. Stop utility timers and audio
         self.gpu_memory_update_timer.stop()
