@@ -97,9 +97,9 @@ class VideoProcessor(QObject):
 
     # --- Signals ---
     # Removed QPixmap to ensure thread safety. GUI thread will handle conversion.
-    frame_processed_signal = Signal(int, numpy.ndarray)
-    webcam_frame_processed_signal = Signal(numpy.ndarray)
-    single_frame_processed_signal = Signal(int, numpy.ndarray)
+    frame_processed_signal = Signal(int, numpy.ndarray, object)
+    webcam_frame_processed_signal = Signal(numpy.ndarray, object)
+    single_frame_processed_signal = Signal(int, numpy.ndarray, object)
     processing_started_signal = Signal()  # Unified signal for any processing start
     processing_stopped_signal = Signal()  # Unified signal for any processing stop
     processing_heartbeat_signal = Signal()  # Emits periodically to show liveness
@@ -136,9 +136,10 @@ class VideoProcessor(QObject):
         self.max_frames_to_display_size = 8  # VP-22: Hard cap on frames_to_display dict
 
         # This queue will hold tasks: (frame_number, frame_rgb_data, params, control) or None (poison pill)
-        self.frame_queue: queue.Queue[
-            Tuple[int, numpy.ndarray, FacesParametersTypes, ControlTypes] | None
-        ] = queue.Queue(maxsize=self.max_display_buffer_size)
+        # Pool tasks: (frame#, rgb, params, control, bboxes, kpss_5, kpss, feeder_perf)
+        self.frame_queue: queue.Queue[Any] = queue.Queue(
+            maxsize=self.max_display_buffer_size
+        )
         # This list will hold our *persistent* worker threads
         self.worker_threads: List[threading.Thread] = []
         # Single-frame (scrubbing) worker — tracked so a new seek can stop the old one
@@ -289,9 +290,11 @@ class VideoProcessor(QObject):
         )
         self._recognition_cache_max: int = 256
         self._recognition_cache_lock = threading.Lock()
-        self.webcam_frames_to_display: queue.Queue[numpy.ndarray] = (
-            queue.Queue()
-        )  # Processed webcam frames
+        self.webcam_frames_to_display: queue.Queue[
+            Tuple[numpy.ndarray, Any]
+        ] = queue.Queue()  # (processed BGR frame, pipeline profile or None)
+
+        self.frames_pipeline_profile: Dict[int, Any] = {}
 
         # --- Signal Connections ---
         self.frame_processed_signal.connect(self.store_frame_to_display)
@@ -299,8 +302,8 @@ class VideoProcessor(QObject):
         self.single_frame_processed_signal.connect(self.display_current_frame)
         self.single_frame_processed_signal.connect(self.store_frame_to_display)
 
-    @Slot(int, numpy.ndarray)
-    def store_frame_to_display(self, frame_number, frame):
+    @Slot(int, numpy.ndarray, object)
+    def store_frame_to_display(self, frame_number, frame, profile=None):
         """Slot to store a processed video/image frame from a worker."""
 
         # Drop stale frames arriving late from slower threads if we already scrubbed or played past them.
@@ -309,6 +312,10 @@ class VideoProcessor(QObject):
             return
 
         self.frames_to_display[frame_number] = frame
+        if profile is not None:
+            self.frames_pipeline_profile[frame_number] = profile
+        else:
+            self.frames_pipeline_profile.pop(frame_number, None)
         # VP-22: Evict stale frames (already past next_frame_to_display) when the
         # buffer exceeds the soft cap. NEVER evict frames that the metronome still
         # needs — doing so causes a permanent stall.
@@ -319,9 +326,10 @@ class VideoProcessor(QObject):
                 break
             arr = self.frames_to_display.pop(oldest)
             del arr
+            self.frames_pipeline_profile.pop(oldest, None)
 
-    @Slot(numpy.ndarray)
-    def store_webcam_frame_to_display(self, frame):
+    @Slot(numpy.ndarray, object)
+    def store_webcam_frame_to_display(self, frame, profile=None):
         """
         Slot to store a processed webcam frame from a worker.
         For live webcam, we only want the *latest* frame.
@@ -334,10 +342,10 @@ class VideoProcessor(QObject):
                 break
 
         # Put the new, latest frame in the now-empty queue
-        self.webcam_frames_to_display.put(frame)
+        self.webcam_frames_to_display.put((frame, profile))
 
-    @Slot(int, numpy.ndarray)
-    def display_current_frame(self, frame_number, frame):
+    @Slot(int, numpy.ndarray, object)
+    def display_current_frame(self, frame_number, frame, profile=None):
         """
         Slot to display a single, specific frame.
         Used after seeking or loading new media. NOT part of the metronome loop.
@@ -363,6 +371,7 @@ class VideoProcessor(QObject):
             )
         self.current_frame = frame
         common_widget_actions.update_gpu_memory_progressbar(self.main_window)
+        graphics_view_actions.update_pipeline_profile_overlay(self.main_window, profile)
 
     def _start_metronome(self, target_fps: float, is_first_start: bool = True):
         """
@@ -1043,6 +1052,7 @@ class VideoProcessor(QObject):
                                     # starve the UI when catch-up retried without a read (issue: loop
                                     # of seek+clear+continue never reached read_frame/enqueue).
                                     self.frames_to_display.clear()
+                                    self.frames_pipeline_profile.clear()
                                 misc_helpers.seek_frame(
                                     self.media_capture, jump_to
                                 )
@@ -1077,7 +1087,14 @@ class VideoProcessor(QObject):
                     cached_target_height = self._get_target_input_height()
                 target_height = cached_target_height
 
-                _perf_stages_feed = _env_flag("VISIOMASTER_PERF_STAGES")
+                _perf_stages_feed = (
+                    _env_flag("VISIOMASTER_PERF_STAGES")
+                    or bool(
+                        self.main_window.control.get(
+                            "PipelineProfileOverlayEnableToggle", False
+                        )
+                    )
+                )
                 _t_feed_read0 = time.perf_counter()
                 ret, frame_bgr = misc_helpers.read_frame(
                     self.media_capture,
@@ -1210,22 +1227,39 @@ class VideoProcessor(QObject):
                 bboxes, kpss_5, kpss = self._run_sequential_detection(
                     frame_rgb, local_control_for_worker, local_params_for_worker
                 )
+                feeder_perf = None
                 if _perf_stages_feed:
-                    if (
+                    _sync_det = (
                         self.main_window.models_processor.device == "cuda"
                         and torch.cuda.is_available()
-                    ):
+                        and (
+                            _env_flag("VISIOMASTER_PERF_STAGES")
+                            or bool(
+                                self.main_window.control.get(
+                                    "PipelineProfileGpuSyncToggle", False
+                                )
+                            )
+                        )
+                    )
+                    if _sync_det:
                         torch.cuda.synchronize()
                     _det_ms = (time.perf_counter() - _t_seq_det) * 1000.0
                     _read_ms = (_t_feed_after_read - _t_feed_read0) * 1000.0
                     _state_ms = (_t_feed_before_rgb - _t_feed_after_read) * 1000.0
                     _rgb_ms = (_t_feed_after_rgb - _t_feed_before_rgb) * 1000.0
-                    print(
-                        f"[PERF-STAGES] frame={frame_num_to_process} role=feeder "
-                        f"read_frame_ms={_read_ms:.2f} feeder_state_ms={_state_ms:.2f} "
-                        f"rgb_pack_ms={_rgb_ms:.2f} sequential_detect_ms={_det_ms:.2f}",
-                        flush=True,
-                    )
+                    feeder_perf = {
+                        "read_frame_ms": _read_ms,
+                        "feeder_state_ms": _state_ms,
+                        "rgb_pack_ms": _rgb_ms,
+                        "sequential_detect_ms": _det_ms,
+                    }
+                    if _env_flag("VISIOMASTER_PERF_STAGES"):
+                        print(
+                            f"[PERF-STAGES] frame={frame_num_to_process} role=feeder "
+                            f"read_frame_ms={_read_ms:.2f} feeder_state_ms={_state_ms:.2f} "
+                            f"rgb_pack_ms={_rgb_ms:.2f} sequential_detect_ms={_det_ms:.2f}",
+                            flush=True,
+                        )
 
                 # The worker will use the feeder's state *from this exact moment*
                 task = (
@@ -1236,6 +1270,7 @@ class VideoProcessor(QObject):
                     bboxes,
                     kpss_5,
                     kpss,
+                    feeder_perf,
                 )
 
                 # Put the task in the queue for the worker pool
@@ -1283,7 +1318,14 @@ class VideoProcessor(QObject):
                     time.sleep(0.005)  # Wait 5ms (buffer full)
                     continue
 
-                _perf_stages_wcam = _env_flag("VISIOMASTER_PERF_STAGES")
+                _perf_stages_wcam = (
+                    _env_flag("VISIOMASTER_PERF_STAGES")
+                    or bool(
+                        self.main_window.control.get(
+                            "PipelineProfileOverlayEnableToggle", False
+                        )
+                    )
+                )
                 _t_w_read0 = time.perf_counter()
                 ret, frame_bgr = misc_helpers.read_frame(
                     self.media_capture, 0, preview_target_height=None
@@ -1310,25 +1352,41 @@ class VideoProcessor(QObject):
                 bboxes, kpss_5, kpss = self._run_sequential_detection(
                     frame_rgb, local_control_for_worker, local_params_for_worker
                 )
+                feeder_perf_w = None
                 if _perf_stages_wcam:
-                    if (
+                    _sync_w = (
                         self.main_window.models_processor.device == "cuda"
                         and torch.cuda.is_available()
-                    ):
+                        and (
+                            _env_flag("VISIOMASTER_PERF_STAGES")
+                            or bool(
+                                self.main_window.control.get(
+                                    "PipelineProfileGpuSyncToggle", False
+                                )
+                            )
+                        )
+                    )
+                    if _sync_w:
                         torch.cuda.synchronize()
                     _det_ms_w = (time.perf_counter() - _t_seq_det_w) * 1000.0
                     _read_ms_w = (_t_w_after_read - _t_w_read0) * 1000.0
                     _rgb_ms_w = (_t_w_after_rgb - _t_w_before_rgb) * 1000.0
                     _param_ms_w = (_t_w_after_params - _t_w_before_params) * 1000.0
-                    print(
-                        f"[PERF-STAGES] frame=webcam role=feeder "
-                        f"read_frame_ms={_read_ms_w:.2f} rgb_pack_ms={_rgb_ms_w:.2f} "
-                        f"feeder_params_lock_ms={_param_ms_w:.2f} "
-                        f"sequential_detect_ms={_det_ms_w:.2f}",
-                        flush=True,
-                    )
+                    feeder_perf_w = {
+                        "read_frame_ms": _read_ms_w,
+                        "rgb_pack_ms": _rgb_ms_w,
+                        "feeder_params_lock_ms": _param_ms_w,
+                        "sequential_detect_ms": _det_ms_w,
+                    }
+                    if _env_flag("VISIOMASTER_PERF_STAGES"):
+                        print(
+                            f"[PERF-STAGES] frame=webcam role=feeder "
+                            f"read_frame_ms={_read_ms_w:.2f} rgb_pack_ms={_rgb_ms_w:.2f} "
+                            f"feeder_params_lock_ms={_param_ms_w:.2f} "
+                            f"sequential_detect_ms={_det_ms_w:.2f}",
+                            flush=True,
+                        )
 
-                # Create the 7-tuple task
                 task = (
                     0,  # frame_number is always 0 for webcam
                     frame_rgb,
@@ -1337,6 +1395,7 @@ class VideoProcessor(QObject):
                     bboxes,
                     kpss_5,
                     kpss,
+                    feeder_perf_w,
                 )
 
                 # Put the task in the queue for the worker pool
@@ -1487,13 +1546,18 @@ class VideoProcessor(QObject):
         # --- 6. Get the frame to display (if ready) ---
         frame = None
         frame_number_to_display = 0  # Used for UI update
+        profile_for_overlay = None
 
         if self.file_type == "webcam":
             # --- Webcam Logic (Queue) ---
             if self.webcam_frames_to_display.empty():
                 self._arm_display_metronome_retry_ms(_retry_ms)
                 return  # Frame not ready, skip display
-            frame = self.webcam_frames_to_display.get()
+            _w_item = self.webcam_frames_to_display.get()
+            if isinstance(_w_item, tuple) and len(_w_item) >= 2:
+                frame, profile_for_overlay = _w_item[0], _w_item[1]
+            else:
+                frame = _w_item  # type: ignore[assignment]
             frame_number_to_display = 0  # Not relevant for webcam
 
         else:
@@ -1528,6 +1592,7 @@ class VideoProcessor(QObject):
                             arr = self.frames_to_display.pop(k, None)
                             if arr is not None:
                                 del arr
+                            self.frames_pipeline_profile.pop(k, None)
                     self.next_frame_to_display = best
                     if best - low >= 10:
                         print(
@@ -1561,6 +1626,9 @@ class VideoProcessor(QObject):
                 self._arm_display_metronome_retry_ms(_retry_ms)
                 return
             frame = self.frames_to_display.pop(frame_number_to_display)
+            profile_for_overlay = self.frames_pipeline_profile.pop(
+                frame_number_to_display, None
+            )
 
         # --- 7. Frame is ready: Process and Display ---
         self.current_frame = frame  # Update current frame state
@@ -1634,6 +1702,9 @@ class VideoProcessor(QObject):
 
         graphics_view_actions.update_graphics_view(
             self.main_window, pixmap, frame_number_to_display
+        )
+        graphics_view_actions.update_pipeline_profile_overlay(
+            self.main_window, profile_for_overlay
         )
         if _perf_disp:
             print(
@@ -1825,6 +1896,7 @@ class VideoProcessor(QObject):
         # 6a. Reset Timers and Containers
         self.start_time = time.perf_counter()
         self.frames_to_display.clear()
+        self.frames_pipeline_profile.clear()
 
         # 6b. START WORKER POOL
         print(f"[INFO] Starting {self.num_threads} persistent worker thread(s)...")
@@ -2234,6 +2306,7 @@ class VideoProcessor(QObject):
         # VP-24: We clear the queue and then send poison pills to wake workers
         # blocked on queue.get().
         self.frames_to_display.clear()
+        self.frames_pipeline_profile.clear()
         self.clear_recognition_embedding_cache()
         self._seek_cached_frame = None  # release seek-preview frame (~6–25 MB at HD/4K)
         self.webcam_frames_to_display.queue.clear()
@@ -4187,6 +4260,7 @@ class VideoProcessor(QObject):
 
             # 4. Clear buffers and join worker threads.
             self.frames_to_display.clear()
+            self.frames_pipeline_profile.clear()
             with self.frame_queue.mutex:
                 self.frame_queue.queue.clear()
             print("[INFO] Waiting for final worker threads...")
@@ -4731,6 +4805,7 @@ class VideoProcessor(QObject):
 
         # 5. Clear containers AND START WORKER POOL for the new segment
         self.frames_to_display.clear()
+        self.frames_pipeline_profile.clear()
         with self.frame_queue.mutex:
             self.frame_queue.queue.clear()
 
@@ -4847,6 +4922,7 @@ class VideoProcessor(QObject):
         self.join_and_clear_threads()
         print("[INFO] Workers joined.")
         self.frames_to_display.clear()
+        self.frames_pipeline_profile.clear()
 
         # 3. Finalize FFmpeg for this segment
         if self.recording_sp:
@@ -5434,6 +5510,7 @@ class VideoProcessor(QObject):
 
         # 6. Clear Containers
         self.frames_to_display.clear()
+        self.frames_pipeline_profile.clear()
         self.webcam_frames_to_display.queue.clear()
         with self.frame_queue.mutex:
             self.frame_queue.queue.clear()

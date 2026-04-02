@@ -429,10 +429,17 @@ class TestGPENBFR256Accuracy:
             provider_options=[{"device_id": "0"}, {}],
         )
         inp_name = sess.get_inputs()[0].name
-        inp_np = np.random.default_rng(0).random((1, 3, 256, 256)).astype(np.float32)
+        rng = np.random.default_rng(0)
+        raw = rng.random((1, 3, 256, 256)).astype(np.float32)
+        if "float16" in sess.get_inputs()[0].type.lower():
+            inp_np = raw.astype(np.float16)
+        else:
+            inp_np = raw
         ort_out = sess.run(None, {inp_name: inp_np})[0]
+        if ort_out.dtype == np.float16:
+            ort_out = ort_out.astype(np.float32)
 
-        inp = torch.from_numpy(inp_np).cuda()
+        inp = torch.from_numpy(raw).cuda()
         model = (
             GPENTorch.from_onnx(str(self.ONNX), compute_dtype=torch.float16)
             .cuda()

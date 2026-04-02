@@ -299,6 +299,12 @@ models_list = [
         "url": f"{assets_repo}/v0.1.0/GPEN-BFR-256.onnx",
     },
     {
+        "model_name": "GPENBFR256FP16",
+        "local_path": f"{models_dir}/GPEN-BFR-256.fp16.onnx",
+        "hash": "30cdded7d14c4dff777856e3a32251849e2e46efeee2650ced2ef5b7d8116a2a",
+        "url": "https://huggingface.co/netrunner-exe/Face-Upscalers-onnx/resolve/main/GPEN-BFR-256.fp16.onnx",
+    },
+    {
         "model_name": "GPENBFR512",
         "local_path": f"{models_dir}/GPEN-BFR-512.onnx",
         "hash": "0960f836488735444d508b588e44fb5dfd19c68fde9163ad7878aa24d1d5115e",

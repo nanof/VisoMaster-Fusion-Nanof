@@ -97,9 +97,12 @@ def warm_up_active_models_for_custom(main_window: "MainWindow") -> None:
             # Conditional: restorers
             restorer = control.get("FaceRestorerTypeSelection", "")
             if "GPEN" in restorer:
-                parts = restorer.split("-")
-                size = int(parts[-1]) if parts and parts[-1].isdigit() else 256
-                mp.face_restorers._get_gpen_runner(size)
+                if restorer == "GPEN-256 FP16 (HF)":
+                    mp.face_restorers._get_gpen_runner(256, "fp16hf")
+                else:
+                    parts = restorer.split("-")
+                    size = int(parts[-1]) if parts and parts[-1].isdigit() else 256
+                    mp.face_restorers._get_gpen_runner(size, "std")
             elif restorer == "RestoreFormer++":
                 mp.face_restorers._get_restoreformer_runner()
             elif restorer == "GFPGAN-v1.4":

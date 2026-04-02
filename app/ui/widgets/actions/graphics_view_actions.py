@@ -129,16 +129,22 @@ def _layout_preview_fps_label(main_window: "MainWindow") -> None:
 
 
 def position_preview_overlay_labels(main_window: "MainWindow") -> None:
-    """Position FPS and metadata overlays at the top-left of the preview view."""
+    """Position FPS and metadata overlays at the top-left; pipeline profile top-right."""
     margin = 8
     gap = 4
     fps_lbl = main_window.previewFpsLabel
     meta_lbl = main_window.previewMediaMetaLabel
+    prof_lbl = main_window.previewPipelineProfileLabel
     fps_lbl.move(margin, margin)
     if meta_lbl.isVisible() and meta_lbl.text().strip():
         meta_lbl.move(margin, margin + fps_lbl.height() + gap)
         meta_lbl.raise_()
     fps_lbl.raise_()
+    vw = main_window.graphicsViewFrame.width()
+    prof_lbl.adjustSize()
+    if prof_lbl.isVisible():
+        prof_lbl.move(max(margin, vw - prof_lbl.width() - margin), margin)
+        prof_lbl.raise_()
 
 
 def position_preview_fps_label(main_window: "MainWindow") -> None:
@@ -201,6 +207,11 @@ def reset_playback_fps_preview_session(main_window: "MainWindow") -> None:
     if frozen_new is not None:
         main_window._preview_session_fps_frozen = frozen_new
 
+    from app.ui.widgets.actions import pipeline_profile_actions as ppa
+
+    ppa.reset_pipeline_profile_state(main_window)
+    update_pipeline_profile_overlay(main_window, None)
+
     inst_text = _instant_fps_text_from_deque(main_window, now)
     _set_preview_fps_label(main_window, inst_text, now)
 
@@ -239,6 +250,44 @@ def record_preview_frame_tick(main_window: "MainWindow") -> None:
     main_window._preview_fps_label_last_ui_sec = now
 
     _set_preview_fps_label(main_window, inst_text, now)
+
+
+def on_pipeline_profile_overlay_toggle(main_window: "MainWindow", _value: object) -> None:
+    """Settings toggle: show/hide pipeline profile overlay immediately."""
+    update_pipeline_profile_overlay(main_window, None)
+
+
+def update_pipeline_profile_overlay(
+    main_window: "MainWindow", profile_payload: object | None
+) -> None:
+    """Show aggregated pipeline timings when the settings toggle is on."""
+    from app.ui.widgets.actions import pipeline_profile_actions as ppa
+
+    lbl = main_window.previewPipelineProfileLabel
+    if not main_window.control.get("PipelineProfileOverlayEnableToggle", False):
+        lbl.setVisible(False)
+        return
+    lbl.setVisible(True)
+    if profile_payload is None:
+        vp = getattr(main_window, "video_processor", None)
+        if vp is not None and vp.processing:
+            return
+        lbl.setText("Profile: —")
+        lbl.adjustSize()
+        position_preview_overlay_labels(main_window)
+        return
+    rows = ppa.flatten_pipeline_profile_payload(
+        profile_payload if isinstance(profile_payload, dict) else None
+    )
+    wt = (
+        profile_payload.get("worker_thread")
+        if isinstance(profile_payload, dict)
+        else None
+    )
+    text = ppa.aggregate_rows_for_display(main_window, rows, wt)
+    lbl.setText(text)
+    lbl.adjustSize()
+    position_preview_overlay_labels(main_window)
 
 
 def refresh_preview_fps_stale(main_window: "MainWindow") -> None:

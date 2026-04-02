@@ -1148,7 +1148,8 @@ class ModelsProcessor(QtCore.QObject):
         # the first-frame weight-load latency is eliminated.
         self.face_restorers._get_ref_ldm_unet_torch()
         for _gpen_size in (256, 512, 1024, 2048):
-            self.face_restorers._get_gpen_runner(_gpen_size)
+            self.face_restorers._get_gpen_runner(_gpen_size, "std")
+        self.face_restorers._get_gpen_runner(256, "fp16hf")
         print("[CustomProvider] Pre-build complete.")
 
     def _ensure_triton_build_dialog_registered(self):

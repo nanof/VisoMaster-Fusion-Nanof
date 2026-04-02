@@ -1,5 +1,5 @@
 import threading
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
 import torch
 import numpy as np
@@ -24,6 +24,17 @@ class _CodeFormerDirectRunner:
         return self._model(x, fidelity_weight=self._fw)
 
 
+def _ort_primary_input_is_float16(ort_session) -> bool:
+    """True si el primer input del grafo ORT es tensor(float16)."""
+    try:
+        ins = ort_session.get_inputs()
+        if not ins:
+            return False
+        return "float16" in ins[0].type.lower()
+    except Exception:
+        return False
+
+
 class FaceRestorers:
     def __init__(self, models_processor: "ModelsProcessor"):
         self.models_processor = models_processor
@@ -34,10 +45,9 @@ class FaceRestorers:
         self._gfpgan1024_torch: Optional[object] = None  # GFPGANTorch (1024)
         self._gfpgan_runner: Optional[object] = None  # CUDA graph runner (v1.4)
         self._gfpgan1024_runner: Optional[object] = None  # CUDA graph runner (1024)
-        self._gpen_torch: Dict[int, Optional[object]] = {}  # GPENTorch per size
-        self._gpen_runner: Dict[
-            int, Optional[object]
-        ] = {}  # CUDA graph runner per size
+        # Key (size, variant): variant "std" = GPEN-BFR-{size}.onnx; "fp16hf" = HF FP16 256 only.
+        self._gpen_torch: Dict[Tuple[int, str], Optional[object]] = {}
+        self._gpen_runner: Dict[Tuple[int, str], Optional[object]] = {}
         self._ref_ldm_encoder_torch: Optional[object] = None  # RefLDMEncoderTorch
         self._ref_ldm_encoder_runner: Optional[object] = None  # CUDA graph runner
         self._ref_ldm_decoder_torch: Optional[object] = None  # RefLDMDecoderTorch
@@ -59,6 +69,7 @@ class FaceRestorers:
             "GFPGAN-1024": "GFPGAN1024",
             "CodeFormer": "CodeFormer",
             "GPEN-256": "GPENBFR256",
+            "GPEN-256 FP16 (HF)": "GPENBFR256FP16",
             "GPEN-512": "GPENBFR512",
             "GPEN-1024": "GPENBFR1024",
             "GPEN-2048": "GPENBFR2048",
@@ -179,40 +190,46 @@ class FaceRestorers:
             self.models_processor.hide_build_dialog.emit()
         return runner
 
-    def _get_gpen_runner(self, size: int):
-        """Lazily load GPENTorch + CUDA graph runner for GPEN-BFR-{size}."""
-        if size in self._gpen_runner:
-            return self._gpen_runner.get(size)
+    def _get_gpen_runner(self, size: int, variant: str = "std"):
+        """Lazily load GPENTorch + CUDA graph runner for GPEN-BFR-{size} (optional HF FP16 file)."""
+        cache_key = (size, variant)
+        if cache_key in self._gpen_runner:
+            return self._gpen_runner.get(cache_key)
+        label = f"{size}" + (" HF-FP16" if variant == "fp16hf" else "")
         self.models_processor.show_build_dialog.emit(
             "Finalizing Custom Provider",
-            f"Capturing CUDA graph for GPEN-BFR-{size}…",
+            f"Capturing CUDA graph for GPEN-BFR-{label}…",
         )
         try:
             with self._custom_init_lock:
-                if size in self._gpen_runner:
-                    return self._gpen_runner.get(size)
-                model = self._gpen_torch.get(size)
+                if cache_key in self._gpen_runner:
+                    return self._gpen_runner.get(cache_key)
+                model = self._gpen_torch.get(cache_key)
                 if model is None:
                     try:
                         from custom_kernels.gpen_bfr.gpen_torch import GPENTorch
                         import pathlib
 
+                        if size == 256 and variant == "fp16hf":
+                            basename = "GPEN-BFR-256.fp16.onnx"
+                        else:
+                            basename = f"GPEN-BFR-{size}.onnx"
                         onnx_path = str(
                             pathlib.Path(__file__).parent.parent.parent
                             / "model_assets"
-                            / f"GPEN-BFR-{size}.onnx"
+                            / basename
                         )
-                        print(f"[GPENTorch] Loading GPEN-BFR-{size} model...")
+                        print(f"[GPENTorch] Loading {basename}…")
                         model = (
                             GPENTorch.from_onnx(onnx_path, compute_dtype=torch.float16)
                             .cuda()
                             .eval()
                         )
-                        self._gpen_torch[size] = model
+                        self._gpen_torch[cache_key] = model
                     except Exception as e:
-                        print(f"[GPENTorch] Failed to load GPEN-BFR-{size}: {e}")
-                        self._gpen_torch[size] = None
-                        self._gpen_runner[size] = None
+                        print(f"[GPENTorch] Failed to load GPEN-BFR-{label}: {e}")
+                        self._gpen_torch[cache_key] = None
+                        self._gpen_runner[cache_key] = None
                         return None
                 try:
                     from custom_kernels.gpen_bfr.gpen_torch import (
@@ -225,19 +242,25 @@ class FaceRestorers:
                             model,  # type: ignore[arg-type]
                             inp_shape=(1, 3, inp_hw, inp_hw),
                         )
-                    self._gpen_runner[size] = runner
+                    self._gpen_runner[cache_key] = runner
                 except Exception as e:
                     print(
-                        f"[GPENTorch] CUDA graph build failed for GPEN-{size}, using direct inference: {e}"
+                        f"[GPENTorch] CUDA graph build failed for GPEN-{label}, using direct inference: {e}"
                     )
-                    self._gpen_runner[size] = model  # fallback: direct model call
+                    self._gpen_runner[cache_key] = model  # fallback: direct model call
         finally:
             self.models_processor.hide_build_dialog.emit()
-        return self._gpen_runner.get(size)
+        return self._gpen_runner.get(cache_key)
 
-    def _run_gpen_custom(self, size: int, image: torch.Tensor, output: torch.Tensor):
+    def _run_gpen_custom(
+        self,
+        size: int,
+        image: torch.Tensor,
+        output: torch.Tensor,
+        variant: str = "std",
+    ):
         """Run GPEN via Custom provider (GPENTorch + CUDA graph)."""
-        runner = self._get_gpen_runner(size)
+        runner = self._get_gpen_runner(size, variant)
         if runner is None:
             return False
         with torch.no_grad():
@@ -631,7 +654,7 @@ class FaceRestorers:
             temp, (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True
         )
 
-        if restorer_type == "GPEN-256":
+        if restorer_type in ("GPEN-256", "GPEN-256 FP16 (HF)"):
             temp = v2.functional.resize(temp, [256, 256], antialias=False)
 
         temp = torch.unsqueeze(temp, 0).contiguous()
@@ -671,6 +694,16 @@ class FaceRestorers:
                 device=self.models_processor.device,
             ).contiguous()
             self.run_GPEN_256(temp, outpred)
+
+        elif restorer_type == "GPEN-256 FP16 (HF)":
+            outpred = torch.empty(
+                (1, 3, 256, 256),
+                dtype=torch.float32,
+                device=self.models_processor.device,
+            ).contiguous()
+            self.run_GPEN_256(
+                temp, outpred, model_name="GPENBFR256FP16", gpen_variant="fp16hf"
+            )
 
         elif restorer_type == "GPEN-512":
             outpred = torch.empty(
@@ -721,7 +754,13 @@ class FaceRestorers:
         # Math: ((x clamped [-1, 1]) + 1.0) * 127.5 is equivalent to /2 * 255.
         outpred = outpred.squeeze(0).clamp_(-1.0, 1.0).add_(1.0).mul_(127.5)
 
-        if restorer_type in ["GPEN-256", "GPEN-1024", "GPEN-2048", "GFPGAN-1024"]:
+        if restorer_type in [
+            "GPEN-256",
+            "GPEN-256 FP16 (HF)",
+            "GPEN-1024",
+            "GPEN-2048",
+            "GFPGAN-1024",
+        ]:
             outpred = v2.functional.resize(outpred, [512, 512], antialias=True)
 
         # Invert Transform
@@ -1173,11 +1212,16 @@ class FaceRestorers:
         # Run the model with lazy build handling
         self._run_model_with_lazy_build_check(model_name, ort_session, io_binding)
 
-    def run_GPEN_256(self, image, output):
-        model_name = "GPENBFR256"
-
+    def run_GPEN_256(
+        self,
+        image,
+        output,
+        *,
+        model_name: str = "GPENBFR256",
+        gpen_variant: str = "std",
+    ):
         if self.models_processor.provider_name == "Custom":
-            if self._run_gpen_custom(256, image, output):
+            if self._run_gpen_custom(256, image, output, variant=gpen_variant):
                 return
 
         ort_session = self._get_model_session(model_name)
@@ -1185,6 +1229,33 @@ class FaceRestorers:
             return  # Silently skip
 
         io_binding = ort_session.io_binding()
+        if _ort_primary_input_is_float16(ort_session):
+            img16 = image.half().contiguous()
+            out16 = torch.empty(
+                (1, 3, 256, 256),
+                dtype=torch.float16,
+                device=image.device,
+            ).contiguous()
+            io_binding.bind_input(
+                name="input",
+                device_type=self.models_processor.device,
+                device_id=0,
+                element_type=np.float16,
+                shape=(1, 3, 256, 256),
+                buffer_ptr=img16.data_ptr(),
+            )
+            io_binding.bind_output(
+                name="output",
+                device_type=self.models_processor.device,
+                device_id=0,
+                element_type=np.float16,
+                shape=(1, 3, 256, 256),
+                buffer_ptr=out16.data_ptr(),
+            )
+            self._run_model_with_lazy_build_check(model_name, ort_session, io_binding)
+            output.copy_(out16.float())
+            return
+
         io_binding.bind_input(
             name="input",
             device_type=self.models_processor.device,
@@ -1209,7 +1280,7 @@ class FaceRestorers:
         model_name = "GPENBFR512"
 
         if self.models_processor.provider_name == "Custom":
-            if self._run_gpen_custom(512, image, output):
+            if self._run_gpen_custom(512, image, output, variant="std"):
                 return
 
         ort_session = self._get_model_session(model_name)
@@ -1241,7 +1312,7 @@ class FaceRestorers:
         model_name = "GPENBFR1024"
 
         if self.models_processor.provider_name == "Custom":
-            if self._run_gpen_custom(1024, image, output):
+            if self._run_gpen_custom(1024, image, output, variant="std"):
                 return
 
         ort_session = self._get_model_session(model_name)
@@ -1273,7 +1344,7 @@ class FaceRestorers:
         model_name = "GPENBFR2048"
 
         if self.models_processor.provider_name == "Custom":
-            if self._run_gpen_custom(2048, image, output):
+            if self._run_gpen_custom(2048, image, output, variant="std"):
                 return
 
         ort_session = self._get_model_session(model_name)

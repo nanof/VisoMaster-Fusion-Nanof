@@ -179,6 +179,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self._playback_preview_fps_start = 0.0
         self._playback_preview_fps_frames = 0
         self._preview_session_fps_frozen: float | None = None
+        self._pipeline_profile_ema_by_thread: dict[str, dict[str, float]] = {}
+        self._pipeline_profile_window_deques: dict[str, deque] = {}
+        self._pipeline_profile_display_by_thread: dict[str, dict[str, float]] = {}
 
     def initialize_widgets(self):
         # Initialize QListWidget for target media
@@ -261,6 +264,25 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.previewMediaMetaLabel.setWordWrap(True)
         self.previewMediaMetaLabel.setMaximumWidth(440)
         self.previewMediaMetaLabel.setVisible(False)
+
+        self.previewPipelineProfileLabel = QtWidgets.QLabel("", self.graphicsViewFrame)
+        self.previewPipelineProfileLabel.setStyleSheet(
+            "QLabel { background-color: rgba(0, 0, 0, 140); color: #c8ffc8; "
+            "padding: 6px 10px; border-radius: 4px; font-size: 13px; "
+            "font-family: 'Consolas', 'Cascadia Mono', monospace; }"
+        )
+        self.previewPipelineProfileLabel.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop
+        )
+        self.previewPipelineProfileLabel.setWordWrap(False)
+        self.previewPipelineProfileLabel.setMaximumWidth(720)
+        self.previewPipelineProfileLabel.setToolTip(
+            "Per-stage timings (feeder + worker). Settings → General: pipeline profile overlay."
+        )
+        self.previewPipelineProfileLabel.setAttribute(
+            QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+        )
+        self.previewPipelineProfileLabel.setVisible(False)
 
         graphics_view_actions.position_preview_overlay_labels(self)
 
