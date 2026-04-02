@@ -152,6 +152,36 @@ def _compute_compile_sentinel_path(model: nn.Module, cache_dir: Optional[str] = 
 # the subprocess logic now treats ANY non-zero exit as fatal.
 _FATAL_AV_EXIT_CODES: frozenset = frozenset({3221225477, -1073741819, 3221225501})
 
+
+def _windows_python_has_triton_host_build_deps() -> bool:
+    """Triton (incl. Inductor CUDA) JIT-builds a host extension linking Python.h + pythonXY.lib."""
+    if sys.platform != "win32":
+        return True
+    root = Path(sys.base_exec_prefix)
+    vi = sys.version_info
+    nodot = f"{vi.major}{vi.minor}"
+    return (root / "Include" / "Python.h").is_file() and (
+        root / "libs" / f"python{nodot}.lib"
+    ).is_file()
+
+
+def _skip_torch_compile_cuda_inductor_reason(example_inp: torch.Tensor) -> Optional[str]:
+    """Inductor uses the Triton CUDA backend; portable Windows Python cannot build its host shim."""
+    if example_inp.device.type != "cuda":
+        return None
+    if sys.platform != "win32":
+        return None
+    if os.environ.get("VISOMASTER_DISABLE_TRITON", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return "VISOMASTER_DISABLE_TRITON"
+    if not _windows_python_has_triton_host_build_deps():
+        return "portable Python lacks Include/Python.h and libs/pythonXY.lib (Inductor CUDA needs Triton host build)"
+    return None
+
+
 def _ensure_compile_cache_subprocess(model: nn.Module, example_inp: torch.Tensor, warmup: int, extra_args: Optional[tuple], extra_kwargs: Optional[dict], compile_mode: str, cache_dir: Optional[str] = None) -> Optional[bool]:
     sentinel = _compute_compile_sentinel_path(model, cache_dir)
     if sentinel.exists():
@@ -236,6 +266,16 @@ def _ensure_compile_cache_subprocess(model: nn.Module, example_inp: torch.Tensor
 
 def apply_torch_compile(model: nn.Module, example_inp: torch.Tensor, warmup: int = 10, extra_args: Optional[tuple] = None, extra_kwargs: Optional[dict] = None, compile_mode: str = "default", _subprocess_mode: bool = False) -> nn.Module:
     setup_compile_env(compile_mode=compile_mode)
+
+    if not _subprocess_mode:
+        _skip = _skip_torch_compile_cuda_inductor_reason(example_inp)
+        if _skip is not None:
+            print(
+                f"[compile_utils] Skipping torch.compile for {type(model).__name__} ({_skip}); "
+                "using eager inference + CUDA graph where applicable."
+            )
+            return model
+
     _need_sentinel = False
     if not _subprocess_mode and hasattr(model, "_visomaster_onnx_path"):
         cache_dir = os.environ.get("TORCHINDUCTOR_CACHE_DIR") or None
