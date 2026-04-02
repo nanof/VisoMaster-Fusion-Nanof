@@ -57,6 +57,22 @@ def create_control(main_window: "MainWindow", control_name, control_value):
     main_window.control[control_name] = control_value
 
 
+def _set_single_widget_value(widget: QtWidgets.QWidget, value) -> None:
+    """Update a settings widget without :func:`update_control` (batch / preset paths)."""
+    setter = getattr(widget, "set_value", None)
+    if callable(setter):
+        setter(value)
+        return
+    if isinstance(value, bool) and hasattr(widget, "setChecked"):
+        widget.setChecked(value)
+        return
+    if hasattr(widget, "setCurrentText"):
+        widget.setCurrentText(str(value))
+        return
+    if isinstance(widget, QtWidgets.QAbstractSlider):
+        widget.setValue(int(value))
+
+
 def update_control(
     main_window: "MainWindow",
     control_name,
@@ -79,6 +95,8 @@ def update_control(
             exec_function_args = [main_window, control_value] + exec_function_args
             exec_function(*exec_function_args)
     main_window.control[control_name] = control_value
+    if control_name == "ScreenCaptureRegionRectText":
+        main_window.control["ScreenCaptureRegionRect"] = str(control_value)
     # Also update the feeder's state if it's running
     if (
         main_window.video_processor.processing
@@ -199,7 +217,9 @@ def show_hide_related_widgets(
     value2=False,
 ):
     if main_window.parameter_widgets:
-        group_layout_data = parent_widget.group_layout_data  # Dictionary contaning layout data of all elements in the group of the parent_widget
+        group_layout_data = getattr(parent_widget, "group_layout_data", None)
+        if not group_layout_data:
+            return
         if "Selection" in parent_widget_name:
             # Loop through all widgets data in the parent widget's group layout data
             for widget_name in group_layout_data.keys():
@@ -501,10 +521,17 @@ def extract_frame_as_pixmap(
             # MODIFICATION: Pass 0 for webcam rotation
             ret, frame = misc_helpers.read_frame(camera, 0)
             camera.release()  # Release camera immediately after grabbing one frame
+    elif file_type == "screen":
+        from app.helpers.screen_capture import grab_one_frame_bgr, mss_available
+
+        if mss_available():
+            _ok, frame = grab_one_frame_bgr(main_window.control)
+            if not _ok:
+                frame = None
 
     if isinstance(frame, np.ndarray):
         # Create a new thumbnail in the cache for next time.
-        if file_type != "webcam":
+        if file_type not in ("webcam", "screen"):
             main_window.thumbnail_manager.create_thumbnail(frame, media_file_path)
 
         # Return the generated pixmap.

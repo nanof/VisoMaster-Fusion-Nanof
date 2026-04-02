@@ -19,6 +19,8 @@ def filter_target_videos(main_window: "MainWindow", *args):
         include_file_types.append("video")
     if main_window.filterWebcamsCheckBox.isChecked():
         include_file_types.append("webcam")
+    if main_window.filterScreenCaptureCheckBox.isChecked():
+        include_file_types.append("screen")
 
     items_snapshot = []
     for i in range(main_window.targetVideosList.count()):

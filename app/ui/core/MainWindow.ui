@@ -957,6 +957,23 @@
            </property>
           </widget>
          </item>
+         <item>
+          <widget class="QCheckBox" name="filterScreenCaptureCheckBox">
+           <property name="toolTip">
+            <string>Include Screen Capture</string>
+           </property>
+           <property name="text">
+            <string/>
+           </property>
+           <property name="icon">
+            <iconset resource="media.qrc">
+             <normaloff>:/media/media/video.png</normaloff>:/media/media/video.png</iconset>
+           </property>
+           <property name="checked">
+            <bool>false</bool>
+           </property>
+          </widget>
+         </item>
         </layout>
        </item>
        <item>

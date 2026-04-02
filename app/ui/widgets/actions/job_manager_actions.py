@@ -1079,11 +1079,12 @@ def _serialize_job_data(main_window: "MainWindow") -> dict:
             "embedding_name": embed_button.embedding_name,
         }
 
-    # Serialize Target Media (excluding webcams)
+    # Serialize Target Media (excluding webcams and screen capture)
     target_medias_data = [
         {"media_id": media_id, "media_path": target_media.media_path}
         for media_id, target_media in main_window.target_videos.items()
         if not target_media.is_webcam
+        and not getattr(target_media, "is_screen_capture", False)
     ]
 
     # Get selected media ID

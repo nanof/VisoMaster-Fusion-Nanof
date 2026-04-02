@@ -100,7 +100,7 @@ def _session_fps_line(main_window: "MainWindow", now: float) -> str | None:
     active = getattr(main_window, "_playback_preview_fps_active", False)
 
     live_avg: float | None = None
-    if active and vp.processing and vp.file_type in ("video", "webcam"):
+    if active and vp.processing and vp.file_type in ("video", "webcam", "screen"):
         n = main_window._playback_preview_fps_frames
         elapsed = now - main_window._playback_preview_fps_start
         if elapsed >= 0.12 and n >= 2:
@@ -158,9 +158,15 @@ def update_preview_media_metadata(main_window: "MainWindow") -> None:
     vp = main_window.video_processor
     wi = wb = None
     sb = getattr(main_window, "selected_video_button", None)
+    screen_mon = -1
     if sb is not None and getattr(sb, "file_type", None) == "webcam":
         wi = sb.webcam_index
         wb = sb.webcam_backend
+    if vp.file_type == "screen":
+        try:
+            screen_mon = int(main_window.control.get("ScreenCaptureMonitorSelection", 1))
+        except (TypeError, ValueError):
+            screen_mon = 1
     text = misc_helpers.build_preview_media_metadata_text(
         file_type=vp.file_type,
         media_path=vp.media_path,
@@ -170,6 +176,7 @@ def update_preview_media_metadata(main_window: "MainWindow") -> None:
         frame=vp.current_frame,
         webcam_index=wi if wi is not None else -1,
         webcam_backend=wb if wb is not None else -1,
+        screen_monitor_index=screen_mon,
     )
     meta = main_window.previewMediaMetaLabel
     meta.setText(text)
@@ -235,7 +242,7 @@ def record_preview_frame_tick(main_window: "MainWindow") -> None:
     active = (
         getattr(main_window, "_playback_preview_fps_active", False)
         and vp.processing
-        and vp.file_type in ("video", "webcam")
+        and vp.file_type in ("video", "webcam", "screen")
     )
     if active:
         main_window._playback_preview_fps_frames += 1

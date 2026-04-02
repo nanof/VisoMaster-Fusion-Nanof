@@ -990,3 +990,49 @@ def apply_fps_aggressive_preset(main_window: "MainWindow", value: str) -> None:
             pre.blockSignals(False)
 
     QtCore.QTimer.singleShot(0, _reset_preset_combo)
+
+
+def start_screen_capture_region_picker(main_window: "MainWindow"):
+    """
+    Fullscreen overlay: user drags a rectangle; updates custom region controls.
+    """
+    from app.helpers.screen_capture import mss_available
+    from app.ui.widgets.screen_region_overlay import ScreenRegionPickerOverlay
+
+    if not mss_available():
+        QtWidgets.QMessageBox.warning(
+            main_window,
+            "Captura de pantalla",
+            "Falta la librería mss; no se puede elegir una región.",
+        )
+        return
+
+    overlay = ScreenRegionPickerOverlay(None)
+
+    def apply_rect(left: int, top: int, width: int, height: int) -> None:
+        s = f"{left},{top},{width},{height}"
+        main_window.control["ScreenCaptureRegionRectText"] = s
+        main_window.control["ScreenCaptureRegionRect"] = s
+        tw = main_window.parameter_widgets.get("ScreenCaptureRegionRectText")
+        if tw is not None:
+            tw.blockSignals(True)
+            tw.setText(s)
+            tw.blockSignals(False)
+        mode = main_window.parameter_widgets.get("ScreenCaptureRegionModeSelection")
+        main_window.control["ScreenCaptureRegionModeSelection"] = "Custom region"
+        if mode is not None:
+            mode.blockSignals(True)
+            mode.setCurrentText("Custom region")
+            mode.blockSignals(False)
+            common_widget_actions.show_hide_related_widgets(
+                main_window, mode, "ScreenCaptureRegionModeSelection"
+            )
+        common_widget_actions.refresh_frame(main_window)
+        overlay.deleteLater()
+
+    def on_cancel() -> None:
+        overlay.deleteLater()
+
+    overlay.region_chosen.connect(apply_rect)
+    overlay.cancelled.connect(on_cancel)
+    overlay.show()

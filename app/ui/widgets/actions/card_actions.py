@@ -14,6 +14,9 @@ import app.helpers.miscellaneous as misc_helpers
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
 
+# Must match Detectors → Recognition Model default in settings_layout_data.py
+_DEFAULT_RECOGNITION_MODEL = "Inswapper128ArcFace"
+
 
 def clear_target_faces(main_window: "MainWindow", refresh_frame=True):
     if main_window.video_processor.processing:
@@ -97,9 +100,13 @@ def find_target_faces(main_window: "MainWindow"):
                 video_processor.media_rotation,
                 seek_to_frame_first=video_processor.current_frame_number,
             )
-        elif video_processor.file_type == "webcam" and media_capture:
-            # Pass 0 for webcam rotation
+            if not ret or frame is None:
+                frame = None
+        elif video_processor.file_type in ("webcam", "screen") and media_capture:
+            # Pass 0 for live capture rotation
             ret, frame = misc_helpers.read_frame(media_capture, 0)
+            if not ret or frame is None:
+                frame = None
 
         if frame is not None:
             frame_rgb = misc_helpers.bgr_uint8_to_rgb_contiguous(frame)
@@ -134,16 +141,21 @@ def find_target_faces(main_window: "MainWindow"):
                 else [0, 90, 180, 270],
             )
 
+            rec_model = str(
+                control.get("RecognitionModelSelection", _DEFAULT_RECOGNITION_MODEL)
+            )
+            sim_type = control.get("SimilarityTypeSelection", "Optimal")
+
             faces_list: list = []
             for face_kps in kpss_5:
-                face_emb, cropped_img = (
-                    main_window.models_processor.run_recognize_direct(
-                        img,
-                        face_kps,
-                        control.get("SimilarityTypeSelection", "Opal"),
-                        control.get("RecognitionModelSelection", "arcface_128"),
-                    )
+                face_emb, cropped_img = main_window.models_processor.run_recognize_direct(
+                    img,
+                    face_kps,
+                    sim_type,
+                    rec_model,
                 )
+                if face_emb is None or cropped_img is None:
+                    continue
                 faces_list.append([face_kps, face_emb, cropped_img, img])
 
             if faces_list:
@@ -155,41 +167,44 @@ def find_target_faces(main_window: "MainWindow"):
                         parameters = main_window.parameters[target_face.face_id]
                         threshhold = parameters.get("SimilarityThresholdSlider", 0.6)
                         if main_window.models_processor.findCosineDistance(
-                            target_face.get_embedding(
-                                str(
-                                    control.get(
-                                        "RecognitionModelSelection", "arcface_128"
-                                    )
-                                )
-                            ),
+                            target_face.get_embedding(rec_model),
                             face[1],
                         ) >= float(threshhold):
                             found = True
                             break
 
                     if not found:
-                        face_img = face[2].cpu().numpy()
-                        face_img = face_img[
-                            ..., ::-1
-                        ]  # Swap the channels from RGB to BGR
-                        face_img = numpy.ascontiguousarray(face_img)
+                        # ArcFace crop is float RGB HWC in ~0–255; QImage needs uint8 BGR.
+                        _crop = face[2].detach().cpu()
+                        face_np = _crop.numpy()
+                        if face_np.dtype != numpy.uint8:
+                            face_np = numpy.clip(face_np, 0.0, 255.0).astype(
+                                numpy.uint8
+                            )
+                        face_img = numpy.ascontiguousarray(face_np[..., ::-1])
 
-                        # Make native Qimage
                         height, width, channel = face_img.shape
                         bytes_per_line = 3 * width
-                        q_image = QtGui.QImage(
-                            face_img.data,
-                            width,
-                            height,
-                            bytes_per_line,
-                            QtGui.QImage.Format_BGR888,
-                        ).copy()
+                        fmt_bgr = getattr(QtGui.QImage.Format, "Format_BGR888", None)
+                        if fmt_bgr is not None:
+                            q_image = QtGui.QImage(
+                                face_img.data,
+                                width,
+                                height,
+                                bytes_per_line,
+                                fmt_bgr,
+                            ).copy()
+                        else:
+                            q_image = QtGui.QImage(
+                                face_img.data,
+                                width,
+                                height,
+                                bytes_per_line,
+                                QtGui.QImage.Format.Format_RGB888,
+                            ).rgbSwapped().copy()
 
-                        # Only store the embedding for the currently selected recognition model
                         embedding_store: Dict[str, numpy.ndarray] = {}
-                        selected_recognition_model = control.get(
-                            "RecognitionModelSelection", "arcface_128"
-                        )
+                        selected_recognition_model = rec_model
 
                         # The embedding for the selected model was already calculated
                         embedding_store[str(selected_recognition_model)] = face[1]

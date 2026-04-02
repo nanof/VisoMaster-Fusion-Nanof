@@ -375,6 +375,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.filterWebcamsCheckBox.clicked.connect(
             partial(list_view_actions.load_target_webcams, self)
         )
+        self.filterScreenCaptureCheckBox.clicked.connect(
+            partial(filter_actions.filter_target_videos, self)
+        )
+        self.filterScreenCaptureCheckBox.clicked.connect(
+            partial(list_view_actions.load_target_screen_capture, self)
+        )
 
         self.inputFacesSearchBox.textChanged.connect(
             partial(filter_actions.filter_input_faces, self)

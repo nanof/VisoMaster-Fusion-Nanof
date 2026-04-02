@@ -586,12 +586,16 @@ def load_saved_workspace(
             main_window.filterWebcamsCheckBox.setChecked(
                 window_state.get("filterWebcamsCheckBox", False)
             )
+            main_window.filterScreenCaptureCheckBox.setChecked(
+                window_state.get("filterScreenCaptureCheckBox", False)
+            )
             if hasattr(main_window, "scanToolsToggleButton"):
                 video_control_actions.set_scan_tools_expanded(
                     main_window, window_state.get("scan_tools_expanded", False)
                 )
             filter_actions.filter_target_videos(main_window)
             list_view_actions.load_target_webcams(main_window)
+            list_view_actions.load_target_screen_capture(main_window)
 
             # restore dock layout if it was saved
             dock_state_str = window_state.get("dock_state", data.get("dock_state", ""))
@@ -642,6 +646,7 @@ def save_current_workspace(
         "filterImagesCheckBox": main_window.filterImagesCheckBox.isChecked(),
         "filterVideosCheckBox": main_window.filterVideosCheckBox.isChecked(),
         "filterWebcamsCheckBox": main_window.filterWebcamsCheckBox.isChecked(),
+        "filterScreenCaptureCheckBox": main_window.filterScreenCaptureCheckBox.isChecked(),
         "scan_tools_expanded": getattr(main_window, "scan_tools_expanded", False),
         "dock_state": dock_state_data,
     }
@@ -664,6 +669,7 @@ def save_current_workspace(
                 "is_webcam": target_media.is_webcam,
                 "webcam_index": target_media.webcam_index,
                 "webcam_backend": target_media.webcam_backend,
+                "is_screen_capture": getattr(target_media, "is_screen_capture", False),
             }
         )
 

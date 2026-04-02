@@ -10,6 +10,7 @@ from app.ui.widgets.actions import graphics_view_actions
 from app.ui.widgets.actions import list_view_actions
 from app.ui.widgets.actions import save_load_actions
 from app.ui.widgets.actions import video_control_actions
+from app.ui.widgets.actions import control_actions
 from app.ui.widgets import widget_components
 
 # from app.UI.Widgets.WidgetComponents import *
@@ -444,6 +445,25 @@ def add_widgets_to_tab_layout(
                 widget.line_edit.textChanged.connect(
                     partial(onchange_int_line_edit, widget, widget_name, widget_data)
                 )
+
+            elif "ScreenAction" in widget_name:
+                btn = QtWidgets.QPushButton(widget_data["button_label"])
+                btn.setToolTip(cast(str, widget_data.get("help", "")))
+                btn.label_widget = label
+                btn.group_layout_data = widgets
+                btn.line_edit = None
+                stub_reset = QtWidgets.QWidget()
+                stub_reset.setFixedSize(0, 0)
+                btn.reset_default_button = stub_reset
+                btn.clicked.connect(
+                    partial(
+                        cast(Callable, widget_data["click_handler"]), main_window
+                    )
+                )
+                horizontal_layout = add_horizontal_layout_to_category(
+                    category_layout, label, btn
+                )
+                widget = btn
 
             elif "Text" in widget_name:
 

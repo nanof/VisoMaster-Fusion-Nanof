@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING, Dict, Type
 import subprocess
 import sys
 import os
+import uuid
 
 from PySide6 import QtWidgets, QtGui, QtCore
 
@@ -12,6 +13,7 @@ from app.ui.widgets.actions import filter_actions
 from app.ui.widgets import widget_components
 import app.helpers.miscellaneous as misc_helpers
 from app.ui.widgets import ui_workers
+from app.helpers.screen_capture import SCREEN_CAPTURE_MEDIA_LABEL, mss_available
 
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
@@ -66,6 +68,32 @@ def add_webcam_thumbnail_to_target_videos_list(
     )
 
 
+def add_screen_capture_thumbnail_to_target_videos_list(main_window: "MainWindow"):
+    if not mss_available():
+        print("[WARN] mss is not installed; screen capture is unavailable.")
+        return
+    q_image = common_widget_actions.extract_frame_as_image(
+        main_window,
+        SCREEN_CAPTURE_MEDIA_LABEL,
+        "screen",
+    )
+    if not q_image:
+        print("[WARN] Could not grab a screen preview for the target list.")
+        return
+    media_id = str(uuid.uuid1().int)
+    add_media_thumbnail_button(
+        main_window,
+        widget_components.TargetMediaCardButton,
+        main_window.targetVideosList,
+        main_window.target_videos,
+        q_image,
+        media_path=SCREEN_CAPTURE_MEDIA_LABEL,
+        file_type="screen",
+        media_id=media_id,
+        is_screen_capture=True,
+    )
+
+
 @QtCore.Slot()
 def add_media_thumbnail_to_target_faces_list(
     main_window: "MainWindow", cropped_face, embedding_store, image_data, face_id
@@ -117,15 +145,11 @@ def add_media_thumbnail_button(
             kwargs.get("media_path"),
             kwargs.get("file_type"),
             kwargs.get("media_id"),
+            kwargs.get("is_webcam", False),
+            kwargs.get("webcam_index", -1),
+            kwargs.get("webcam_backend", -1),
+            kwargs.get("is_screen_capture", False),
         ]
-        if kwargs.get("is_webcam"):
-            constructor_args.extend(
-                [
-                    kwargs.get("is_webcam"),
-                    kwargs.get("webcam_index"),
-                    kwargs.get("webcam_backend"),
-                ]
-            )
     elif buttonClass in (
         widget_components.TargetFaceCardButton,
         widget_components.InputFaceCardButton,
@@ -315,6 +339,26 @@ def select_target_medias(
 def filter_target_videos(main_window):
     filter_actions.filter_target_videos(main_window)
     load_target_webcams(main_window)
+    load_target_screen_capture(main_window)
+
+
+def load_target_screen_capture(main_window: "MainWindow"):
+    if main_window.filterScreenCaptureCheckBox.isChecked():
+        has_screen = any(
+            getattr(b, "is_screen_capture", False)
+            for b in main_window.target_videos.values()
+        )
+        if not has_screen:
+            add_screen_capture_thumbnail_to_target_videos_list(main_window)
+            main_window.placeholder_update_signal.emit(main_window.targetVideosList, False)
+    else:
+        main_window.placeholder_update_signal.emit(main_window.targetVideosList, True)
+        for _, target_video in main_window.target_videos.copy().items():
+            if target_video.file_type == "screen":
+                target_video.remove_target_media_from_list()
+                if target_video == main_window.selected_video_button:
+                    main_window.selected_video_button = None
+        main_window.placeholder_update_signal.emit(main_window.targetVideosList, False)
 
 
 @QtCore.Slot()

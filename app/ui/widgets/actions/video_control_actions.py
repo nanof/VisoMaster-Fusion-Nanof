@@ -1450,6 +1450,17 @@ def play_video(main_window: "MainWindow", checked: bool):
         graphics_view_actions.start_playback_fps_preview_session(main_window)
         video_processor.process_webcam()
         return
+    if checked and video_processor.file_type == "screen":
+        if video_processor.processing:
+            print(
+                "[WARN] Screen capture already streaming. Stopping before restarting."
+            )
+            video_processor.stop_processing()
+        print("[INFO] Starting screen capture stream processing.")
+        set_play_button_icon_to_stop(main_window)
+        graphics_view_actions.start_playback_fps_preview_session(main_window)
+        video_processor.process_screen()
+        return
     if checked:
         if (
             video_processor.processing
@@ -1498,11 +1509,11 @@ def record_video(main_window: "MainWindow", checked: bool):
         main_window.buttonMediaRecord.blockSignals(True)
         main_window.buttonMediaRecord.setChecked(False)
         main_window.buttonMediaRecord.blockSignals(False)
-        if video_processor.file_type == "webcam":
+        if video_processor.file_type in ("webcam", "screen"):
             common_widget_actions.create_and_show_messagebox(
                 main_window,
                 "Recording Not Supported",
-                "Recording webcam stream is not supported yet.",
+                "Recording live webcam or screen capture is not supported yet.",
                 main_window,
             )
         return
