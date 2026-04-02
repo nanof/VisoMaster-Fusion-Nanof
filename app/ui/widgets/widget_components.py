@@ -137,13 +137,6 @@ class TargetMediaCardButton(CardButton):
         )  # Style for the label
         layout.addWidget(text_label)
         self.clicked.connect(self.load_media)
-        # Imposta lo stylesheet solo per questo pulsante
-        self.setStyleSheet("""
-        CardButton:checked {
-            background-color: #555555;
-            border: 2px solid #1abc9c;
-        }
-        """)
 
         # Set the context menu policy to trigger the custom context menu on right-click
         self.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
@@ -484,14 +477,6 @@ class TargetFaceCardButton(CardButton):
 
         self.setCheckable(True)
         self.clicked.connect(self.load_target_face)
-
-        # Imposta lo stylesheet solo per questo pulsante
-        self.setStyleSheet("""
-        CardButton:checked {
-            background-color: #555555;
-            border: 2px solid #1abc9c;
-        }
-        """)
 
         # Set the context menu policy to trigger the custom context menu on right-click
         self.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
@@ -879,26 +864,14 @@ class TargetFaceCardButton(CardButton):
             self.calculate_assigned_input_embedding()
 
     def copy_parameters(self):
-        self.main_window.copied_parameters = self.main_window.parameters[
-            self.face_id
-        ].copy()
+        common_widget_actions.copy_selected_face_parameters(
+            self.main_window, self.face_id
+        )
 
     def paste_and_apply_parameters(self):
-        if not self.main_window.copied_parameters:
-            common_widget_actions.create_and_show_messagebox(
-                self.main_window,
-                "No parameters found in Clipboard",
-                "You need to copy parameters from any of the target face before pasting it!",
-                parent_widget=self,
-            )
-        else:
-            self.main_window.parameters[self.face_id] = (
-                self.main_window.copied_parameters.copy()
-            )
-            common_widget_actions.set_widgets_values_using_face_id_parameters(
-                self.main_window, face_id=self.face_id
-            )
-            common_widget_actions.refresh_frame(main_window=self.main_window)
+        common_widget_actions.paste_selected_face_parameters(
+            self.main_window, self.face_id
+        )
 
 
 class InputFaceCardButton(CardButton):
@@ -923,14 +896,6 @@ class InputFaceCardButton(CardButton):
         self.setCheckable(True)
         self.setToolTip(media_path)
         self.clicked.connect(self.load_input_face)
-
-        # Imposta lo stylesheet solo per questo pulsante
-        self.setStyleSheet("""
-        CardButton:checked {
-            background-color: #555555;
-            border: 2px solid #1abc9c;
-        }
-        """)
 
         # Set the context menu policy to trigger the custom context menu on right-click
         self.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
@@ -1202,14 +1167,6 @@ class EmbeddingCardButton(CardButton):
         self.setText(embedding_name)
         self.setToolTip(embedding_name)
         self.clicked.connect(self.load_embedding)
-
-        # Imposta lo stylesheet solo per questo pulsante
-        self.setStyleSheet("""
-        CardButton:checked {
-            background-color: #555555;
-            border: 2px solid #1abc9c;
-        }
-        """)
 
         # Set the context menu policy to trigger the custom context menu on right-click
         self.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
@@ -1594,6 +1551,37 @@ class SelectionBox(QtWidgets.QComboBox, ParametersWidget):
             self.setCurrentIndex(idx)
         else:
             self.setCurrentText(text)
+
+    def showPopup(self):
+        view = self.view()
+        if view and self.count() > 0:
+            view.setUniformItemSizes(True)
+            view.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+            row_height = max(view.sizeHintForRow(0), self.sizeHint().height())
+            frame = view.frameWidth() * 2
+            desired_height = (row_height * self.count()) + frame
+            popup_origin = self.mapToGlobal(QtCore.QPoint(0, 0))
+            app = QtWidgets.QApplication.instance()
+            screen = app.screenAt(popup_origin) if app else None
+            if screen is None:
+                screen = self.screen()
+            available = (
+                screen.availableGeometry() if screen else QtCore.QRect(0, 0, 800, 600)
+            )
+            space_below = available.bottom() - (popup_origin.y() + self.height()) - 8
+            space_above = popup_origin.y() - available.top() - 8
+            max_space = max(space_below, space_above, 0)
+
+            if desired_height <= max(space_below, 0):
+                popup_height = desired_height
+            elif desired_height <= max(space_above, 0):
+                popup_height = desired_height
+            else:
+                popup_height = max(min(desired_height, max_space), row_height + frame)
+
+            view.setMinimumHeight(popup_height)
+            view.setMaximumHeight(popup_height)
+        super().showPopup()
 
 
 class ToggleButton(QtWidgets.QPushButton, ParametersWidget):

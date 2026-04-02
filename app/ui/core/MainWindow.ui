@@ -518,21 +518,21 @@
        <item>
         <widget class="QGroupBox" name="facesPanelGroupBox">
          <property name="sizePolicy">
-          <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
+          <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
            <horstretch>0</horstretch>
            <verstretch>0</verstretch>
           </sizepolicy>
          </property>
          <property name="minimumSize">
           <size>
-           <width>0</width>
-           <height>180</height>
+            <width>0</width>
+            <height>220</height>
           </size>
          </property>
          <property name="maximumSize">
           <size>
-           <width>16777215</width>
-           <height>225</height>
+            <width>16777215</width>
+            <height>16777215</height>
           </size>
          </property>
          <property name="autoFillBackground">
@@ -548,23 +548,53 @@
           <item row="1" column="0">
            <widget class="QWidget" name="facesButtonsWidget" native="true">
             <property name="sizePolicy">
-             <sizepolicy hsizetype="Minimum" vsizetype="Preferred">
+             <sizepolicy hsizetype="Minimum" vsizetype="Expanding">
               <horstretch>0</horstretch>
               <verstretch>0</verstretch>
              </sizepolicy>
             </property>
             <layout class="QVBoxLayout" name="verticalLayout_8">
+             <property name="spacing">
+              <number>0</number>
+             </property>
+             <property name="leftMargin">
+              <number>0</number>
+             </property>
+             <property name="topMargin">
+              <number>0</number>
+             </property>
+             <property name="rightMargin">
+              <number>0</number>
+             </property>
+             <property name="bottomMargin">
+              <number>0</number>
+             </property>
              <item>
               <widget class="QWidget" name="verticalWidget" native="true">
                <layout class="QVBoxLayout" name="controlButtonsLayout">
-                <item>
-                 <widget class="QPushButton" name="findTargetFacesButton">
-                  <property name="minimumSize">
-                   <size>
-                    <width>100</width>
-                    <height>0</height>
-                   </size>
-                  </property>
+                 <property name="spacing">
+                  <number>8</number>
+                 </property>
+                 <property name="leftMargin">
+                  <number>0</number>
+                 </property>
+                 <property name="topMargin">
+                  <number>4</number>
+                 </property>
+                 <property name="rightMargin">
+                  <number>0</number>
+                 </property>
+                 <property name="bottomMargin">
+                  <number>4</number>
+                 </property>
+                 <item>
+                  <widget class="QPushButton" name="findTargetFacesButton">
+                   <property name="minimumSize">
+                    <size>
+                     <width>100</width>
+                     <height>0</height>
+                    </size>
+                   </property>
                   <property name="text">
                    <string>Find Faces</string>
                   </property>
@@ -577,10 +607,10 @@
                  </widget>
                 </item>
                 <item>
-                 <widget class="QPushButton" name="clearTargetFacesButton">
-                  <property name="text">
-                   <string>Clear Faces</string>
-                  </property>
+                  <widget class="QPushButton" name="clearTargetFacesButton">
+                   <property name="text">
+                    <string>Clear Faces</string>
+                   </property>
                   <property name="checkable">
                    <bool>false</bool>
                   </property>
@@ -590,10 +620,10 @@
                  </widget>
                 </item>
                 <item>
-                 <widget class="QPushButton" name="swapfacesButton">
-                  <property name="text">
-                   <string>Swap Faces</string>
-                  </property>
+                  <widget class="QPushButton" name="swapfacesButton">
+                   <property name="text">
+                    <string>Swap Faces</string>
+                   </property>
                   <property name="checkable">
                    <bool>true</bool>
                   </property>
@@ -603,10 +633,10 @@
                  </widget>
                 </item>
                 <item>
-                 <widget class="QPushButton" name="editFacesButton">
-                  <property name="text">
-                   <string>Edit Faces</string>
-                  </property>
+                  <widget class="QPushButton" name="editFacesButton">
+                   <property name="text">
+                    <string>Edit Faces</string>
+                   </property>
                   <property name="checkable">
                    <bool>true</bool>
                   </property>
@@ -617,10 +647,10 @@
                    <bool>true</bool>
                   </property>
                  </widget>
-                </item>
-               </layout>
-              </widget>
-             </item>
+                 </item>
+                </layout>
+               </widget>
+              </item>
             </layout>
            </widget>
           </item>
@@ -1170,9 +1200,9 @@
    <property name="features">
     <set>QDockWidget::DockWidgetFeature::DockWidgetFloatable|QDockWidget::DockWidgetFeature::DockWidgetMovable</set>
    </property>
-   <property name="windowTitle">
-    <string>Control Options</string>
-   </property>
+    <property name="windowTitle">
+     <string>Parameters</string>
+    </property>
    <attribute name="dockWidgetArea">
     <number>2</number>
    </attribute>
@@ -1351,15 +1381,12 @@
              </item>
              <item>
               <widget class="QPushButton" name="controlPresetButton">
-               <property name="text">
-                <string>Apply Settings</string>
-               </property>
+                <property name="text">
+                 <string>Apply Settings</string>
+                </property>
 			   <property name="checkable">
-                <bool>true</bool>
-               </property>
-			   <property name="flat">
-                <bool>true</bool>
-               </property>
+                 <bool>true</bool>
+                </property>
               </widget>
              </item>
             </layout>
@@ -1496,7 +1523,7 @@
   </action>
   <action name="actionView_Fullscreen_F11">
    <property name="text">
-    <string>View Fullscreen (F11)</string>
+    <string>Fullscreen</string>
    </property>
   </action>
   <action name="actionView_Help_Shortcuts">

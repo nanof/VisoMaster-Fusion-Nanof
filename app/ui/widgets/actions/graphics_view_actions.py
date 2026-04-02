@@ -19,6 +19,7 @@ def update_graphics_view(
     pixmap: QtGui.QPixmap,
     current_frame_number: int,
     reset_fit: bool = False,
+    size_mode: str = "preserve_previous_pixmap_size",
 ):
     # print('(update_graphics_view) current_frame_number', current_frame_number)
 
@@ -41,7 +42,7 @@ def update_graphics_view(
             break
 
     # Resize the pixmap if necessary (e.g., face compare or mask compare mode)
-    if pixmap_item:
+    if pixmap_item and size_mode == "preserve_previous_pixmap_size":
         bounding_rect = pixmap_item.boundingRect()
         b_width = int(bounding_rect.width())  # Explicit cast to int for PySide6 safety
         b_height = int(

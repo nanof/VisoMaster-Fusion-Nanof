@@ -46,6 +46,82 @@ def _click_target_face_for_workspace_restore(main_window: "MainWindow", data: di
     button.click()
 
 
+def _get_clamped_window_geometry(
+    main_window: "MainWindow", x: int, y: int, width: int, height: int
+) -> QtCore.QRect:
+    app = QtWidgets.QApplication.instance()
+    screens = app.screens() if app else []
+    if not screens:
+        return QtCore.QRect(x, y, width, height)
+
+    saved_rect = QtCore.QRect(x, y, width, height)
+    saved_center = saved_rect.center()
+
+    target_screen = None
+    for screen in screens:
+        if screen.availableGeometry().contains(saved_center):
+            target_screen = screen
+            break
+
+    if target_screen is None:
+        target_screen = app.primaryScreen() or screens[0]
+
+    available = target_screen.availableGeometry()
+    clamped_width = min(max(1, width), available.width())
+    clamped_height = min(max(1, height), available.height())
+    max_x = available.x() + available.width() - clamped_width
+    max_y = available.y() + available.height() - clamped_height
+    clamped_x = min(max(x, available.x()), max_x)
+    clamped_y = min(max(y, available.y()), max_y)
+
+    return QtCore.QRect(clamped_x, clamped_y, clamped_width, clamped_height)
+
+
+def _get_target_screen_for_rect(rect: QtCore.QRect):
+    app = QtWidgets.QApplication.instance()
+    screens = app.screens() if app else []
+    if not screens:
+        return None
+
+    rect_center = rect.center()
+    for screen in screens:
+        if screen.availableGeometry().contains(rect_center):
+            return screen
+
+    return app.primaryScreen() or screens[0]
+
+
+def _clamp_window_frame_to_available_geometry(main_window: "MainWindow"):
+    frame_rect = main_window.frameGeometry()
+    if not frame_rect.isValid():
+        return
+
+    target_screen = _get_target_screen_for_rect(frame_rect)
+    if target_screen is None:
+        return
+
+    available = target_screen.availableGeometry()
+    if (
+        frame_rect.width() > available.width()
+        or frame_rect.height() > available.height()
+    ):
+        excess_width = max(frame_rect.width() - available.width(), 0)
+        excess_height = max(frame_rect.height() - available.height(), 0)
+        new_width = max(1, main_window.width() - excess_width)
+        new_height = max(1, main_window.height() - excess_height)
+        if new_width != main_window.width() or new_height != main_window.height():
+            main_window.resize(new_width, new_height)
+            frame_rect = main_window.frameGeometry()
+
+    max_x = available.x() + available.width() - frame_rect.width()
+    max_y = available.y() + available.height() - frame_rect.height()
+    clamped_x = min(max(frame_rect.x(), available.x()), max_x)
+    clamped_y = min(max(frame_rect.y(), available.y()), max_y)
+
+    if clamped_x != frame_rect.x() or clamped_y != frame_rect.y():
+        main_window.move(clamped_x, clamped_y)
+
+
 def open_embeddings_from_file(main_window: "MainWindow"):
     embedding_filename, _ = QtWidgets.QFileDialog.getOpenFileName(
         main_window,
@@ -548,6 +624,7 @@ def load_saved_workspace(
             window_state = data.get("window_state_data", {})
             is_maximized = window_state.get("isMaximized", False)
             is_fullScreen = window_state.get("isFullScreen", False)
+            needs_post_restore_frame_clamp = False
 
             if is_maximized:
                 main_window.resize(main_window.sizeHint())
@@ -558,25 +635,39 @@ def load_saved_workspace(
                 main_window.menuBar().hide()
                 main_window.is_full_screen = True
             else:
-                main_window.setGeometry(
+                restored_rect = _get_clamped_window_geometry(
+                    main_window,
                     window_state.get("x", main_window.x()),
                     window_state.get("y", main_window.y()),
                     window_state.get("width", main_window.width()),
                     window_state.get("height", main_window.height()),
                 )
-            main_window.TargetMediaCheckBox.setChecked(
-                window_state.get("TargetMediaCheckBox", True)
-            )
-            main_window.InputFacesCheckBox.setChecked(
-                window_state.get("InputFacesCheckBox", True)
-            )
-            main_window.JobsCheckBox.setChecked(window_state.get("JobsCheckBox", True))
-            main_window.facesPanelCheckBox.setChecked(
-                window_state.get("facesPanelCheckBox", True)
-            )
-            main_window.parametersPanelCheckBox.setChecked(
-                window_state.get("parametersPanelCheckBox", True)
-            )
+                main_window.setGeometry(restored_rect)
+                needs_post_restore_frame_clamp = True
+            panel_state_map = {
+                "target_media": window_state.get(
+                    "target_media",
+                    window_state.get("TargetMediaCheckBox", True),
+                ),
+                "input_faces": window_state.get(
+                    "input_faces",
+                    window_state.get("InputFacesCheckBox", True),
+                ),
+                "jobs": window_state.get(
+                    "jobs",
+                    window_state.get("JobsCheckBox", True),
+                ),
+                "faces": window_state.get(
+                    "faces",
+                    window_state.get("facesPanelCheckBox", True),
+                ),
+                "parameters": window_state.get(
+                    "parameters",
+                    window_state.get("parametersPanelCheckBox", True),
+                ),
+            }
+            for panel_key, visible in panel_state_map.items():
+                main_window._set_panel_visibility(panel_key, visible)
             main_window.filterImagesCheckBox.setChecked(
                 window_state.get("filterImagesCheckBox", True)
             )
@@ -603,8 +694,15 @@ def load_saved_workspace(
                 try:
                     ba = QtCore.QByteArray.fromBase64(dock_state_str.encode("utf-8"))
                     main_window.restoreState(ba)
+                    main_window._refresh_panel_visibility_state_from_widgets()
                 except Exception as e:
                     print(f"[WARN] Failed to restore dock layout: {e}")
+
+            if needs_post_restore_frame_clamp:
+                QtCore.QTimer.singleShot(
+                    0,
+                    partial(_clamp_window_frame_to_available_geometry, main_window),
+                )
         except (json.JSONDecodeError, KeyError, TypeError) as e:
             QtWidgets.QMessageBox.critical(
                 main_window, "Error", f"Failed to load workspace: {e}"
@@ -638,11 +736,11 @@ def save_current_workspace(
         "width": main_window.width(),
         "isMaximized": main_window.isMaximized(),
         "isFullScreen": main_window.is_full_screen,
-        "TargetMediaCheckBox": main_window.TargetMediaCheckBox.isChecked(),
-        "InputFacesCheckBox": main_window.InputFacesCheckBox.isChecked(),
-        "JobsCheckBox": main_window.JobsCheckBox.isChecked(),
-        "facesPanelCheckBox": main_window.facesPanelCheckBox.isChecked(),
-        "parametersPanelCheckBox": main_window.parametersPanelCheckBox.isChecked(),
+        "target_media": main_window.panel_visibility_state.get("target_media", True),
+        "input_faces": main_window.panel_visibility_state.get("input_faces", True),
+        "jobs": main_window.panel_visibility_state.get("jobs", True),
+        "faces": main_window.panel_visibility_state.get("faces", True),
+        "parameters": main_window.panel_visibility_state.get("parameters", True),
         "filterImagesCheckBox": main_window.filterImagesCheckBox.isChecked(),
         "filterVideosCheckBox": main_window.filterVideosCheckBox.isChecked(),
         "filterWebcamsCheckBox": main_window.filterWebcamsCheckBox.isChecked(),

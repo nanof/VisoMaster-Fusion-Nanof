@@ -1,7 +1,7 @@
 from typing import TYPE_CHECKING, cast, Union, List, Callable
 from functools import partial
 
-from PySide6 import QtWidgets, QtCore
+from PySide6 import QtWidgets, QtCore, QtGui
 
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
@@ -585,31 +585,29 @@ def show_hide_parameters_panel(main_window: "MainWindow", checked):
 
 
 def show_hide_theatre_mode_panels(main_window: "MainWindow", checked):
-    # Collects the current state of all UI panel checkboxes
+    # Collects the current state of all visible panel toggle actions/state
     def collect_states():
         return {
-            "TargetMediaCheckBox": main_window.TargetMediaCheckBox.isChecked(),
-            "facesPanelCheckBox": main_window.facesPanelCheckBox.isChecked(),
-            "parametersPanelCheckBox": main_window.parametersPanelCheckBox.isChecked(),
-            "InputFacesCheckBox": main_window.InputFacesCheckBox.isChecked(),
-            "JobsCheckBox": main_window.JobsCheckBox.isChecked(),
+            "target_media": main_window.panel_visibility_state.get(
+                "target_media", True
+            ),
+            "faces": main_window.panel_visibility_state.get("faces", True),
+            "parameters": main_window.panel_visibility_state.get("parameters", True),
+            "input_faces": main_window.panel_visibility_state.get("input_faces", True),
+            "jobs": main_window.panel_visibility_state.get("jobs", True),
         }
 
-    # Applies the saved states to the UI panel checkboxes
+    # Applies the saved states to the visible View-menu actions/state
     def apply_states(states):
-        main_window.TargetMediaCheckBox.setChecked(
-            states.get("TargetMediaCheckBox", True)
+        main_window._set_panel_visibility(
+            "target_media", states.get("target_media", True)
         )
-        main_window.facesPanelCheckBox.setChecked(
-            states.get("facesPanelCheckBox", True)
+        main_window._set_panel_visibility("faces", states.get("faces", True))
+        main_window._set_panel_visibility("parameters", states.get("parameters", True))
+        main_window._set_panel_visibility(
+            "input_faces", states.get("input_faces", True)
         )
-        main_window.parametersPanelCheckBox.setChecked(
-            states.get("parametersPanelCheckBox", True)
-        )
-        main_window.InputFacesCheckBox.setChecked(
-            states.get("InputFacesCheckBox", True)
-        )
-        main_window.JobsCheckBox.setChecked(states.get("JobsCheckBox", True))
+        main_window._set_panel_visibility("jobs", states.get("jobs", True))
 
     if checked:
         # Entering Theatre Mode: Save normal states and apply theatre states (default all False/Hidden)
@@ -617,11 +615,11 @@ def show_hide_theatre_mode_panels(main_window: "MainWindow", checked):
         apply_states(
             main_window._theatre_mode_panel_states
             or {
-                "TargetMediaCheckBox": False,
-                "facesPanelCheckBox": False,
-                "parametersPanelCheckBox": False,
-                "InputFacesCheckBox": False,
-                "JobsCheckBox": False,
+                "target_media": False,
+                "faces": False,
+                "parameters": False,
+                "input_faces": False,
+                "jobs": False,
             }
         )
     else:
@@ -630,11 +628,11 @@ def show_hide_theatre_mode_panels(main_window: "MainWindow", checked):
         apply_states(
             main_window._theatre_normal_panel_states
             or {
-                "TargetMediaCheckBox": True,
-                "facesPanelCheckBox": True,
-                "parametersPanelCheckBox": True,
-                "InputFacesCheckBox": True,
-                "JobsCheckBox": True,
+                "target_media": True,
+                "faces": True,
+                "parameters": True,
+                "input_faces": True,
+                "jobs": True,
             }
         )
         main_window._theatre_normal_panel_states = None
@@ -664,6 +662,45 @@ def fit_image_to_view_onchange(main_window: "MainWindow", *args):
 
 
 def set_up_menu_actions(main_window: "MainWindow"):
+    if getattr(main_window, "_menu_actions_setup_installed", False):
+        return
+
+    if not hasattr(main_window, "actionEdit_CopyParameters"):
+        main_window.actionEdit_CopyParameters = QtGui.QAction(
+            "Copy Parameters", main_window
+        )
+        main_window.actionEdit_PasteParameters = QtGui.QAction(
+            "Paste Parameters", main_window
+        )
+        main_window.actionEdit_ResetParameters = QtGui.QAction(
+            "Reset Parameters", main_window
+        )
+        main_window.menuEdit.clear()
+        main_window.menuEdit.addAction(main_window.actionEdit_CopyParameters)
+        main_window.menuEdit.addAction(main_window.actionEdit_PasteParameters)
+        main_window.menuEdit.addSeparator()
+        main_window.menuEdit.addAction(main_window.actionEdit_ResetParameters)
+
+    if not hasattr(main_window, "actionHelp_QuickStartGuide"):
+        main_window.actionHelp_QuickStartGuide = QtGui.QAction(
+            "Quick Start Guide", main_window
+        )
+        main_window.actionHelp_UserManual = QtGui.QAction("User Manual", main_window)
+        main_window.menuHelp.insertAction(
+            main_window.actionView_Help_Shortcuts,
+            main_window.actionHelp_QuickStartGuide,
+        )
+        main_window.menuHelp.insertAction(
+            main_window.actionView_Help_Shortcuts,
+            main_window.actionHelp_UserManual,
+        )
+        main_window.menuHelp.insertSeparator(main_window.actionView_Help_Shortcuts)
+
+    if not hasattr(main_window, "actionHelp_About"):
+        main_window.actionHelp_About = QtGui.QAction("About", main_window)
+        main_window.menuHelp.addSeparator()
+        main_window.menuHelp.addAction(main_window.actionHelp_About)
+
     main_window.actionLoad_SavedWorkspace.triggered.connect(
         partial(
             save_load_actions.load_saved_workspace,
@@ -701,12 +738,31 @@ def set_up_menu_actions(main_window: "MainWindow"):
     main_window.actionView_Fullscreen_F11.triggered.connect(
         partial(video_control_actions.view_fullscreen, main_window)
     )
+    main_window.actionEdit_CopyParameters.triggered.connect(
+        partial(common_widget_actions.copy_selected_face_parameters, main_window)
+    )
+    main_window.actionEdit_PasteParameters.triggered.connect(
+        partial(common_widget_actions.paste_selected_face_parameters, main_window)
+    )
+    main_window.actionEdit_ResetParameters.triggered.connect(
+        partial(common_widget_actions.reset_selected_face_parameters, main_window)
+    )
     main_window.actionView_Help_Shortcuts.triggered.connect(
         partial(list_view_actions.show_shortcuts, main_window)
     )
     main_window.actionView_Help_Presets.triggered.connect(
         partial(list_view_actions.show_presets, main_window)
     )
+    main_window.actionHelp_QuickStartGuide.triggered.connect(
+        partial(list_view_actions._open_about_link, main_window, "quickstart")
+    )
+    main_window.actionHelp_UserManual.triggered.connect(
+        partial(list_view_actions._open_about_link, main_window, "manual")
+    )
+    main_window.actionHelp_About.triggered.connect(
+        partial(list_view_actions.show_about, main_window)
+    )
+    main_window._menu_actions_setup_installed = True
 
 
 def set_all_parameters_and_control_widgets_enabled(
@@ -747,9 +803,11 @@ def set_all_parameters_and_control_widgets_enabled(
         if hasattr(main_window, attr_name):
             getattr(main_window, attr_name).setDisabled(disabled)
 
-    # Compare checkboxes
-    main_window.faceCompareCheckBox.setDisabled(disabled)
-    main_window.faceMaskCheckBox.setDisabled(disabled)
+    # Compare/mask toolbar toggles
+    if hasattr(main_window, "faceCompareToggleButton"):
+        main_window.faceCompareToggleButton.setDisabled(disabled)
+    if hasattr(main_window, "faceMaskToggleButton"):
+        main_window.faceMaskToggleButton.setDisabled(disabled)
 
     # List items
     for _, embed_button in main_window.merged_embeddings.items():

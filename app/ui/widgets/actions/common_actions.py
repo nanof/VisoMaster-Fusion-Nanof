@@ -208,6 +208,93 @@ def refresh_frame(main_window: "MainWindow", synchronous: bool = False):
         video_processor.process_current_frame(synchronous=synchronous)
 
 
+def _resolve_target_face_id(
+    main_window: "MainWindow", face_id: str | None = None
+) -> str | None:
+    resolved_face_id = face_id or main_window.selected_target_face_id
+    if resolved_face_id and resolved_face_id in main_window.target_faces:
+        return resolved_face_id
+    return None
+
+
+def _show_target_face_parameter_message(
+    main_window: "MainWindow", title: str, message: str
+):
+    create_and_show_messagebox(
+        main_window,
+        title,
+        message,
+        parent_widget=main_window,
+    )
+
+
+def copy_selected_face_parameters(
+    main_window: "MainWindow", face_id: str | None = None
+) -> bool:
+    face_id = _resolve_target_face_id(main_window, face_id)
+    if not face_id:
+        _show_target_face_parameter_message(
+            main_window,
+            "No target face selected",
+            "Select a target face before copying parameters.",
+        )
+        return False
+
+    face_parameters = main_window.parameters.get(face_id)
+    if not face_parameters:
+        _show_target_face_parameter_message(
+            main_window,
+            "No parameters found",
+            "The selected target face has no parameters to copy.",
+        )
+        return False
+
+    main_window.copied_parameters = face_parameters.copy()
+    return True
+
+
+def paste_selected_face_parameters(
+    main_window: "MainWindow", face_id: str | None = None
+) -> bool:
+    face_id = _resolve_target_face_id(main_window, face_id)
+    if not face_id:
+        _show_target_face_parameter_message(
+            main_window,
+            "No target face selected",
+            "Select a target face before pasting parameters.",
+        )
+        return False
+
+    if not main_window.copied_parameters:
+        _show_target_face_parameter_message(
+            main_window,
+            "No parameters found in Clipboard",
+            "You need to copy parameters from any of the target face before pasting it!",
+        )
+        return False
+
+    main_window.parameters[face_id] = main_window.copied_parameters.copy()
+    set_widgets_values_using_face_id_parameters(main_window, face_id=face_id)
+    return True
+
+
+def reset_selected_face_parameters(
+    main_window: "MainWindow", face_id: str | None = None
+) -> bool:
+    face_id = _resolve_target_face_id(main_window, face_id)
+    if not face_id:
+        _show_target_face_parameter_message(
+            main_window,
+            "No target face selected",
+            "Select a target face before resetting parameters.",
+        )
+        return False
+
+    main_window.parameters[face_id] = main_window.default_parameters.copy()
+    set_widgets_values_using_face_id_parameters(main_window, face_id=face_id)
+    return True
+
+
 # Function to Hide Elements conditionally from values in LayoutData (Currently supports using Selection box and Toggle button to hide other widgets)
 def show_hide_related_widgets(
     main_window: "MainWindow",
@@ -416,41 +503,43 @@ def set_gpu_memory_progressbar_value(
     main_window.vramProgressBar.setFormat(
         f"{round(memory_used / 1024, 2)} GB / {round(memory_total / 1024, 2)} GB (%p%)"
     )
-    # Base style copied from true_dark_styles.qss
-    base_style = """
-        QProgressBar {
-            border: 1px solid #363636;
+    palette = main_window.vramProgressBar.palette()
+    background_color = palette.color(QtGui.QPalette.ColorRole.Base).name()
+    text_color = palette.color(QtGui.QPalette.ColorRole.Text).name()
+    border_color = palette.color(QtGui.QPalette.ColorRole.Mid).name()
+
+    base_style = f"""
+        QProgressBar {{
+            border: 1px solid {border_color};
             border-radius: 5px;
             text-align: center;
-            background-color: #202020;
-            color: #f0f0f0;
-        }
+            background-color: {background_color};
+            color: {text_color};
+        }}
     """
 
-    # Base Chunk style copied from true_dark_styles.qss
     chunk_style_normal = """
         QProgressBar::chunk {
-            background-color: #16759e;  /* Blue */
-            width: 10px;
-            margin: 0.5px;
+            background-color: #16759e;
             border-radius: 4px;
         }
     """
 
-    # High VRAM Chunck style
     chunk_style_high = """
         QProgressBar::chunk {
             background-color: #911414; /* Red */
-            width: 10px;
-            margin: 0.5px;
             border-radius: 4px;
         }
     """
 
-    if (memory_used / memory_total) > 0.85:
-        main_window.vramProgressBar.setStyleSheet(base_style + chunk_style_high)
-    else:
-        main_window.vramProgressBar.setStyleSheet(base_style + chunk_style_normal)
+    is_high = memory_total > 0 and (memory_used / memory_total) > 0.85
+    was_high = getattr(main_window, "_vram_high_style_active", None)
+    if is_high != was_high:
+        main_window._vram_high_style_active = is_high
+        if is_high:
+            main_window.vramProgressBar.setStyleSheet(base_style + chunk_style_high)
+        else:
+            main_window.vramProgressBar.setStyleSheet(base_style + chunk_style_normal)
 
     main_window.vramProgressBar.update()
 

@@ -105,7 +105,7 @@ class VideoProcessor(QObject):
     # Removed QPixmap to ensure thread safety. GUI thread will handle conversion.
     frame_processed_signal = Signal(int, numpy.ndarray, object)
     webcam_frame_processed_signal = Signal(numpy.ndarray, object)
-    single_frame_processed_signal = Signal(int, numpy.ndarray, object)
+    single_frame_processed_signal = Signal(int, int, numpy.ndarray, object)
     processing_started_signal = Signal()  # Unified signal for any processing start
     processing_stopped_signal = Signal()  # Unified signal for any processing stop
     processing_heartbeat_signal = Signal()  # Emits periodically to show liveness
@@ -151,6 +151,15 @@ class VideoProcessor(QObject):
         # Single-frame (scrubbing) worker — tracked so a new seek can stop the old one
         # before starting a fresh worker, preventing concurrent model inference crashes.
         self._current_single_frame_worker: "FrameWorker | None" = None
+        self._single_frame_request_generation: int = 0
+        self._active_single_frame_request_generation: int = 0
+        self._fit_on_single_frame_request_generation: int | None = None
+        self._pending_single_frame_request: dict | None = None
+        self._single_frame_handoff_timer = QTimer(self)
+        self._single_frame_handoff_timer.setInterval(15)
+        self._single_frame_handoff_timer.timeout.connect(
+            self._try_start_pending_single_frame_worker
+        )
 
         # --- Media State ---
         self.media_capture: cv2.VideoCapture | None = None
@@ -189,6 +198,7 @@ class VideoProcessor(QObject):
             False  # True if "multi-segment" recording is active
         )
         self.triggered_by_job_manager: bool = False  # For multi-segment job integration
+        self.active_output_folder: str = ""
 
         # --- Subprocesses ---
         self.virtcam: pyvirtualcam.Camera | None = None
@@ -311,7 +321,7 @@ class VideoProcessor(QObject):
         self.frame_processed_signal.connect(self.store_frame_to_display)
         self.webcam_frame_processed_signal.connect(self.store_webcam_frame_to_display)
         self.single_frame_processed_signal.connect(self.display_current_frame)
-        self.single_frame_processed_signal.connect(self.store_frame_to_display)
+        self.single_frame_processed_signal.connect(self.store_single_frame_to_display)
 
     @Slot(int, numpy.ndarray, object)
     def store_frame_to_display(self, frame_number, frame, profile=None):
@@ -355,12 +365,28 @@ class VideoProcessor(QObject):
         # Put the new, latest frame in the now-empty queue
         self.webcam_frames_to_display.put((frame, profile))
 
-    @Slot(int, numpy.ndarray, object)
-    def display_current_frame(self, frame_number, frame, profile=None):
+    @Slot(int, int, numpy.ndarray, object)
+    def store_single_frame_to_display(
+        self, generation, frame_number, frame, preview_profile
+    ):
+        if (
+            generation != 0
+            and generation != self._active_single_frame_request_generation
+        ):
+            return
+        self.store_frame_to_display(frame_number, frame, preview_profile)
+
+    @Slot(int, int, numpy.ndarray, object)
+    def display_current_frame(self, generation, frame_number, frame, preview_cache):
         """
         Slot to display a single, specific frame.
         Used after seeking or loading new media. NOT part of the metronome loop.
         """
+        if (
+            generation != 0
+            and generation != self._active_single_frame_request_generation
+        ):
+            return
 
         # During fast scrubbing with AI workers enabled, an older thread might finish processing
         # a frame AFTER the user has already seeked to a newer frame.
@@ -368,7 +394,6 @@ class VideoProcessor(QObject):
         if self.file_type == "video" and frame_number != self.next_frame_to_display:
             return
 
-        # Create QPixmap Just-In-Time strictly inside the GUI Thread
         pixmap = common_widget_actions.get_pixmap_from_frame(self.main_window, frame)
 
         if self.main_window.loading_new_media:
@@ -382,7 +407,18 @@ class VideoProcessor(QObject):
             )
         self.current_frame = frame
         common_widget_actions.update_gpu_memory_progressbar(self.main_window)
-        graphics_view_actions.update_pipeline_profile_overlay(self.main_window, profile)
+        graphics_view_actions.update_pipeline_profile_overlay(
+            self.main_window, preview_cache
+        )
+        if (
+            self._fit_on_single_frame_request_generation is not None
+            and generation == self._fit_on_single_frame_request_generation
+        ):
+            self._fit_on_single_frame_request_generation = None
+            QTimer.singleShot(
+                0,
+                lambda: layout_actions.fit_image_to_view_onchange(self.main_window),
+            )
 
     def _start_metronome(self, target_fps: float, is_first_start: bool = True):
         """
@@ -1939,6 +1975,38 @@ class VideoProcessor(QObject):
 
         # 4. Setup Recording (if applicable)
         if self.recording:
+            output_folder = str(
+                self.main_window.control.get("OutputMediaFolder", "")
+            ).strip()
+            if self.main_window.control.get("OutputToTargetLocationToggle", False):
+                output_folder = os.path.dirname(str(self.media_path))
+            if self.main_window.control.get("ClusterOutputBySourceToggle", False):
+                target_face_button = getattr(
+                    self.main_window, "cur_selected_target_face_button", None
+                )
+                assigned_embeddings = (
+                    getattr(target_face_button, "assigned_merged_embeddings", None)
+                    if target_face_button
+                    else None
+                )
+                embedding_id = (
+                    next(iter(assigned_embeddings), None)
+                    if assigned_embeddings
+                    else None
+                )
+                embedding_button = (
+                    self.main_window.merged_embeddings.get(embedding_id)
+                    if embedding_id is not None
+                    else None
+                )
+                embedding_name = (
+                    str(getattr(embedding_button, "embedding_name", "")).strip()
+                    if embedding_button is not None
+                    else ""
+                )
+                if embedding_name:
+                    output_folder = os.path.join(output_folder, embedding_name)
+            self.active_output_folder = output_folder
             # Disable UI elements
             if not self.main_window.control["KeepControlsToggle"]:
                 layout_actions.disable_all_parameters_and_control_widget(
@@ -2108,8 +2176,68 @@ class VideoProcessor(QObject):
                 print("[INFO] Playback mode.")
                 self._start_synchronized_playback()
 
+    def _launch_async_single_frame_worker(
+        self, frame_number: int, frame: numpy.ndarray, generation: int
+    ):
+        worker = FrameWorker(
+            frame=frame,
+            main_window=self.main_window,
+            frame_number=frame_number,
+            frame_queue=None,
+            is_single_frame=True,
+            worker_id=-1,
+        )
+        worker.preview_generation = generation
+        self._current_single_frame_worker = worker
+        worker.start()
+        return worker
+
+    def _try_start_pending_single_frame_worker(self):
+        if self._pending_single_frame_request is None:
+            self._single_frame_handoff_timer.stop()
+            return
+
+        current_worker = self._current_single_frame_worker
+        if current_worker is not None and current_worker.is_alive():
+            return
+
+        request = self._pending_single_frame_request
+        self._pending_single_frame_request = None
+        self._single_frame_handoff_timer.stop()
+        self._current_single_frame_worker = None
+        self._launch_async_single_frame_worker(
+            request["frame_number"],
+            request["frame"],
+            request["generation"],
+        )
+
+    def _cancel_single_frame_preview_state(self):
+        self._single_frame_request_generation += 1
+        self._active_single_frame_request_generation = (
+            self._single_frame_request_generation
+        )
+        self._pending_single_frame_request = None
+        self._single_frame_handoff_timer.stop()
+        self._fit_on_single_frame_request_generation = None
+
+        worker = self._current_single_frame_worker
+        if worker is not None and worker.is_alive():
+            worker.stop_event.set()
+            worker.join(timeout=2.0)
+            if worker.is_alive():
+                print("[WARN] Single-frame preview worker did not join gracefully.")
+                self._current_single_frame_worker = worker
+                return
+
+        self._current_single_frame_worker = None
+
     def start_frame_worker(
-        self, frame_number, frame, is_single_frame=False, synchronous=False
+        self,
+        frame_number,
+        frame,
+        is_single_frame=False,
+        synchronous=False,
+        fit_on_complete: bool = False,
     ):
         """
         Starts a one-shot FrameWorker for a *single frame*.
@@ -2121,32 +2249,63 @@ class VideoProcessor(QObject):
         # calls.  VR180 workers are especially vulnerable because they run for several
         # seconds (multiple face detections + landmark detection + stitching per frame).
         prev = self._current_single_frame_worker
-        if prev is not None and prev.is_alive():
-            prev.stop_event.set()
-            prev.join(timeout=3.0)
-            if prev.is_alive():
-                print("[WARN] Previous single-frame worker did not finish within 3 s.")
-        self._current_single_frame_worker = None
-
-        worker = FrameWorker(
-            frame=frame,  # Pass frame directly
-            main_window=self.main_window,
-            frame_number=frame_number,
-            frame_queue=None,  # No queue for single frame
-            is_single_frame=is_single_frame,
-            worker_id=-1,  # Indicates single-frame mode
-        )
 
         if synchronous:
+            self._pending_single_frame_request = None
+            self._single_frame_handoff_timer.stop()
+            if prev is not None and prev.is_alive():
+                prev.stop_event.set()
+                prev.join()
+            self._current_single_frame_worker = None
+            worker = FrameWorker(
+                frame=frame,  # Pass frame directly
+                main_window=self.main_window,
+                frame_number=frame_number,
+                frame_queue=None,  # No queue for single frame
+                is_single_frame=is_single_frame,
+                worker_id=-1,  # Indicates single-frame mode
+            )
+            if fit_on_complete:
+                self._fit_on_single_frame_request_generation = 0
+            else:
+                self._fit_on_single_frame_request_generation = None
+            worker.preview_generation = 0
             worker.run()
             return worker
         else:
-            # Run in a *new* thread (asynchronous).
-            self._current_single_frame_worker = worker
-            worker.start()
-            return worker
+            self._single_frame_request_generation += 1
+            self._active_single_frame_request_generation = (
+                self._single_frame_request_generation
+            )
+            if fit_on_complete:
+                self._fit_on_single_frame_request_generation = (
+                    self._single_frame_request_generation
+                )
+            else:
+                self._fit_on_single_frame_request_generation = None
+            request = {
+                "frame_number": frame_number,
+                "frame": frame,
+                "generation": self._single_frame_request_generation,
+            }
+            if prev is not None and prev.is_alive():
+                prev.stop_event.set()
+                self._pending_single_frame_request = request
+                if not self._single_frame_handoff_timer.isActive():
+                    self._single_frame_handoff_timer.start()
+                return prev
 
-    def process_current_frame(self, synchronous: bool = False):
+            self._pending_single_frame_request = None
+            self._current_single_frame_worker = None
+            return self._launch_async_single_frame_worker(
+                frame_number,
+                frame,
+                self._single_frame_request_generation,
+            )
+
+    def process_current_frame(
+        self, synchronous: bool = False, fit_on_complete: bool = False
+    ):
         """
         Process the single, currently selected frame (e.g., after seek or for image).
         This is a one-shot operation, not part of the metronome.
@@ -2277,6 +2436,7 @@ class VideoProcessor(QObject):
                 frame_to_process,
                 is_single_frame=True,
                 synchronous=synchronous,
+                fit_on_complete=fit_on_complete,
             )
 
         return None
@@ -2297,6 +2457,7 @@ class VideoProcessor(QObject):
 
         # VP-34: Check if capture is missing/broken while idle. If so, fix it.
         if not was_active:
+            self._cancel_single_frame_preview_state()
             if self.file_type == "video" and self.media_path:
                 if not self.media_capture or not self.media_capture.isOpened():
                     print(
@@ -2330,6 +2491,8 @@ class VideoProcessor(QObject):
         self._audio_sync_last_seek_monotonic = 0.0
         self._interactive_playback_seek_pending = None
         self._feeder_deferred_seek_read = None
+        self.active_output_folder = ""
+        self._cancel_single_frame_preview_state()
 
         # 2. Stop utility timers and audio
         self.gpu_memory_update_timer.stop()
@@ -4804,6 +4967,36 @@ class VideoProcessor(QObject):
         self.current_segment_index = -1
         self.temp_segment_files = []
         self.segment_temp_dir = None
+        output_folder = str(
+            self.main_window.control.get("OutputMediaFolder", "")
+        ).strip()
+        if self.main_window.control.get("OutputToTargetLocationToggle", False):
+            output_folder = os.path.dirname(str(self.media_path))
+        if self.main_window.control.get("ClusterOutputBySourceToggle", False):
+            target_face_button = getattr(
+                self.main_window, "cur_selected_target_face_button", None
+            )
+            assigned_embeddings = (
+                getattr(target_face_button, "assigned_merged_embeddings", None)
+                if target_face_button
+                else None
+            )
+            embedding_id = (
+                next(iter(assigned_embeddings), None) if assigned_embeddings else None
+            )
+            embedding_button = (
+                self.main_window.merged_embeddings.get(embedding_id)
+                if embedding_id is not None
+                else None
+            )
+            embedding_name = (
+                str(getattr(embedding_button, "embedding_name", "")).strip()
+                if embedding_button is not None
+                else ""
+            )
+            if embedding_name:
+                output_folder = os.path.join(output_folder, embedding_name)
+        self.active_output_folder = output_folder
 
         # 3. Disable UI
         if not self.main_window.control["KeepControlsToggle"]:
@@ -5125,6 +5318,7 @@ class VideoProcessor(QObject):
             self.current_segment_index = -1
             self.temp_segment_files = []
             self.triggered_by_job_manager = False
+            self.active_output_folder = ""
             return
 
         # 3. Determine final output path
@@ -5143,6 +5337,7 @@ class VideoProcessor(QObject):
             if was_triggered_by_job
             else None
         )
+        output_folder = self.active_output_folder
 
         job_name, output_file_name = self._apply_job_timestamp_to_output_name(
             was_triggered_by_job,
@@ -5153,7 +5348,7 @@ class VideoProcessor(QObject):
 
         final_file_path = misc_helpers.get_output_file_path(
             self.media_path,
-            self.main_window.control["OutputMediaFolder"],
+            output_folder,
             job_name=job_name,
             use_job_name_for_output=use_job_name,
             output_file_name=output_file_name,
@@ -5189,6 +5384,7 @@ class VideoProcessor(QObject):
                     self.main_window
                 )
                 video_control_actions.reset_media_buttons(self.main_window)
+                self.active_output_folder = ""
                 return
 
         if Path(final_file_path).is_file():
@@ -5207,6 +5403,7 @@ class VideoProcessor(QObject):
                     self.main_window
                 )
                 video_control_actions.reset_media_buttons(self.main_window)
+                self.active_output_folder = ""
                 return
 
         # 4. Create FFmpeg list file
@@ -5284,6 +5481,7 @@ class VideoProcessor(QObject):
             self.temp_segment_files = []
             self.current_segment_end_frame = None
             self.triggered_by_job_manager = False
+            self.active_output_folder = ""
             print("[INFO] Clearing frame queue of residual pills...")
             with self.frame_queue.mutex:
                 self.frame_queue.queue.clear()
@@ -5333,7 +5531,9 @@ class VideoProcessor(QObject):
 
             if self.main_window.control["OpenOutputToggle"]:
                 try:
-                    list_view_actions.open_output_media_folder(self.main_window)
+                    list_view_actions.open_output_media_folder(
+                        self.main_window, output_dir
+                    )
                 except Exception:
                     pass
 

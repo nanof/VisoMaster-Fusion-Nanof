@@ -563,8 +563,14 @@ def add_scan_review_controls(main_window: "MainWindow"):
         lambda checked: set_scan_tools_expanded(main_window, checked)
     )
     main_window.scanToolsToggleButton = toggle_button
-    media_layout = main_window.horizontalLayoutMediaButtons
+    media_layout = getattr(
+        main_window,
+        "mediaControlsTransportLayout",
+        main_window.horizontalLayoutMediaButtons,
+    )
     media_layout.addWidget(toggle_button)
+    if hasattr(main_window, "_sync_media_controls_balance"):
+        main_window._sync_media_controls_balance()
 
     section = QtWidgets.QWidget(main_window)
     section_layout = QtWidgets.QVBoxLayout(section)
@@ -1322,12 +1328,53 @@ def view_fullscreen(main_window: "MainWindow"):
     main_window.is_full_screen = not main_window.is_full_screen
 
 
-def enable_zoom_and_pan(view: QtWidgets.QGraphicsView):
+def fit_view_to_current_image(main_window: "MainWindow"):
+    layout_actions.fit_image_to_view_onchange(main_window)
+
+
+def zoom_current_image_100(main_window: "MainWindow"):
+    view = main_window.graphicsViewFrame
+    if not view.scene():
+        return
+    items = view.scene().items()
+    pixmap_item = next(
+        (item for item in items if isinstance(item, QtWidgets.QGraphicsPixmapItem)),
+        None,
+    )
+    if pixmap_item is None:
+        return
+
+    view.resetTransform()
+    view.setSceneRect(pixmap_item.boundingRect())
+    view.centerOn(pixmap_item)
+    view.zoom_value = 0
+    view.last_scale_factor = 1.0
+
+
+def show_graphics_view_context_menu(
+    main_window: "MainWindow", global_pos: QtCore.QPoint
+):
+    menu = QtWidgets.QMenu(main_window.graphicsViewFrame)
+    fit_action = menu.addAction("Fit to View")
+    zoom_100_action = menu.addAction("100% Zoom")
+    save_action = menu.addAction("Save Image")
+    selected_action = menu.exec(global_pos)
+    if selected_action is fit_action:
+        fit_view_to_current_image(main_window)
+    elif selected_action is zoom_100_action:
+        zoom_current_image_100(main_window)
+    elif selected_action is save_action:
+        save_current_frame_to_file(main_window)
+
+
+def enable_zoom_and_pan(main_window: "MainWindow", view: QtWidgets.QGraphicsView):
     """
-    Attaches mouse-wheel zoom and right-click pan behaviour to a QGraphicsView instance.
+    Attaches mouse-wheel zoom, middle-click pan, and context-menu behaviour to a
+    QGraphicsView instance.
 
     Monkey-patches zoom, reset_zoom, wheelEvent, mousePressEvent, mouseMoveEvent,
-    and mouseReleaseEvent directly onto the view object so no subclass is required.
+    mouseReleaseEvent, and contextMenuEvent directly onto the view object so no
+    subclass is required.
     """
     SCALE_FACTOR = 1.1
     view.zoom_value = 0  # Track zoom level
@@ -1354,28 +1401,11 @@ def enable_zoom_and_pan(view: QtWidgets.QGraphicsView):
 
     def reset_zoom(self: QtWidgets.QGraphicsView):
         """Resets the view transform so the scene content fits the viewport exactly."""
-        # print("Called reset_zoom()")
-        self.zoom_value = 0
-        if not self.scene():
-            return
-        items = self.scene().items()
-        if not items:
-            return
-        rect = self.scene().itemsBoundingRect()
-        self.setSceneRect(rect)
-        unity = self.transform().mapRect(QtCore.QRectF(0, 0, 1, 1))
-        self.scale(1 / unity.width(), 1 / unity.height())
-        view_rect = self.viewport().rect()
-        scene_rect = self.transform().mapRect(rect)
-        factor = min(
-            view_rect.width() / scene_rect.width(),
-            view_rect.height() / scene_rect.height(),
-        )
-        self.scale(factor, factor)
+        fit_view_to_current_image(main_window)
 
     def mousePressEvent(self: QtWidgets.QGraphicsView, event: QtGui.QMouseEvent):
         """Handle mouse press event for panning."""
-        if event.button() == QtCore.Qt.MouseButton.RightButton:
+        if event.button() == QtCore.Qt.MouseButton.MiddleButton:
             self.is_panning = True
             self.pan_start_pos = event.pos()  # Store the initial mouse position
             self.setCursor(
@@ -1404,12 +1434,16 @@ def enable_zoom_and_pan(view: QtWidgets.QGraphicsView):
 
     def mouseReleaseEvent(self: QtWidgets.QGraphicsView, event: QtGui.QMouseEvent):
         """Handle mouse release event for panning."""
-        if event.button() == QtCore.Qt.MouseButton.RightButton:
+        if event.button() == QtCore.Qt.MouseButton.MiddleButton:
             self.is_panning = False
             self.setCursor(QtCore.Qt.ArrowCursor)  # Reset the cursor
         else:
             # Explicitly call the base class implementation
             QtWidgets.QGraphicsView.mouseReleaseEvent(self, event)
+
+    def contextMenuEvent(self: QtWidgets.QGraphicsView, event: QtGui.QContextMenuEvent):
+        show_graphics_view_context_menu(main_window, event.globalPos())
+        event.accept()
 
     # Attach methods to the view
     view.zoom = partial(zoom, view)
@@ -1418,6 +1452,7 @@ def enable_zoom_and_pan(view: QtWidgets.QGraphicsView):
     view.mousePressEvent = partial(mousePressEvent, view)
     view.mouseMoveEvent = partial(mouseMoveEvent, view)
     view.mouseReleaseEvent = partial(mouseReleaseEvent, view)
+    view.contextMenuEvent = partial(contextMenuEvent, view)
 
     # view.zoom = zoom.__get__(view)
     # view.reset_zoom = reset_zoom.__get__(view)
@@ -1935,7 +1970,10 @@ def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
             # The processed frame will be shown when the slider is released.
             pixmap = common_widget_actions.get_pixmap_from_frame(main_window, frame)
             graphics_view_actions.update_graphics_view(
-                main_window, pixmap, new_position
+                main_window,
+                pixmap,
+                new_position,
+                size_mode="native_pixmap_size",
             )
 
         else:
@@ -2170,8 +2208,7 @@ def process_compare_checkboxes(main_window: "MainWindow"):
     """Triggers a single-frame re-process and view resize after a compare/mask checkbox changes."""
     vp = main_window.video_processor
     vp.sync_feeder_ui_face_flags_from_main_window()
-    vp.process_current_frame()
-    layout_actions.fit_image_to_view_onchange(main_window)
+    vp.process_current_frame(fit_on_complete=True)
 
 
 def save_current_frame_to_file(main_window: "MainWindow"):
@@ -2189,15 +2226,43 @@ def save_current_frame_to_file(main_window: "MainWindow"):
             main_window,
         )
         return
+    output_folder = str(main_window.control.get("OutputMediaFolder", "")).strip()
+    if main_window.control.get("OutputToTargetLocationToggle", False):
+        output_folder = os.path.dirname(str(main_window.video_processor.media_path))
+    if main_window.control.get("ClusterOutputBySourceToggle", False):
+        target_face_button = getattr(
+            main_window, "cur_selected_target_face_button", None
+        )
+        assigned_embeddings = (
+            getattr(target_face_button, "assigned_merged_embeddings", None)
+            if target_face_button
+            else None
+        )
+        embedding_id = (
+            next(iter(assigned_embeddings), None) if assigned_embeddings else None
+        )
+        embedding_button = (
+            main_window.merged_embeddings.get(embedding_id)
+            if embedding_id is not None
+            else None
+        )
+        embedding_name = (
+            str(getattr(embedding_button, "embedding_name", "")).strip()
+            if embedding_button is not None
+            else ""
+        )
+        if embedding_name:
+            output_folder = os.path.join(output_folder, embedding_name)
     frame = main_window.video_processor.current_frame.copy()
     image_format = "image"
     if main_window.control["ImageFormatToggle"]:
         image_format = "jpegimage"
 
     if isinstance(frame, numpy.ndarray):
+        os.makedirs(output_folder, exist_ok=True)
         save_filename = misc_helpers.get_output_file_path(
             main_window.video_processor.media_path,
-            str(main_window.control["OutputMediaFolder"]),
+            output_folder,
             media_type=image_format,
         )
         if save_filename:
@@ -2494,9 +2559,43 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
                     image_format = "image"
                     if main_window.control["ImageFormatToggle"]:
                         image_format = "jpegimage"
+                    output_folder = str(
+                        main_window.control.get("OutputMediaFolder", "")
+                    ).strip()
+                    if main_window.control.get("OutputToTargetLocationToggle", False):
+                        output_folder = os.path.dirname(str(media_path))
+                    if main_window.control.get("ClusterOutputBySourceToggle", False):
+                        target_face_button = getattr(
+                            main_window, "cur_selected_target_face_button", None
+                        )
+                        assigned_embeddings = (
+                            getattr(
+                                target_face_button, "assigned_merged_embeddings", None
+                            )
+                            if target_face_button
+                            else None
+                        )
+                        embedding_id = (
+                            next(iter(assigned_embeddings), None)
+                            if assigned_embeddings
+                            else None
+                        )
+                        embedding_button = (
+                            main_window.merged_embeddings.get(embedding_id)
+                            if embedding_id is not None
+                            else None
+                        )
+                        embedding_name = (
+                            str(getattr(embedding_button, "embedding_name", "")).strip()
+                            if embedding_button is not None
+                            else ""
+                        )
+                        if embedding_name:
+                            output_folder = os.path.join(output_folder, embedding_name)
+                    os.makedirs(output_folder, exist_ok=True)
                     save_filename = misc_helpers.get_output_file_path(
                         media_path,
-                        str(main_window.control["OutputMediaFolder"]),
+                        output_folder,
                         media_type=image_format,
                     )
 
@@ -2773,12 +2872,14 @@ def toggle_theatre_mode(main_window: "MainWindow"):
             "h_spacing": main_window.horizontalLayout.spacing(),
             "v_spacing": main_window.verticalLayout.spacing(),
             "frame_shape": main_window.graphicsViewFrame.frameShape(),
+            "media_controls_margin": main_window.verticalLayoutMediaControls.contentsMargins(),
         }
 
         main_window.horizontalLayout.setContentsMargins(0, 0, 0, 0)
         main_window.verticalLayout.setContentsMargins(0, 0, 0, 0)
         main_window.horizontalLayout.setSpacing(0)
         main_window.verticalLayout.setSpacing(0)
+        main_window.verticalLayoutMediaControls.setContentsMargins(0, 0, 0, 16)
 
         # 3. Safely detach spacers and hide Top Bar widgets
         main_window._top_bar_spacers = []
@@ -2883,6 +2984,10 @@ def toggle_theatre_mode(main_window: "MainWindow"):
             main_window.verticalLayout.setSpacing(props["v_spacing"])
         if "frame_shape" in props:
             main_window.graphicsViewFrame.setFrameShape(props["frame_shape"])
+        if "media_controls_margin" in props:
+            main_window.verticalLayoutMediaControls.setContentsMargins(
+                props["media_controls_margin"]
+            )
 
         main_window.graphicsViewFrame.setStyleSheet("")
         main_window.graphicsViewFrame.setVerticalScrollBarPolicy(

@@ -1,12 +1,14 @@
 from functools import partial
 from typing import TYPE_CHECKING, Dict, Type
-import subprocess
+from pathlib import Path
 import sys
 import os
 import uuid
+import subprocess
 
 from PySide6 import QtWidgets, QtGui, QtCore
 
+from app.helpers.app_metadata import AppDisplayMetadata, get_app_display_metadata
 from app.ui.widgets.actions import common_actions as common_widget_actions
 from app.ui.widgets.actions import card_actions
 from app.ui.widgets.actions import filter_actions
@@ -481,8 +483,10 @@ def select_output_media_folder(main_window: "MainWindow"):
         )
 
 
-def open_output_media_folder(main_window: "MainWindow"):
-    folder_name = main_window.control.get("OutputMediaFolder")
+def open_output_media_folder(main_window: "MainWindow", folder_name: str | None = None):
+    if not folder_name:
+        configured_folder = main_window.control.get("OutputMediaFolder")
+        folder_name = configured_folder if isinstance(configured_folder, str) else None
     if isinstance(folder_name, str) and folder_name:
         if os.path.exists(folder_name):
             # Normalize path
@@ -509,11 +513,11 @@ def show_shortcuts(main_window: "MainWindow"):
     # HTML formating
     shortcuts_text = (
         "<b><u>Actions:</u></b><br>"
-        "<b>F11</b> : View fullscreen<br>"
+        "<b>F11</b> : Fullscreen<br>"
         "<b>T</b> : Theatre Mode<br>"
         "<b>Space</b> : Play/Stop<br>"
         "<b>R</b> : Record start/stop<br>"
-        "<b>S</b> : Swap face"
+        "<b>S</b> : Swap face<br>"
         "<br>"
         "<b><u>Seeking:</u></b><br>"
         "<b>V</b> : Advance 1 frame<br>"
@@ -527,6 +531,12 @@ def show_shortcuts(main_window: "MainWindow"):
         "<b>ALT+F</b> : Remove video marker<br>"
         "<b>W</b> : Move to next marker<br>"
         "<b>Q</b> : Move to previous marker<br>"
+        "<br>"
+        "<b><u>Viewport:</u></b><br>"
+        "<b>Ctrl+0</b> : Fit to View<br>"
+        "<b>Ctrl+1</b> : 100% Zoom<br>"
+        "<b>Middle Mouse Drag</b> : Pan view<br>"
+        "<b>Right Click</b> : Viewport menu (Fit to View, 100% Zoom, Save Image)<br>"
         "<br>"
     )
 
@@ -569,3 +579,104 @@ def show_presets(main_window: "MainWindow"):
         presets_text,
         main_window,
     )
+
+
+def _get_app_display_metadata(main_window: "MainWindow") -> AppDisplayMetadata:
+    metadata = getattr(main_window, "app_display_metadata", None)
+    if metadata is not None:
+        return metadata
+
+    base_title = getattr(main_window, "_base_window_title", main_window.windowTitle())
+    return get_app_display_metadata(main_window.project_root_path, base_title)
+
+
+def _open_about_link(main_window: "MainWindow", link_type: str):
+    project_root = Path(main_window.project_root_path)
+    local_links = {
+        "quickstart": project_root / "docs" / "quickstart.md",
+        "manual": project_root / "docs" / "user_manual.md",
+    }
+    remote_links = {
+        "github": "https://github.com/VisoMasterFusion/VisoMaster-Fusion",
+        "discord": "https://discord.gg/5rx4SQuDbp",
+    }
+
+    if link_type in local_links:
+        target_path = local_links[link_type]
+        if target_path.is_file():
+            QtGui.QDesktopServices.openUrl(
+                QtCore.QUrl.fromLocalFile(str(target_path.resolve()))
+            )
+        else:
+            common_widget_actions.create_and_show_messagebox(
+                main_window,
+                "Document Not Found",
+                f"Could not find:\n{target_path}",
+                parent_widget=main_window,
+            )
+        return
+
+    target_url = remote_links.get(link_type)
+    if target_url:
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl(target_url))
+
+
+def show_about(main_window: "MainWindow"):
+    dialog = QtWidgets.QDialog(main_window)
+    dialog.setWindowTitle("About")
+    dialog.setModal(True)
+    dialog.setMinimumWidth(420)
+
+    layout = QtWidgets.QVBoxLayout(dialog)
+    layout.setContentsMargins(18, 18, 18, 18)
+    layout.setSpacing(12)
+
+    title_label = QtWidgets.QLabel("VisoMaster Fusion", dialog)
+    title_font = title_label.font()
+    title_font.setPointSize(title_font.pointSize() + 2)
+    title_font.setBold(True)
+    title_label.setFont(title_font)
+
+    version_label = QtWidgets.QLabel(
+        _get_app_display_metadata(main_window).about_version_text, dialog
+    )
+    description_label = QtWidgets.QLabel(
+        "Advanced image and video editing toolkit.\n"
+        "See the User Manual for setup and usage guidance.",
+        dialog,
+    )
+    description_label.setWordWrap(True)
+
+    links_group = QtWidgets.QGroupBox("Quick Links", dialog)
+    links_layout = QtWidgets.QVBoxLayout(links_group)
+    links_layout.setContentsMargins(12, 12, 12, 12)
+    links_layout.setSpacing(6)
+
+    links_label = QtWidgets.QLabel(links_group)
+    links_label.setTextFormat(QtCore.Qt.TextFormat.RichText)
+    links_label.setTextInteractionFlags(
+        QtCore.Qt.TextInteractionFlag.TextBrowserInteraction
+    )
+    links_label.setOpenExternalLinks(False)
+    links_label.setWordWrap(True)
+    links_label.setText(
+        '<a href="quickstart">Quick Start Guide</a><br>'
+        '<a href="manual">User Manual</a><br>'
+        '<a href="discord">Discord</a><br>'
+        '<a href="github">GitHub</a>'
+    )
+    links_label.linkActivated.connect(
+        lambda link_type: _open_about_link(main_window, link_type)
+    )
+    links_layout.addWidget(links_label)
+
+    close_button = QtWidgets.QPushButton("Close", dialog)
+    close_button.clicked.connect(dialog.accept)
+
+    layout.addWidget(title_label)
+    layout.addWidget(version_label)
+    layout.addWidget(description_label)
+    layout.addWidget(links_group)
+    layout.addWidget(close_button, alignment=QtCore.Qt.AlignmentFlag.AlignRight)
+
+    dialog.exec()

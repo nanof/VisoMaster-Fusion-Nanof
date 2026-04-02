@@ -10,6 +10,7 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "label": "Theme",
             "options": [
                 "True-Dark",
+                "OLED-Black",
                 "Windows11-Dark",
                 "Dark",
                 "Dark-Blue",
@@ -19,6 +20,7 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
                 "Dracula",
                 "Nord",
                 "Gruvbox",
+                "Monokai",
             ],
             "default": "True-Dark",
             "help": "Select the theme to be used",
@@ -134,6 +136,20 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "parentToggle": "PipelineProfileOverlayEnableToggle",
             "requiredToggleValue": True,
             "help": "Call cuda.synchronize() at each stage mark for faithful GPU times; reduces preview FPS.",
+        },
+    },
+    "Output Settings": {
+        "OutputToTargetLocationToggle": {
+            "level": 1,
+            "label": "Output to Target Location",
+            "default": False,
+            "help": "Save processed output next to the current target media instead of the global output folder.",
+        },
+        "ClusterOutputBySourceToggle": {
+            "level": 1,
+            "label": "Cluster Output by Source Name",
+            "default": False,
+            "help": "Save processed output into a subfolder named after the selected merged embedding.",
         },
     },
     "Video Playback Settings": {
