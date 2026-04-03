@@ -25,6 +25,82 @@ _TARGET_BUTTON_SIZE = (90, 90)
 _FACE_BUTTON_SIZE = (70, 70)
 _EMBED_BUTTON_SIZE = (120, 25)
 _EMBED_LIST_HEIGHT = 140
+_THUMB_ZOOM_MIN = 0.5
+_THUMB_ZOOM_MAX = 3.0
+
+
+def thumbnail_size_for_zoom(base_size: tuple[int, int], zoom: float) -> QtCore.QSize:
+    bw, bh = base_size
+    z = max(_THUMB_ZOOM_MIN, min(_THUMB_ZOOM_MAX, zoom))
+    return QtCore.QSize(max(24, int(round(bw * z))), max(24, int(round(bh * z))))
+
+
+def _update_list_grid_for_thumbnail_size(
+    list_widget: QtWidgets.QListWidget, button_size: QtCore.QSize
+) -> None:
+    list_widget.setGridSize(button_size + QtCore.QSize(4, 4))
+
+
+def _apply_scaled_list_thumbnail_icon(
+    button: QtWidgets.QAbstractButton, icon_size: QtCore.QSize
+) -> None:
+    """Scale pixmap to icon_size so the image grows with zoom (QIcon+setIconSize alone can cap size)."""
+    base = getattr(button, "_thumbnail_base_pixmap", None)
+    if base is None or base.isNull():
+        button.setIconSize(icon_size)
+        return
+    scaled = base.scaled(
+        icon_size.width(),
+        icon_size.height(),
+        QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+        QtCore.Qt.TransformationMode.SmoothTransformation,
+    )
+    button.setIcon(QtGui.QIcon(scaled))
+    button.setIconSize(icon_size)
+
+
+def refresh_thumbnail_sizes_for_list(
+    main_window: "MainWindow", list_widget: QtWidgets.QListWidget
+) -> None:
+    if list_widget == main_window.targetVideosList:
+        zoom = main_window.target_videos_thumbnail_zoom
+        base = _TARGET_BUTTON_SIZE
+        buttons = main_window.target_videos
+    elif list_widget == main_window.inputFacesList:
+        zoom = main_window.input_faces_thumbnail_zoom
+        base = _FACE_BUTTON_SIZE
+        buttons = main_window.input_faces
+    else:
+        return
+    button_size = thumbnail_size_for_zoom(base, zoom)
+    icon_size = button_size - QtCore.QSize(8, 8)
+    for btn in buttons.values():
+        btn.setFixedSize(button_size)
+        _apply_scaled_list_thumbnail_icon(btn, icon_size)
+        li = getattr(btn, "list_item", None)
+        if li is not None:
+            li.setSizeHint(button_size)
+    _update_list_grid_for_thumbnail_size(list_widget, button_size)
+
+
+def apply_wheel_zoom_to_thumbnail_list(
+    main_window: "MainWindow", list_widget: QtWidgets.QListWidget, delta_y: int
+) -> bool:
+    """Ctrl+wheel zoom for target videos or input faces lists. Returns True if handled."""
+    if list_widget == main_window.targetVideosList:
+        attr = "target_videos_thumbnail_zoom"
+    elif list_widget == main_window.inputFacesList:
+        attr = "input_faces_thumbnail_zoom"
+    else:
+        return False
+    if delta_y == 0:
+        return True
+    current = getattr(main_window, attr, 1.0)
+    new_zoom = current * (1.1 if delta_y > 0 else 1.0 / 1.1)
+    new_zoom = max(_THUMB_ZOOM_MIN, min(_THUMB_ZOOM_MAX, new_zoom))
+    setattr(main_window, attr, new_zoom)
+    refresh_thumbnail_sizes_for_list(main_window, list_widget)
+    return True
 
 
 # Functions to add Buttons with thumbnail for selecting videos/images and faces
@@ -164,7 +240,13 @@ def add_media_thumbnail_button(
         ]
 
     if buttonClass == widget_components.TargetMediaCardButton:
-        button_size = QtCore.QSize(*_TARGET_BUTTON_SIZE)
+        button_size = thumbnail_size_for_zoom(
+            _TARGET_BUTTON_SIZE, main_window.target_videos_thumbnail_zoom
+        )
+    elif buttonClass == widget_components.InputFaceCardButton:
+        button_size = thumbnail_size_for_zoom(
+            _FACE_BUTTON_SIZE, main_window.input_faces_thumbnail_zoom
+        )
     else:
         button_size = QtCore.QSize(*_FACE_BUTTON_SIZE)
 
@@ -178,10 +260,16 @@ def add_media_thumbnail_button(
     else:
         pixmap = image_data
 
-    button.setIcon(QtGui.QIcon(pixmap))
-    button.setIconSize(
-        button_size - QtCore.QSize(8, 8)
-    )  # Slightly smaller than the button size to add some margin
+    icon_size = button_size - QtCore.QSize(8, 8)
+    if buttonClass in (
+        widget_components.TargetMediaCardButton,
+        widget_components.InputFaceCardButton,
+    ):
+        button._thumbnail_base_pixmap = pixmap.copy()
+        _apply_scaled_list_thumbnail_icon(button, icon_size)
+    else:
+        button.setIcon(QtGui.QIcon(pixmap))
+        button.setIconSize(icon_size)
     button.setFixedSize(button_size)
     button.setCheckable(True)
 
@@ -207,12 +295,17 @@ def add_media_thumbnail_button(
 
 def initialize_media_list_widgets(main_window: "MainWindow"):
     """One-time configuration for target/input media and face list widgets."""
-    for listWidget, button_size_tuple in [
-        (main_window.targetVideosList, _TARGET_BUTTON_SIZE),
-        (main_window.targetFacesList, _FACE_BUTTON_SIZE),
-        (main_window.inputFacesList, _FACE_BUTTON_SIZE),
+    for listWidget, button_size_tuple, zoom_attr in [
+        (main_window.targetVideosList, _TARGET_BUTTON_SIZE, "target_videos_thumbnail_zoom"),
+        (main_window.targetFacesList, _FACE_BUTTON_SIZE, None),
+        (main_window.inputFacesList, _FACE_BUTTON_SIZE, "input_faces_thumbnail_zoom"),
     ]:
-        button_size = QtCore.QSize(*button_size_tuple)
+        if zoom_attr is not None:
+            button_size = thumbnail_size_for_zoom(
+                button_size_tuple, getattr(main_window, zoom_attr, 1.0)
+            )
+        else:
+            button_size = QtCore.QSize(*button_size_tuple)
         grid_size_with_padding = button_size + QtCore.QSize(4, 4)
         listWidget.setGridSize(grid_size_with_padding)
         listWidget.setWrapping(True)

@@ -102,6 +102,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.input_faces: Dict[
             str, widget_components.InputFaceCardButton
         ] = {}  # Contains button objects of source faces (images)
+        self.target_videos_thumbnail_zoom = 1.0
+        self.input_faces_thumbnail_zoom = 1.0
         self.merged_embeddings: Dict[str, widget_components.EmbeddingCardButton] = {}
         self.cur_selected_target_face_button: Optional[
             widget_components.TargetFaceCardButton

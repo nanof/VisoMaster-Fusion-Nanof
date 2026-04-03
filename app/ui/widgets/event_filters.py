@@ -156,6 +156,15 @@ class ListWidgetEventFilter(QtCore.QObject):
                     event.acceptProposedAction()
                     return True
 
+            elif event.type() == QtCore.QEvent.Type.Wheel:
+                if event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier:
+                    list_view_actions.apply_wheel_zoom_to_thumbnail_list(
+                        self.main_window,
+                        self.main_window.targetVideosList,
+                        event.angleDelta().y(),
+                    )
+                    return True
+
         elif (
             list_widget == self.main_window.inputFacesList
             or list_widget == self.main_window.inputFacesList.viewport()
@@ -205,4 +214,14 @@ class ListWidgetEventFilter(QtCore.QObject):
                         self.main_window.input_faces_loader_worker.start()
                     event.acceptProposedAction()
                     return True
+
+            elif event.type() == QtCore.QEvent.Type.Wheel:
+                if event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier:
+                    list_view_actions.apply_wheel_zoom_to_thumbnail_list(
+                        self.main_window,
+                        self.main_window.inputFacesList,
+                        event.angleDelta().y(),
+                    )
+                    return True
+
         return super().eventFilter(list_widget, event)

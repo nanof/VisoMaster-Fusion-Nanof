@@ -9,7 +9,7 @@ from app.ui.widgets import widget_components
 from app.ui.widgets.settings_layout_data import SETTINGS_LAYOUT_DATA
 from app.ui.widgets.common_layout_data import COMMON_LAYOUT_DATA
 import app.helpers.miscellaneous as misc_helpers
-from app.helpers.miscellaneous import get_video_rotation
+from app.helpers.miscellaneous import get_video_rotation, THUMBNAIL_MAX_EDGE_PX
 from app.helpers.typing_helper import ControlTypes
 
 if TYPE_CHECKING:
@@ -575,8 +575,12 @@ def extract_frame_as_pixmap(
             frame.data, width, height, bytes_per_line, QtGui.QImage.Format_RGB888
         ).rgbSwapped()
         pixmap = QtGui.QPixmap.fromImage(q_img)
-        # The final scaling for display is consistent.
-        return pixmap.scaled(70, 70, QtCore.Qt.AspectRatioMode.KeepAspectRatio)
+        return pixmap.scaled(
+            THUMBNAIL_MAX_EDGE_PX,
+            THUMBNAIL_MAX_EDGE_PX,
+            QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+            QtCore.Qt.TransformationMode.SmoothTransformation,
+        )
 
     # For images and videos, first check for a cached thumbnail.
     if file_type in ["image", "video"]:

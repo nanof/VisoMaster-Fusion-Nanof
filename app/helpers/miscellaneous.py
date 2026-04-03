@@ -59,6 +59,11 @@ video_extensions = (
     ".gif",
 )
 
+# Target media list: max longer edge for cached thumbnails and QPixmap extraction.
+# Bump THUMBNAIL_CACHE_TAG when changing THUMBNAIL_MAX_EDGE_PX so old low-res files are not reused.
+THUMBNAIL_MAX_EDGE_PX = 320
+THUMBNAIL_CACHE_TAG = "e320"
+
 
 def bgr_uint8_to_rgb_contiguous(frame_bgr: np.ndarray) -> np.ndarray:
     """
@@ -137,7 +142,7 @@ class ThumbnailManager:
         """
         name = os.path.basename(file_path)
         file_size = os.path.getsize(file_path)
-        hash_input = f"{name}_{file_size}"
+        hash_input = f"{name}_{file_size}_{THUMBNAIL_CACHE_TAG}"
         return hashlib.md5(hash_input.encode("utf-8")).hexdigest()
 
     def get_thumbnail_path(self, file_path: str) -> Tuple[str, str]:
@@ -194,7 +199,10 @@ class ThumbnailManager:
 
         height, width, _ = frame.shape
         width, height = get_scaled_resolution(
-            media_width=width, media_height=height, max_height=140, max_width=140
+            media_width=width,
+            media_height=height,
+            max_height=THUMBNAIL_MAX_EDGE_PX,
+            max_width=THUMBNAIL_MAX_EDGE_PX,
         )
 
         resized_frame = cv2.resize(
