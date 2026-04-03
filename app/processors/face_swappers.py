@@ -4,7 +4,7 @@ from torchvision.transforms import v2
 from app.processors.utils import faceutil
 import numpy as np
 from numpy.linalg import norm as l2norm
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, List, Optional
 import kornia.geometry.transform as kgm
 
 if TYPE_CHECKING:
@@ -209,6 +209,127 @@ class FaceSwappers:
             )
 
         return embedding, cropped_image
+
+    def _chw112_for_inswapper_arcface(
+        self, img: torch.Tensor, face_kps: np.ndarray, similarity_type: str
+    ) -> torch.Tensor:
+        """Aligned 3×112 face crop (Pearl/Opal paths) before Inswapper128ArcFace normalization."""
+        if similarity_type == "Pearl":
+            dst = self.models_processor.arcface_dst.copy()
+            dst[:, 0] += 8.0
+            tform = faceutil.similarity_transform_from_correspondences(face_kps, dst)
+            M_tensor = (
+                torch.from_numpy(tform.params[0:2]).float().unsqueeze(0).to(img.device)
+            )
+            img_b = img.unsqueeze(0) if img.dim() == 3 else img
+            out = kgm.warp_affine(
+                img_b.float(),
+                M_tensor,
+                dsize=(128, 128),
+                mode="bilinear",
+                align_corners=True,
+            ).squeeze(0)
+            return v2.functional.resize(out, [112, 112], antialias=True)
+
+        tform = faceutil.similarity_transform_from_correspondences(
+            face_kps, self.models_processor.arcface_dst
+        )
+        M_tensor = (
+            torch.from_numpy(tform.params[0:2]).float().unsqueeze(0).to(img.device)
+        )
+        img_b = img.unsqueeze(0) if img.dim() == 3 else img
+        return kgm.warp_affine(
+            img_b.float(),
+            M_tensor,
+            dsize=(112, 112),
+            mode="bilinear",
+            align_corners=True,
+        ).squeeze(0)
+
+    def run_recognize_direct_batch(
+        self,
+        img: torch.Tensor,
+        kps_list: List[np.ndarray],
+        similarity_type: str,
+        arcface_model: str,
+    ) -> Optional[List[Optional[np.ndarray]]]:
+        """
+        One ORT inference for B>1 faces (Inswapper128ArcFace + Opal/Pearl, non-Custom).
+        Returns None to fall back to per-face run_recognize_direct.
+        """
+        if len(kps_list) < 2:
+            return None
+        if arcface_model != "Inswapper128ArcFace":
+            return None
+        if similarity_type not in ("Opal", "Pearl"):
+            return None
+        if self.models_processor.provider_name == "Custom":
+            return None
+
+        with self.models_processor.model_lock:
+            if (
+                self.current_arcface_model
+                and self.current_arcface_model != arcface_model
+            ):
+                self.models_processor.unload_model(self.current_arcface_model)
+            self.current_arcface_model = arcface_model
+
+        ort_session = self.models_processor.models.get(arcface_model)
+        if not ort_session:
+            ort_session = self.models_processor.load_model(arcface_model)
+        if not ort_session:
+            return None
+
+        try:
+            crops = [
+                self._chw112_for_inswapper_arcface(img, kps, similarity_type)
+                for kps in kps_list
+            ]
+            batch = torch.stack(crops, dim=0).float().clone()
+            if batch.max() <= 1.0:
+                batch = batch * 255.0
+            batch.sub_(127.5).div_(127.5)
+
+            session_id = id(ort_session)
+            with self._io_cache_lock:
+                if session_id not in self._session_io_name_cache:
+                    self._session_io_name_cache[session_id] = {
+                        "input": ort_session.get_inputs()[0].name,
+                        "outputs": [o.name for o in ort_session.get_outputs()],
+                    }
+                input_name = self._session_io_name_cache[session_id]["input"]
+                output_names = self._session_io_name_cache[session_id]["outputs"]
+
+            io_binding = ort_session.io_binding()
+            io_binding.bind_input(
+                name=input_name,
+                device_type=self.models_processor.device,
+                device_id=0,
+                element_type=np.float32,
+                shape=tuple(batch.shape),
+                buffer_ptr=batch.data_ptr(),
+            )
+            for name in output_names:
+                io_binding.bind_output(name, self.models_processor.device)
+
+            self._run_model_with_lazy_build_check(
+                arcface_model, ort_session, io_binding
+            )
+            outs = io_binding.copy_outputs_to_cpu()
+            emb_arr = np.array(outs[0])
+            if emb_arr.ndim == 1:
+                dim = emb_arr.size // len(kps_list)
+                if dim * len(kps_list) != emb_arr.size:
+                    return None
+                emb_arr = emb_arr.reshape(len(kps_list), dim)
+            elif emb_arr.ndim == 2 and emb_arr.shape[0] == len(kps_list):
+                pass
+            else:
+                return None
+            return [emb_arr[i].flatten().astype(np.float32, copy=False) for i in range(len(kps_list))]
+        except Exception as e:
+            print(f"[WARN] ArcFace batch inference failed, falling back per-face: {e}")
+            return None
 
     def run_recognize(
         self, img, kps, similarity_type="Opal", face_swapper_model="Inswapper128"

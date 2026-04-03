@@ -4,6 +4,9 @@ Pipeline profile overlay: merge feeder + worker timings, EMA / window aggregatio
 
 from __future__ import annotations
 
+import csv
+import json
+import os
 import re
 from collections import deque
 from typing import Any, Deque, Dict, List, Tuple
@@ -16,6 +19,12 @@ PIPELINE_PROFILE_FEEDER_ORDER: Tuple[str, ...] = (
     "feeder_params_lock_ms",
     "sequential_detect_ms",
 )
+
+PIPELINE_PROFILE_FEEDER_KEY_SET: frozenset[str] = frozenset(PIPELINE_PROFILE_FEEDER_ORDER)
+
+# Cap stored samples per playback session (each displayed frame with overlay on).
+_PIPELINE_PROFILE_SESSION_MAX = 8000
+_PIPELINE_PROFILE_SESSION_REPORT_PREFIX = "[PIPELINE-PROFILE-SESSION]"
 
 # Display labels for overlay (fallback: raw stage id).
 PIPELINE_STAGE_LABELS: Dict[str, str] = {
@@ -35,6 +44,8 @@ PIPELINE_STAGE_LABELS: Dict[str, str] = {
     "frame_enhancer": "Frame enhancer",
     "d2h_numpy": "GPU to CPU",
     "pass_through": "Passthrough",
+    "feeder_subtotal": "Sum Feeder (ms)",
+    "worker_subtotal": "Sum Worker (ms)",
 }
 
 # Column widths for monospace overlay.
@@ -151,8 +162,13 @@ def push_window_and_mean(
 
 def format_profile_overlay_multithread(
     per_thread: Dict[str, Dict[str, float]],
+    header_lines: List[str] | None = None,
 ) -> str:
-    """One column per worker thread plus an Avg column (mean across threads per row)."""
+    """One column per worker thread plus an Avg column (mean across threads per row).
+
+    Feeder-stage rows (read/detect in feeder thread) are grouped first, then worker
+    stages (GPU pipeline after dequeue), with subtotal lines to compare both sides.
+    """
     if not per_thread:
         return "Profile: —"
     threads_sorted = sorted(per_thread.keys(), key=_thread_sort_key)
@@ -162,30 +178,73 @@ def format_profile_overlay_multithread(
     if not stages:
         return "Profile: —"
 
+    feeder_stages = [s for s in stages if s in PIPELINE_PROFILE_FEEDER_KEY_SET]
+    worker_stages = [s for s in stages if s not in PIPELINE_PROFILE_FEEDER_KEY_SET]
+
     cw_l = _OVERLAY_COL_LABEL
     cw = _OVERLAY_COL_MS_THREAD
-    lines = ["Pipeline profile (ms)"]
+    lines: List[str] = []
+    if header_lines:
+        lines.extend(header_lines)
+    lines.append("Pipeline profile (ms) — Feeder | Worker")
     hdr = f"{'Stage':<{cw_l}}"
     for t in threads_sorted:
         hdr += f"  {_short_thread_column_title(t):>{cw}}"
     hdr += f"  {'Avg':>{cw}}"
     lines.append(hdr)
 
-    for stage in stages:
-        label = _overlay_fit_label(PIPELINE_STAGE_LABELS.get(stage, stage))
-        row = f"{label:<{cw_l}}"
-        vals: List[float] = []
-        for t in threads_sorted:
-            d = per_thread[t]
-            v = d.get(stage)
-            if v is not None:
-                vals.append(float(v))
+    def _append_stage_block(stage_list: List[str], title: str | None) -> None:
+        if not stage_list:
+            return
+        if title:
+            sep = f"{_overlay_fit_label(title):<{cw_l}}"
+            for _t in threads_sorted:
+                sep += f"  {'':>{cw}}"
+            sep += f"  {'':>{cw}}"
+            lines.append(sep)
+        for stage in stage_list:
+            label = _overlay_fit_label(PIPELINE_STAGE_LABELS.get(stage, stage))
+            row = f"{label:<{cw_l}}"
+            vals: List[float] = []
+            for t in threads_sorted:
+                d = per_thread[t]
+                v = d.get(stage)
+                if v is not None:
+                    vals.append(float(v))
+                row += (
+                    f"  {v:>{cw}.1f}"
+                    if v is not None
+                    else f"  {'—':>{cw}}"
+                )
+            avg_v = sum(vals) / len(vals) if vals else None
             row += (
-                f"  {v:>{cw}.1f}"
-                if v is not None
+                f"  {avg_v:>{cw}.1f}"
+                if avg_v is not None
                 else f"  {'—':>{cw}}"
             )
-        avg_v = sum(vals) / len(vals) if vals else None
+            lines.append(row)
+
+    def _append_subtotal_row(stage_key: str, stage_list: List[str]) -> None:
+        if not stage_list:
+            return
+        label = _overlay_fit_label(PIPELINE_STAGE_LABELS.get(stage_key, stage_key))
+        row = f"{label:<{cw_l}}"
+        col_totals: List[float] = []
+        for t in threads_sorted:
+            d = per_thread[t]
+            ssum = 0.0
+            any_v = False
+            for s in stage_list:
+                v = d.get(s)
+                if v is not None:
+                    ssum += float(v)
+                    any_v = True
+            if any_v:
+                col_totals.append(ssum)
+                row += f"  {ssum:>{cw}.1f}"
+            else:
+                row += f"  {'—':>{cw}}"
+        avg_v = sum(col_totals) / len(col_totals) if col_totals else None
         row += (
             f"  {avg_v:>{cw}.1f}"
             if avg_v is not None
@@ -193,7 +252,12 @@ def format_profile_overlay_multithread(
         )
         lines.append(row)
 
-    row = f"{'Total':<{cw_l}}"
+    _append_stage_block(feeder_stages, "— Feeder thread —" if feeder_stages else None)
+    _append_subtotal_row("feeder_subtotal", feeder_stages)
+    _append_stage_block(worker_stages, "— Worker thread —" if worker_stages else None)
+    _append_subtotal_row("worker_subtotal", worker_stages)
+
+    row = f"{'Total (all stages)':<{cw_l}}"
     totals: List[float] = []
     for t in threads_sorted:
         d = per_thread[t]
@@ -210,6 +274,7 @@ def aggregate_rows_for_display(
     main_window: Any,
     rows: List[Tuple[str, float]],
     worker_thread: str | None,
+    header_lines: List[str] | None = None,
 ) -> str:
     """EMA or window smoothing per thread; table with one column per thread + Avg."""
     display: Dict[str, Dict[str, float]] = getattr(
@@ -223,7 +288,7 @@ def aggregate_rows_for_display(
 
     if not rows:
         return (
-            format_profile_overlay_multithread(display)
+            format_profile_overlay_multithread(display, header_lines=header_lines)
             if display
             else "Profile: —"
         )
@@ -261,7 +326,7 @@ def aggregate_rows_for_display(
         update_ema_per_stage(ema_bt[wt], rows, alpha)
         display[wt] = dict(ema_bt[wt])
 
-    return format_profile_overlay_multithread(display)
+    return format_profile_overlay_multithread(display, header_lines=header_lines)
 
 
 def reset_pipeline_profile_state(main_window: Any) -> None:
@@ -269,3 +334,175 @@ def reset_pipeline_profile_state(main_window: Any) -> None:
     main_window._pipeline_profile_ema_by_thread = {}
     main_window._pipeline_profile_window_deques = {}
     main_window._pipeline_profile_display_by_thread = {}
+
+def clear_pipeline_profile_session_samples(main_window: Any) -> None:
+    """Empty session log at playback start (overlay samples for console report)."""
+    main_window._pipeline_profile_session_samples = deque()
+
+
+def append_pipeline_profile_session_sample(
+    main_window: Any,
+    profile_payload: dict[str, Any],
+    rows: List[Tuple[str, float]],
+) -> None:
+    """Record one frame while the pipeline profile overlay is enabled."""
+    if not main_window.control.get("PipelineProfileOverlayEnableToggle", False):
+        return
+    samples: Deque[dict[str, Any]] | None = getattr(
+        main_window, "_pipeline_profile_session_samples", None
+    )
+    if samples is None:
+        samples = deque()
+        main_window._pipeline_profile_session_samples = samples
+    stages_ms: dict[str, float] = {}
+    for k, v in rows:
+        try:
+            stages_ms[str(k)] = float(v)
+        except (TypeError, ValueError):
+            pass
+    samples.append(
+        {
+            "frame_number": profile_payload.get("frame_number"),
+            "worker_thread": profile_payload.get("worker_thread"),
+            "queue_at_emit": profile_payload.get("frame_queue_depth_at_emit"),
+            "queue_max": profile_payload.get("frame_queue_max"),
+            "stages_ms": stages_ms,
+        }
+    )
+    _append_pipeline_profile_csv_row(profile_payload, stages_ms)
+    while len(samples) > _PIPELINE_PROFILE_SESSION_MAX:
+        samples.popleft()
+
+
+def _append_pipeline_profile_csv_row(
+    profile_payload: dict[str, Any],
+    stages_ms: dict[str, float],
+) -> None:
+    """Append one row when VISIOMASTER_PIPELINE_PROFILE_CSV points to a file path."""
+    path = os.environ.get("VISIOMASTER_PIPELINE_PROFILE_CSV", "").strip()
+    if not path:
+        return
+    try:
+        fn = profile_payload.get("frame_number")
+        wt = profile_payload.get("worker_thread")
+        qe = profile_payload.get("frame_queue_depth_at_emit")
+        qm = profile_payload.get("frame_queue_max")
+        write_header = not os.path.isfile(path) or os.path.getsize(path) == 0
+        with open(path, "a", newline="", encoding="utf-8") as fp:
+            w = csv.writer(fp)
+            if write_header:
+                w.writerow(
+                    [
+                        "frame_number",
+                        "worker_thread",
+                        "queue_at_emit",
+                        "queue_max",
+                        "stages_ms_json",
+                    ]
+                )
+            w.writerow(
+                [
+                    fn,
+                    wt,
+                    qe,
+                    qm,
+                    json.dumps(stages_ms, separators=(",", ":")),
+                ]
+            )
+    except OSError as e:
+        print(f"[WARN] Pipeline profile CSV append failed ({path}): {e}", flush=True)
+
+
+def print_pipeline_profile_session_report(main_window: Any) -> None:
+    """After stop: print min/avg/max per stage for A/B comparisons."""
+    samples: Deque[dict[str, Any]] | None = getattr(
+        main_window, "_pipeline_profile_session_samples", None
+    )
+    if not samples:
+        return
+    snap = list(samples)
+    samples.clear()
+    n = len(snap)
+    pfx = _PIPELINE_PROFILE_SESSION_REPORT_PREFIX
+    qvals: list[int] = []
+    qmax_cap: int | None = None
+    for s in snap:
+        qe = s.get("queue_at_emit")
+        if qe is not None:
+            try:
+                qvals.append(int(qe))
+            except (TypeError, ValueError):
+                pass
+        qm = s.get("queue_max")
+        if qm is not None and qmax_cap is None:
+            try:
+                qmax_cap = int(qm)
+            except (TypeError, ValueError):
+                pass
+    keys: set[str] = set()
+    for s in snap:
+        keys.update(s["stages_ms"].keys())
+
+    def _feeder_key_order(k: str) -> int:
+        try:
+            return PIPELINE_PROFILE_FEEDER_ORDER.index(k)
+        except ValueError:
+            return 999
+
+    feeder_keys = sorted(keys & PIPELINE_PROFILE_FEEDER_KEY_SET, key=_feeder_key_order)
+    worker_keys = sorted(keys - PIPELINE_PROFILE_FEEDER_KEY_SET)
+
+    def stats_for_key(k: str) -> tuple[float, float, float, int]:
+        vals = [s["stages_ms"][k] for s in snap if k in s["stages_ms"]]
+        if not vals:
+            return 0.0, 0.0, 0.0, 0
+        return sum(vals) / len(vals), min(vals), max(vals), len(vals)
+
+    lines: list[str] = []
+    lines.append(f"{pfx} ========== Session summary (n={n} samples) ==========")
+    if qvals:
+        qa = sum(qvals) / len(qvals)
+        lines.append(
+            f"{pfx} Queue at emit: avg={qa:.2f} min={min(qvals)} max={max(qvals)}"
+            + (f" (queue maxsize={qmax_cap})" if qmax_cap is not None else "")
+        )
+    f_sums: list[float] = []
+    w_sums: list[float] = []
+    for s in snap:
+        sm = s["stages_ms"]
+        f_sums.append(sum(sm[k] for k in sm if k in PIPELINE_PROFILE_FEEDER_KEY_SET))
+        w_sums.append(sum(sm[k] for k in sm if k not in PIPELINE_PROFILE_FEEDER_KEY_SET))
+    if f_sums:
+        lines.append(
+            f"{pfx} Sum Feeder ms/frame: avg={sum(f_sums)/len(f_sums):.2f} "
+            f"min={min(f_sums):.2f} max={max(f_sums):.2f}"
+        )
+    if w_sums:
+        lines.append(
+            f"{pfx} Sum Worker ms/frame: avg={sum(w_sums)/len(w_sums):.2f} "
+            f"min={min(w_sums):.2f} max={max(w_sums):.2f}"
+        )
+
+    def _block(title: str, ks: List[str]) -> None:
+        if not ks:
+            return
+        lines.append(f"{pfx} --- {title} ---")
+        for k in ks:
+            avg, vmin, vmax, cnt = stats_for_key(k)
+            if cnt == 0:
+                continue
+            lab = PIPELINE_STAGE_LABELS.get(k, k)
+            lines.append(
+                f"{pfx}   {lab}: avg={avg:.2f} ms  min={vmin:.2f}  max={vmax:.2f}  (n={cnt})"
+            )
+
+    _block("Feeder thread", feeder_keys)
+    _block("Worker thread", worker_keys)
+    lines.append(f"{pfx} ========== End session summary ==========")
+    lines.append(
+        f"{pfx} Baseline tools: VISIOMASTER_PERF_STAGES=1 (console per frame); "
+        "VISIOMASTER_PIPELINE_PROFILE_CSV=path.csv (append rows during session); "
+        "VISIOMASTER_NVTX=1 + NVIDIA Nsight Systems (GPU overlap)."
+    )
+    print("\n".join(lines), flush=True)
+

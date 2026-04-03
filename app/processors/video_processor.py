@@ -31,6 +31,7 @@ from app.ui.widgets.actions import list_view_actions
 from app.ui.widgets.actions import save_load_actions
 from app.ui.widgets.settings_layout_data import CAMERA_BACKENDS
 import app.helpers.miscellaneous as misc_helpers
+from app.helpers.cuda_timeline import nvtx_range
 from app.helpers.screen_capture import (
     create_screen_capture_from_control,
     mss_available,
@@ -158,6 +159,7 @@ class VideoProcessor(QObject):
         self.frame_queue: queue.Queue[Any] = queue.Queue(
             maxsize=self.max_display_buffer_size
         )
+        self._feeder_cuda_stream: Optional[torch.cuda.Stream] = None
         # This list will hold our *persistent* worker threads
         self.worker_threads: List[threading.Thread] = []
         # Single-frame (scrubbing) worker — tracked so a new seek can stop the old one
@@ -882,17 +884,28 @@ class VideoProcessor(QObject):
 
         import contextlib
 
-        # VRAM Optimization: Get the current global stream instead of a custom one.
-        local_stream = (
-            torch.cuda.current_stream() if torch.cuda.is_available() else None
+        use_sep = self.main_window.control.get(
+            "PipelineSeparateCudaStreamsToggle", False
         )
+        if (
+            use_sep
+            and torch.cuda.is_available()
+            and self.main_window.models_processor.device == "cuda"
+        ):
+            if self._feeder_cuda_stream is None:
+                self._feeder_cuda_stream = torch.cuda.Stream()
+            local_stream = self._feeder_cuda_stream
+        else:
+            local_stream = (
+                torch.cuda.current_stream() if torch.cuda.is_available() else None
+            )
         stream_context = (
             torch.cuda.stream(local_stream)
             if local_stream
             else contextlib.nullcontext()
         )
 
-        with stream_context:
+        with nvtx_range("VisoMaster/feeder/detect"), stream_context:
             use_landmark = local_control_for_worker.get("LandmarkDetectToggle", True)
             landmark_mode = local_control_for_worker.get(
                 "LandmarkDetectModelSelection", "203"
@@ -2096,6 +2109,25 @@ class VideoProcessor(QObject):
         self.main_window.models_processor.set_number_of_threads(value)
         self.num_threads = value
 
+    def _rebuild_frame_queue_from_control(self) -> None:
+        """Resize frame_queue from Settings → General (applied when worker pool starts)."""
+        try:
+            mult = int(
+                self.main_window.control.get(
+                    "PipelineInflightBufferMultiplierSlider", 4
+                )
+            )
+        except (TypeError, ValueError):
+            mult = 4
+        mult = max(2, min(24, mult))
+        self.preroll_target = max(20, self.num_threads * 2)
+        self.max_display_buffer_size = max(16, self.preroll_target * mult)
+        self.frame_queue = queue.Queue(maxsize=self.max_display_buffer_size)
+        print(
+            f"[INFO] Frame queue: maxsize={self.max_display_buffer_size} "
+            f"(preroll={self.preroll_target}, multiplier={mult})"
+        )
+
     def process_video(self):
         """
         Start video processing.
@@ -2250,6 +2282,7 @@ class VideoProcessor(QObject):
         # Ensure old workers are cleared (from a previous run)
         self.join_and_clear_threads()
         self.worker_threads = []
+        self._rebuild_frame_queue_from_control()
         # Clear any stale tasks or poison pills left from the previous session.
         # join_and_clear_threads() returns early when worker_threads is empty,
         # so pills from workers that exited via stop_event (not pill consumption)
@@ -5579,6 +5612,7 @@ class VideoProcessor(QObject):
         # Ensure old workers are cleaned up (if present)
         self.join_and_clear_threads()
         self.worker_threads = []
+        self._rebuild_frame_queue_from_control()
         for i in range(self.num_threads):
             worker = FrameWorker(
                 frame_queue=self.frame_queue,  # Pass the task queue
@@ -6312,6 +6346,7 @@ class VideoProcessor(QObject):
 
         self.join_and_clear_threads()
         self.worker_threads = []
+        self._rebuild_frame_queue_from_control()
         for i in range(self.num_threads):
             worker = FrameWorker(
                 frame_queue=self.frame_queue,  # Pass the task queue
@@ -6387,6 +6422,7 @@ class VideoProcessor(QObject):
 
         self.join_and_clear_threads()
         self.worker_threads = []
+        self._rebuild_frame_queue_from_control()
         for i in range(self.num_threads):
             worker = FrameWorker(
                 frame_queue=self.frame_queue,

@@ -45,7 +45,7 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "max_value": "30",
             "default": "4",
             "step": 1,
-            "help": "Set number of execution threads while playing and recording. Depends strongly on GPU VRAM.",
+            "help": "Worker pool threads for playback/recording (face pipeline). If the profile overlay shows the frame queue pegged with 1 thread, try 2; more threads can raise GPU contention—compare session summaries on stop.",
             "exec_function": control_actions.change_threads_number,
             "exec_function_args": [],
         },
@@ -92,8 +92,9 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "level": 1,
             "label": "Pipeline profile overlay (preview)",
             "default": False,
-            "help": "Show per-stage timings (feeder + worker) on the preview. Reads live while playing. "
-            "VISIOMASTER_PERF_STAGES=1 still logs to the console separately.",
+            "help": "Show per-stage timings (feeder + worker) on the preview. On stop, prints a session summary "
+            "to the console ([PIPELINE-PROFILE-SESSION]). Optional: VISIOMASTER_PIPELINE_PROFILE_CSV=file.csv "
+            "appends rows while playing; VISIOMASTER_PERF_STAGES=1 logs per frame separately.",
             "exec_function": graphics_view_actions.on_pipeline_profile_overlay_toggle,
             "exec_function_args": [],
         },
@@ -136,6 +137,30 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "parentToggle": "PipelineProfileOverlayEnableToggle",
             "requiredToggleValue": True,
             "help": "Call cuda.synchronize() at each stage mark for faithful GPU times; reduces preview FPS.",
+        },
+        "PipelineInflightBufferMultiplierSlider": {
+            "level": 1,
+            "label": "Inflight buffer (× preroll)",
+            "min_value": "2",
+            "max_value": "24",
+            "default": "4",
+            "step": 1,
+            "help": "Frame queue max ≈ preroll × this value (preroll scales with worker threads). "
+            "Higher = more overlap between feeder and workers if RAM allows; lower = less latency/RAM.",
+        },
+        "PipelineSeparateCudaStreamsToggle": {
+            "level": 1,
+            "label": "Separate CUDA streams (feeder vs workers)",
+            "default": False,
+            "help": "Use dedicated CUDA streams for feeder detection and worker inference to improve "
+            "GPU overlap on some drivers. If unstable, turn off. For Nsight: set VISIOMASTER_NVTX=1.",
+        },
+        "ArcFaceBatchInferenceToggle": {
+            "level": 1,
+            "label": "Batch ArcFace (2+ faces, Inswapper128 path)",
+            "default": True,
+            "help": "When several faces need embeddings on the same frame, run one batched ORT call "
+            "(Inswapper128ArcFace + Opal/Pearl, non-Custom). Falls back per-face if batch fails.",
         },
     },
     "Output Settings": {

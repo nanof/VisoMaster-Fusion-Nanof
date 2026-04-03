@@ -36,6 +36,7 @@ from app.helpers.miscellaneous import (
     keypoints_adjustments,
     get_grid_for_pasting,
 )
+from app.helpers.cuda_timeline import nvtx_range
 from app.helpers.vr_utils import EquirectangularConverter, PerspectiveConverter
 from app.helpers.typing_helper import ParametersTypes
 from app.processors.frame_enhancers import FrameEnhancers
@@ -334,8 +335,17 @@ class FrameWorker(threading.Thread):
         ).view(1, 1, 3, 3)
         self.kernel_sobel_y = self.kernel_sobel_x.transpose(2, 3)
 
-        # Thread-safety. Create a frame_worker stream as cpu uses multithreaded streams but GPU makes a queue.
-        self.worker_stream = None  # torch.cuda.Stream() if self.models_processor.device == "cuda" else None
+        # Optional dedicated stream when Settings → Separate CUDA streams is enabled.
+        use_sep = main_window.control.get("PipelineSeparateCudaStreamsToggle", False)
+        self.worker_stream = (
+            torch.cuda.Stream()
+            if (
+                use_sep
+                and device == "cuda"
+                and torch.cuda.is_available()
+            )
+            else None
+        )
 
     def set_scaling_transforms(self, control_params):
         """Initializes the torchvision transforms based on user interpolation settings."""
@@ -547,7 +557,7 @@ class FrameWorker(threading.Thread):
                 else contextlib.nullcontext()
             )
 
-            with stream_context:
+            with nvtx_range("VisoMaster/worker/process_frame"), stream_context:
                 local_control_state = self.local_control_state_from_feeder
                 _profile_collect = _pipeline_profile_collect_enabled(self.main_window)
 
@@ -1212,11 +1222,30 @@ class FrameWorker(threading.Thread):
             return None
         stages = list(worker_payload["stages"]) if worker_payload else []
         total = float(worker_payload["total_ms"]) if worker_payload else 0.0
+        fd_dict = dict(fd) if fd else {}
+        feeder_total = 0.0
+        for _k, _v in fd_dict.items():
+            try:
+                feeder_total += float(_v)
+            except (TypeError, ValueError):
+                pass
+        q_depth, q_max = 0, 0
+        fq = getattr(self.video_processor, "frame_queue", None)
+        if fq is not None:
+            try:
+                q_depth = fq.qsize()
+                q_max = int(fq.maxsize)
+            except (TypeError, ValueError, AttributeError):
+                pass
         return {
-            "feeder": dict(fd) if fd else {},
+            "feeder": fd_dict,
             "worker": stages,
             "worker_total_ms": total,
+            "feeder_total_ms": feeder_total,
             "worker_thread": self.name,
+            "frame_number": int(self.frame_number),
+            "frame_queue_depth_at_emit": q_depth,
+            "frame_queue_max": q_max,
         }
 
     # ------------------------------------------------------------------
@@ -2377,13 +2406,15 @@ class FrameWorker(threading.Thread):
             or isinstance(kpss_5, list)
             and len(kpss_5) > 0
         ):
+            _arcface_batch_on = control.get("ArcFaceBatchInferenceToggle", True)
+            _work_faces: list[dict[str, Any]] = []
             for i in range(len(kpss_5)):
                 _bbox_i = bboxes[i]
                 if not is_detected_face_eligible_for_matching(
                     kpss_5[i], _bbox_i, self._MIN_FACE_PIXELS
                 ):
                     continue  # too small to produce meaningful swap
-                face_emb: np.ndarray
+                face_emb: np.ndarray | None = None
                 if _use_recognition_cache:
                     _cached_emb = (
                         self.video_processor.try_reuse_recognition_embedding(
@@ -2397,40 +2428,76 @@ class FrameWorker(threading.Thread):
                     )
                     if _cached_emb is not None:
                         face_emb = _cached_emb
-                    else:
-                        face_emb, _ = self.models_processor.run_recognize_direct(
-                            img,
-                            kpss_5[i],
-                            _rec_sim,
-                            _recognition_arc_model,
-                        )
-                        self.video_processor.store_recognition_embedding(
-                            self.frame_number,
-                            i,
-                            _bbox_i,
-                            kpss_5[i],
-                            face_emb,
-                            _recognition_arc_model,
-                            _rec_sim,
-                        )
-                else:
-                    face_emb, _ = self.models_processor.run_recognize_direct(
-                        img,
-                        kpss_5[i],
-                        _rec_sim,
-                        _recognition_arc_model,
-                    )
-                # FW-BUG-01: bounds check before indexing kpss
                 kps_all_i = kpss[i] if kpss is not None and i < len(kpss) else None
-                det_faces_data_for_display.append(
+                _work_faces.append(
                     {
+                        "i": i,
+                        "bbox": _bbox_i,
                         "kps_5": kpss_5[i],
                         "kps_all": kps_all_i,
                         "embedding": face_emb,
-                        "bbox": bboxes[i],
+                    }
+                )
+
+            _need_emb = [w for w in _work_faces if w["embedding"] is None]
+            if _need_emb:
+                _batch_ok = False
+                if _arcface_batch_on and len(_need_emb) >= 2:
+                    _kpsl = [w["kps_5"] for w in _need_emb]
+                    with nvtx_range("VisoMaster/worker/arcface_batch"):
+                        _batched = self.models_processor.run_recognize_direct_batch(
+                            img,
+                            _kpsl,
+                            _rec_sim,
+                            _recognition_arc_model,
+                        )
+                    if _batched is not None and len(_batched) == len(_need_emb):
+                        _batch_ok = all(x is not None for x in _batched)
+                        if _batch_ok:
+                            for _w, _e in zip(_need_emb, _batched):
+                                _w["embedding"] = _e
+                                if _use_recognition_cache:
+                                    self.video_processor.store_recognition_embedding(
+                                        self.frame_number,
+                                        int(_w["i"]),
+                                        _w["bbox"],
+                                        _w["kps_5"],
+                                        _e,
+                                        _recognition_arc_model,
+                                        _rec_sim,
+                                    )
+                if not _batch_ok:
+                    for _w in _need_emb:
+                        if _w["embedding"] is not None:
+                            continue
+                        _e2, _ = self.models_processor.run_recognize_direct(
+                            img,
+                            _w["kps_5"],
+                            _rec_sim,
+                            _recognition_arc_model,
+                        )
+                        _w["embedding"] = _e2
+                        if _use_recognition_cache and _e2 is not None:
+                            self.video_processor.store_recognition_embedding(
+                                self.frame_number,
+                                int(_w["i"]),
+                                _w["bbox"],
+                                _w["kps_5"],
+                                _e2,
+                                _recognition_arc_model,
+                                _rec_sim,
+                            )
+
+            for _w in _work_faces:
+                det_faces_data_for_display.append(
+                    {
+                        "kps_5": _w["kps_5"],
+                        "kps_all": _w["kps_all"],
+                        "embedding": _w["embedding"],
+                        "bbox": _w["bbox"],
                         "original_face": None,
                         "swap_mask": None,
-                        "matched_target": None,  # FW-BUG-09: cache slot
+                        "matched_target": None,
                     }
                 )
 

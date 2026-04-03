@@ -191,10 +191,13 @@ def update_preview_media_metadata(main_window: "MainWindow") -> None:
 
 def start_playback_fps_preview_session(main_window: "MainWindow") -> None:
     """Start session-average FPS measurement from Play (video or webcam)."""
+    from app.ui.widgets.actions import pipeline_profile_actions as _ppa_sess
+
     main_window._preview_fps_label_last_ui_sec = 0.0
     main_window._playback_preview_fps_active = True
     main_window._playback_preview_fps_start = time.perf_counter()
     main_window._playback_preview_fps_frames = 0
+    _ppa_sess.clear_pipeline_profile_session_samples(main_window)
 
 
 def reset_playback_fps_preview_session(main_window: "MainWindow") -> None:
@@ -217,6 +220,7 @@ def reset_playback_fps_preview_session(main_window: "MainWindow") -> None:
 
     from app.ui.widgets.actions import pipeline_profile_actions as ppa
 
+    ppa.print_pipeline_profile_session_report(main_window)
     ppa.reset_pipeline_profile_state(main_window)
     update_pipeline_profile_overlay(main_window, None)
 
@@ -292,7 +296,35 @@ def update_pipeline_profile_overlay(
         if isinstance(profile_payload, dict)
         else None
     )
-    text = ppa.aggregate_rows_for_display(main_window, rows, wt)
+    header_lines: list[str] = []
+    vp_ov = getattr(main_window, "video_processor", None)
+    if vp_ov is not None:
+        fq = getattr(vp_ov, "frame_queue", None)
+        if fq is not None:
+            try:
+                header_lines.append(
+                    f"Queue (live): {fq.qsize()}/{fq.maxsize}"
+                )
+            except (TypeError, ValueError, AttributeError):
+                pass
+    if isinstance(profile_payload, dict):
+        qe = profile_payload.get("frame_queue_depth_at_emit")
+        qm = profile_payload.get("frame_queue_max")
+        if qe is not None and qm is not None:
+            try:
+                header_lines.append(
+                    f"Queue (at emit): {int(qe)}/{int(qm)}"
+                )
+            except (TypeError, ValueError):
+                pass
+        fn = profile_payload.get("frame_number")
+        if fn is not None and wt:
+            header_lines.append(f"Profile frame: {fn} · {wt}")
+    text = ppa.aggregate_rows_for_display(
+        main_window, rows, wt, header_lines=header_lines or None
+    )
+    if rows and isinstance(profile_payload, dict):
+        ppa.append_pipeline_profile_session_sample(main_window, profile_payload, rows)
     lbl.setText(text)
     lbl.adjustSize()
     position_preview_overlay_labels(main_window)

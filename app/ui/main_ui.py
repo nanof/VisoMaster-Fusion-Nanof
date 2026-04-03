@@ -292,9 +292,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop
         )
         self.previewPipelineProfileLabel.setWordWrap(False)
-        self.previewPipelineProfileLabel.setMaximumWidth(720)
+        self.previewPipelineProfileLabel.setMaximumWidth(880)
         self.previewPipelineProfileLabel.setToolTip(
-            "Per-stage timings (feeder + worker). Settings → General: pipeline profile overlay."
+            "Feeder vs worker stages, queue depth, per-thread columns. On stop, a session summary prints to the console (prefix [PIPELINE-PROFILE-SESSION]). Settings → General: pipeline profile overlay."
         )
         self.previewPipelineProfileLabel.setAttribute(
             QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
