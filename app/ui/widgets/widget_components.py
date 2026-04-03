@@ -4,7 +4,7 @@ import traceback
 from functools import partial
 import uuid
 from typing import TYPE_CHECKING, Any, Dict
-from send2trash import send2trash
+from app.helpers.recycle_bin import recycle_path
 import subprocess
 import sys
 
@@ -393,7 +393,7 @@ class TargetMediaCardButton(CardButton):
 
         # Send the file to the trash
         if os.path.exists(self.media_path):
-            send2trash(self.media_path)
+            recycle_path(self.media_path)
             print(f"[INFO] {self.media_path} has been sent to the trash.")
         else:
             print(f"[ERROR] {self.media_path} does not exist.")
@@ -1076,7 +1076,7 @@ class InputFaceCardButton(CardButton):
 
         # Send the file to the trash
         if os.path.exists(self.media_path):
-            send2trash(self.media_path)
+            recycle_path(self.media_path)
             print(f"[INFO] {self.media_path} has been sent to the trash.")
         else:
             print(f"[ERROR] {self.media_path} does not exist.")

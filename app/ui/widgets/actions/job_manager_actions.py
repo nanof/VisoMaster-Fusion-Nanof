@@ -13,7 +13,7 @@ import numpy as np
 import threading
 import re
 import traceback  # Import traceback for error logging
-from send2trash import send2trash
+from app.helpers.recycle_bin import recycle_path
 
 from app.ui.widgets.actions import common_actions as common_widget_actions
 from app.ui.widgets.actions import card_actions
@@ -190,7 +190,7 @@ def delete_job(main_window: "MainWindow") -> bool:
         job_file = jobs_dir / f"{job_name}.json"
         if job_file.exists():
             try:
-                send2trash(str(job_file))  # Use send2trash for safety
+                recycle_path(job_file)
                 print(f"[INFO] Job moved to trash: {job_file}")
                 deleted_any = True
             except Exception as e:

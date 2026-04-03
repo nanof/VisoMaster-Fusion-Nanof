@@ -2,7 +2,7 @@ import json
 from PySide6 import QtWidgets, QtCore
 from typing import TYPE_CHECKING
 from functools import partial
-from send2trash import send2trash
+from app.helpers.recycle_bin import recycle_path
 
 from app.ui.widgets.actions import common_actions as common_widget_actions
 from app.helpers.miscellaneous import ParametersDict
@@ -89,9 +89,9 @@ def delete_preset(main_window: "MainWindow", item: "QListWidgetItem"):
 
     try:
         if delete_path.exists():
-            send2trash(str(delete_path))
+            recycle_path(delete_path)
         if delete_path_ctl.exists():
-            send2trash(str(delete_path_ctl))
+            recycle_path(delete_path_ctl)
 
         print(f"[INFO] Preset: {preset_name} has been sent to the trash.")
         refresh_presets_list(main_window)
