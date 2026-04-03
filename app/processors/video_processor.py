@@ -18,6 +18,7 @@ import torch
 import pyvirtualcam
 import math
 import copy
+import json
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
 # Internal project imports
@@ -317,11 +318,116 @@ class VideoProcessor(QObject):
 
         self.frames_pipeline_profile: Dict[int, Any] = {}
 
+        # EMA across consecutive *display-ordered* frames when frame enhancer + temporal
+        # smooth are on (mitigates per-frame SR flicker; safe with multi-worker decode).
+        self._enhancer_temporal_prev_frame: numpy.ndarray | None = None
+        self._enhancer_temporal_prev_fn: int | None = None
+
+        # Preview-only: K lerped blends between prev and current, then full frame
+        # (K+1 display ticks per processed frame). Recording still receives only full frames.
+        self._preview_frame_gen_pending: Tuple[numpy.ndarray, int, Any] | None = None
+        self._preview_frame_gen_substep: int = 0  # blends shown; full when substep == K
+        self._preview_frame_gen_prev: numpy.ndarray | None = None
+        self._preview_frame_gen_prev_fn: int | None = None
+
         # --- Signal Connections ---
         self.frame_processed_signal.connect(self.store_frame_to_display)
         self.webcam_frame_processed_signal.connect(self.store_webcam_frame_to_display)
         self.single_frame_processed_signal.connect(self.display_current_frame)
         self.single_frame_processed_signal.connect(self.store_single_frame_to_display)
+
+    def _reset_enhancer_temporal_smooth_state(self) -> None:
+        """Drop temporal SR smooth state (seek, buffer flush, stop, enhancer off)."""
+        self._enhancer_temporal_prev_frame = None
+        self._enhancer_temporal_prev_fn = None
+
+    def _reset_preview_frame_generation_state(self) -> None:
+        self._preview_frame_gen_pending = None
+        self._preview_frame_gen_substep = 0
+        self._preview_frame_gen_prev = None
+        self._preview_frame_gen_prev_fn = None
+
+    @staticmethod
+    def _preview_frame_gen_lerp(
+        a: numpy.ndarray, b: numpy.ndarray, w: float
+    ) -> numpy.ndarray:
+        w = max(0.0, min(1.0, float(w)))
+        return (
+            a.astype(numpy.float32) * (1.0 - w) + b.astype(numpy.float32) * w
+        ).astype(numpy.uint8)
+
+    def _get_preview_frame_gen_intermediate_count(self) -> int:
+        """Number of blend-only preview ticks before the full processed frame (1–5)."""
+        try:
+            n = int(
+                str(
+                    self.main_window.control.get(
+                        "PreviewFrameGenIntermediateCountSelection", "1"
+                    )
+                )
+            )
+        except (TypeError, ValueError):
+            n = 1
+        return max(1, min(n, 5))
+
+    def _clear_frames_to_display_and_profiles(self) -> None:
+        self.frames_to_display.clear()
+        self.frames_pipeline_profile.clear()
+        self._reset_enhancer_temporal_smooth_state()
+        self._reset_preview_frame_generation_state()
+
+    def _apply_frame_enhancer_temporal_smooth(
+        self,
+        frame: numpy.ndarray,
+        frame_number_to_display: int,
+        *,
+        is_live_stream: bool,
+    ) -> numpy.ndarray:
+        """Blend current displayed frame with previous smoothed output (EMA) to reduce SR flicker."""
+        ctrl = self.main_window.control
+        if not ctrl.get("FrameEnhancerEnableToggle", False):
+            self._reset_enhancer_temporal_smooth_state()
+            return frame
+        try:
+            slider = int(ctrl.get("FrameEnhancerTemporalSmoothSlider", 0))
+        except (TypeError, ValueError):
+            slider = 0
+        if slider <= 0:
+            self._reset_enhancer_temporal_smooth_state()
+            return frame
+
+        strength = (slider / 100.0) * 0.35
+        prev = self._enhancer_temporal_prev_frame
+        prev_fn = self._enhancer_temporal_prev_fn
+
+        if prev is None or prev.shape != frame.shape or prev.dtype != frame.dtype:
+            self._enhancer_temporal_prev_frame = frame.copy()
+            self._enhancer_temporal_prev_fn = frame_number_to_display
+            return frame
+
+        if not is_live_stream:
+            if prev_fn is not None and frame_number_to_display != prev_fn + 1:
+                self._enhancer_temporal_prev_frame = frame.copy()
+                self._enhancer_temporal_prev_fn = frame_number_to_display
+                return frame
+
+        mad = float(
+            numpy.mean(
+                numpy.abs(frame.astype(numpy.float32) - prev.astype(numpy.float32))
+            )
+        )
+        if mad > 42.0:
+            self._enhancer_temporal_prev_frame = frame.copy()
+            self._enhancer_temporal_prev_fn = frame_number_to_display
+            return frame
+
+        blended = frame.astype(numpy.float32) * (1.0 - strength) + prev.astype(
+            numpy.float32
+        ) * strength
+        out = numpy.clip(blended, 0, 255).astype(frame.dtype)
+        self._enhancer_temporal_prev_frame = out.copy()
+        self._enhancer_temporal_prev_fn = frame_number_to_display
+        return out
 
     @Slot(int, numpy.ndarray, object)
     def store_frame_to_display(self, frame_number, frame, profile=None):
@@ -513,7 +619,12 @@ class VideoProcessor(QObject):
             return
         self._ensure_precise_metronome_timer()
         now_sec = time.perf_counter()
-        self.last_display_schedule_time_sec += self.target_delay_sec
+        step_sec = self.target_delay_sec
+        if self.main_window.control.get("PreviewFrameGenEnableToggle", False):
+            # K blends + 1 full tick per processed frame.
+            k = self._get_preview_frame_gen_intermediate_count()
+            step_sec /= float(k + 1)
+        self.last_display_schedule_time_sec += step_sec
         if self.last_display_schedule_time_sec < now_sec:
             self.last_display_schedule_time_sec = now_sec + 0.001
         wait_time_sec = self.last_display_schedule_time_sec - now_sec
@@ -1059,8 +1170,7 @@ class VideoProcessor(QObject):
                         self._interactive_playback_seek_pending = None
                 if pending_interactive_seek is not None:
                     with self.state_lock:
-                        self.frames_to_display.clear()
-                        self.frames_pipeline_profile.clear()
+                        self._clear_frames_to_display_and_profiles()
                         self.current_frame_number = pending_interactive_seek
                         self.next_frame_to_display = pending_interactive_seek
                     with self.frame_queue.mutex:
@@ -1135,8 +1245,7 @@ class VideoProcessor(QObject):
                                     # of decoded frames made store_frame_to_display reject work and
                                     # starve the UI when catch-up retried without a read (issue: loop
                                     # of seek+clear+continue never reached read_frame/enqueue).
-                                    self.frames_to_display.clear()
-                                    self.frames_pipeline_profile.clear()
+                                    self._clear_frames_to_display_and_profiles()
                                 seek_before_read = jump_to
                                 with self.frame_queue.mutex:
                                     self.frame_queue.queue.clear()
@@ -1633,94 +1742,173 @@ class VideoProcessor(QObject):
         frame = None
         frame_number_to_display = 0  # Used for UI update
         profile_for_overlay = None
+        preview_fg = self.main_window.control.get("PreviewFrameGenEnableToggle", False)
+        preview_from_pending = False
+        preview_skip_ffmpeg = False
+        preview_skip_increment = False
 
-        if self.file_type in LIVE_STREAM_FILE_TYPES:
-            # --- Live stream (webcam / screen) — queue of latest processed frames ---
-            if self.webcam_frames_to_display.empty():
-                self._arm_display_metronome_retry_ms(_retry_ms)
-                return  # Frame not ready, skip display
-            _w_item = self.webcam_frames_to_display.get()
-            if isinstance(_w_item, tuple) and len(_w_item) >= 2:
-                frame, profile_for_overlay = _w_item[0], _w_item[1]
+        if not preview_fg:
+            self._preview_frame_gen_pending = None
+            self._preview_frame_gen_substep = 0
+            self._preview_frame_gen_prev = None
+            self._preview_frame_gen_prev_fn = None
+
+        if preview_fg and self._preview_frame_gen_pending is not None:
+            pf, pfn, pprof = self._preview_frame_gen_pending
+            ss = self._preview_frame_gen_substep
+            k_int = self._get_preview_frame_gen_intermediate_count()
+            prev_arr = self._preview_frame_gen_prev
+            preview_from_pending = True
+            if ss < k_int:
+                w = float(ss + 1) / float(k_int + 1)
+                if (
+                    prev_arr is not None
+                    and prev_arr.shape == pf.shape
+                    and prev_arr.dtype == pf.dtype
+                ):
+                    frame = self._preview_frame_gen_lerp(prev_arr, pf, w)
+                else:
+                    frame = pf
+                frame_number_to_display = pfn
+                profile_for_overlay = None
+                self._preview_frame_gen_substep = ss + 1
+                preview_skip_ffmpeg = True
+                preview_skip_increment = True
             else:
-                frame = _w_item  # type: ignore[assignment]
-            frame_number_to_display = 0  # Not relevant for live streams
+                frame = pf
+                frame_number_to_display = pfn
+                profile_for_overlay = pprof
+                self._preview_frame_gen_pending = None
+                self._preview_frame_gen_substep = 0
+                self._preview_frame_gen_prev = pf.copy()
+                if self.file_type == "video":
+                    self._preview_frame_gen_prev_fn = pfn
+                preview_skip_ffmpeg = False
+                preview_skip_increment = False
 
-        else:
-            # --- Video/Image Logic (Dictionary) ---
-            if self.file_type == "video" and self._playback_use_wall_clock:
-                target = self._advance_past_skipped_for_display(
-                    self._expected_frame_from_wall_clock()
+        if not preview_from_pending:
+            if self.file_type in LIVE_STREAM_FILE_TYPES:
+                # --- Live stream (webcam / screen) — queue of latest processed frames ---
+                if self.webcam_frames_to_display.empty():
+                    self._arm_display_metronome_retry_ms(_retry_ms)
+                    return  # Frame not ready, skip display
+                _w_item = self.webcam_frames_to_display.get()
+                if isinstance(_w_item, tuple) and len(_w_item) >= 2:
+                    frame, profile_for_overlay = _w_item[0], _w_item[1]
+                else:
+                    frame = _w_item  # type: ignore[assignment]
+                frame_number_to_display = 0  # Not relevant for live streams
+
+            else:
+                # --- Video/Image Logic (Dictionary) ---
+                if self.file_type == "video" and self._playback_use_wall_clock:
+                    target = self._advance_past_skipped_for_display(
+                        self._expected_frame_from_wall_clock()
+                    )
+
+                    low = self.next_frame_to_display
+                    while low in self.skipped_frames and low <= self.max_frame_number:
+                        low += 1
+                    self.next_frame_to_display = low
+
+                    if low > target:
+                        self._arm_display_metronome_retry_ms(_retry_ms)
+                        return
+
+                    candidates = [
+                        k
+                        for k in self.frames_to_display
+                        if low <= k <= target and k not in self.skipped_frames
+                    ]
+                    if not candidates:
+                        self._arm_display_metronome_retry_ms(_retry_ms)
+                        return
+
+                    best = max(candidates)
+                    if best > low:
+                        for k in list(self.frames_to_display.keys()):
+                            if low <= k < best:
+                                arr = self.frames_to_display.pop(k, None)
+                                if arr is not None:
+                                    del arr
+                                self.frames_pipeline_profile.pop(k, None)
+                        self.next_frame_to_display = best
+                        if best - low >= 10:
+                            print(
+                                f"[INFO] Display: Wall-clock catch-up, skipping to frame {best} "
+                                f"(target≤{target}, had been at {low})"
+                            )
+
+                    frame_number_to_display = self.next_frame_to_display
+                else:
+                    frame_number_to_display = self.next_frame_to_display
+
+                    # Skip frames that were corrupted/skipped during processing
+                    # Find the next non-skipped frame to display
+                    original_frame = frame_number_to_display
+                    while (
+                        frame_number_to_display in self.skipped_frames
+                        and frame_number_to_display <= self.max_frame_number
+                    ):
+                        frame_number_to_display += 1
+
+                    # Update next_frame_to_display to skip all consecutive skipped frames
+                    if frame_number_to_display > original_frame:
+                        skipped_count = frame_number_to_display - original_frame
+                        print(
+                            f"[INFO] Display: Advancing past {skipped_count} skipped frame(s), jumping to frame {frame_number_to_display}"
+                        )
+                        self.next_frame_to_display = frame_number_to_display
+
+                if frame_number_to_display not in self.frames_to_display:
+                    # Frame not ready.
+                    self._arm_display_metronome_retry_ms(_retry_ms)
+                    return
+                frame = self.frames_to_display.pop(frame_number_to_display)
+                profile_for_overlay = self.frames_pipeline_profile.pop(
+                    frame_number_to_display, None
                 )
 
-                low = self.next_frame_to_display
-                while low in self.skipped_frames and low <= self.max_frame_number:
-                    low += 1
-                self.next_frame_to_display = low
-
-                if low > target:
-                    self._arm_display_metronome_retry_ms(_retry_ms)
-                    return
-
-                candidates = [
-                    k
-                    for k in self.frames_to_display
-                    if low <= k <= target and k not in self.skipped_frames
-                ]
-                if not candidates:
-                    self._arm_display_metronome_retry_ms(_retry_ms)
-                    return
-
-                best = max(candidates)
-                if best > low:
-                    for k in list(self.frames_to_display.keys()):
-                        if low <= k < best:
-                            arr = self.frames_to_display.pop(k, None)
-                            if arr is not None:
-                                del arr
-                            self.frames_pipeline_profile.pop(k, None)
-                    self.next_frame_to_display = best
-                    if best - low >= 10:
-                        print(
-                            f"[INFO] Display: Wall-clock catch-up, skipping to frame {best} "
-                            f"(target≤{target}, had been at {low})"
-                        )
-
-                frame_number_to_display = self.next_frame_to_display
-            else:
-                frame_number_to_display = self.next_frame_to_display
-
-                # Skip frames that were corrupted/skipped during processing
-                # Find the next non-skipped frame to display
-                original_frame = frame_number_to_display
-                while (
-                    frame_number_to_display in self.skipped_frames
-                    and frame_number_to_display <= self.max_frame_number
-                ):
-                    frame_number_to_display += 1
-
-                # Update next_frame_to_display to skip all consecutive skipped frames
-                if frame_number_to_display > original_frame:
-                    skipped_count = frame_number_to_display - original_frame
-                    print(
-                        f"[INFO] Display: Advancing past {skipped_count} skipped frame(s), jumping to frame {frame_number_to_display}"
-                    )
-                    self.next_frame_to_display = frame_number_to_display
-
-            if frame_number_to_display not in self.frames_to_display:
-                # Frame not ready.
-                self._arm_display_metronome_retry_ms(_retry_ms)
-                return
-            frame = self.frames_to_display.pop(frame_number_to_display)
-            profile_for_overlay = self.frames_pipeline_profile.pop(
-                frame_number_to_display, None
+            frame = self._apply_frame_enhancer_temporal_smooth(
+                frame,
+                frame_number_to_display,
+                is_live_stream=self.file_type in LIVE_STREAM_FILE_TYPES,
             )
+
+            if preview_fg:
+                k_int = self._get_preview_frame_gen_intermediate_count()
+                if self.file_type == "video":
+                    pfn = self._preview_frame_gen_prev_fn
+                    if pfn is not None and frame_number_to_display != pfn + 1:
+                        self._preview_frame_gen_prev = None
+                prev_arr = self._preview_frame_gen_prev
+                if (
+                    prev_arr is not None
+                    and prev_arr.shape == frame.shape
+                    and prev_arr.dtype == frame.dtype
+                ):
+                    self._preview_frame_gen_pending = (
+                        frame.copy(),
+                        frame_number_to_display,
+                        profile_for_overlay,
+                    )
+                    self._preview_frame_gen_substep = 0
+                    w0 = 1.0 / float(k_int + 1)
+                    frame = self._preview_frame_gen_lerp(prev_arr, frame, w0)
+                    self._preview_frame_gen_substep = 1
+                    profile_for_overlay = None
+                    preview_skip_ffmpeg = True
+                    preview_skip_increment = True
+                else:
+                    self._preview_frame_gen_prev = frame.copy()
+                    if self.file_type == "video":
+                        self._preview_frame_gen_prev_fn = frame_number_to_display
 
         # --- 7. Frame is ready: Process and Display ---
         self.current_frame = frame  # Update current frame state
 
         # Emit a signal every 500 frames to notify JobProcessor we are still alive
-        if self.file_type not in LIVE_STREAM_FILE_TYPES:  # Don't spam on live streams
+        if self.file_type not in LIVE_STREAM_FILE_TYPES and not preview_skip_increment:
             self.heartbeat_frame_counter += 1
             if self.heartbeat_frame_counter >= 500:
                 self.heartbeat_frame_counter = 0
@@ -1729,8 +1917,10 @@ class VideoProcessor(QObject):
         # Send to Virtual Cam
         self.send_frame_to_virtualcam(frame)
 
-        # Write to FFmpeg
-        if self.is_processing_segments or self.recording:
+        # Write to FFmpeg (skip preview-only blend ticks)
+        if (
+            self.is_processing_segments or self.recording
+        ) and not preview_skip_ffmpeg:
             if (
                 self.recording_sp
                 and self.recording_sp.stdin
@@ -1761,7 +1951,7 @@ class VideoProcessor(QObject):
                 )
 
         # Update UI
-        if self.file_type not in LIVE_STREAM_FILE_TYPES:
+        if self.file_type not in LIVE_STREAM_FILE_TYPES and not preview_skip_increment:
             # This is the metronome tick.
             if frame_number_to_display in self.main_window.markers:
                 # Acquire lock to safely modify parameters and controls
@@ -1802,7 +1992,7 @@ class VideoProcessor(QObject):
         self.playback_frames_displayed += 1
 
         # --- 8. Clean up and Increment ---
-        if self.file_type not in LIVE_STREAM_FILE_TYPES:
+        if self.file_type not in LIVE_STREAM_FILE_TYPES and not preview_skip_increment:
             # Increment for next frame
             self.next_frame_to_display += 1
 
@@ -2016,8 +2206,7 @@ class VideoProcessor(QObject):
         # 6a. Reset Timers and Containers
         self.start_time = time.perf_counter()
         self.playback_frames_displayed = 0
-        self.frames_to_display.clear()
-        self.frames_pipeline_profile.clear()
+        self._clear_frames_to_display_and_profiles()
 
         # 6b. START WORKER POOL
         print(f"[INFO] Starting {self.num_threads} persistent worker thread(s)...")
@@ -2493,6 +2682,7 @@ class VideoProcessor(QObject):
         self._feeder_deferred_seek_read = None
         self.active_output_folder = ""
         self._cancel_single_frame_preview_state()
+        self._reset_preview_frame_generation_state()
 
         # 2. Stop utility timers and audio
         self.gpu_memory_update_timer.stop()
@@ -2525,8 +2715,7 @@ class VideoProcessor(QObject):
         # 3c. Clear display buffers and join worker threads.
         # VP-24: We clear the queue and then send poison pills to wake workers
         # blocked on queue.get().
-        self.frames_to_display.clear()
-        self.frames_pipeline_profile.clear()
+        self._clear_frames_to_display_and_profiles()
         self.clear_recognition_embedding_cache()
         self._seek_cached_frame = None  # release seek-preview frame (~6–25 MB at HD/4K)
         self.webcam_frames_to_display.queue.clear()
@@ -4153,6 +4342,192 @@ class VideoProcessor(QObject):
             print(f"[WARN] Audio validation failed for {audio_file_path}: {e}")
             return False
 
+    @staticmethod
+    def _parse_ffprobe_frame_rate_fraction(rate_str: str) -> float | None:
+        if not rate_str or rate_str == "0/0":
+            return None
+        if "/" in rate_str:
+            num, den = rate_str.split("/", 1)
+            try:
+                d = float(den)
+                if d == 0:
+                    return None
+                return float(num) / d
+            except ValueError:
+                return None
+        try:
+            return float(rate_str)
+        except ValueError:
+            return None
+
+    def _video_file_has_audio_stream(self, file_path: str) -> bool:
+        """True if ffprobe finds at least one audio stream (for safe -map in post-process)."""
+        if not file_path or not os.path.isfile(file_path):
+            return False
+        try:
+            args = [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "a",
+                "-show_entries",
+                "stream=index",
+                "-of",
+                "csv=p=0",
+                file_path,
+            ]
+            result = subprocess.run(
+                args, capture_output=True, text=True, timeout=60, check=False
+            )
+            return result.returncode == 0 and bool(result.stdout.strip())
+        except Exception:
+            return False
+
+    def _probe_video_stream_fps(self, file_path: str) -> float | None:
+        """Return container-reported video FPS via ffprobe (avg_frame_rate, then r_frame_rate)."""
+        if not file_path or not os.path.isfile(file_path):
+            return None
+        try:
+            args = [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=avg_frame_rate,r_frame_rate",
+                "-of",
+                "json",
+                file_path,
+            ]
+            result = subprocess.run(
+                args, capture_output=True, text=True, timeout=120, check=False
+            )
+            if result.returncode != 0:
+                return None
+            data = json.loads(result.stdout)
+            streams = data.get("streams") or []
+            if not streams:
+                return None
+            st0 = streams[0]
+            for key in ("avg_frame_rate", "r_frame_rate"):
+                fps = self._parse_ffprobe_frame_rate_fraction(str(st0.get(key) or ""))
+                if fps is not None and fps > 1.0:
+                    return fps
+            return None
+        except Exception as e:
+            print(f"[WARN] Failed to probe video FPS for {file_path}: {e}")
+            return None
+
+    def _apply_post_record_minterpolate_if_enabled(self, final_file_path: str) -> None:
+        """
+        Optional second FFmpeg pass: motion-compensated frame interpolation (minterpolate).
+
+        Runs only when PostRecordFrameGenEnableToggle is on. Re-encodes video with libx264;
+        audio is stream-copied (duration unchanged). For HDR or 10-bit masters, quality may
+        differ; disable if unacceptable.
+
+        Future inline neural interpolation (RIFE/ONNX) would need: output FPS = source_fps * mult;
+        metronome and raw FFmpeg -r aligned; audio via atempo or remux after offline pass;
+        frame indices remapped for markers; workers must supply ordered pairs (N, N+1) before
+        emitting synthetic frames.
+        """
+        ctrl = self.main_window.control
+        if not ctrl.get("PostRecordFrameGenEnableToggle", False):
+            return
+        if not final_file_path or not os.path.isfile(final_file_path):
+            return
+        if os.path.getsize(final_file_path) <= 0:
+            return
+
+        mult_raw = ctrl.get("PostRecordFrameGenFPSMultSelection", "2")
+        try:
+            mult = int(str(mult_raw))
+        except (TypeError, ValueError):
+            mult = 2
+        mult = max(2, min(mult, 4))
+
+        fps_in = self._probe_video_stream_fps(final_file_path)
+        if fps_in is None or fps_in <= 0:
+            print(
+                "[WARN] Post-record frame generation: could not probe FPS; skipping minterpolate."
+            )
+            return
+
+        fps_out = min(fps_in * float(mult), 120.0)
+        if fps_out <= fps_in + 1e-3:
+            return
+
+        has_audio = self._video_file_has_audio_stream(final_file_path)
+
+        src = Path(final_file_path)
+        tmp_path = str(src.parent / f"{src.stem}_minterp_{uuid.uuid4().hex[:8]}.mp4")
+        vf = (
+            f"minterpolate=fps={fps_out:.6f}:mi_mode=mci:"
+            f"mc_mode=aobmc:me_mode=bidir:vsbmc=1"
+        )
+        args = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            final_file_path,
+            "-vf",
+            vf,
+            "-map",
+            "0:v:0",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "fast",
+            "-crf",
+            "18",
+            "-pix_fmt",
+            "yuv420p",
+        ]
+        if has_audio:
+            args.extend(["-map", "0:a:0", "-c:a", "copy"])
+        args.append(tmp_path)
+        try:
+            print(
+                f"[INFO] Post-record frame generation: {fps_in:.4f} -> {fps_out:.4f} fps "
+                f"({mult}x) via FFmpeg minterpolate..."
+            )
+            subprocess.run(args, check=True, timeout=7200)
+            os.replace(tmp_path, final_file_path)
+            print("[INFO] Post-record frame generation finished successfully.")
+        except FileNotFoundError:
+            print("[ERROR] FFmpeg not found; post-record frame generation skipped.")
+            if os.path.isfile(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+        except subprocess.TimeoutExpired:
+            print("[ERROR] Post-record minterpolate timed out.")
+            if os.path.isfile(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+        except subprocess.CalledProcessError as e:
+            print(f"[ERROR] Post-record minterpolate failed: {e}")
+            if os.path.isfile(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+        except OSError as e:
+            print(f"[ERROR] Could not replace output after minterpolate: {e}")
+            if os.path.isfile(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
     def _probe_video_duration(self, file_path: str) -> float | None:
         """
         Return the duration (in seconds) of the video file at `file_path` using
@@ -4509,8 +4884,7 @@ class VideoProcessor(QObject):
             print("[INFO] Feeder thread joined.")
 
             # 4. Clear buffers and join worker threads.
-            self.frames_to_display.clear()
-            self.frames_pipeline_profile.clear()
+            self._clear_frames_to_display_and_profiles()
             with self.frame_queue.mutex:
                 self.frame_queue.queue.clear()
             print("[INFO] Waiting for final worker threads...")
@@ -4723,15 +5097,20 @@ class VideoProcessor(QObject):
                     print(
                         f"[INFO] --- Successfully created final video: {final_file_path} ---"
                     )
+                    self._apply_post_record_minterpolate_if_enabled(final_file_path)
                 except Exception as e:
                     print(f"[ERROR] Audio merge failed: {e}")
                     if self.temp_file and os.path.exists(self.temp_file):
                         print(
                             "[WARN] Falling back to video-only output for default-style recording."
                         )
-                        if not self._write_video_only_output(
+                        if self._write_video_only_output(
                             self.temp_file, final_file_path
                         ):
+                            self._apply_post_record_minterpolate_if_enabled(
+                                final_file_path
+                            )
+                        else:
                             self.main_window.display_messagebox_signal.emit(
                                 "Recording Error",
                                 f"Audio merge failed and video-only fallback also failed:\n{e}",
@@ -5092,8 +5471,7 @@ class VideoProcessor(QObject):
             return
 
         # 5. Clear containers AND START WORKER POOL for the new segment
-        self.frames_to_display.clear()
-        self.frames_pipeline_profile.clear()
+        self._clear_frames_to_display_and_profiles()
         with self.frame_queue.mutex:
             self.frame_queue.queue.clear()
 
@@ -5209,8 +5587,7 @@ class VideoProcessor(QObject):
         print(f"[INFO] Waiting for workers from segment {segment_num}...")
         self.join_and_clear_threads()
         print("[INFO] Workers joined.")
-        self.frames_to_display.clear()
-        self.frames_pipeline_profile.clear()
+        self._clear_frames_to_display_and_profiles()
 
         # 3. Finalize FFmpeg for this segment
         if self.recording_sp:
@@ -5447,6 +5824,7 @@ class VideoProcessor(QObject):
             print(
                 f"[INFO] --- {log_prefix}Successfully created final video: {final_file_path} ---"
             )
+            self._apply_post_record_minterpolate_if_enabled(final_file_path)
 
         except subprocess.CalledProcessError as e:
             print(f"[ERROR] FFmpeg command failed during final concatenation: {e}")
@@ -5457,6 +5835,7 @@ class VideoProcessor(QObject):
                 f"FFmpeg command failed during concatenation:\n{e}\nCould not create final video.",
             ):
                 concatenation_successful = True
+                self._apply_post_record_minterpolate_if_enabled(final_file_path)
         except FileNotFoundError:
             print("[ERROR] FFmpeg not found. Ensure it's in your system PATH.")
             self.main_window.display_messagebox_signal.emit(
@@ -5470,6 +5849,7 @@ class VideoProcessor(QObject):
                 f"An unexpected error occurred:\n{e}",
             ):
                 concatenation_successful = True
+                self._apply_post_record_minterpolate_if_enabled(final_file_path)
 
         finally:
             # 6. Cleanup
@@ -5813,8 +6193,7 @@ class VideoProcessor(QObject):
         self.clear_recognition_embedding_cache()
 
         # 6. Clear Containers
-        self.frames_to_display.clear()
-        self.frames_pipeline_profile.clear()
+        self._clear_frames_to_display_and_profiles()
         self.webcam_frames_to_display.queue.clear()
         with self.frame_queue.mutex:
             self.frame_queue.queue.clear()
@@ -5889,8 +6268,7 @@ class VideoProcessor(QObject):
         self.sync_feeder_ui_face_flags_from_main_window()
         self.clear_recognition_embedding_cache()
 
-        self.frames_to_display.clear()
-        self.frames_pipeline_profile.clear()
+        self._clear_frames_to_display_and_profiles()
         self.webcam_frames_to_display.queue.clear()
         with self.frame_queue.mutex:
             self.frame_queue.queue.clear()

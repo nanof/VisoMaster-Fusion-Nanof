@@ -184,6 +184,26 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "default": False,
             "help": "Auto start over when video playing to the end.(Not work for recording)",
         },
+        "PreviewFrameGenEnableToggle": {
+            "level": 1,
+            "label": "Frame Interpolation",
+            "default": False,
+            "help": "Frame Interpolation: lerped preview and virtual-cam frames between each processed "
+            "frame (weights 1/(K+1)…K/(K+1), then the full frame; K is set below). Metronome step is "
+            "divided by K+1 so playback speed stays correct. CPU-only linear blend, not optical flow. "
+            "Recording still writes only full processed frames. If preview drifts vs Live Sound, try "
+            "disabling sync.",
+        },
+        "PreviewFrameGenIntermediateCountSelection": {
+            "level": 2,
+            "label": "Interpolation steps (K)",
+            "options": ["1", "2", "3", "4", "5"],
+            "default": "1",
+            "parentToggle": "PreviewFrameGenEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Frame Interpolation: K blend-only ticks before each full processed frame "
+            "(total preview ticks = K+1). Higher = smoother but more CPU and shorter time per tick.",
+        },
         "FrameSkipStepSlider": {
             "level": 1,
             "label": "Frame Skip Step",
@@ -285,6 +305,23 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "label": "Open Output Folder After Recording",
             "default": False,
             "help": "Opens the output folder after recording ends.",
+        },
+        "PostRecordFrameGenEnableToggle": {
+            "level": 1,
+            "label": "Post-record frame generation (FFmpeg minterpolate)",
+            "default": False,
+            "help": "After the final file is written, run a second FFmpeg pass with the minterpolate "
+            "filter to increase frame rate (motion-compensated). Re-encodes video with libx264 (yuv420p); "
+            "audio is copied. Slower; HDR/10-bit masters may need this off. Preview/virtual cam unchanged.",
+        },
+        "PostRecordFrameGenFPSMultSelection": {
+            "level": 2,
+            "label": "Frame-gen FPS multiplier",
+            "options": ["2", "3", "4"],
+            "default": "2",
+            "parentToggle": "PostRecordFrameGenEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Target output FPS ≈ source FPS × multiplier (capped at 120). Higher = smoother motion but slower encode.",
         },
         "HDREncodeToggle": {
             "level": 1,
@@ -698,6 +735,17 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "parentToggle": "FrameEnhancerEnableToggle",
             "requiredToggleValue": True,
             "help": "Blends the enhanced results back into the original frame.",
+        },
+        "FrameEnhancerTemporalSmoothSlider": {
+            "level": 2,
+            "label": "Video temporal smooth",
+            "min_value": "0",
+            "max_value": "100",
+            "default": "0",
+            "step": 1,
+            "parentToggle": "FrameEnhancerEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Reduces frame-to-frame flicker from per-frame upscalers by blending with the previous displayed frame (ordered playback). Resets on seeks, buffer flushes, non-sequential frames, or large scene changes. 0 = off.",
         },
     },
     "Webcam and Virtualcam Settings": {
