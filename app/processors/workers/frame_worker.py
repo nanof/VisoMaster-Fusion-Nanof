@@ -156,6 +156,9 @@ class FrameWorker(threading.Thread):
 
     # Q-IMP-04: minimum face bounding-box side length (pixels) to process
     _MIN_FACE_PIXELS: int = 20
+    # FW-PERF-11: Auto Restore sharpness search uses this max side (area resize) — ~4× fewer
+    # pixels than 512² per score call; final blend still uses full-res tensors.
+    _AUTO_RESTORE_SCORE_MAX_SIDE: int = 256
     preview_generation: int
 
     def __init__(
@@ -224,6 +227,8 @@ class FrameWorker(threading.Thread):
         self._RESIZE_CACHE_MAX = 40  # swap_core uses many dynamic (H,W) bilinear+AA pairs
         self._gaussian_blur_cache: _OrderedDict = _OrderedDict()
         self._GAUSSIAN_BLUR_CACHE_MAX = 48
+        # FW-PERF-11: v2.GaussianBlur chain for face_restorer_auto blur fallback (lazy-built)
+        self._auto_restore_blur_chain: list[v2.GaussianBlur] | None = None
         self._d2h_pin_hwc: torch.Tensor | None = None
         self._d2h_pin_shape: tuple[int, ...] | None = None
 
@@ -4401,17 +4406,16 @@ class FrameWorker(threading.Thread):
                 "FaceRestorerAutoSharpMask2AdjustDecimalSlider"
             ]
             automaskblur2 = 2
-            restore_mask = mask_forcalc_512.clone()
 
             alpha_auto2, blur_value2 = self.face_restorer_auto(
-                original_face_512.clone(),
-                swap_original2.clone(),
+                original_face_512,
+                swap_original2,
                 swap2,
                 alpha_restorer2,
                 adjust_sharpness2,
                 scale_factor2,
                 debug,
-                restore_mask,
+                mask_forcalc_512,
                 automasktoggle2,
                 automaskadjust2,
                 automaskblur2,
@@ -5215,28 +5219,25 @@ class FrameWorker(threading.Thread):
             parameters["FaceRestorerEnableToggle"]
             and parameters["FaceRestorerAutoEnableToggle"]
         ):
-            original_face_512_autorestore = original_face_512.clone()
             assert swap_original is not None, (
                 "swap_original must be set when FaceRestorerEnableToggle is active"
             )
-            swap_original_autorestore = swap_original.clone()
             alpha_restorer = float(parameters["FaceRestorerBlendSlider"]) / 100.0
             adjust_sharpness = float(parameters["FaceRestorerAutoSharpAdjustSlider"])
             scale_factor = round(tform.scale, 2)
             automasktoggle = parameters["FaceRestorerAutoMaskEnableToggle"]
             automaskadjust = parameters["FaceRestorerAutoSharpMaskAdjustDecimalSlider"]
             automaskblur = 2
-            restore_mask = mask_forcalc_512.clone()
 
             alpha_auto, blur_value = self.face_restorer_auto(
-                original_face_512_autorestore,
-                swap_original_autorestore,
+                original_face_512,
+                swap_original,
                 swap_restorecalc,
                 alpha_restorer,
                 adjust_sharpness,
                 scale_factor,
                 debug,
-                restore_mask,
+                mask_forcalc_512,
                 automasktoggle,
                 automaskadjust,
                 automaskblur,
@@ -6279,6 +6280,37 @@ class FrameWorker(threading.Thread):
             self.kernel_sobel_x = self.kernel_sobel_x.to(device)
             self.kernel_sobel_y = self.kernel_sobel_y.to(device)
 
+    def _get_auto_restore_blur_chain(self) -> list[v2.GaussianBlur]:
+        """Lazy-cached GaussianBlur 0..10 for Auto Restore blur fallback (avoids per-hit alloc)."""
+        ch = self._auto_restore_blur_chain
+        if ch is None:
+            max_blur_strength = 10
+            self._auto_restore_blur_chain = [
+                (
+                    v2.GaussianBlur(1, 1e-6)
+                    if bs == 0
+                    else v2.GaussianBlur(2 * bs + 1, max(float(bs), 1e-6))
+                )
+                for bs in range(0, max_blur_strength + 1)
+            ]
+            ch = self._auto_restore_blur_chain
+        return ch
+
+    def _sharpness_score_auto_restore(self, image: torch.Tensor) -> dict:
+        """sharpness_score on a downsampled image when side > _AUTO_RESTORE_SCORE_MAX_SIDE."""
+        cap = self._AUTO_RESTORE_SCORE_MAX_SIDE
+        h, w = int(image.shape[-2]), int(image.shape[-1])
+        m = max(h, w)
+        if m <= cap:
+            return self.sharpness_score(image)
+        scale = cap / float(m)
+        nh = max(1, int(round(h * scale)))
+        nw = max(1, int(round(w * scale)))
+        small = F.interpolate(
+            image.unsqueeze(0).float(), size=(nh, nw), mode="area"
+        ).squeeze(0)
+        return self.sharpness_score(small)
+
     def face_restorer_auto(
         self,
         original_face_512,  # [3,H,W], float in [0..255]
@@ -6294,8 +6326,8 @@ class FrameWorker(threading.Thread):
         alpha_map_blur: int = 7,
     ):
         """Auto-Restorer: Blends between restored and original image based on sharpness."""
-        # Baseline sharpness of original
-        scores_original = self.sharpness_score(original_face_512)
+        # Baseline sharpness of original (subsampled when large — see _sharpness_score_auto_restore)
+        scores_original = self._sharpness_score_auto_restore(original_face_512)
         score_new_original = (
             scores_original["combined"].item() * 100 + adjust_sharpness / 10.0
         )
@@ -6312,9 +6344,8 @@ class FrameWorker(threading.Thread):
 
         while iteration < max_iterations:
             swap2 = swap * alpha + swap_original * (1 - alpha)
-            swap2_masked = swap2.clone()
 
-            scores_swap = self.sharpness_score(swap2_masked)
+            scores_swap = self._sharpness_score_auto_restore(swap2)
             score_new_swap = scores_swap["combined"].item() * 100
             sharpness_diff = score_new_swap - score_new_original
 
@@ -6335,19 +6366,9 @@ class FrameWorker(threading.Thread):
             if sharpness_diff >= 0 and alpha < 0.07:
                 prev_alpha = 0.0
                 base = swap_original
-                max_blur_strength = 10
-                # FW-PERF-10: precompute GaussianBlur objects outside the scoring loop
-                blur_kernels_for_auto = [
-                    (
-                        v2.GaussianBlur(1, 1e-6)
-                        if bs == 0
-                        else v2.GaussianBlur(2 * bs + 1, max(bs, 1e-6))
-                    )
-                    for bs in range(0, max_blur_strength + 1)
-                ]
-                for bs, gaussian_blur in enumerate(blur_kernels_for_auto):
+                for bs, gaussian_blur in enumerate(self._get_auto_restore_blur_chain()):
                     swap2_blurred = gaussian_blur(base.float())
-                    scores_swap_b = self.sharpness_score(swap2_blurred)
+                    scores_swap_b = self._sharpness_score_auto_restore(swap2_blurred)
                     score_new_swap_b = scores_swap_b["combined"].item() * 100.0
                     sharpness_diff_b = score_new_swap_b - score_new_original
 
