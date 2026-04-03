@@ -32,7 +32,9 @@ def _run_transcode_worker(
     paths: List[str],
     *,
     batch_av1: bool,
-    encode_options: Optional[Tuple[Optional[int], bool]] = None,
+    encode_options: Optional[
+        Tuple[Optional[int], bool, bool, Optional[float]]
+    ] = None,
 ) -> None:
     if _active_worker(main_window):
         QtWidgets.QMessageBox.information(
@@ -46,9 +48,9 @@ def _run_transcode_worker(
         dlg = TranscodeOptionsDialog(main_window, batch_av1=batch_av1)
         if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
-        max_height, prefer_nvenc, _recursive = dlg.options()
+        max_height, prefer_nvenc, _recursive, overwrite, target_fps = dlg.options()
     else:
-        max_height, prefer_nvenc = encode_options
+        max_height, prefer_nvenc, overwrite, target_fps = encode_options
 
     prog = QtWidgets.QProgressDialog(main_window)
     prog.setWindowTitle("Converting to H.264")
@@ -60,7 +62,14 @@ def _run_transcode_worker(
     prog.setAutoReset(True)
     prog.setCancelButtonText("Cancel")
 
-    worker = H264TranscodeWorker(paths, max_height, prefer_nvenc, parent=main_window)
+    worker = H264TranscodeWorker(
+        paths,
+        max_height,
+        prefer_nvenc,
+        overwrite=overwrite,
+        target_fps=target_fps,
+        parent=main_window,
+    )
     setattr(main_window, _worker_attr(main_window), worker)
 
     def on_progress(idx: int, total: int, path: str, frac: float) -> None:
@@ -69,13 +78,18 @@ def _run_transcode_worker(
         prog.setValue(min(1000, int(overall * 1000)))
         prog.setLabelText(os.path.basename(path))
 
-    def on_ok(count: int, _last: str) -> None:
+    def on_ok(count: int, last_output: str) -> None:
         prog.close()
-        QtWidgets.QMessageBox.information(
-            main_window,
-            "Transcode",
-            f"Finished: {count} file(s).",
-        )
+        msg = f"Finished: {count} file(s)."
+        if (
+            count == 1
+            and paths
+            and last_output
+            and os.path.normpath(last_output)
+            != os.path.normpath(os.path.abspath(paths[0]))
+        ):
+            msg += f"\n\nSaved as:\n{last_output}"
+        QtWidgets.QMessageBox.information(main_window, "Transcode", msg)
 
     def on_fail(msg: str) -> None:
         prog.close()
@@ -163,7 +177,7 @@ def batch_convert_av1_in_folder(main_window: MainWindow) -> None:
     if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
         return
 
-    max_height, prefer_nvenc, recursive = dlg.options()
+    max_height, prefer_nvenc, recursive, _overwrite, target_fps = dlg.options()
     candidates = vt.iter_candidate_video_paths(folder, recursive)
     av1_list = vt.filter_av1_paths(candidates)
     if not av1_list:
@@ -190,5 +204,5 @@ def batch_convert_av1_in_folder(main_window: MainWindow) -> None:
         main_window,
         av1_list,
         batch_av1=True,
-        encode_options=(max_height, prefer_nvenc),
+        encode_options=(max_height, prefer_nvenc, True, target_fps),
     )

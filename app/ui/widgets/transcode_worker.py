@@ -1,4 +1,4 @@
-"""Background worker for H.264 transcode with replace-in-place."""
+"""Background worker for H.264 transcode (in-place or sibling output)."""
 
 from __future__ import annotations
 
@@ -21,12 +21,17 @@ class H264TranscodeWorker(qtc.QThread):
         paths: List[str],
         max_height: Optional[int],
         prefer_nvenc: bool,
+        *,
+        overwrite: bool = True,
+        target_fps: Optional[float] = None,
         parent=None,
     ):
         super().__init__(parent)
         self._paths = list(paths)
         self._max_height = max_height
         self._prefer_nvenc = prefer_nvenc
+        self._overwrite = overwrite
+        self._target_fps = target_fps
         self._cancel_event = threading.Event()
         self._proc_holder: list = []
 
@@ -47,6 +52,7 @@ class H264TranscodeWorker(qtc.QThread):
     def run(self) -> None:
         total = len(self._paths)
         done = 0
+        last_output_path = ""
         for i, p in enumerate(self._paths):
             if self._cancel_event.is_set():
                 self.failed.emit("Canceled.")
@@ -60,7 +66,9 @@ class H264TranscodeWorker(qtc.QThread):
             ok, msg = vt.transcode_replace_in_place(
                 p,
                 max_height=self._max_height,
+                target_fps=self._target_fps,
                 prefer_nvenc=self._prefer_nvenc,
+                overwrite=self._overwrite,
                 process_holder=self._proc_holder,
                 cancel_event=self._cancel_event,
                 progress_callback=_file_progress,
@@ -72,6 +80,7 @@ class H264TranscodeWorker(qtc.QThread):
             if not ok:
                 self.failed.emit(f"{p}\n{msg}")
                 return
+            last_output_path = msg
             done += 1
             self.progress.emit(i, total, p, 1.0)
-        self.finished_ok.emit(done, self._paths[-1] if self._paths else "")
+        self.finished_ok.emit(done, last_output_path)

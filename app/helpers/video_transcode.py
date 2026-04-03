@@ -188,15 +188,60 @@ def _video_filter_for_scale(max_height: Optional[int]) -> str:
     )
 
 
+def _fps_filter_arg(target_fps: float) -> str:
+    """Value for the ffmpeg ``fps`` filter (integer or short decimal)."""
+    f = float(target_fps)
+    if f <= 0:
+        return ""
+    if abs(f - round(f)) < 1e-4:
+        return str(int(round(f)))
+    return f"{f:.6g}"
+
+
+def build_video_filter(
+    max_height: Optional[int],
+    target_fps: Optional[float],
+) -> str:
+    """
+    Video filter chain: even dimensions (required for H.264), optional resize,
+    optional constant frame rate.
+    """
+    vf = _video_filter_for_scale(max_height)
+    if target_fps is not None and target_fps > 0:
+        fa = _fps_filter_arg(target_fps)
+        if fa:
+            vf = f"{vf},fps={fa}"
+    return vf
+
+
+def sibling_output_path_no_overwrite(input_path: str) -> str:
+    """
+    Path for a new file next to ``input_path`` (``name_h264.ext``, then
+    ``name_h264_2.ext``, …) so the original is never overwritten.
+    """
+    path = os.path.normpath(os.path.abspath(input_path))
+    d, base = os.path.dirname(path), os.path.basename(path)
+    root, ext = os.path.splitext(base)
+    ext = ext if ext else ".mp4"
+    n = 0
+    while True:
+        suffix = "_h264" if n == 0 else f"_h264_{n}"
+        cand = os.path.join(d, f"{root}{suffix}{ext}")
+        if not os.path.isfile(cand):
+            return cand
+        n += 1
+
+
 def build_ffmpeg_h264_command(
     input_path: str,
     output_path: str,
     *,
     max_height: Optional[int],
+    target_fps: Optional[float],
     prefer_nvenc: bool,
     use_aac_audio: bool,
 ) -> List[str]:
-    vf = _video_filter_for_scale(max_height)
+    vf = build_video_filter(max_height, target_fps)
     use_nvenc = bool(prefer_nvenc and ffmpeg_h264_nvenc_available())
 
     cmd: List[str] = [
@@ -320,13 +365,16 @@ def transcode_replace_in_place(
     input_path: str,
     *,
     max_height: Optional[int],
+    target_fps: Optional[float] = None,
     prefer_nvenc: bool,
+    overwrite: bool = True,
     process_holder: Optional[List] = None,
     cancel_event: Optional[threading.Event] = None,
     progress_callback: Optional[Callable[[float], None]] = None,
 ) -> tuple[bool, str]:
     """
-    Transcode to H.264 MP4 into a temp file, then replace ``input_path``.
+    Transcode to H.264 into a temp file, then replace the original or write a
+    sibling file (see ``overwrite``).
 
     ``process_holder`` may be a single-element list; the running Popen is stored
     in ``process_holder[0]`` so the caller can kill it on cancel.
@@ -343,6 +391,7 @@ def transcode_replace_in_place(
     last_stderr = ""
     replaced_ok = False
     duration_sec = ffprobe_video_duration_sec(path)
+    final_path = path if overwrite else sibling_output_path_no_overwrite(path)
 
     try:
         for use_aac in (False, True):
@@ -358,6 +407,7 @@ def transcode_replace_in_place(
                 path,
                 temp_out,
                 max_height=max_height,
+                target_fps=target_fps,
                 prefer_nvenc=prefer_nvenc,
                 use_aac_audio=use_aac,
             )
@@ -394,15 +444,15 @@ def transcode_replace_in_place(
             return False, "FFmpeg did not produce valid output."
 
         try:
-            os.replace(temp_out, path)
+            os.replace(temp_out, final_path)
         except OSError as e:
             try:
                 os.remove(temp_out)
             except OSError:
                 pass
-            return False, f"Could not replace file: {e}"
+            return False, f"Could not write output file: {e}"
         replaced_ok = True
-        return True, ""
+        return True, final_path
     finally:
         if not replaced_ok and temp_out and os.path.isfile(temp_out):
             try:

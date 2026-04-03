@@ -1,4 +1,4 @@
-"""Dialog for H.264 transcode options (resize + NVENC + batch subfolders)."""
+"""Dialog for H.264 transcode options (resize, FPS, NVENC, overwrite, batch)."""
 
 from __future__ import annotations
 
@@ -55,9 +55,35 @@ class TranscodeOptionsDialog(QtWidgets.QDialog):
         layout.addLayout(height_row)
         self._resize_check.toggled.connect(self._height_spin.setEnabled)
 
+        self._fps_check = QtWidgets.QCheckBox("Set output frame rate (constant FPS)")
+        self._fps_check.setChecked(False)
+        layout.addWidget(self._fps_check)
+
+        fps_row = QtWidgets.QHBoxLayout()
+        fps_row.addWidget(QtWidgets.QLabel("FPS:"))
+        self._fps_spin = QtWidgets.QDoubleSpinBox()
+        self._fps_spin.setRange(1.0, 240.0)
+        self._fps_spin.setDecimals(3)
+        self._fps_spin.setSingleStep(1.0)
+        self._fps_spin.setValue(30.0)
+        self._fps_spin.setEnabled(False)
+        fps_row.addWidget(self._fps_spin)
+        fps_row.addStretch()
+        layout.addLayout(fps_row)
+        self._fps_check.toggled.connect(self._fps_spin.setEnabled)
+
         self._gpu_check = QtWidgets.QCheckBox("Use GPU (NVIDIA NVENC) when available")
         self._gpu_check.setChecked(True)
         layout.addWidget(self._gpu_check)
+
+        if batch_av1:
+            self._overwrite_check = None
+        else:
+            self._overwrite_check = QtWidgets.QCheckBox(
+                "Overwrite original file (if unchecked, saves as name_h264.ext next to it)"
+            )
+            self._overwrite_check.setChecked(True)
+            layout.addWidget(self._overwrite_check)
 
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok
@@ -67,8 +93,8 @@ class TranscodeOptionsDialog(QtWidgets.QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-    def options(self) -> Tuple[Optional[int], bool, bool]:
-        """Returns (max_height or None, prefer_nvenc, include_subfolders for batch)."""
+    def options(self) -> Tuple[Optional[int], bool, bool, bool, Optional[float]]:
+        """Returns (max_height, prefer_nvenc, recursive, overwrite, target_fps or None)."""
         mh: Optional[int] = None
         if self._resize_check.isChecked():
             mh = int(self._height_spin.value())
@@ -77,4 +103,12 @@ class TranscodeOptionsDialog(QtWidgets.QDialog):
             if self._recursive_check is not None
             else False
         )
-        return mh, self._gpu_check.isChecked(), rec
+        overwrite = (
+            bool(self._overwrite_check.isChecked())
+            if self._overwrite_check is not None
+            else True
+        )
+        target_fps: Optional[float] = None
+        if self._fps_check.isChecked():
+            target_fps = float(self._fps_spin.value())
+        return mh, self._gpu_check.isChecked(), rec, overwrite, target_fps
