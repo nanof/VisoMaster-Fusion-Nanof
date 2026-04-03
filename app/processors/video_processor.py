@@ -1237,12 +1237,15 @@ class VideoProcessor(QObject):
                 # 2b. Audio-master preview: seek read position toward the ffplay timeline
                 # when processing cannot keep up; otherwise preview stays in slow motion while
                 # audio runs at real time.
+                # AV1: OpenCV decode + frame seeks are very heavy; catch-up seeks cause storms
+                # and freezes — keep read position sequential and accept A/V drift in preview.
                 if (
                     seek_before_read is None
                     and not is_segment_mode
                     and not self.recording
                     and self._wall_clock_use_audio_file_rate
                     and self._playback_use_wall_clock
+                    and not self.is_av1_codec
                 ):
                     now_seek = time.perf_counter()
                     min_lag, slices, max_step, min_interval = (
@@ -2035,6 +2038,7 @@ class VideoProcessor(QObject):
             and self.file_type == "video"
             and self._playback_use_wall_clock
             and not self.recording
+            and not self.is_av1_codec
         ):
             tgt_follow = self._advance_past_skipped_for_display(
                 self._expected_frame_from_wall_clock()
