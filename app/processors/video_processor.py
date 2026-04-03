@@ -19,7 +19,7 @@ import pyvirtualcam
 import math
 import copy
 import json
-from PySide6.QtCore import QObject, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, QTimer, Signal, Slot, QEventLoop, QThread, Qt
 
 # Internal project imports
 from app.processors.workers.frame_worker import FrameWorker, _env_flag
@@ -83,6 +83,17 @@ class Av1ScrubPreviewEmitter(QObject):
     """Delivers FFmpeg scrub previews from a background thread to the GUI thread."""
 
     frame_ready = Signal(int, object)
+
+
+class _HeavyStopThread(QThread):
+    """Runs feeder/worker joins, subprocess cleanup, capture reopen, and GPU queue cleanup off the GUI thread."""
+
+    def __init__(self, vp: "VideoProcessor") -> None:
+        super().__init__(vp)
+        self._vp = vp
+
+    def run(self) -> None:
+        self._vp._execute_heavy_stop_body()
 
 
 class VideoProcessor(QObject):
@@ -209,6 +220,9 @@ class VideoProcessor(QObject):
         self.ffplay_sound_sp: subprocess.Popen | None = (
             None  # ffplay process for live audio
         )
+        self._async_stop_in_progress: bool = False
+        self._heavy_stop_thread: _HeavyStopThread | None = None
+        self._stop_context: Dict[str, Any] = {}
 
         # --- Metronome and Timing ---
         self.processing_start_frame: int = (
@@ -2083,6 +2097,7 @@ class VideoProcessor(QObject):
         Start video processing.
         This can be either simple playback OR "default-style" recording.
         """
+        self._wait_if_async_stop_pending()
 
         # 1. Guards
         if self.processing or self.is_processing_segments:
@@ -2648,23 +2663,230 @@ class VideoProcessor(QObject):
 
         return None
 
-    def stop_processing(self) -> bool:
+    def _wait_if_async_stop_pending(self) -> None:
+        """Blocks the caller until a UI-async stop has finished (keeps GUI responsive)."""
+        if not self._async_stop_in_progress:
+            return
+        t = self._heavy_stop_thread
+        if t is None or not t.isRunning():
+            self._async_stop_in_progress = False
+            return
+        loop = QEventLoop()
+        t.finished.connect(loop.quit)
+        loop.exec()
+
+    def _build_stop_context(
+        self,
+        was_recording_default_style: bool,
+        was_processing_segments: bool,
+    ) -> Dict[str, Any]:
+        """Snapshot UI-derived values on the GUI thread before a background stop runs."""
+        return {
+            "was_recording_default_style": was_recording_default_style,
+            "was_processing_segments": was_processing_segments,
+            "video_seek_frame": int(self.main_window.videoSeekSlider.value()),
+            "webcam_index": int(self.main_window.control.get("WebcamDeviceSelection", 0)),
+            "screen_control": copy.deepcopy(self.main_window.control),
+        }
+
+    def _stop_phase1_abort_through_release(self, *, stop_audio_on_main_thread: bool) -> None:
+        """Flags, timers, optional audio, tracker reset, and release capture (feeder unblocks)."""
+        self.gpu_memory_update_timer.stop()
+        self.preroll_timer.stop()
+        pm = getattr(self, "precise_metronome", None)
+        if pm is not None:
+            pm.stop()
+        if stop_audio_on_main_thread:
+            self.stop_live_sound()
+        self.main_window.models_processor.face_detectors.reset_tracker()
+
+        print("[INFO] Releasing media capture to unblock feeder thread...")
+        if self.media_capture:
+            misc_helpers.release_capture(self.media_capture)
+            self.media_capture = None
+
+    def _execute_heavy_stop_body(self) -> None:
+        """Runs on _HeavyStopThread: audio reap, joins, FFmpeg/temp cleanup, reopen capture."""
+        ctx = self._stop_context
+        was_recording_default_style = bool(ctx.get("was_recording_default_style"))
+        was_processing_segments = bool(ctx.get("was_processing_segments"))
+        video_seek_frame = int(ctx.get("video_seek_frame", 0))
+
+        self.stop_live_sound()
+
+        print("[INFO] Waiting for feeder thread to complete...")
+        if self.feeder_thread and self.feeder_thread.is_alive():
+            self.feeder_thread.join(timeout=3.0)
+            if self.feeder_thread.is_alive():
+                print("[WARN] Feeder thread did not join gracefully within 3s timeout.")
+        self.feeder_thread = None
+        print("[INFO] Feeder thread joined.")
+
+        self._clear_frames_to_display_and_profiles()
+        self.clear_recognition_embedding_cache()
+        self._seek_cached_frame = None
+        self.webcam_frames_to_display.queue.clear()
+        with self.frame_queue.mutex:
+            self.frame_queue.queue.clear()
+
+        print("[INFO] Waiting for worker threads to complete...")
+        self.join_and_clear_threads(skip_post_join_gpu_cleanup=True)
+        print("[INFO] Worker threads joined.")
+
+        if self.recording_sp:
+            print("[INFO] Closing and waiting for active FFmpeg subprocess...")
+            if self.recording_sp.stdin and not self.recording_sp.stdin.closed:
+                try:
+                    self.recording_sp.stdin.close()
+                except OSError as e:
+                    print(f"[WARN] Error closing ffmpeg stdin during abort: {e}")
+            try:
+                self.recording_sp.wait(timeout=5)
+                print("[INFO] FFmpeg subprocess terminated.")
+            except subprocess.TimeoutExpired:
+                print("[WARN] FFmpeg subprocess did not terminate gracefully, killing.")
+                self.recording_sp.kill()
+                self.recording_sp.wait()
+            except Exception as e:
+                print(f"[ERROR] Error waiting for FFmpeg subprocess: {e}")
+            self.recording_sp = None
+
+        if was_processing_segments:
+            print("[INFO] Cleaning up segment temporary directory due to abort.")
+            self._cleanup_temp_dir()
+        elif was_recording_default_style:
+            print("[INFO] Cleaning up default-style temporary file due to abort.")
+            if self.temp_file and os.path.exists(self.temp_file):
+                try:
+                    os.remove(self.temp_file)
+                    print(f"[INFO] Removed temporary file: {self.temp_file}")
+                except OSError as e:
+                    print(
+                        f"[WARN] Could not remove temp file {self.temp_file} during abort: {e}"
+                    )
+            self.temp_file = ""
+
+        self.segments_to_process = []
+        self.current_segment_index = -1
+        self.temp_segment_files = []
+        self.current_segment_end_frame = None
+        self.last_detected_faces.clear()
+        self._smoothed_kps.clear()
+
+        if self.file_type == "video" and self.media_path:
+            if self._reopen_video_capture(video_seek_frame):
+                print(
+                    f"[INFO] Video capture re-opened and seeked to {video_seek_frame} after stop."
+                )
+            else:
+                print("[WARN] Failed to re-open media capture after active stop.")
+        elif self.file_type == "webcam":
+            try:
+                wi = int(ctx.get("webcam_index", 0))
+                self.media_capture = cv2.VideoCapture(wi)
+                if not self.media_capture.isOpened():
+                    print("[WARN] Failed to re-open webcam capture after stop.")
+                    self.media_capture = None
+            except Exception as e:
+                print(f"[WARN] Error re-opening webcam capture: {e}")
+                self.media_capture = None
+        elif self.file_type == "screen":
+            try:
+                sc = ctx.get("screen_control")
+                if mss_available() and isinstance(sc, dict):
+                    self.media_capture = create_screen_capture_from_control(sc)
+                else:
+                    print("[WARN] mss not available; cannot re-open screen capture.")
+                    self.media_capture = None
+            except Exception as e:
+                print(f"[WARN] Error re-opening screen capture: {e}")
+                self.media_capture = None
+
+    @Slot()
+    def _on_heavy_stop_thread_finished(self) -> None:
+        self._async_stop_in_progress = False
+        self._heavy_stop_thread = None
+        self._stop_finalize_ui_and_metrics()
+
+    def _stop_finalize_ui_and_metrics(self) -> None:
+        layout_actions.enable_all_parameters_and_control_widget(self.main_window)
+        video_control_actions.reset_media_buttons(self.main_window)
+
+        def _deferred_gpu_gc() -> None:
+            print("[INFO] Clearing GPU Cache and running garbage collection.")
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except ImportError:
+                pass
+            except Exception as e:
+                print(f"[WARN] Error clearing Torch cache: {e}")
+            gc.collect()
+
+        QTimer.singleShot(0, _deferred_gpu_gc)
+
+        try:
+            self.disable_virtualcam()
+        except Exception:
+            pass
+
+        self.play_end_time, end_frame_for_calc, frames_actually_processed, duration = (
+            self._compute_play_end()
+        )
+        if duration is not None:
+            print(
+                f"[INFO] Probed temp video duration during abort: {duration:.3f}s (recorded clip length), "
+                f"play_end_time set to {self.play_end_time:.3f}s [media time]."
+            )
+        else:
+            print(
+                f"[INFO] Calculated recording end time (frame estimate) during abort: {self.play_end_time:.3f}s (based on frame {end_frame_for_calc})"
+            )
+
+        self.end_time = time.perf_counter()
+        processing_time_sec = self.end_time - self.start_time
+
+        try:
+            start_frame_num = getattr(
+                self, "processing_start_frame", end_frame_for_calc
+            )
+            num_frames_processed = end_frame_for_calc - start_frame_num
+            if num_frames_processed < 0:
+                num_frames_processed = 0
+        except Exception:
+            num_frames_processed = 0
+
+        self._log_processing_summary(processing_time_sec, num_frames_processed)
+        self.playback_display_start_time = 0.0
+        self.processing_stopped_signal.emit()
+
+    def stop_processing(self, block: bool = True) -> bool:
         """
         General Stop / Abort Function.
-        This is the master function to stop *any* active processing
-        (playback, recording, segments, webcam).
+        Stops *any* active processing (playback, recording, segments, webcam).
+
+        Args:
+            block: If False, plain playback / live-stream stops run heavy cleanup
+                (feeder/worker joins, capture reopen, ffplay wait) on a background
+                thread so the GUI stays responsive. Recording and multi-segment
+                modes always use a fully blocking stop.
 
         Returns:
             True if any active processing was stopped or a broken capture was recovered.
         """
-        # Step 0: Capture current state for return value and cleanup logic
+        if block:
+            self._wait_if_async_stop_pending()
+        elif self._async_stop_in_progress:
+            return True
+
         was_active = self.processing or self.is_processing_segments
         was_recording_default_style = self.recording
         was_processing_segments = self.is_processing_segments
 
-        # VP-34: Check if capture is missing/broken while idle. If so, fix it.
         if not was_active:
             self._cancel_single_frame_preview_state()
+            if self._async_stop_in_progress:
+                return False
             if self.file_type == "video" and self.media_path:
                 if not self.media_capture or not self.media_capture.isOpened():
                     print(
@@ -2674,15 +2896,19 @@ class VideoProcessor(QObject):
                     video_control_actions.reset_media_buttons(self.main_window)
                     return True
             video_control_actions.reset_media_buttons(self.main_window)
-            return False  # Nothing was active and capture seems OK
+            return False
+
+        allow_ui_async_stop = (
+            not block
+            and not was_recording_default_style
+            and not was_processing_segments
+            and self.recording_sp is None
+        )
 
         print("[INFO] Aborting active processing...")
         if was_active:
             graphics_view_actions.reset_playback_fps_preview_session(self.main_window)
 
-        # 1. Reset flags FIRST to stop all loops immediately.
-        # VP-29: Set recording=False early to prevent further frames from being
-        # dispatched to FFmpeg by concurrent worker threads.
         self.processing = False
         self.is_processing_segments = False
         self.recording = False
@@ -2702,183 +2928,32 @@ class VideoProcessor(QObject):
         self._cancel_single_frame_preview_state()
         self._reset_preview_frame_generation_state()
 
-        # 2. Stop utility timers and audio
-        self.gpu_memory_update_timer.stop()
-        self.preroll_timer.stop()
-        pm = getattr(self, "precise_metronome", None)
-        if pm is not None:
-            pm.stop()
-        self.stop_live_sound()
+        if allow_ui_async_stop:
+            self._stop_context = self._build_stop_context(
+                was_recording_default_style, was_processing_segments
+            )
+            self._stop_phase1_abort_through_release(stop_audio_on_main_thread=False)
+            self._async_stop_in_progress = True
+            thr = _HeavyStopThread(self)
+            self._heavy_stop_thread = thr
+            thr.finished.connect(
+                self._on_heavy_stop_thread_finished,
+                Qt.ConnectionType.QueuedConnection,
+            )
+            thr.start()
+            return True
 
-        # Face tracker defaults (use thread-safe reset)
-        self.main_window.models_processor.face_detectors.reset_tracker()
+        self._stop_phase1_abort_through_release(stop_audio_on_main_thread=True)
 
-        # 3a. Release the capture object to unblock the feeder.
-        # The feeder calls read_frame() in a loop; releasing here causes the next read
-        # to fail immediately, driving the feeder's EOF branch and exit.
-        print("[INFO] Releasing media capture to unblock feeder thread...")
-        if self.media_capture:
-            misc_helpers.release_capture(self.media_capture)
-            self.media_capture = None
-
-        # 3b. Wait for the feeder thread to fully exit.
-        print("[INFO] Waiting for feeder thread to complete...")
-        if self.feeder_thread and self.feeder_thread.is_alive():
-            self.feeder_thread.join(timeout=3.0)
-            if self.feeder_thread.is_alive():
-                print("[WARN] Feeder thread did not join gracefully within 3s timeout.")
-        self.feeder_thread = None
-        print("[INFO] Feeder thread joined.")
-
-        # 3c. Clear display buffers and join worker threads.
-        # VP-24: We clear the queue and then send poison pills to wake workers
-        # blocked on queue.get().
-        self._clear_frames_to_display_and_profiles()
-        self.clear_recognition_embedding_cache()
-        self._seek_cached_frame = None  # release seek-preview frame (~6–25 MB at HD/4K)
-        self.webcam_frames_to_display.queue.clear()
-        with self.frame_queue.mutex:
-            self.frame_queue.queue.clear()
-
-        print("[INFO] Waiting for worker threads to complete...")
-        self.join_and_clear_threads()
-        print("[INFO] Worker threads joined.")
-
-        # 5. Stop and cleanup FFmpeg subprocess
-        if self.recording_sp:
-            print("[INFO] Closing and waiting for active FFmpeg subprocess...")
-            if self.recording_sp.stdin and not self.recording_sp.stdin.closed:
-                try:
-                    self.recording_sp.stdin.close()
-                except OSError as e:
-                    print(f"[WARN] Error closing ffmpeg stdin during abort: {e}")
-            try:
-                self.recording_sp.wait(timeout=5)
-                print("[INFO] FFmpeg subprocess terminated.")
-            except subprocess.TimeoutExpired:
-                print("[WARN] FFmpeg subprocess did not terminate gracefully, killing.")
-                self.recording_sp.kill()
-                self.recording_sp.wait()
-            except Exception as e:
-                print(f"[ERROR] Error waiting for FFmpeg subprocess: {e}")
-            self.recording_sp = None
-
-        # 6. Cleanup temp files based on stopped mode.
-        if was_processing_segments:
-            print("[INFO] Cleaning up segment temporary directory due to abort.")
-            self._cleanup_temp_dir()
-        elif was_recording_default_style:
-            print("[INFO] Cleaning up default-style temporary file due to abort.")
-            if self.temp_file and os.path.exists(self.temp_file):
-                try:
-                    os.remove(self.temp_file)
-                    print(f"[INFO] Removed temporary file: {self.temp_file}")
-                except OSError as e:
-                    print(
-                        f"[WARN] Could not remove temp file {self.temp_file} during abort: {e}"
-                    )
-            self.temp_file = ""
-
-        # 7. Reset segment state
-        self.segments_to_process = []
-        self.current_segment_index = -1
-        self.temp_segment_files = []
-        self.current_segment_end_frame = None
-        self.last_detected_faces.clear()
-        self._smoothed_kps.clear()
-
-        # 8. RE-OPEN media capture IMMEDIATELY.
-        # VP-34: This is critical. By ensuring media_capture is re-opened before
-        # returning, we ensure that on_change_video_seek_slider() (which calls
-        # stop_processing() first) can still read a frame for the preview.
-        if self.file_type == "video" and self.media_path:
-            current_slider_pos = self.main_window.videoSeekSlider.value()
-            if self._reopen_video_capture(current_slider_pos):
-                print(
-                    f"[INFO] Video capture re-opened and seeked to {current_slider_pos} after stop."
-                )
-            else:
-                print("[WARN] Failed to re-open media capture after active stop.")
-        elif self.file_type == "webcam":
-            # For webcam, re-opening essentially prepares it for the next 'Play' click.
-            try:
-                webcam_index = int(
-                    self.main_window.control.get("WebcamDeviceSelection", 0)
-                )
-                self.media_capture = cv2.VideoCapture(webcam_index)
-                if not self.media_capture.isOpened():
-                    print("[WARN] Failed to re-open webcam capture after stop.")
-                    self.media_capture = None
-            except Exception as e:
-                print(f"[WARN] Error re-opening webcam capture: {e}")
-                self.media_capture = None
-        elif self.file_type == "screen":
-            try:
-                if mss_available():
-                    self.media_capture = create_screen_capture_from_control(
-                        self.main_window.control
-                    )
-                else:
-                    print("[WARN] mss not available; cannot re-open screen capture.")
-                    self.media_capture = None
-            except Exception as e:
-                print(f"[WARN] Error re-opening screen capture: {e}")
-                self.media_capture = None
-
-        # 9. Final cleanup and UI reset
-        layout_actions.enable_all_parameters_and_control_widget(self.main_window)
-        video_control_actions.reset_media_buttons(self.main_window)
-
-        print("[INFO] Clearing GPU Cache and running garbage collection.")
-        try:
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except ImportError:
-            pass
-        except Exception as e:
-            print(f"[WARN] Error clearing Torch cache: {e}")
-        gc.collect()
-
-        try:
-            self.disable_virtualcam()
-        except Exception:
-            pass
-
-        # compute end metrics using helper
-        self.play_end_time, end_frame_for_calc, frames_actually_processed, duration = (
-            self._compute_play_end()
+        self._stop_context = self._build_stop_context(
+            was_recording_default_style, was_processing_segments
         )
-        if duration is not None:
-            print(
-                f"[INFO] Probed temp video duration during abort: {duration:.3f}s (recorded clip length), "
-                f"play_end_time set to {self.play_end_time:.3f}s [media time]."
-            )
-        else:
-            print(
-                f"[INFO] Calculated recording end time (frame estimate) during abort: {self.play_end_time:.3f}s (based on frame {end_frame_for_calc})"
-            )
+        self._execute_heavy_stop_body()
+        self._stop_finalize_ui_and_metrics()
 
-        # 11. Final Timing and Logging
-        self.end_time = time.perf_counter()
-        processing_time_sec = self.end_time - self.start_time
+        return True
 
-        try:
-            start_frame_num = getattr(
-                self, "processing_start_frame", end_frame_for_calc
-            )
-            num_frames_processed = end_frame_for_calc - start_frame_num
-            if num_frames_processed < 0:
-                num_frames_processed = 0
-        except Exception:
-            num_frames_processed = 0
-
-        self._log_processing_summary(processing_time_sec, num_frames_processed)
-        self.playback_display_start_time = 0.0
-        self.processing_stopped_signal.emit()
-
-        return True  # Processing was stopped
-
-    def join_and_clear_threads(self):
+    def join_and_clear_threads(self, *, skip_post_join_gpu_cleanup: bool = False):
         """
         Stops and waits for all pool worker threads to finish.
         This function's *only* job is to set events, send pills, and join.
@@ -2931,11 +3006,12 @@ class VideoProcessor(QObject):
         #    FrameEnhancers/FrameEdits helpers, etc.).  CPython's reference-counting
         #    will free them eventually, but calling GC + empty_cache here ensures
         #    VRAM is reclaimed before the next session allocates new workers.
-        import gc as _gc
+        if not skip_post_join_gpu_cleanup:
+            import gc as _gc
 
-        _gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            _gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     def _reopen_video_capture(self, seek_frame: int = 0) -> bool:
         """
@@ -6122,6 +6198,7 @@ class VideoProcessor(QObject):
 
     def process_webcam(self):
         """Starts the webcam stream using the unified metronome and User Settings."""
+        self._wait_if_async_stop_pending()
         if self.processing:
             print("[WARN] Processing already active, cannot start webcam.")
             return
@@ -6250,6 +6327,7 @@ class VideoProcessor(QObject):
 
     def process_screen(self):
         """Starts desktop screen capture as a live stream (same pipeline as webcam)."""
+        self._wait_if_async_stop_pending()
         if self.processing:
             print("[WARN] Processing already active, cannot start screen capture.")
             return
