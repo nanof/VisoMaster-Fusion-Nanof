@@ -556,6 +556,38 @@ def handle_landmark_model_selection_change(
     landmark_detectors.current_landmark_model_name = new_model_name
 
 
+def sync_rife_preview_interpolation_model(main_window: "MainWindow") -> None:
+    """Unload RIFE when Neural mode is off; never load here (avoids blocking app startup).
+
+    Loading runs lazily on first interpolated preview frame in
+    ``FrameEnhancers.run_rife_preview_interpolate`` so workspace restore and
+    ``set_control_widgets_values`` do not freeze on ONNX download / TRT build.
+    """
+    fe = main_window.models_processor.frame_enhancers
+    interp_on = bool(main_window.control.get("PreviewFrameGenEnableToggle", False))
+    method = str(
+        main_window.control.get("FrameInterpolationMethodSelection", "Linear (CPU)")
+    )
+    want = interp_on and method == "Neural (ONNX)"
+
+    if not want:
+        fe.unload_rife_preview_model()
+
+
+def handle_preview_frame_interpolation_toggle(
+    main_window: "MainWindow", new_value: bool, control_name: str
+):
+    """Frame Interpolation master toggle: sync RIFE session when using Neural mode."""
+    sync_rife_preview_interpolation_model(main_window)
+
+
+def handle_frame_interpolation_method_change(
+    main_window: "MainWindow", new_method: str, control_name: str
+):
+    """Switching Linear vs Neural: load or unload RIFE accordingly."""
+    sync_rife_preview_interpolation_model(main_window)
+
+
 def handle_frame_enhancer_state_change(
     main_window: "MainWindow", new_value: bool, control_name: str
 ):

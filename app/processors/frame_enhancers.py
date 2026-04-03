@@ -3,12 +3,17 @@ from collections import OrderedDict
 from typing import TYPE_CHECKING
 
 import torch
+import torch.nn.functional as F
 import numpy as np
 from torchvision.transforms import v2
 from app.processors.utils import faceutil
 
 if TYPE_CHECKING:
     from app.processors.models_processor import ModelsProcessor
+
+# Preview frame interpolation (TensorStack/RIFE ONNX): img0, img1, timestep -> output
+RIFE_PREVIEW_MODEL_NAME = "RifePreviewInterp"
+_RIFE_ALIGN = 32
 
 
 class FrameEnhancers:
@@ -29,6 +34,7 @@ class FrameEnhancers:
         """
         self.models_processor = models_processor
         self.current_enhancer_model = None  # Tracks the currently active enhancer model
+        self.current_rife_preview_model: str | None = None
         self.model_map = {
             # Maps user-facing names to internal model keys (used in models_processor)
             "RealEsrgan-x2-Plus": "RealEsrganx2Plus",
@@ -57,6 +63,149 @@ class FrameEnhancers:
             if self.current_enhancer_model:
                 self.models_processor.unload_model(self.current_enhancer_model)
                 self.current_enhancer_model = None
+
+    def unload_rife_preview_model(self) -> None:
+        """Unload RIFE preview-interpolation ONNX session if loaded."""
+        with self.models_processor.model_lock:
+            if self.current_rife_preview_model:
+                self.models_processor.unload_model(self.current_rife_preview_model)
+                self.current_rife_preview_model = None
+
+    @staticmethod
+    def _bgr_hwc_uint8_to_rgb01_nchw(
+        arr: np.ndarray, device: torch.device
+    ) -> torch.Tensor:
+        t = torch.from_numpy(arr).to(device=device, dtype=torch.float32) / 255.0
+        t = t[:, :, [2, 1, 0]]  # BGR -> RGB
+        return t.permute(2, 0, 1).unsqueeze(0).contiguous()
+
+    @staticmethod
+    def _rgb01_nchw_to_bgr_hwc_uint8(t: torch.Tensor) -> np.ndarray:
+        t = torch.clamp(t.squeeze(0).permute(1, 2, 0), 0.0, 1.0) * 255.0
+        rgb = t.to(dtype=torch.uint8).cpu().numpy()
+        return rgb[:, :, ::-1].copy()
+
+    def run_rife_preview_interpolate(
+        self,
+        img0_bgr: np.ndarray,
+        img1_bgr: np.ndarray,
+        timestep: float = 0.5,
+    ) -> np.ndarray:
+        """
+        One RIFE forward between two BGR uint8 HWC frames (same shape). Pads to /32.
+        Falls back to 50% linear blend if the model is missing or run fails.
+        """
+        if (
+            img0_bgr.shape != img1_bgr.shape
+            or img0_bgr.dtype != np.uint8
+            or img1_bgr.dtype != np.uint8
+        ):
+            return img1_bgr
+        h0, w0 = int(img0_bgr.shape[0]), int(img0_bgr.shape[1])
+        ort_session = self.models_processor.models.get(RIFE_PREVIEW_MODEL_NAME)
+        if not ort_session:
+            print(
+                "[INFO] RIFE preview interpolation: loading model (first use; may take a while)…"
+            )
+            sess = self.models_processor.load_model(RIFE_PREVIEW_MODEL_NAME)
+            if sess:
+                self.current_rife_preview_model = RIFE_PREVIEW_MODEL_NAME
+            ort_session = self.models_processor.models.get(RIFE_PREVIEW_MODEL_NAME)
+        if not ort_session:
+            return (
+                img0_bgr.astype(np.float32) * 0.5 + img1_bgr.astype(np.float32) * 0.5
+            ).astype(np.uint8)
+
+        ph = (h0 + _RIFE_ALIGN - 1) // _RIFE_ALIGN * _RIFE_ALIGN
+        pw = (w0 + _RIFE_ALIGN - 1) // _RIFE_ALIGN * _RIFE_ALIGN
+        device_torch = torch.device(
+            self.models_processor.device
+            if self.models_processor.device == "cuda"
+            else "cpu"
+        )
+
+        try:
+            t0 = self._bgr_hwc_uint8_to_rgb01_nchw(img0_bgr, device_torch)
+            t1 = self._bgr_hwc_uint8_to_rgb01_nchw(img1_bgr, device_torch)
+            if ph != h0 or pw != w0:
+                t0 = F.pad(t0, (0, pw - w0, 0, ph - h0), mode="reflect")
+                t1 = F.pad(t1, (0, pw - w0, 0, ph - h0), mode="reflect")
+
+            out_t = torch.empty(
+                (1, 3, ph, pw), dtype=torch.float32, device=device_torch
+            ).contiguous()
+            ts = torch.tensor(
+                [timestep], dtype=torch.float32, device=device_torch
+            ).contiguous()
+
+            in_meta = ort_session.get_inputs()
+            out_meta = ort_session.get_outputs()
+            n_img0 = in_meta[0].name
+            n_img1 = in_meta[1].name
+            n_ts = in_meta[2].name
+            n_out = out_meta[0].name
+
+            if self.models_processor.device == "cuda" and torch.cuda.is_available():
+                io_binding = ort_session.io_binding()
+                torch.cuda.current_stream().synchronize()
+                dt = self.models_processor.device
+                io_binding.bind_input(
+                    name=n_img0,
+                    device_type=dt,
+                    device_id=0,
+                    element_type=np.float32,
+                    shape=tuple(t0.shape),
+                    buffer_ptr=t0.data_ptr(),
+                )
+                io_binding.bind_input(
+                    name=n_img1,
+                    device_type=dt,
+                    device_id=0,
+                    element_type=np.float32,
+                    shape=tuple(t1.shape),
+                    buffer_ptr=t1.data_ptr(),
+                )
+                io_binding.bind_input(
+                    name=n_ts,
+                    device_type=dt,
+                    device_id=0,
+                    element_type=np.float32,
+                    shape=tuple(ts.shape),
+                    buffer_ptr=ts.data_ptr(),
+                )
+                io_binding.bind_output(
+                    name=n_out,
+                    device_type=dt,
+                    device_id=0,
+                    element_type=np.float32,
+                    shape=tuple(out_t.shape),
+                    buffer_ptr=out_t.data_ptr(),
+                )
+                self._run_model_with_lazy_build_check(
+                    RIFE_PREVIEW_MODEL_NAME, ort_session, io_binding
+                )
+                torch.cuda.current_stream().synchronize()
+            else:
+                out_np = ort_session.run(
+                    None,
+                    {
+                        n_img0: t0.detach().cpu().numpy(),
+                        n_img1: t1.detach().cpu().numpy(),
+                        n_ts: ts.detach().cpu().numpy(),
+                    },
+                )[0]
+                out_t = torch.from_numpy(np.asarray(out_np, dtype=np.float32)).to(
+                    device=device_torch
+                )
+
+            out_crop = out_t[:, :, :h0, :w0]
+            return self._rgb01_nchw_to_bgr_hwc_uint8(out_crop)
+        except Exception as e:
+            print(f"[WARN] RIFE preview interpolation failed, using blend fallback: {e}")
+            return (
+                img0_bgr.astype(np.float32) * (1.0 - timestep)
+                + img1_bgr.astype(np.float32) * timestep
+            ).astype(np.uint8)
 
     def _run_model_with_lazy_build_check(
         self, model_name: str, ort_session, io_binding

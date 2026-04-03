@@ -1337,6 +1337,7 @@ class ModelsProcessor(QtCore.QObject):
             self.face_restorers.unload_models()
             self.face_swappers.unload_models()
             self.frame_enhancers.unload_models()
+            self.frame_enhancers.unload_rife_preview_model()
             self.face_editors.unload_models()
 
             # Unload any remaining models in the main dictionaries

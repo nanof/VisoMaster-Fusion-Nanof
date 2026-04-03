@@ -382,6 +382,13 @@ models_list = [
         "hash": "3b96d63c239121b1ad5992e42a2089d6b4e1185c493c6440adfeafc0a20591eb",
         "url": f"{assets_repo}/v0.1.0/4x-UltraMix_Smooth.fp16.onnx",
     },
+    # TensorStack/RIFE ONNX: inputs img0, img1 [1,3,H,W] float32, timestep [1] float32; output [1,3,H,W].
+    {
+        "model_name": "RifePreviewInterp",
+        "local_path": f"{models_dir}/rife_preview_interp.onnx",
+        "hash": "76e4cef9ab42fa7dd4e8f6e4aba47462051e3faa969e4bca6479784fbab0ac6f",
+        "url": "https://huggingface.co/TensorStack/RIFE/resolve/main/model.onnx",
+    },
     {
         "model_name": "DeoldifyArt",
         "local_path": f"{models_dir}/ColorizeArtistic.fp16.onnx",

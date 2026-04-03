@@ -188,11 +188,26 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "level": 1,
             "label": "Frame Interpolation",
             "default": False,
-            "help": "Frame Interpolation: lerped preview and virtual-cam frames between each processed "
-            "frame (weights 1/(K+1)…K/(K+1), then the full frame; K is set below). Metronome step is "
-            "divided by K+1 so playback speed stays correct. CPU-only linear blend, not optical flow. "
-            "Recording still writes only full processed frames. If preview drifts vs Live Sound, try "
-            "disabling sync.",
+            "help": "Preview and virtual cam only: extra frames between each processed frame so motion "
+            "looks smoother. Metronome step is divided by K+1 (linear) or 2 (neural) so playback speed "
+            "stays correct. Recording still writes only full processed frames (no extra FFmpeg frames). "
+            "Neural (ONNX) uses GPU/VRAM and RIFE; Linear uses CPU blends with K steps below. "
+            "If preview drifts vs Live Sound, try disabling sync.",
+            "exec_function": control_actions.handle_preview_frame_interpolation_toggle,
+            "exec_function_args": ["PreviewFrameGenEnableToggle"],
+        },
+        "FrameInterpolationMethodSelection": {
+            "level": 2,
+            "label": "Interpolation method",
+            "options": ["Linear (CPU)", "Neural (ONNX)"],
+            "default": "Linear (CPU)",
+            "parentToggle": "PreviewFrameGenEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Linear (CPU): K weighted blends between previous and current frame (K below). "
+            "Neural (ONNX): one RIFE intermediate per processed frame (always 2 preview ticks), "
+            "GPU-heavy; same preview/virtual-cam scope, not written to recording files.",
+            "exec_function": control_actions.handle_frame_interpolation_method_change,
+            "exec_function_args": ["FrameInterpolationMethodSelection"],
         },
         "PreviewFrameGenIntermediateCountSelection": {
             "level": 2,
@@ -201,8 +216,9 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "default": "1",
             "parentToggle": "PreviewFrameGenEnableToggle",
             "requiredToggleValue": True,
-            "help": "Frame Interpolation: K blend-only ticks before each full processed frame "
-            "(total preview ticks = K+1). Higher = smoother but more CPU and shorter time per tick.",
+            "help": "Linear (CPU) only: K blend-only ticks before each full processed frame "
+            "(total preview ticks = K+1). Neural mode ignores K (fixed one RIFE step). "
+            "Higher K = smoother linear preview but more CPU and shorter time per tick.",
         },
         "FrameSkipStepSlider": {
             "level": 1,

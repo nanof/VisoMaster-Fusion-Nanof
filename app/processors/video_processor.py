@@ -356,8 +356,21 @@ class VideoProcessor(QObject):
             a.astype(numpy.float32) * (1.0 - w) + b.astype(numpy.float32) * w
         ).astype(numpy.uint8)
 
+    def _preview_frame_interpolation_is_neural(self) -> bool:
+        """True when Frame Interpolation uses RIFE ONNX (preview / virtual cam only)."""
+        if not self.main_window.control.get("PreviewFrameGenEnableToggle", False):
+            return False
+        m = str(
+            self.main_window.control.get(
+                "FrameInterpolationMethodSelection", "Linear (CPU)"
+            )
+        )
+        return m == "Neural (ONNX)"
+
     def _get_preview_frame_gen_intermediate_count(self) -> int:
         """Number of blend-only preview ticks before the full processed frame (1–5)."""
+        if self._preview_frame_interpolation_is_neural():
+            return 1
         try:
             n = int(
                 str(
@@ -1894,7 +1907,12 @@ class VideoProcessor(QObject):
                     )
                     self._preview_frame_gen_substep = 0
                     w0 = 1.0 / float(k_int + 1)
-                    frame = self._preview_frame_gen_lerp(prev_arr, frame, w0)
+                    if self._preview_frame_interpolation_is_neural():
+                        frame = self.main_window.models_processor.frame_enhancers.run_rife_preview_interpolate(
+                            prev_arr, frame, timestep=float(w0)
+                        )
+                    else:
+                        frame = self._preview_frame_gen_lerp(prev_arr, frame, w0)
                     self._preview_frame_gen_substep = 1
                     profile_for_overlay = None
                     preview_skip_ffmpeg = True
