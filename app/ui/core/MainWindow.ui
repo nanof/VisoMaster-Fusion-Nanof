@@ -237,7 +237,7 @@
              </property>
              <property name="icon">
               <iconset resource="media.qrc">
-               <normaloff>:/media/media/previous_marker_off.png</normaloff>:/media/media/previous_marker_off.png</iconset>
+               <normaloff>:/media/media/tl_left_hover.png</normaloff>:/media/media/tl_left_hover.png</iconset>
              </property>
              <property name="flat">
               <bool>true</bool>
@@ -312,7 +312,7 @@
              </property>
              <property name="icon">
               <iconset resource="media.qrc">
-               <normaloff>:/media/media/play_off.png</normaloff>:/media/media/play_off.png</iconset>
+               <normaloff>:/media/media/play_hover.png</normaloff>:/media/media/play_hover.png</iconset>
              </property>
              <property name="checkable">
               <bool>true</bool>
@@ -357,7 +357,7 @@
              </property>
              <property name="icon">
               <iconset resource="media.qrc">
-               <normaloff>:/media/media/next_marker_off.png</normaloff>:/media/media/next_marker_off.png</iconset>
+               <normaloff>:/media/media/tl_right_hover.png</normaloff>:/media/media/tl_right_hover.png</iconset>
              </property>
              <property name="flat">
               <bool>true</bool>

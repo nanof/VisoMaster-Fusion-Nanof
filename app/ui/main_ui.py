@@ -123,6 +123,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         }
         self.view_face_compare_enabled = False
         self.view_face_mask_enabled = False
+        self.viewer_mode_actions_enabled = True
 
         # --- Initialize Managers ---
         self.thumbnail_manager = ThumbnailManager()
@@ -271,6 +272,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             partial(video_control_actions.move_slider_to_previous_nearest_marker, self)
         )
         video_control_actions.add_scan_review_controls(self)
+        video_control_actions.initialize_media_button_icons(self)
 
         self.viewFullScreenButton.clicked.connect(
             partial(video_control_actions.view_fullscreen, self)
@@ -394,6 +396,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             layoutWidget=self.swapWidgetsLayout,
             data_type="parameter",
         )
+        self._connect_mask_show_selection_sync()
         layout_actions.add_widgets_to_tab_layout(
             self,
             LAYOUT_DATA=SETTINGS_LAYOUT_DATA,
@@ -723,7 +726,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
     def resizeEvent(self, event: QtGui.QResizeEvent):
         # print("[INFO] Called resizeEvent()")
         super().resizeEvent(event)
-        self._sync_media_controls_balance()
+        self._queue_media_controls_balance()
         # Call the method to fit the image to the view whenever the window resizes
         items = self.scene.items()
         pixmap_item = next(
@@ -735,6 +738,32 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             scene_rect = pixmap_item.boundingRect()
             self.graphicsViewFrame.setSceneRect(scene_rect)
             graphics_view_actions.fit_image_to_view(self, pixmap_item, scene_rect)
+
+    def changeEvent(self, event: QtCore.QEvent):
+        super().changeEvent(event)
+        if event.type() == QtCore.QEvent.Type.WindowStateChange:
+            self.is_full_screen = self.isFullScreen()
+
+    def eventFilter(self, watched, event):
+        viewport_widget = getattr(self, "mediaControlsViewportWidget", None)
+        if (
+            viewport_widget is not None
+            and watched is viewport_widget
+            and event.type() == QtCore.QEvent.Type.Resize
+        ):
+            self._queue_media_controls_balance()
+        return super().eventFilter(watched, event)
+
+    def _queue_media_controls_balance(self):
+        if getattr(self, "_media_controls_balance_queued", False):
+            return
+        self._media_controls_balance_queued = True
+
+        def _run_balance():
+            self._media_controls_balance_queued = False
+            self._sync_media_controls_balance()
+
+        QtCore.QTimer.singleShot(0, _run_balance)
 
     def _apply_runtime_window_title(self):
         base_title = getattr(self, "_base_window_title", self.windowTitle())
@@ -827,22 +856,25 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             self._move_faces_strip_to_right()
 
     def _normalize_media_control_button_sizes(self):
-        """Match all player control buttons to double the play button width."""
+        """Apply a consistent preferred size to the centered media controls."""
         play_size = self.buttonMediaPlay.sizeHint()
         if not play_size.isValid():
             return
 
-        target_size = QtCore.QSize(play_size.width() * 2, play_size.height())
-        marker_size = QtCore.QSize(
-            max(1, int(round(target_size.width() * 0.7))),
-            target_size.height(),
-        )
-        utility_size = QtCore.QSize(
-            max(1, target_size.width() // 2), target_size.height()
-        )
+        target_height = play_size.height()
+        scan_tools_button = getattr(self, "scanToolsToggleButton", None)
+        scan_tools_text_width = 0
+        if scan_tools_button is not None:
+            scan_tools_font_metrics = QtGui.QFontMetrics(scan_tools_button.font())
+            scan_tools_text_width = (
+                scan_tools_font_metrics.horizontalAdvance(scan_tools_button.text()) + 28
+            )
+
+        preferred_width = max(play_size.width() * 2 + 10, scan_tools_text_width + 8, 96)
+        target_size = QtCore.QSize(preferred_width, target_height)
         transport_icon_size = QtCore.QSize(22, 22)
         marker_icon_size = QtCore.QSize(20, 20)
-        utility_icon_size = QtCore.QSize(18, 18)
+        utility_icon_size = QtCore.QSize(22, 22)
 
         transport_buttons = [
             self.frameRewindButton,
@@ -862,60 +894,69 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             self.theatreModeButton,
         ]
         text_utility_buttons = [
-            getattr(self, "faceCompareToggleButton", None),
-            getattr(self, "faceMaskToggleButton", None),
             getattr(self, "scanToolsToggleButton", None),
         ]
 
         for button in transport_buttons:
-            button.setMinimumSize(target_size)
-            button.setMaximumSize(target_size)
+            min_width = max(32, transport_icon_size.width() + 18)
+            button.setMinimumHeight(target_size.height())
+            button.setMaximumHeight(target_size.height())
+            button.setMinimumWidth(min_width)
+            button.setMaximumWidth(target_size.width())
             size_policy = button.sizePolicy()
-            size_policy.setHorizontalPolicy(QtWidgets.QSizePolicy.Fixed)
+            size_policy.setHorizontalPolicy(QtWidgets.QSizePolicy.Minimum)
             size_policy.setVerticalPolicy(QtWidgets.QSizePolicy.Fixed)
             button.setSizePolicy(size_policy)
             button.setIconSize(transport_icon_size)
 
         for button in marker_buttons:
-            button.setMinimumSize(marker_size)
-            button.setMaximumSize(marker_size)
+            min_width = max(30, marker_icon_size.width() + 16)
+            button.setMinimumHeight(target_size.height())
+            button.setMaximumHeight(target_size.height())
+            button.setMinimumWidth(min_width)
+            button.setMaximumWidth(target_size.width())
             size_policy = button.sizePolicy()
-            size_policy.setHorizontalPolicy(QtWidgets.QSizePolicy.Fixed)
+            size_policy.setHorizontalPolicy(QtWidgets.QSizePolicy.Minimum)
             size_policy.setVerticalPolicy(QtWidgets.QSizePolicy.Fixed)
             button.setSizePolicy(size_policy)
             button.setIconSize(marker_icon_size)
 
         for button in icon_utility_buttons:
-            button.setMinimumSize(utility_size)
-            button.setMaximumSize(utility_size)
+            min_width = max(30, utility_icon_size.width() + 16)
+            button.setMinimumHeight(target_size.height())
+            button.setMaximumHeight(target_size.height())
+            button.setMinimumWidth(min_width)
+            button.setMaximumWidth(target_size.width())
             size_policy = button.sizePolicy()
-            size_policy.setHorizontalPolicy(QtWidgets.QSizePolicy.Fixed)
+            size_policy.setHorizontalPolicy(QtWidgets.QSizePolicy.Minimum)
             size_policy.setVerticalPolicy(QtWidgets.QSizePolicy.Fixed)
             button.setSizePolicy(size_policy)
             button.setIconSize(utility_icon_size)
 
+        self.liveSoundButton.setIconSize(QtCore.QSize(24, 24))
+        self.theatreModeButton.setIconSize(QtCore.QSize(28, 28))
+
         for button in text_utility_buttons:
             if button is None:
                 continue
-            text_size = QtCore.QSize(
-                max(button.sizeHint().width(), utility_size.width()),
-                target_size.height(),
-            )
-            button.setMinimumSize(text_size)
-            button.setMaximumSize(text_size)
+            font_metrics = QtGui.QFontMetrics(button.font())
+            text_width = font_metrics.horizontalAdvance(button.text()) + 28
+            minimum_width = text_width
+            button.setMinimumHeight(target_size.height())
+            button.setMaximumHeight(target_size.height())
+            button.setMinimumWidth(minimum_width)
+            button.setMaximumWidth(target_size.width())
             size_policy = button.sizePolicy()
-            size_policy.setHorizontalPolicy(QtWidgets.QSizePolicy.Fixed)
+            size_policy.setHorizontalPolicy(QtWidgets.QSizePolicy.Minimum)
             size_policy.setVerticalPolicy(QtWidgets.QSizePolicy.Fixed)
             button.setSizePolicy(size_policy)
 
-        if hasattr(self, "mediaControlsTransportLayout"):
-            self.mediaControlsTransportLayout.setSpacing(12)
-        if hasattr(self, "mediaControlsUtilityLayout"):
-            self.mediaControlsUtilityLayout.setSpacing(12)
+        if hasattr(self, "mediaControlsMainLayout"):
+            self.mediaControlsMainLayout.setSpacing(12)
         self._sync_media_controls_balance()
 
     def _install_media_controls_layout(self):
-        """Split the media bar into left, centered transport, and right zones."""
+        """Center the media controls in a single simple row."""
         if getattr(self, "_media_controls_layout_installed", False):
             return
 
@@ -930,69 +971,84 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.setSpacing(0)
 
-        self.mediaControlsLeftWidget = QtWidgets.QWidget(self.mediaLayout)
-        self.mediaControlsLeftWidget.setObjectName("mediaControlsLeftWidget")
-        self.mediaControlsLeftWidget.setSizePolicy(
+        self.mediaControlsViewportWidget = QtWidgets.QWidget(self.mediaLayout)
+        self.mediaControlsViewportWidget.setObjectName("mediaControlsViewportWidget")
+        self.mediaControlsViewportWidget.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
+        )
+        self.mediaControlsViewportWidget.installEventFilter(self)
+        self.mediaControlsViewportLayout = QtWidgets.QGridLayout(
+            self.mediaControlsViewportWidget
+        )
+        self.mediaControlsViewportLayout.setContentsMargins(0, 0, 0, 0)
+        self.mediaControlsViewportLayout.setSpacing(0)
+
+        self.mediaControlsCenterWidget = QtWidgets.QWidget(
+            self.mediaControlsViewportWidget
+        )
+        self.mediaControlsCenterWidget.setObjectName("mediaControlsCenterWidget")
+        self.mediaControlsCenterWidget.setSizePolicy(
             QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed
         )
-        self.mediaControlsLeftLayout = QtWidgets.QHBoxLayout(
-            self.mediaControlsLeftWidget
-        )
-        self.mediaControlsLeftLayout.setContentsMargins(0, 0, 0, 0)
-        self.mediaControlsLeftLayout.setSpacing(12)
-        self.mediaControlsLeftLayout.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
-
-        self.mediaControlsCenterWidget = QtWidgets.QWidget(self.mediaLayout)
-        self.mediaControlsCenterWidget.setObjectName("mediaControlsCenterWidget")
         self.mediaControlsCenterLayout = QtWidgets.QHBoxLayout(
             self.mediaControlsCenterWidget
         )
         self.mediaControlsCenterLayout.setContentsMargins(0, 0, 0, 0)
         self.mediaControlsCenterLayout.setSpacing(12)
         self.mediaControlsCenterLayout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-
-        self.mediaControlsRightWidget = QtWidgets.QWidget(self.mediaLayout)
-        self.mediaControlsRightWidget.setObjectName("mediaControlsRightWidget")
-        self.mediaControlsRightWidget.setSizePolicy(
-            QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed
+        self.mediaControlsViewportLayout.addItem(
+            QtWidgets.QSpacerItem(
+                0,
+                0,
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Minimum,
+            ),
+            0,
+            0,
         )
-        self.mediaControlsRightLayout = QtWidgets.QHBoxLayout(
-            self.mediaControlsRightWidget
+        self.mediaControlsViewportLayout.addWidget(self.mediaControlsCenterWidget, 0, 1)
+        self.mediaControlsViewportLayout.addItem(
+            QtWidgets.QSpacerItem(
+                0,
+                0,
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Minimum,
+            ),
+            0,
+            2,
         )
-        self.mediaControlsRightLayout.setContentsMargins(0, 0, 0, 0)
-        self.mediaControlsRightLayout.setSpacing(12)
-        self.mediaControlsRightLayout.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        self.mediaControlsViewportLayout.setColumnStretch(0, 1)
+        self.mediaControlsViewportLayout.setColumnStretch(2, 1)
 
-        top_layout.addWidget(self.mediaControlsLeftWidget)
-        top_layout.addWidget(self.mediaControlsCenterWidget, 1)
-        top_layout.addWidget(self.mediaControlsRightWidget)
+        top_layout.addWidget(self.mediaControlsViewportWidget, 1)
 
-        self.mediaControlsTransportLayout = self.mediaControlsCenterLayout
-        self.mediaControlsUtilityLayout = self.mediaControlsRightLayout
+        self.mediaControlsMainLayout = self.mediaControlsCenterLayout
+        self.mediaControlsTransportLayout = self.mediaControlsMainLayout
+        self.mediaControlsUtilityLayout = self.mediaControlsMainLayout
 
         for button in [
-            self.frameRewindButton,
-            self.buttonMediaRecord,
-            self.buttonMediaPlay,
-            self.frameAdvanceButton,
             self.addMarkerButton,
             self.removeMarkerButton,
             self.previousMarkerButton,
             self.nextMarkerButton,
+            self.frameRewindButton,
+            self.buttonMediaRecord,
+            self.buttonMediaPlay,
+            self.frameAdvanceButton,
             self.liveSoundButton,
             self.viewFullScreenButton,
             self.theatreModeButton,
         ]:
             button.show()
-            self.mediaControlsTransportLayout.addWidget(button)
+            self.mediaControlsMainLayout.addWidget(button)
 
         scan_tools_button = getattr(self, "scanToolsToggleButton", None)
         if scan_tools_button is not None:
             scan_tools_button.show()
-            self.mediaControlsTransportLayout.addWidget(scan_tools_button)
+            self.mediaControlsMainLayout.addWidget(scan_tools_button)
 
         self._media_controls_layout_installed = True
-        QtCore.QTimer.singleShot(0, self._sync_media_controls_balance)
+        self._queue_media_controls_balance()
 
     def _install_view_panel_toggle_actions(self):
         """Move the top panel toggle checkboxes into the View menu."""
@@ -1043,6 +1099,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             return
 
         self.actionView_Fullscreen_F11.setText("Fullscreen\tF11")
+        self.actionView_Fullscreen_F11.setCheckable(True)
 
         fit_action = QtGui.QAction("Fit to View", self.menuView)
         fit_action.setShortcut(QtGui.QKeySequence("Ctrl+0"))
@@ -1059,104 +1116,73 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         )
 
         theatre_action = QtGui.QAction("Theatre Mode\tT", self.menuView)
+        theatre_action.setCheckable(True)
         theatre_action.triggered.connect(
             lambda: video_control_actions.toggle_theatre_mode(self)
         )
 
+        face_compare_action = QtGui.QAction("Face Compare", self.menuView)
+        face_compare_action.setCheckable(True)
+        face_compare_action.triggered.connect(
+            lambda checked: (
+                self._set_compare_mode("compare", checked),
+                self._sync_viewer_menu_actions(),
+            )
+        )
+
+        mask_actions = {}
+        for option in self._get_mask_show_options():
+            action = QtGui.QAction(
+                self._mask_show_context_menu_label(option), self.menuView
+            )
+            action.setCheckable(True)
+            action.triggered.connect(
+                lambda checked, value=option: self._handle_viewer_mask_action(
+                    value, checked
+                )
+            )
+            mask_actions[option] = action
+
         self.actionView_FitToView = fit_action
         self.actionView_100Zoom = zoom_100_action
         self.actionView_TheatreMode = theatre_action
+        self.actionView_FaceCompare = face_compare_action
+        self._view_mask_actions = mask_actions
 
-        self.menuView.insertAction(
-            self.actionView_Fullscreen_F11, self.actionView_FitToView
-        )
-        self.menuView.insertAction(
-            self.actionView_Fullscreen_F11, self.actionView_100Zoom
-        )
-        self.menuView.insertSeparator(self.actionView_Fullscreen_F11)
-        self.menuView.insertAction(
-            self.actionView_Fullscreen_F11, self.actionView_TheatreMode
-        )
+        self.menuView.removeAction(self.actionView_Fullscreen_F11)
+        self.menuView.addAction(self.actionView_FitToView)
+        self.menuView.addAction(self.actionView_100Zoom)
+        self.menuView.addSeparator()
+        self.menuView.addAction(self.actionView_Fullscreen_F11)
+        self.menuView.addAction(self.actionView_TheatreMode)
+        self.menuView.addSeparator()
+        self.menuView.addAction(self.actionView_FaceCompare)
+        self.menuView.addSeparator()
+        for option in self._get_mask_show_options():
+            self.menuView.addAction(self._view_mask_actions[option])
 
         self.addAction(self.actionView_FitToView)
         self.addAction(self.actionView_100Zoom)
         self.addAction(self.actionView_TheatreMode)
+        self.menuView.aboutToShow.connect(self._sync_viewer_menu_actions)
+        self._sync_viewer_menu_actions()
         self._view_navigation_actions_installed = True
 
     def _install_compare_mask_toggle_buttons(self):
-        """Move Face Compare and Face Mask toggles into the media controls row."""
+        """Initialize hidden compare/mask checkbox state without visible media-bar buttons."""
         if getattr(self, "_compare_mask_toggle_buttons_installed", False):
             return
+        compare_checkbox = getattr(self, "faceCompareCheckBox", None)
+        if compare_checkbox is not None:
+            self.view_face_compare_enabled = compare_checkbox.isChecked()
+            compare_checkbox.hide()
 
-        specs = [
-            (
-                "faceCompareCheckBox",
-                "Face Compare",
-                "faceCompareToggleButton",
-                "compare",
-            ),
-            ("faceMaskCheckBox", "Face Mask", "faceMaskToggleButton", "mask"),
-        ]
-
-        insert_before = getattr(self, "scanToolsToggleButton", None)
-        insert_index = (
-            self.horizontalLayoutMediaButtons.indexOf(insert_before)
-            if insert_before is not None
-            else -1
-        )
-        if insert_index == -1:
-            insert_index = self.horizontalLayoutMediaButtons.indexOf(
-                self.horizontalSpacer_5
-            )
-        if insert_index == -1:
-            insert_index = self.horizontalLayoutMediaButtons.count()
-
-        for offset, (checkbox_attr, label, button_attr, mode_key) in enumerate(specs):
-            checkbox = getattr(self, checkbox_attr, None)
-            if checkbox is None:
-                continue
-
-            if mode_key == "compare":
-                self.view_face_compare_enabled = checkbox.isChecked()
-            else:
-                self.view_face_mask_enabled = checkbox.isChecked()
-            checkbox.hide()
-
-            button = QtWidgets.QPushButton(label, self.mediaLayout)
-            button.setObjectName(button_attr)
-            button.setCheckable(True)
-            button.setChecked(
-                self.view_face_compare_enabled
-                if mode_key == "compare"
-                else self.view_face_mask_enabled
-            )
-            button.setFlat(True)
-            button.toggled.connect(
-                lambda checked, key=mode_key: self._set_compare_mode(key, checked)
-            )
-
-            setattr(self, button_attr, button)
-            utility_layout = getattr(self, "mediaControlsUtilityLayout", None)
-            if utility_layout is not None:
-                before_widget = getattr(self, "faceCompareToggleButton", None)
-                if before_widget is button:
-                    before_widget = getattr(self, "liveSoundButton", None)
-                if before_widget is None:
-                    before_widget = getattr(self, "liveSoundButton", None)
-                if before_widget is not None:
-                    insert_at = utility_layout.indexOf(before_widget)
-                    if insert_at < 0:
-                        insert_at = utility_layout.count()
-                else:
-                    insert_at = utility_layout.count()
-                utility_layout.insertWidget(insert_at + offset, button)
-            else:
-                self.horizontalLayoutMediaButtons.insertWidget(
-                    insert_index + offset, button
-                )
+        mask_checkbox = getattr(self, "faceMaskCheckBox", None)
+        if mask_checkbox is not None:
+            self.view_face_mask_enabled = mask_checkbox.isChecked()
+            mask_checkbox.hide()
 
         self._compare_mask_toggle_buttons_installed = True
-        self._sync_media_controls_balance()
 
     def _set_panel_visibility(self, panel_key: str, checked: bool):
         """Apply panel visibility from the visible View menu actions."""
@@ -1226,27 +1252,152 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self._panel_visibility_sync_installed = True
 
     def _set_compare_mode(self, mode_key: str, checked: bool):
-        """Apply compare/mask preview mode from the visible media-bar buttons."""
+        """Apply compare/mask preview mode from shared hidden checkbox state."""
         if mode_key == "compare":
             self.view_face_compare_enabled = checked
             checkbox = getattr(self, "faceCompareCheckBox", None)
-            button = getattr(self, "faceCompareToggleButton", None)
         else:
             self.view_face_mask_enabled = checked
             checkbox = getattr(self, "faceMaskCheckBox", None)
-            button = getattr(self, "faceMaskToggleButton", None)
 
         if checkbox is not None and checkbox.isChecked() != checked:
             checkbox.blockSignals(True)
             checkbox.setChecked(checked)
             checkbox.blockSignals(False)
-
-        if button is not None and button.isChecked() != checked:
-            button.blockSignals(True)
-            button.setChecked(checked)
-            button.blockSignals(False)
-
         video_control_actions.process_compare_checkboxes(self)
+        self._sync_viewer_menu_actions()
+
+    def _get_mask_show_selection_widget(self):
+        return self.parameter_widgets.get("MaskShowSelection")
+
+    def _get_mask_show_label_map(self) -> dict[str, str]:
+        return {
+            "swap_mask": "Swap",
+            "diff": "Differencing",
+            "texture": "Texture Transfer",
+        }
+
+    def _get_mask_show_options(self) -> list[str]:
+        widget = self._get_mask_show_selection_widget()
+        if isinstance(widget, widget_components.SelectionBox):
+            values = []
+            for index in range(widget.count()):
+                item_value = widget.itemData(index)
+                values.append(
+                    item_value if item_value is not None else widget.itemText(index)
+                )
+            return values
+        return list(SWAPPER_LAYOUT_DATA["Masks"]["MaskShowSelection"]["options"])
+
+    def _get_current_mask_show_value(self) -> str:
+        widget = self._get_mask_show_selection_widget()
+        if isinstance(widget, widget_components.SelectionBox):
+            current_value = widget.currentData()
+            if current_value:
+                return str(current_value)
+            current_value = widget.currentText()
+            if current_value:
+                return current_value
+        return str(
+            self.current_widget_parameters.get(
+                "MaskShowSelection",
+                SWAPPER_LAYOUT_DATA["Masks"]["MaskShowSelection"]["default"],
+            )
+        )
+
+    def _mask_show_option_label(self, value: str) -> str:
+        return self._get_mask_show_label_map().get(
+            value, value.replace("_", " ").title()
+        )
+
+    def _mask_show_context_menu_label(self, value: str) -> str:
+        context_labels = {
+            "swap_mask": "Swap Mask",
+            "diff": "Differencing Mask",
+            "texture": "Texture Transfer Mask",
+        }
+        return context_labels.get(value, self._mask_show_option_label(value))
+
+    def _is_fullscreen_menu_active(self) -> bool:
+        if getattr(self, "is_theatre_mode", False):
+            return bool(getattr(self, "_was_custom_fullscreen", False))
+        return self.isFullScreen()
+
+    def _handle_viewer_mask_action(self, value: str, checked: bool):
+        current_value = self._get_current_mask_show_value()
+        if self.view_face_mask_enabled and value == current_value and not checked:
+            self._set_compare_mode("mask", False)
+        elif checked or not self.view_face_mask_enabled or value != current_value:
+            self._select_mask_show_option(value)
+        self._sync_viewer_menu_actions()
+
+    def _select_mask_show_option(self, value: str):
+        widget = self._get_mask_show_selection_widget()
+        if isinstance(widget, widget_components.SelectionBox):
+            current_value = widget.currentData()
+            if current_value != value:
+                widget.set_value(value)
+        else:
+            common_widget_actions.update_parameter(self, "MaskShowSelection", value)
+        if not self.view_face_mask_enabled:
+            self._set_compare_mode("mask", True)
+        else:
+            self._sync_viewer_menu_actions()
+
+    def _sync_face_mask_button_presentation(self):
+        return
+
+    def _connect_mask_show_selection_sync(self):
+        if getattr(self, "_mask_show_selection_sync_installed", False):
+            return
+        widget = self._get_mask_show_selection_widget()
+        if isinstance(widget, widget_components.SelectionBox):
+            current_value = self._get_current_mask_show_value()
+            label_map = self._get_mask_show_label_map()
+            widget.blockSignals(True)
+            widget.clear()
+            for option in SWAPPER_LAYOUT_DATA["Masks"]["MaskShowSelection"]["options"]:
+                widget.addItem(label_map.get(option, option), option)
+            widget.set_value(current_value)
+            widget.blockSignals(False)
+            self._mask_show_selection_sync_installed = True
+
+    def _sync_viewer_menu_actions(self):
+        fullscreen_action = getattr(self, "actionView_Fullscreen_F11", None)
+        if fullscreen_action is not None:
+            fullscreen_action.blockSignals(True)
+            fullscreen_action.setCheckable(True)
+            fullscreen_action.setChecked(self._is_fullscreen_menu_active())
+            fullscreen_action.setEnabled(True)
+            fullscreen_action.blockSignals(False)
+
+        theatre_action = getattr(self, "actionView_TheatreMode", None)
+        if theatre_action is not None:
+            theatre_action.blockSignals(True)
+            theatre_action.setCheckable(True)
+            theatre_action.setChecked(bool(getattr(self, "is_theatre_mode", False)))
+            theatre_action.blockSignals(False)
+
+        compare_action = getattr(self, "actionView_FaceCompare", None)
+        if compare_action is not None:
+            compare_action.blockSignals(True)
+            compare_action.setChecked(bool(self.view_face_compare_enabled))
+            compare_action.setEnabled(
+                bool(getattr(self, "viewer_mode_actions_enabled", True))
+            )
+            compare_action.blockSignals(False)
+
+        current_mask_value = self._get_current_mask_show_value()
+        viewer_mode_actions_enabled = bool(
+            getattr(self, "viewer_mode_actions_enabled", True)
+        )
+        for option, action in getattr(self, "_view_mask_actions", {}).items():
+            action.blockSignals(True)
+            action.setChecked(
+                bool(self.view_face_mask_enabled) and option == current_mask_value
+            )
+            action.setEnabled(viewer_mode_actions_enabled)
+            action.blockSignals(False)
 
     def _install_media_controls_separator(self):
         """Insert visual dividers between control groups in the media button row."""
@@ -1270,12 +1421,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             separator.setFixedHeight(height)
             separator.setStyleSheet("color: rgba(180, 180, 180, 110);")
             separator_layout.addWidget(separator)
+            separator_container.setProperty("defaultMargin", margin)
             return separator_container
 
-        transport_layout = getattr(self, "mediaControlsTransportLayout", None)
+        transport_layout = getattr(self, "mediaControlsMainLayout", None)
         if transport_layout is not None:
             playback_marker_separator = _make_separator("mediaControlsSeparator")
-            insert_index = transport_layout.indexOf(self.addMarkerButton)
+            insert_index = transport_layout.indexOf(self.frameRewindButton)
             if insert_index != -1:
                 transport_layout.insertWidget(insert_index, playback_marker_separator)
                 self._media_controls_separator = playback_marker_separator
@@ -1288,23 +1440,35 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self._sync_media_controls_balance()
 
     def _sync_media_controls_balance(self):
-        """Keep left and right side zones equal so the center band stays centered."""
-        left_widget = getattr(self, "mediaControlsLeftWidget", None)
-        right_widget = getattr(self, "mediaControlsRightWidget", None)
-        if left_widget is None or right_widget is None:
+        """Keep the centered media controls minimum width in sync with their content."""
+        viewport_widget = getattr(self, "mediaControlsViewportWidget", None)
+        center_widget = getattr(self, "mediaControlsCenterWidget", None)
+        if viewport_widget is None or center_widget is None:
             return
 
-        left_width = max(
-            left_widget.layout().sizeHint().width() if left_widget.layout() else 0,
-            left_widget.minimumSizeHint().width(),
+        main_layout = getattr(self, "mediaControlsMainLayout", None)
+        if main_layout is None:
+            return
+
+        main_spacing = 12
+        separator_margin = 12
+
+        main_layout.setSpacing(main_spacing)
+        for separator_name in (
+            "_media_controls_separator",
+            "_media_controls_view_separator",
+        ):
+            separator_container = getattr(self, separator_name, None)
+            if separator_container is None or separator_container.layout() is None:
+                continue
+            separator_container.layout().setContentsMargins(
+                separator_margin, 0, separator_margin, 0
+            )
+
+        center_width = max(
+            center_widget.sizeHint().width(), center_widget.minimumSizeHint().width()
         )
-        right_width = max(
-            right_widget.layout().sizeHint().width() if right_widget.layout() else 0,
-            right_widget.minimumSizeHint().width(),
-        )
-        side_width = max(left_width, right_width)
-        left_widget.setFixedWidth(side_width)
-        right_widget.setFixedWidth(side_width)
+        viewport_widget.setMinimumWidth(center_width)
 
     def _configure_faces_panel_button_column(self):
         """Keep the left-side face buttons matched to the visible target-faces box height."""

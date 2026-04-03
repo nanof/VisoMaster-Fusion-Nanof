@@ -154,11 +154,14 @@ def add_widgets_to_tab_layout(
                     widget_data: dict,
                     selected_value=False,
                 ):
+                    actual_value = selection_widget.currentData()
+                    if actual_value is None:
+                        actual_value = selected_value
                     if data_type == "parameter":
                         common_widget_actions.update_parameter(
                             main_window,
                             selection_widget_name,
-                            selected_value,
+                            actual_value,
                             enable_refresh_frame=selection_widget.enable_refresh_frame,
                             exec_function=widget_data.get("exec_function"),
                             exec_function_args=cast(
@@ -169,7 +172,7 @@ def add_widgets_to_tab_layout(
                         common_widget_actions.update_control(
                             main_window,
                             selection_widget_name,
-                            selected_value,
+                            actual_value,
                             exec_function=widget_data.get("exec_function"),
                             exec_function_args=cast(
                                 list, widget_data.get("exec_function_args", [])
@@ -749,6 +752,7 @@ def set_all_parameters_and_control_widgets_enabled(
     main_window: "MainWindow", enabled: bool
 ):
     disabled = not enabled
+    main_window.viewer_mode_actions_enabled = enabled
 
     # Bottom buttons
     main_window.saveImageButton.setDisabled(disabled)
@@ -782,12 +786,6 @@ def set_all_parameters_and_control_widgets_enabled(
     ):
         if hasattr(main_window, attr_name):
             getattr(main_window, attr_name).setDisabled(disabled)
-
-    # Compare/mask toolbar toggles
-    if hasattr(main_window, "faceCompareToggleButton"):
-        main_window.faceCompareToggleButton.setDisabled(disabled)
-    if hasattr(main_window, "faceMaskToggleButton"):
-        main_window.faceMaskToggleButton.setDisabled(disabled)
 
     # List items
     for _, embed_button in main_window.merged_embeddings.items():
