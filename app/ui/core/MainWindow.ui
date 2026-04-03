@@ -919,6 +919,25 @@
               </property>
              </widget>
             </item>
+            <item>
+             <widget class="QPushButton" name="buttonBatchAv1ToH264">
+              <property name="sizePolicy">
+               <sizepolicy hsizetype="Minimum" vsizetype="Fixed">
+                <horstretch>0</horstretch>
+                <verstretch>0</verstretch>
+               </sizepolicy>
+              </property>
+              <property name="toolTip">
+               <string>Find AV1 videos in the target folder and batch-convert them to H.264 (replaces each original file after a successful transcode).</string>
+              </property>
+              <property name="text">
+               <string>AV1→H.264</string>
+              </property>
+              <property name="flat">
+               <bool>true</bool>
+              </property>
+             </widget>
+            </item>
            </layout>
           </item>
          </layout>

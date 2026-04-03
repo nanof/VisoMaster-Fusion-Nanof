@@ -16,6 +16,7 @@ from app.ui.widgets.actions import video_control_actions
 from app.ui.widgets.actions import filter_actions
 from app.ui.widgets.actions import save_load_actions
 from app.ui.widgets.actions import list_view_actions
+from app.ui.widgets.actions import transcode_actions
 from app.ui.widgets.actions import graphics_view_actions
 from app.ui.widgets.actions import job_manager_actions
 from app.ui.widgets.actions import preset_actions
@@ -230,6 +231,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         # Set up folder open buttons for Target and Input
         self.buttonTargetVideosPath.clicked.connect(
             partial(list_view_actions.select_target_medias, self, "folder")
+        )
+        self.buttonBatchAv1ToH264.clicked.connect(
+            partial(transcode_actions.batch_convert_av1_in_folder, self)
         )
         self.buttonInputFacesPath.clicked.connect(
             partial(list_view_actions.select_input_face_images, self, "folder")

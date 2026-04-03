@@ -19,6 +19,7 @@ from app.ui.widgets.actions import video_control_actions
 from app.ui.widgets.actions import graphics_view_actions
 from app.ui.widgets.actions import card_actions
 from app.ui.widgets.actions import save_load_actions
+from app.ui.widgets.actions import transcode_actions
 import app.helpers.miscellaneous as misc_helpers
 from app.helpers.miscellaneous import get_video_rotation
 from app.helpers.screen_capture import (
@@ -424,6 +425,16 @@ class TargetMediaCardButton(CardButton):
 
     def create_context_menu(self):
         self.popMenu = QtWidgets.QMenu(self)
+        if self.file_type == "video" and os.path.isfile(self.media_path):
+            convert_action = QtGui.QAction("Convert to H.264…", self)
+            convert_action.triggered.connect(
+                lambda: transcode_actions.convert_target_video_to_h264(
+                    self.main_window, self.media_path
+                )
+            )
+            self.popMenu.addAction(convert_action)
+            self.popMenu.addSeparator()
+
         remove_action = QtGui.QAction("Remove from list", self)
         remove_action.triggered.connect(self.remove_target_media_from_list)
         self.popMenu.addAction(remove_action)
