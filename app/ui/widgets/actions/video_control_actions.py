@@ -605,9 +605,9 @@ def add_scan_review_controls(main_window: "MainWindow"):
     run_scan_button = QtWidgets.QPushButton("Scan for Issues")
     run_scan_button.setToolTip(
         "Scans the current render range using your current settings.\n"
-        "If record markers exist, only those ranges are scanned.\n"
+        "If record start/end markers exist, only those ranges are scanned.\n"
         "Saved settings markers are applied during the scan.\n"
-        "Flags likely issue frames for the selected target face.\n"
+        "Flags detection or similarity misses for the selected target face.\n"
         "Single-frame preview may differ from playback on borderline frames."
     )
     run_scan_button.setSizePolicy(
@@ -1012,9 +1012,9 @@ def _restore_issue_scan_ui(main_window: "MainWindow") -> None:
         run_button.setText("Scan for Issues")
         run_button.setToolTip(
             "Scans the current render range using your current settings.\n"
-            "If record markers exist, only those ranges are scanned.\n"
+            "If record start/end markers exist, only those ranges are scanned.\n"
             "Saved settings markers are applied during the scan.\n"
-            "Flags likely issue frames for the selected target face.\n"
+            "Flags detection or similarity misses for the selected target face.\n"
             "Single-frame preview may differ from playback on borderline frames."
         )
 
@@ -1312,15 +1312,19 @@ def delete_all_markers(main_window: "MainWindow"):
 
 
 def view_fullscreen(main_window: "MainWindow"):
-    """Toggles the main window between full-screen and normal mode, hiding/showing the menu bar."""
-    if main_window.is_full_screen:
+    """Toggle fullscreen or update the remembered fullscreen base while theatre mode is active."""
+    if getattr(main_window, "is_theatre_mode", False):
+        main_window._was_custom_fullscreen = not bool(
+            getattr(main_window, "_was_custom_fullscreen", False)
+        )
+    elif main_window.isFullScreen():
         main_window.showNormal()  # Exit full-screen mode
-        main_window.menuBar().show()
     else:
         main_window.showFullScreen()  # Enter full-screen mode
-        main_window.menuBar().hide()
 
-    main_window.is_full_screen = not main_window.is_full_screen
+    sync_actions = getattr(main_window, "_sync_viewer_menu_actions", None)
+    if callable(sync_actions):
+        sync_actions()
 
 
 def fit_view_to_current_image(main_window: "MainWindow"):
@@ -1350,16 +1354,59 @@ def show_graphics_view_context_menu(
     main_window: "MainWindow", global_pos: QtCore.QPoint
 ):
     menu = QtWidgets.QMenu(main_window.graphicsViewFrame)
+    viewer_mode_actions_enabled = bool(
+        getattr(main_window, "viewer_mode_actions_enabled", True)
+    )
     fit_action = menu.addAction("Fit to View")
     zoom_100_action = menu.addAction("100% Zoom")
+    menu.addSeparator()
+    fullscreen_action = menu.addAction("Fullscreen")
+    fullscreen_action.setCheckable(True)
+    fullscreen_action.setChecked(bool(main_window._is_fullscreen_menu_active()))
+    theatre_action = menu.addAction("Theatre Mode")
+    theatre_action.setCheckable(True)
+    theatre_action.setChecked(bool(getattr(main_window, "is_theatre_mode", False)))
+    menu.addSeparator()
+    face_compare_action = menu.addAction("Face Compare")
+    face_compare_action.setCheckable(True)
+    face_compare_action.setChecked(bool(main_window.view_face_compare_enabled))
+    face_compare_action.setEnabled(viewer_mode_actions_enabled)
+    menu.addSeparator()
+    current_mask_value = main_window._get_current_mask_show_value()
+    mask_actions = {}
+    for option in main_window._get_mask_show_options():
+        action = menu.addAction(main_window._mask_show_context_menu_label(option))
+        action.setCheckable(True)
+        action.setChecked(
+            bool(main_window.view_face_mask_enabled) and option == current_mask_value
+        )
+        action.setEnabled(viewer_mode_actions_enabled)
+        mask_actions[action] = option
+    menu.addSeparator()
     save_action = menu.addAction("Save Image")
     selected_action = menu.exec(global_pos)
     if selected_action is fit_action:
         fit_view_to_current_image(main_window)
     elif selected_action is zoom_100_action:
         zoom_current_image_100(main_window)
+    elif selected_action is fullscreen_action:
+        view_fullscreen(main_window)
+        main_window._sync_viewer_menu_actions()
+    elif selected_action is theatre_action:
+        QtCore.QTimer.singleShot(
+            0,
+            lambda: _run_context_menu_theatre_toggle(main_window),
+        )
+    elif selected_action is face_compare_action:
+        main_window._set_compare_mode("compare", face_compare_action.isChecked())
+        main_window._sync_viewer_menu_actions()
     elif selected_action is save_action:
         save_current_frame_to_file(main_window)
+    elif selected_action in mask_actions:
+        selected_value = mask_actions[selected_action]
+        main_window._handle_viewer_mask_action(
+            selected_value, selected_action.isChecked()
+        )
 
 
 def enable_zoom_and_pan(main_window: "MainWindow", view: QtWidgets.QGraphicsView):
@@ -1598,6 +1645,7 @@ def record_video(main_window: "MainWindow", checked: bool):
             print(
                 "[INFO] Record button pressed: Starting default recording (full video or from slider)."
             )
+            _disable_compare_preview_modes_for_recording(main_window)
             set_record_button_icon_to_stop(main_window)
             # Disable play button during recording
             main_window.buttonMediaPlay.setEnabled(False)
@@ -1645,6 +1693,7 @@ def record_video(main_window: "MainWindow", checked: bool):
                 print(
                     f"[INFO] Record button pressed: Starting multi-segment recording for {len(valid_pairs)} segment(s)."
                 )
+                _disable_compare_preview_modes_for_recording(main_window)
                 set_record_button_icon_to_stop(main_window)
                 # Disable play button during segment recording
                 main_window.buttonMediaPlay.setEnabled(False)
@@ -1722,7 +1771,7 @@ def record_video(main_window: "MainWindow", checked: bool):
 
 def set_record_button_icon_to_play(main_window: "MainWindow"):
     """Sets the Record button icon and tooltip to the 'ready-to-record' (stopped) state."""
-    main_window.buttonMediaRecord.setIcon(QtGui.QIcon(":/media/media/rec_off.png"))
+    main_window.buttonMediaRecord.setIcon(QtGui.QIcon(":/media/media/rec_hover.png"))
     main_window.buttonMediaRecord.setToolTip("Start Recording")
 
 
@@ -1732,9 +1781,55 @@ def set_record_button_icon_to_stop(main_window: "MainWindow"):
     main_window.buttonMediaRecord.setToolTip("Stop Recording")
 
 
+def _disable_compare_preview_modes_for_recording(main_window: "MainWindow") -> None:
+    disabled_modes = []
+    if getattr(main_window, "view_face_compare_enabled", False):
+        main_window._set_compare_mode("compare", False)
+        disabled_modes.append("Face Compare")
+    if getattr(main_window, "view_face_mask_enabled", False):
+        main_window._set_compare_mode("mask", False)
+        disabled_modes.append("Face Mask")
+
+    if not disabled_modes:
+        return
+
+    disabled_modes_text = " and ".join(disabled_modes)
+    print(
+        f"[INFO] Disabled {disabled_modes_text} preview for recording to keep frame size stable."
+    )
+    common_widget_actions.create_and_show_toast_message(
+        main_window,
+        "Preview Disabled for Recording",
+        f"Disabled {disabled_modes_text} preview before recording.",
+        style_type="warning",
+    )
+
+
+def initialize_media_button_icons(main_window: "MainWindow"):
+    """Assign default icons for the visible centered media-control strip."""
+    icon_map = {
+        "frameRewindButton": ":/media/media/tl_left_hover.png",
+        "frameAdvanceButton": ":/media/media/tl_right_hover.png",
+        "addMarkerButton": ":/media/media/add_marker_hover.png",
+        "removeMarkerButton": ":/media/media/remove_marker_hover.png",
+        "previousMarkerButton": ":/media/media/previous_marker_hover.png",
+        "nextMarkerButton": ":/media/media/next_marker_hover.png",
+        "liveSoundButton": ":/media/media/audio_toggle.png",
+        "viewFullScreenButton": ":/media/media/fullscreen_v2.png",
+        "theatreModeButton": ":/media/media/theatre_mode.png",
+    }
+    for button_name, icon_path in icon_map.items():
+        button = getattr(main_window, button_name, None)
+        if button is not None:
+            button.setIcon(QtGui.QIcon(icon_path))
+
+    set_play_button_icon(main_window)
+    set_record_button_icon(main_window)
+
+
 def set_play_button_icon_to_play(main_window: "MainWindow"):
     """Sets the Play button icon and tooltip to the 'ready-to-play' (stopped) state."""
-    main_window.buttonMediaPlay.setIcon(QtGui.QIcon(":/media/media/play_off.png"))
+    main_window.buttonMediaPlay.setIcon(QtGui.QIcon(":/media/media/play_hover.png"))
     main_window.buttonMediaPlay.setToolTip("Play")
 
 
@@ -1767,7 +1862,7 @@ def set_play_button_icon(main_window: "MainWindow"):
         main_window.buttonMediaPlay.setIcon(QtGui.QIcon(":/media/media/play_on.png"))
         main_window.buttonMediaPlay.setToolTip("Stop")
     else:
-        main_window.buttonMediaPlay.setIcon(QtGui.QIcon(":/media/media/play_off.png"))
+        main_window.buttonMediaPlay.setIcon(QtGui.QIcon(":/media/media/play_hover.png"))
         main_window.buttonMediaPlay.setToolTip("Play")
 
 
@@ -1777,7 +1872,9 @@ def set_record_button_icon(main_window: "MainWindow"):
         main_window.buttonMediaRecord.setIcon(QtGui.QIcon(":/media/media/rec_on.png"))
         main_window.buttonMediaRecord.setToolTip("Stop Recording")
     else:
-        main_window.buttonMediaRecord.setIcon(QtGui.QIcon(":/media/media/rec_off.png"))
+        main_window.buttonMediaRecord.setIcon(
+            QtGui.QIcon(":/media/media/rec_hover.png")
+        )
         main_window.buttonMediaRecord.setToolTip("Start Recording")
 
 
@@ -2655,7 +2752,6 @@ def toggle_theatre_mode(main_window: "MainWindow"):
     Impact: Solves the "squashed text" bug and preserves exact QDockWidget sizes using saveState/restoreState.
     """
     is_theatre = getattr(main_window, "is_theatre_mode", False)
-
     if not is_theatre:
         # --- ENTER THEATRE MODE ---
         main_window.is_theatre_mode = True
@@ -2666,6 +2762,10 @@ def toggle_theatre_mode(main_window: "MainWindow"):
         main_window._was_custom_fullscreen = getattr(
             main_window, "is_full_screen", False
         )
+        if main_window.isMaximized() or main_window.isFullScreen():
+            main_window._was_normal_geometry = main_window.normalGeometry()
+        else:
+            main_window._was_normal_geometry = main_window.geometry()
 
         # 1. Save state and hide Docks, MenuBar
         main_window._saved_dock_states = {
@@ -2859,3 +2959,14 @@ def toggle_theatre_mode(main_window: "MainWindow"):
         main_window.setUpdatesEnabled(True)
 
     layout_actions.fit_image_to_view_onchange(main_window)
+
+
+def _run_context_menu_theatre_toggle(main_window: "MainWindow") -> None:
+    toggle_theatre_mode(main_window)
+    graphics_view = main_window.graphicsViewFrame
+    graphics_view.update()
+    graphics_view.viewport().update()
+    graphics_view.repaint()
+    graphics_view.viewport().repaint()
+    main_window.update()
+    main_window._sync_viewer_menu_actions()

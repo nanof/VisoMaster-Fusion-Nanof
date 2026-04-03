@@ -404,12 +404,6 @@ QProgressBar {
     color: #f0f0f0;
 }
 
-QProgressBar::chunk {
-    background-color: #4090a3; /* Accent */
-    width: 10px; /* Progress chunk width */
-    margin: 0.5px;
-}
-
 QScrollBar:vertical {
     border: 1px solid #363636; /* Darker */
     background: #141414; /* Darkest */

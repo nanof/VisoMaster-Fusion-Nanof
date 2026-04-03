@@ -1682,15 +1682,17 @@ class SelectionBox(QtWidgets.QComboBox, ParametersWidget):
         if callable(self.selection_values) and callable(self.default_value):
             self.clear()
             self.addItems(self.selection_values())
-            self.setCurrentText(self.default_value())
+            self.set_value(self.default_value())
         else:
-            self.setCurrentText(self.default_value)
+            self.set_value(self.default_value)
 
     def set_value(self, value):
-        if callable(value):
-            self.setCurrentText(value())
+        resolved_value = value() if callable(value) else value
+        data_index = self.findData(resolved_value)
+        if data_index != -1:
+            self.setCurrentIndex(data_index)
         else:
-            self.setCurrentText(value)
+            self.setCurrentText(resolved_value)
 
     def showPopup(self):
         view = self.view()

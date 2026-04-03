@@ -602,10 +602,11 @@ def load_saved_workspace(
             if is_maximized:
                 main_window.resize(main_window.sizeHint())
                 main_window.showMaximized()
+                main_window.menuBar().show()
+                main_window.is_full_screen = False
             elif is_fullScreen:
                 main_window.resize(main_window.sizeHint())
                 main_window.showFullScreen()
-                main_window.menuBar().hide()
                 main_window.is_full_screen = True
             else:
                 restored_rect = _get_clamped_window_geometry(
@@ -616,6 +617,8 @@ def load_saved_workspace(
                     window_state.get("height", main_window.height()),
                 )
                 main_window.setGeometry(restored_rect)
+                main_window.menuBar().show()
+                main_window.is_full_screen = False
                 needs_post_restore_frame_clamp = True
             panel_state_map = {
                 "target_media": window_state.get(
@@ -689,19 +692,38 @@ def save_current_workspace(
 
     # --- Save Window State ---
     # --- Save dock layout / panel sizes ---
+    is_theatre_mode = bool(getattr(main_window, "is_theatre_mode", False))
+    saved_is_fullscreen = main_window.is_full_screen
+    saved_is_maximized = main_window.isMaximized()
+    saved_geometry = main_window.geometry()
+    dock_state_source = None
+    if is_theatre_mode:
+        saved_is_fullscreen = bool(
+            getattr(main_window, "_was_custom_fullscreen", False)
+        )
+        saved_is_maximized = (
+            bool(getattr(main_window, "_was_maximized", False))
+            if not saved_is_fullscreen
+            else False
+        )
+        saved_geometry = getattr(main_window, "_was_normal_geometry", saved_geometry)
+        dock_state_source = getattr(main_window, "_saved_window_state", None)
+
     try:
         # saveState returns QByteArray; convert to base64 string for json compatibility
-        dock_state_data = main_window.saveState().toBase64().data().decode("utf-8")
+        if dock_state_source is None:
+            dock_state_source = main_window.saveState()
+        dock_state_data = dock_state_source.toBase64().data().decode("utf-8")
     except Exception:
         dock_state_data = ""
 
     window_state_data = {
-        "x": main_window.x(),
-        "y": main_window.y(),
-        "height": main_window.height(),
-        "width": main_window.width(),
-        "isMaximized": main_window.isMaximized(),
-        "isFullScreen": main_window.is_full_screen,
+        "x": saved_geometry.x(),
+        "y": saved_geometry.y(),
+        "height": saved_geometry.height(),
+        "width": saved_geometry.width(),
+        "isMaximized": saved_is_maximized,
+        "isFullScreen": saved_is_fullscreen,
         "target_media": main_window.panel_visibility_state.get("target_media", True),
         "input_faces": main_window.panel_visibility_state.get("input_faces", True),
         "jobs": main_window.panel_visibility_state.get("jobs", True),
