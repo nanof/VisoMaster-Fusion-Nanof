@@ -216,7 +216,7 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "help": "Preview and virtual cam only: extra frames between each processed frame so motion "
             "looks smoother. Metronome step is divided by K+1 (linear) or 2 (neural) so playback speed "
             "stays correct. Recording still writes only full processed frames (no extra FFmpeg frames). "
-            "Neural (ONNX) uses GPU/VRAM and RIFE; Linear uses CPU blends with K steps below. "
+            "Neural (ONNX) uses GPU/VRAM and RIFE; Linear uses OpenGL shader blends (K below) in the main video preview. "
             "If preview drifts vs Live Sound, try disabling sync.",
             "exec_function": control_actions.handle_preview_frame_interpolation_toggle,
             "exec_function_args": ["PreviewFrameGenEnableToggle"],
@@ -224,13 +224,13 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
         "FrameInterpolationMethodSelection": {
             "level": 2,
             "label": "Interpolation method",
-            "options": ["Linear (CPU)", "Neural (ONNX)"],
-            "default": "Linear (CPU)",
+            "options": ["Linear (GPU)", "Neural (ONNX)"],
+            "default": "Linear (GPU)",
             "parentToggle": "PreviewFrameGenEnableToggle",
             "requiredToggleValue": True,
-            "help": "Linear (CPU): K weighted blends between previous and current frame (K below). "
-            "Neural (ONNX): one RIFE intermediate per processed frame (always 2 preview ticks), "
-            "GPU-heavy; same preview/virtual-cam scope, not written to recording files.",
+            "help": "Linear (GPU): K weighted mixes in the preview (OpenGL); K below. Virtual cam off "
+            "(needs a CPU frame path). Neural (ONNX): one RIFE intermediate per processed frame "
+            "(always 2 preview ticks), GPU-heavy; same preview/virtual-cam scope, not written to recording files.",
             "exec_function": control_actions.handle_frame_interpolation_method_change,
             "exec_function_args": ["FrameInterpolationMethodSelection"],
         },
@@ -254,25 +254,30 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "default": "1",
             "parentToggle": "PreviewFrameGenEnableToggle",
             "requiredToggleValue": True,
-            "help": "Linear (CPU) only: K blend-only ticks before each full processed frame "
+            "help": "Linear mode only: K blend-only ticks before each full processed frame "
             "(total preview ticks = K+1). Neural mode ignores K (fixed one RIFE step). "
-            "Higher K = smoother linear preview but more CPU and shorter time per tick.",
+            "Higher K = smoother motion but more GPU upload work per processed frame and shorter time per tick.",
         },
-        "PreviewLinearInterpolationDisplaySelection": {
+        "PreviewLinearBlendShaderSelection": {
             "level": 3,
-            "label": "Linear preview display",
-            "options": ["CPU (NumPy)", "GPU (OpenGL)"],
-            "default": "CPU (NumPy)",
+            "label": "Linear blend quality",
+            "options": [
+                "sRGB mix",
+                "Linear (gamma)",
+                "Luma-weighted",
+                "Edge-aware",
+                "Pro (linear + luma + edges)",
+            ],
+            "default": "sRGB mix",
             "parentToggle": "PreviewFrameGenEnableToggle",
             "requiredToggleValue": True,
             "parentSelection": "FrameInterpolationMethodSelection",
-            "requiredSelectionValue": "Linear (CPU)",
-            "help": "Video file preview in the main viewer only. CPU (NumPy): blend on the UI thread "
-            "(default). GPU (OpenGL): mix in a fragment shader (OpenGL viewport); reduces CPU work "
-            "for the blend step. Virtual cam must be off (it still needs a CPU frame). "
-            "Neural (RIFE) mode ignores this. If GPU fails, switch back to CPU.",
-            "exec_function": control_actions.handle_preview_linear_display_selection_change,
-            "exec_function_args": ["PreviewLinearInterpolationDisplaySelection"],
+            "requiredSelectionValue": "Linear (GPU)",
+            "help": "OpenGL fragment shader path for linear interpolation (video preview). "
+            "sRGB mix: direct blend (fastest). Linear (gamma): blend in linear light. "
+            "Luma-weighted: re-weight mix by local luminance (reduces some ghosting). "
+            "Edge-aware: soften blend weight on strong edges (few extra taps). "
+            "Pro: luma-weighted + edge-aware. Neural (RIFE) mode ignores this.",
         },
         "FrameSkipStepSlider": {
             "level": 1,

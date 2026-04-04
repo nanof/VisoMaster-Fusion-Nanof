@@ -382,7 +382,7 @@ class VideoProcessor(QObject):
             return False
         m = str(
             self.main_window.control.get(
-                "FrameInterpolationMethodSelection", "Linear (CPU)"
+                "FrameInterpolationMethodSelection", "Linear (GPU)"
             )
         )
         return m == "Neural (ONNX)"

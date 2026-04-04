@@ -13,7 +13,28 @@ if TYPE_CHECKING:
 _PREVIEW_FPS_WINDOW_SEC = 1.0
 _PREVIEW_FPS_STALE_SEC = 0.85
 
-_GPU_DISPLAY_SEL = "GPU (OpenGL)"
+
+# Maps Settings → Linear blend quality (fragment shader u_mode).
+_PREVIEW_LINEAR_BLEND_SHADER_MODE: dict[str, int] = {
+    "sRGB mix": 0,
+    "Linear (gamma)": 1,
+    "Luma-weighted": 2,
+    "Edge-aware": 3,
+    "Pro (linear + luma + edges)": 4,
+}
+
+
+def preview_linear_blend_shader_mode_int(main_window: "MainWindow") -> int:
+    sel = str(
+        main_window.control.get("PreviewLinearBlendShaderSelection", "sRGB mix")
+    )
+    return _PREVIEW_LINEAR_BLEND_SHADER_MODE.get(sel, 0)
+
+
+def is_linear_preview_interpolation_method(method: object) -> bool:
+    """True for linear preview (current name or legacy workspace value)."""
+    v = str(method).strip()
+    return v in ("Linear (GPU)", "Linear (OpenGL)", "Linear (CPU)")
 
 
 def ensure_video_preview_opengl_viewport(main_window: "MainWindow") -> bool:
@@ -27,8 +48,8 @@ def ensure_video_preview_opengl_viewport(main_window: "MainWindow") -> bool:
         from PySide6.QtOpenGLWidgets import QOpenGLWidget
     except ImportError:
         print(
-            "[WARN] Linear preview GPU: PySide6.QtOpenGLWidgets not available; "
-            "using CPU (NumPy) blends."
+            "[WARN] Linear preview: PySide6.QtOpenGLWidgets not available; "
+            "falling back to NumPy blend for interpolation ticks."
         )
         setattr(main_window, "_video_preview_opengl_viewport_failed", True)
         return False
@@ -63,23 +84,17 @@ def restore_video_preview_raster_viewport(main_window: "MainWindow") -> None:
 
 
 def preview_linear_gpu_display_enabled(main_window: "MainWindow") -> bool:
+    """Linear interpolation uses OpenGL in the main video preview (no separate CPU/GPU toggle)."""
     if main_window.video_processor.file_type != "video":
         return False
     if not main_window.control.get("PreviewFrameGenEnableToggle", False):
         return False
-    m = str(
-        main_window.control.get("FrameInterpolationMethodSelection", "Linear (CPU)")
-    )
-    if m != "Linear (CPU)":
+    m = main_window.control.get("FrameInterpolationMethodSelection", "Linear (GPU)")
+    if not is_linear_preview_interpolation_method(m):
         return False
     if main_window.control.get("SendVirtCamFramesEnableToggle", False):
         return False
-    sel = str(
-        main_window.control.get(
-            "PreviewLinearInterpolationDisplaySelection", "CPU (NumPy)"
-        )
-    )
-    return sel == _GPU_DISPLAY_SEL
+    return True
 
 
 def invalidate_video_preview_blend_gl_item_ref(main_window: "MainWindow") -> None:
@@ -154,7 +169,12 @@ def update_graphics_view(
         b_item = _get_or_create_blend_gl_item(main_window, scene)
         if getattr(b_item, "_gl_failed", False):
             b_item.reset_gl_state()
-        b_item.set_blend_frames(prev_bgr, curr_bgr, float(bw))
+        b_item.set_blend_frames(
+            prev_bgr,
+            curr_bgr,
+            float(bw),
+            preview_linear_blend_shader_mode_int(main_window),
+        )
         b_item.setVisible(True)
         if pixmap_item is None:
             pixmap_item = QtWidgets.QGraphicsPixmapItem()

@@ -339,6 +339,8 @@ def load_saved_workspace(
             for control_name, control_value in control.items():
                 main_window.control[control_name] = control_value
 
+            common_widget_actions.migrate_interpolation_control_keys(main_window.control)
+
             # Match provider before thumbnails / refresh_frame load the wrong stack
             control_actions.apply_saved_execution_provider(main_window)
 

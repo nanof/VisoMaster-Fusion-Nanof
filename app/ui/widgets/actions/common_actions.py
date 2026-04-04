@@ -794,12 +794,21 @@ def run_parameter_layout_exec_functions(main_window: "MainWindow") -> None:
                     )
 
 
+def migrate_interpolation_control_keys(control: dict) -> None:
+    """Map removed/renamed settings keys (workspace JSON compatibility)."""
+    fm = "FrameInterpolationMethodSelection"
+    if str(control.get(fm, "")).strip() == "Linear (CPU)":
+        control[fm] = "Linear (GPU)"
+    control.pop("PreviewLinearInterpolationDisplaySelection", None)
+
+
 def set_control_widgets_values(main_window: "MainWindow", enable_exec_func=True):
     """
     Set the values of control widgets based on the `control` data in the `main_window`.
 
     Temporarily disables frame refreshing while setting values to avoid unnecessary processing.
     """
+    migrate_interpolation_control_keys(main_window.control)
     # Get control values and parameter widgets from the main window
     control = main_window.control.copy()
     parameter_widgets = main_window.parameter_widgets

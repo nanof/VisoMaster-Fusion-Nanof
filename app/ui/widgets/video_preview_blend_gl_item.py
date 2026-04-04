@@ -1,7 +1,7 @@
 """
 OpenGL mix of two BGR video frames for preview (QGraphicsScene item).
 
-Used only when Settings → Frame Interpolation → Linear preview display = GPU (OpenGL).
+Used when Settings → Frame Interpolation → method Linear (GPU) is active (video preview).
 Requires QGraphicsView viewport to be a QOpenGLWidget.
 """
 
@@ -29,6 +29,9 @@ _GL_TRIANGLES = 0x0004
 _GL_DEPTH_TEST = 0x0B71
 _GL_BLEND = 0x0BE2
 
+# Bump when changing shader source so existing sessions re-link (uniforms / logic).
+_BLEND_SHADER_PROGRAM_VERSION = 2
+
 
 _VS = """#version 330 core
 layout(location = 0) in vec4 a_pos_uv;
@@ -44,12 +47,76 @@ in vec2 v_uv;
 uniform sampler2D u_tex0;
 uniform sampler2D u_tex1;
 uniform float u_w;
+uniform int u_mode;
 out vec4 fragColor;
+
+float lumRgb(vec3 c) {
+  return dot(clamp(c, 0.0, 1.0), vec3(0.299, 0.587, 0.114));
+}
+
+vec3 toLin(vec3 c) {
+  return pow(max(c, vec3(1e-6)), vec3(2.2));
+}
+
+vec3 toSrgb(vec3 c) {
+  return pow(max(c, vec3(1e-6)), vec3(1.0 / 2.2));
+}
+
+float edgeStrength(vec2 tuv, vec2 d) {
+  float xp = lumRgb(texture(u_tex0, tuv + vec2(d.x, 0.0)).rgb);
+  float xm = lumRgb(texture(u_tex0, tuv - vec2(d.x, 0.0)).rgb);
+  float yp = lumRgb(texture(u_tex0, tuv + vec2(0.0, d.y)).rgb);
+  float ym = lumRgb(texture(u_tex0, tuv - vec2(0.0, d.y)).rgb);
+  float gx = xp - xm;
+  float gy = yp - ym;
+  return smoothstep(0.03, 0.22, sqrt(gx * gx + gy * gy));
+}
+
 void main() {
   vec2 tuv = vec2(v_uv.x, 1.0 - v_uv.y);
-  vec4 c0 = texture(u_tex0, tuv);
-  vec4 c1 = texture(u_tex1, tuv);
-  fragColor = mix(c0, c1, u_w);
+  vec3 c0 = texture(u_tex0, tuv).rgb;
+  vec3 c1 = texture(u_tex1, tuv).rgb;
+  float w = clamp(u_w, 0.0, 1.0);
+  int m = u_mode;
+  if (m < 0 || m > 4) {
+    m = 0;
+  }
+
+  if (m == 0) {
+    fragColor = vec4(mix(c0, c1, w), 1.0);
+    return;
+  }
+
+  vec3 L0 = toLin(c0);
+  vec3 L1 = toLin(c1);
+  ivec2 ts = textureSize(u_tex0, 0);
+  vec2 d = 1.0 / max(vec2(float(ts.x), float(ts.y)), vec2(1.0));
+
+  if (m == 1) {
+    fragColor = vec4(toSrgb(mix(L0, L1, w)), 1.0);
+    return;
+  }
+
+  float l0 = lumRgb(c0);
+  float l1 = lumRgb(c1);
+  float denom = max((1.0 - w) * (l0 + 0.04) + w * (l1 + 0.04), 1e-4);
+  float w_lm = (w * (l1 + 0.04)) / denom;
+
+  if (m == 2) {
+    fragColor = vec4(toSrgb(mix(L0, L1, w_lm)), 1.0);
+    return;
+  }
+
+  float ed = edgeStrength(tuv, d);
+
+  if (m == 3) {
+    float we = mix(w, 0.5, ed * 0.55);
+    fragColor = vec4(toSrgb(mix(L0, L1, clamp(we, 0.0, 1.0))), 1.0);
+    return;
+  }
+
+  float wep = mix(w_lm, 0.5, ed * 0.48);
+  fragColor = vec4(toSrgb(mix(L0, L1, clamp(wep, 0.0, 1.0))), 1.0);
 }
 """
 
@@ -77,15 +144,23 @@ class VideoBlendOpenGLItem(QtWidgets.QGraphicsObject):
         self._tex_staging0: np.ndarray | None = None
         self._tex_staging1: np.ndarray | None = None
         self._gl_failed: bool = False
+        self._blend_mode: int = 0
         self.setZValue(1.0)
 
     def boundingRect(self) -> QtCore.QRectF:  # noqa: N802
         return QtCore.QRectF(0.0, 0.0, float(self._bw), float(self._bh))
 
-    def set_blend_frames(self, prev_bgr: np.ndarray, curr_bgr: np.ndarray, w: float) -> None:
+    def set_blend_frames(
+        self,
+        prev_bgr: np.ndarray,
+        curr_bgr: np.ndarray,
+        w: float,
+        blend_mode: int = 0,
+    ) -> None:
         self._prev = prev_bgr
         self._curr = curr_bgr
         self._w = float(w)
+        self._blend_mode = int(max(0, min(4, blend_mode)))
         h, wi = curr_bgr.shape[:2]
         if wi != self._bw or h != self._bh:
             self.prepareGeometryChange()
@@ -111,7 +186,10 @@ class VideoBlendOpenGLItem(QtWidgets.QGraphicsObject):
         if QOpenGLShaderProgram is None or QOpenGLShader is None:
             return False
         if self._program is not None and self._program.isLinked():
-            return True
+            if getattr(self, "_blend_prog_ver", 0) == _BLEND_SHADER_PROGRAM_VERSION:
+                return True
+            self._program.removeAllShaders()
+            self._program = None
         self._program = QOpenGLShaderProgram()
         ok = self._program.addShaderFromSourceCode(QOpenGLShader.ShaderTypeBit.Vertex, _VS)
         ok = ok and self._program.addShaderFromSourceCode(
@@ -122,6 +200,7 @@ class VideoBlendOpenGLItem(QtWidgets.QGraphicsObject):
             self._program.removeAllShaders()
             self._program = None
             return False
+        self._blend_prog_ver = _BLEND_SHADER_PROGRAM_VERSION
         return True
 
     def _ensure_vbo(self) -> bool:
@@ -291,6 +370,7 @@ class VideoBlendOpenGLItem(QtWidgets.QGraphicsObject):
             self._program.setUniformValue("u_tex0", 0)
             self._program.setUniformValue("u_tex1", 1)
             self._program.setUniformValue("u_w", float(max(0.0, min(1.0, self._w))))
+            self._program.setUniformValue("u_mode", int(self._blend_mode))
 
             loc = self._program.attributeLocation("a_pos_uv")
             self._program.enableAttributeArray(loc)
