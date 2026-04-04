@@ -1,8 +1,9 @@
 import time
 from collections import deque
-
-from PySide6 import QtWidgets, QtGui, QtCore
 from typing import TYPE_CHECKING
+
+import numpy as np
+from PySide6 import QtWidgets, QtGui, QtCore
 
 import app.helpers.miscellaneous as misc_helpers
 
@@ -12,6 +13,105 @@ if TYPE_CHECKING:
 _PREVIEW_FPS_WINDOW_SEC = 1.0
 _PREVIEW_FPS_STALE_SEC = 0.85
 
+_GPU_DISPLAY_SEL = "GPU (OpenGL)"
+
+
+def ensure_video_preview_opengl_viewport(main_window: "MainWindow") -> bool:
+    """
+    Switch QGraphicsView to an OpenGL viewport once (for shader-based linear preview).
+    Returns False if QtOpenGLWidgets is unavailable or setViewport fails.
+    """
+    if getattr(main_window, "_video_preview_opengl_viewport_active", False):
+        return True
+    try:
+        from PySide6.QtOpenGLWidgets import QOpenGLWidget
+    except ImportError:
+        print(
+            "[WARN] Linear preview GPU: PySide6.QtOpenGLWidgets not available; "
+            "using CPU (NumPy) blends."
+        )
+        setattr(main_window, "_video_preview_opengl_viewport_failed", True)
+        return False
+    try:
+        gl_vp = QOpenGLWidget()
+        main_window.graphicsViewFrame.setViewport(gl_vp)
+        main_window._video_preview_opengl_viewport_active = True
+        main_window._video_preview_opengl_viewport_failed = False
+        return True
+    except Exception as e:
+        print(f"[WARN] Linear preview GPU: could not enable OpenGL viewport: {e}")
+        main_window._video_preview_opengl_viewport_failed = True
+        return False
+
+
+def restore_video_preview_raster_viewport(main_window: "MainWindow") -> None:
+    """Revert QGraphicsView to the default raster viewport (CPU preview path)."""
+    if not getattr(main_window, "_video_preview_opengl_viewport_active", False):
+        return
+    try:
+        main_window.graphicsViewFrame.setViewport(QtWidgets.QWidget())
+    except Exception as e:
+        print(f"[WARN] Could not restore raster preview viewport: {e}")
+    main_window._video_preview_opengl_viewport_active = False
+    item = getattr(main_window, "_video_preview_blend_gl_item", None)
+    if item is not None:
+        try:
+            item.setVisible(False)
+            item.reset_gl_state()
+        except RuntimeError:
+            invalidate_video_preview_blend_gl_item_ref(main_window)
+
+
+def preview_linear_gpu_display_enabled(main_window: "MainWindow") -> bool:
+    if main_window.video_processor.file_type != "video":
+        return False
+    if not main_window.control.get("PreviewFrameGenEnableToggle", False):
+        return False
+    m = str(
+        main_window.control.get("FrameInterpolationMethodSelection", "Linear (CPU)")
+    )
+    if m != "Linear (CPU)":
+        return False
+    if main_window.control.get("SendVirtCamFramesEnableToggle", False):
+        return False
+    sel = str(
+        main_window.control.get(
+            "PreviewLinearInterpolationDisplaySelection", "CPU (NumPy)"
+        )
+    )
+    return sel == _GPU_DISPLAY_SEL
+
+
+def invalidate_video_preview_blend_gl_item_ref(main_window: "MainWindow") -> None:
+    """Call after scene.clear() (or similar): the C++ QGraphicsItem is destroyed but Python may still hold a wrapper."""
+    main_window._video_preview_blend_gl_item = None
+
+
+def _blend_gl_item_still_valid(
+    item, scene: QtWidgets.QGraphicsScene
+) -> bool:
+    if item is None:
+        return False
+    try:
+        sc = item.scene()
+    except RuntimeError:
+        return False
+    return sc is scene
+
+
+def _get_or_create_blend_gl_item(
+    main_window: "MainWindow", scene: QtWidgets.QGraphicsScene
+):
+    from app.ui.widgets.video_preview_blend_gl_item import VideoBlendOpenGLItem
+
+    item = getattr(main_window, "_video_preview_blend_gl_item", None)
+    if not _blend_gl_item_still_valid(item, scene):
+        invalidate_video_preview_blend_gl_item_ref(main_window)
+        item = VideoBlendOpenGLItem()
+        scene.addItem(item)
+        main_window._video_preview_blend_gl_item = item
+    return item
+
 
 # @misc_helpers.benchmark  (Keep this decorator if you have it)
 def update_graphics_view(
@@ -20,6 +120,8 @@ def update_graphics_view(
     current_frame_number: int,
     reset_fit: bool = False,
     size_mode: str = "preserve_previous_pixmap_size",
+    *,
+    gpu_blend: tuple[np.ndarray, np.ndarray, float] | None = None,
 ):
     # print('(update_graphics_view) current_frame_number', current_frame_number)
 
@@ -41,6 +143,36 @@ def update_graphics_view(
             pixmap_item = item
             break
 
+    blend_item = getattr(main_window, "_video_preview_blend_gl_item", None)
+    if not _blend_gl_item_still_valid(blend_item, scene):
+        if blend_item is not None:
+            invalidate_video_preview_blend_gl_item_ref(main_window)
+        blend_item = None
+
+    if gpu_blend is not None and ensure_video_preview_opengl_viewport(main_window):
+        prev_bgr, curr_bgr, bw = gpu_blend
+        b_item = _get_or_create_blend_gl_item(main_window, scene)
+        if getattr(b_item, "_gl_failed", False):
+            b_item.reset_gl_state()
+        b_item.set_blend_frames(prev_bgr, curr_bgr, float(bw))
+        b_item.setVisible(True)
+        if pixmap_item is None:
+            pixmap_item = QtWidgets.QGraphicsPixmapItem()
+            pixmap_item.setTransformationMode(
+                QtCore.Qt.TransformationMode.SmoothTransformation
+            )
+            scene.addItem(pixmap_item)
+        pixmap_item.setVisible(False)
+        scene_rect = b_item.boundingRect()
+        main_window.graphicsViewFrame.setSceneRect(scene_rect)
+        if reset_fit:
+            fit_image_to_view(main_window, b_item, scene_rect)
+        record_preview_frame_tick(main_window)
+        return
+
+    if blend_item is not None and _blend_gl_item_still_valid(blend_item, scene):
+        blend_item.setVisible(False)
+
     # Resize the pixmap if necessary (e.g., face compare or mask compare mode)
     if pixmap_item and size_mode == "preserve_previous_pixmap_size":
         bounding_rect = pixmap_item.boundingRect()
@@ -61,6 +193,7 @@ def update_graphics_view(
     # Update or create pixmap item
     if pixmap_item:
         pixmap_item.setPixmap(pixmap)  # Update the pixmap of the existing item
+        pixmap_item.setVisible(True)
     else:
         pixmap_item = QtWidgets.QGraphicsPixmapItem(pixmap)
         pixmap_item.setTransformationMode(
@@ -340,7 +473,7 @@ def refresh_preview_fps_stale(main_window: "MainWindow") -> None:
 
 
 def fit_image_to_view(
-    main_window: "MainWindow", pixmap_item: QtWidgets.QGraphicsPixmapItem, scene_rect
+    main_window: "MainWindow", scene_item: QtWidgets.QGraphicsItem, scene_rect
 ):
     """Reset the view and fit the image to the view, keeping the aspect ratio."""
     graphicsViewFrame = main_window.graphicsViewFrame
@@ -348,4 +481,4 @@ def fit_image_to_view(
     graphicsViewFrame.resetTransform()
     graphicsViewFrame.setSceneRect(scene_rect)
     # Fit the image to the view, keeping the aspect ratio
-    graphicsViewFrame.fitInView(pixmap_item, QtCore.Qt.AspectRatioMode.KeepAspectRatio)
+    graphicsViewFrame.fitInView(scene_item, QtCore.Qt.AspectRatioMode.KeepAspectRatio)

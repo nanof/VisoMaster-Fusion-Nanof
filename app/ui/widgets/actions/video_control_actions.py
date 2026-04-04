@@ -2870,6 +2870,7 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
         else:
             # If no media was loaded, clear the scene
             main_window.scene.clear()
+            graphics_view_actions.invalidate_video_preview_blend_gl_item_ref(main_window)
             # Manually update graphics view to show nothing
             graphics_view_actions.update_graphics_view(main_window, QtGui.QPixmap(), 0)
             # Reset the slider
