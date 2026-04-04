@@ -1360,6 +1360,12 @@ def view_fullscreen(main_window: "MainWindow"):
         main_window.showFullScreen()  # Enter full-screen mode
         main_window.is_full_screen = True
 
+    sync_theatre_snapshot = getattr(
+        main_window, "_sync_theatre_base_window_snapshot", None
+    )
+    if callable(sync_theatre_snapshot):
+        sync_theatre_snapshot()
+
     sync_actions = getattr(main_window, "_sync_viewer_menu_actions", None)
 
     if callable(sync_actions):

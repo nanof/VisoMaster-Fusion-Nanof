@@ -67,6 +67,7 @@ from app.helpers.miscellaneous import ParametersDict  # noqa: E402
 
 # Now import the module under test
 from app.ui.widgets.actions.save_load_actions import (  # noqa: E402
+    _apply_workspace_window_state,
     convert_parameters_to_supported_type,
     convert_markers_to_supported_type,
     save_current_workspace,
@@ -360,6 +361,7 @@ def _make_workspace_main_window(
     saved_window_state: str = "live-window-state",
     was_custom_fullscreen: bool = False,
     was_maximized: bool = False,
+    fullscreen_restore_geometry: _FakeGeometry | None = None,
 ):
     default_params_data = {"brightness": 1.0, "contrast": 0.8}
     geometry = geometry or _FakeGeometry(10, 20, 1280, 720)
@@ -372,6 +374,8 @@ def _make_workspace_main_window(
     mw._was_custom_fullscreen = was_custom_fullscreen
     mw._was_maximized = was_maximized
     mw._was_normal_geometry = normal_geometry
+    mw._fullscreen_restore_was_maximized = False
+    mw._fullscreen_restore_geometry = fullscreen_restore_geometry
     mw._saved_window_state = _FakeByteArray(saved_window_state)
     mw.control = {}
     mw.target_videos = {}
@@ -401,6 +405,7 @@ def _make_workspace_main_window(
     mw.scan_tools_expanded = False
     mw.project_root_path = tmp_path
     mw.geometry = lambda: geometry
+    mw.normalGeometry = lambda: normal_geometry
     mw.isMaximized = lambda: is_maximized
     mw.saveState = lambda: _FakeByteArray("live-window-state")
     return mw
@@ -428,6 +433,33 @@ def test_save_workspace_non_theatre_uses_live_window_state(tmp_path):
     assert saved["isMaximized"] is False
     assert saved["dock_state"] == "live-window-state"
     assert (saved["x"], saved["y"], saved["width"], saved["height"]) == (5, 6, 700, 500)
+
+
+def test_save_workspace_non_theatre_fullscreen_uses_restore_geometry(tmp_path):
+    save_path = tmp_path / "workspace.json"
+    geometry = _FakeGeometry(0, 0, 1920, 1080)
+    restore_geometry = _FakeGeometry(50, 60, 800, 500)
+    main_window = _make_workspace_main_window(
+        tmp_path,
+        is_theatre_mode=False,
+        is_full_screen=True,
+        is_maximized=False,
+        geometry=geometry,
+        normal_geometry=_FakeGeometry(5, 6, 700, 500),
+        fullscreen_restore_geometry=restore_geometry,
+    )
+
+    save_current_workspace(main_window, str(save_path))
+
+    saved = _read_saved_workspace(save_path)["window_state_data"]
+    assert saved["isFullScreen"] is True
+    assert saved["isMaximized"] is False
+    assert (saved["x"], saved["y"], saved["width"], saved["height"]) == (
+        50,
+        60,
+        800,
+        500,
+    )
 
 
 def test_save_workspace_theatre_from_fullscreen_uses_live_window_state(tmp_path):
@@ -524,23 +556,130 @@ def test_save_workspace_theatre_uses_latest_fullscreen_base_toggle(tmp_path):
         is_theatre_mode=True,
         is_full_screen=True,
         is_maximized=False,
+        normal_geometry=_FakeGeometry(150, 250, 950, 650),
         saved_window_state="pre-theatre-layout",
-        was_custom_fullscreen=False,
-        was_maximized=True,
+        was_custom_fullscreen=True,
+        was_maximized=False,
     )
 
     save_current_workspace(main_window, str(save_path))
     saved = _read_saved_workspace(save_path)["window_state_data"]
     assert saved["isFullScreen"] is True
     assert saved["isMaximized"] is False
+    assert (saved["x"], saved["y"], saved["width"], saved["height"]) == (
+        150,
+        250,
+        950,
+        650,
+    )
 
     main_window.is_full_screen = False
-    main_window.isMaximized = lambda: True
-    main_window._was_custom_fullscreen = True
+    main_window.isMaximized = lambda: False
+    main_window._was_custom_fullscreen = False
+    main_window._was_maximized = False
+    main_window._was_normal_geometry = _FakeGeometry(220, 330, 1110, 720)
     save_current_workspace(main_window, str(save_path))
     saved = _read_saved_workspace(save_path)["window_state_data"]
     assert saved["isFullScreen"] is False
-    assert saved["isMaximized"] is True
+    assert saved["isMaximized"] is False
+    assert (saved["x"], saved["y"], saved["width"], saved["height"]) == (
+        220,
+        330,
+        1110,
+        720,
+    )
+
+
+def test_apply_workspace_window_state_fullscreen_seeds_restore_geometry(monkeypatch):
+    restored_rect = _FakeGeometry(140, 150, 910, 610)
+    main_window = SimpleNamespace(
+        _fullscreen_restore_was_maximized=True,
+        _fullscreen_restore_geometry="stale-geometry",
+        resize=MagicMock(),
+        sizeHint=lambda: "size-hint",
+        showFullScreen=MagicMock(),
+        showMaximized=MagicMock(),
+        setGeometry=MagicMock(),
+        menuBar=lambda: SimpleNamespace(show=MagicMock()),
+        is_full_screen=False,
+        x=lambda: 0,
+        y=lambda: 0,
+        width=lambda: 1920,
+        height=lambda: 1080,
+    )
+
+    monkeypatch.setattr(
+        "app.ui.widgets.actions.save_load_actions._get_clamped_window_geometry",
+        lambda *_args, **_kwargs: restored_rect,
+    )
+
+    needs_clamp = _apply_workspace_window_state(
+        main_window,
+        {
+            "isMaximized": False,
+            "isFullScreen": True,
+            "x": 1,
+            "y": 2,
+            "width": 3,
+            "height": 4,
+        },
+    )
+
+    assert needs_clamp is False
+    main_window.resize.assert_called_once_with("size-hint")
+    main_window.showFullScreen.assert_called_once()
+    main_window.showMaximized.assert_not_called()
+    main_window.setGeometry.assert_not_called()
+    assert main_window.is_full_screen is True
+    assert main_window._fullscreen_restore_was_maximized is False
+    assert main_window._fullscreen_restore_geometry is restored_rect
+
+
+def test_apply_workspace_window_state_normal_clears_fullscreen_restore_state(
+    monkeypatch,
+):
+    restored_rect = _FakeGeometry(240, 250, 920, 620)
+    menu_bar = SimpleNamespace(show=MagicMock())
+    main_window = SimpleNamespace(
+        _fullscreen_restore_was_maximized=True,
+        _fullscreen_restore_geometry="stale-geometry",
+        resize=MagicMock(),
+        sizeHint=lambda: "size-hint",
+        showFullScreen=MagicMock(),
+        showMaximized=MagicMock(),
+        setGeometry=MagicMock(),
+        menuBar=lambda: menu_bar,
+        is_full_screen=True,
+        x=lambda: 0,
+        y=lambda: 0,
+        width=lambda: 1920,
+        height=lambda: 1080,
+    )
+
+    monkeypatch.setattr(
+        "app.ui.widgets.actions.save_load_actions._get_clamped_window_geometry",
+        lambda *_args, **_kwargs: restored_rect,
+    )
+
+    needs_clamp = _apply_workspace_window_state(
+        main_window,
+        {
+            "isMaximized": False,
+            "isFullScreen": False,
+            "x": 1,
+            "y": 2,
+            "width": 3,
+            "height": 4,
+        },
+    )
+
+    assert needs_clamp is True
+    main_window.setGeometry.assert_called_once_with(restored_rect)
+    menu_bar.show.assert_called_once()
+    main_window.showFullScreen.assert_not_called()
+    assert main_window.is_full_screen is False
+    assert main_window._fullscreen_restore_was_maximized is False
+    assert main_window._fullscreen_restore_geometry is None
 
 
 def test_save_workspace_theatre_does_not_serialize_theatre_active_flag(tmp_path):

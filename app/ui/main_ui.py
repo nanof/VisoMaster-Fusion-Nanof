@@ -740,11 +740,40 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             scene_rect = pixmap_item.boundingRect()
             self.graphicsViewFrame.setSceneRect(scene_rect)
             graphics_view_actions.fit_image_to_view(self, pixmap_item, scene_rect)
+        self._sync_theatre_base_window_snapshot()
+
+    def moveEvent(self, event: QtGui.QMoveEvent):
+        super().moveEvent(event)
+        self._sync_theatre_base_window_snapshot()
 
     def changeEvent(self, event: QtCore.QEvent):
         super().changeEvent(event)
         if event.type() == QtCore.QEvent.Type.WindowStateChange:
             self.is_full_screen = self.isFullScreen()
+            self._sync_theatre_base_window_snapshot()
+
+    def _sync_theatre_base_window_snapshot(self):
+        if not getattr(self, "is_theatre_mode", False):
+            return
+
+        if self.isFullScreen():
+            restore_geometry = getattr(self, "_fullscreen_restore_geometry", None)
+            self._was_custom_fullscreen = True
+            self._was_maximized = False
+            self._was_normal_geometry = (
+                restore_geometry
+                if restore_geometry is not None
+                else self.normalGeometry()
+            )
+            return
+
+        self._was_custom_fullscreen = False
+        if self.isMaximized():
+            self._was_maximized = True
+            self._was_normal_geometry = self.normalGeometry()
+        else:
+            self._was_maximized = False
+            self._was_normal_geometry = self.geometry()
 
     def eventFilter(self, watched, event):
         viewport_widget = getattr(self, "mediaControlsViewportWidget", None)

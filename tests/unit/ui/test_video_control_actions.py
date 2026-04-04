@@ -217,6 +217,7 @@ class _StatefulFullscreenWindow:
         self._was_custom_fullscreen = False
         self._was_normal_geometry = self._normal_geometry
         self._sync_calls: list[bool] = []
+        self._theatre_snapshot_sync_calls = 0
         self.showFullScreen = MagicMock(side_effect=self._show_fullscreen)
         self.showNormal = MagicMock(side_effect=self._show_normal)
         self.showMaximized = MagicMock(side_effect=self._show_maximized)
@@ -252,6 +253,29 @@ class _StatefulFullscreenWindow:
 
     def _sync_viewer_menu_actions(self):
         self._sync_calls.append(True)
+
+    def _sync_theatre_base_window_snapshot(self):
+        self._theatre_snapshot_sync_calls += 1
+        if not self.is_theatre_mode:
+            return
+
+        if self.isFullScreen():
+            self._was_custom_fullscreen = True
+            self._was_maximized = False
+            self._was_normal_geometry = (
+                self._fullscreen_restore_geometry
+                if self._fullscreen_restore_geometry is not None
+                else self.normalGeometry()
+            )
+            return
+
+        self._was_custom_fullscreen = False
+        if self.isMaximized():
+            self._was_maximized = True
+            self._was_normal_geometry = self.normalGeometry()
+        else:
+            self._was_maximized = False
+            self._was_normal_geometry = self.geometry()
 
 
 def test_view_fullscreen_restores_saved_geometry_after_round_trip(video_actions_env):
@@ -305,6 +329,7 @@ def test_view_fullscreen_preserves_maximized_base_state_in_theatre(video_actions
     assert main_window._was_custom_fullscreen is False
     assert main_window._was_normal_geometry == main_window.normalGeometry()
     assert main_window._fullscreen_restore_geometry is None
+    assert main_window._theatre_snapshot_sync_calls == 2
 
 
 def test_view_fullscreen_preserves_normal_geometry_in_theatre(video_actions_env):
@@ -329,6 +354,7 @@ def test_view_fullscreen_preserves_normal_geometry_in_theatre(video_actions_env)
     assert main_window._was_maximized is False
     assert main_window._was_custom_fullscreen is False
     assert main_window._was_normal_geometry is geometry
+    assert main_window._theatre_snapshot_sync_calls == 2
 
 
 def test_view_fullscreen_keeps_theatre_layout_active_during_round_trip(
@@ -345,12 +371,15 @@ def test_view_fullscreen_keeps_theatre_layout_active_during_round_trip(
     assert main_window.is_theatre_mode is True
     assert main_window.isFullScreen() is True
     assert main_window._was_normal_geometry is base_geometry
+    assert main_window._was_custom_fullscreen is True
+    assert main_window._was_maximized is False
 
     video_actions_env.view_fullscreen(main_window)
 
     assert main_window.is_theatre_mode is True
     assert main_window.isFullScreen() is False
     assert main_window.geometry() is base_geometry
+    assert main_window._theatre_snapshot_sync_calls == 2
 
 
 class _FakeWidget:
