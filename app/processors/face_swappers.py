@@ -358,48 +358,61 @@ class FaceSwappers:
         return np.array(io_binding.copy_outputs_to_cpu()).flatten(), cropped_image
 
     def preprocess_image_cscs(self, img, face_kps):
+        """
+        Preprocesses the image for the CSCS ArcFace models.
+        OPTIMIZED: Uses torchvision v2 for fast GPU affine transformations.
+        BUGFIX: Resolves skimage deprecation warning while keeping exact
+        mathematical alignment required by CSCS.
+        """
+        # OPTIMIZED: Fix deprecation warning using from_estimate
         tform = trans.SimilarityTransform.from_estimate(
             face_kps, self.models_processor.FFHQ_kps
         )
 
-        # OPTIMIZED: Direct GPU Warp to 512x512 using Kornia
-        M_tensor = (
-            torch.from_numpy(tform.params[0:2]).float().unsqueeze(0).to(img.device)
+        # GPU Accelerated Affine Transformation (img is already a GPU Tensor here)
+        # We preserve the exact center=(0,0) geometry required by CSCS models.
+        temp = v2.functional.affine(
+            img,
+            angle=tform.rotation * 57.2958,  # Rad to Deg
+            translate=(tform.translation[0], tform.translation[1]),
+            scale=tform.scale,
+            shear=0.0,
+            center=(0, 0),
         )
-        img_b = img.unsqueeze(0) if img.dim() == 3 else img
-        temp = kgm.warp_affine(
-            img_b.float(),
-            M_tensor,
-            dsize=(512, 512),
-            mode="bilinear",
-            align_corners=True,
-        ).squeeze(0)
 
-        # Fast resize to 112x112
-        image = v2.functional.resize(temp, [112, 112], antialias=True)
+        # Fast GPU Crop and Resize
+        temp = v2.functional.crop(temp, top=0, left=0, height=512, width=512)
+        image = self.resize_112(temp)
 
         cropped_image = image.permute(1, 2, 0).clone()
 
         if image.dtype == torch.uint8:
             image = image.float()
 
-        # OPTIMIZED: In-place division and normalization
+        # CLONE: Prevent cross-thread race conditions before in-place math
+        image = image.clone()
+
+        # OPTIMIZED: In-place division and normalization for CSCS [-1.0, 1.0] standard
         image.div_(255.0)
         v2.functional.normalize(image, (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True)
 
         return torch.unsqueeze(image, 0).contiguous(), cropped_image
 
     def recognize_cscs(self, img, face_kps):
-        # Usa la funzione di preprocessamento
         img, cropped_image = self.preprocess_image_cscs(img, face_kps)
 
-        model_name = "CSCSArcFace"  # Define model_name
+        model_name = "CSCSArcFace"
         model = self.models_processor.models.get(model_name)
         if not model:
             print("[ERROR] CSCSArcFace model not loaded in recognize_cscs.")
             return None, None
 
         io_binding = model.io_binding()
+
+        # SAFETY: Clear bindings to prevent thread caching errors
+        io_binding.clear_binding_inputs()
+        io_binding.clear_binding_outputs()
+
         io_binding.bind_input(
             name="input",
             device_type=self.models_processor.device,
@@ -410,21 +423,19 @@ class FaceSwappers:
         )
         io_binding.bind_output(name="output", device_type=self.models_processor.device)
 
-        # Run the model with lazy build handling
         self._run_model_with_lazy_build_check(model_name, model, io_binding)
 
         output = io_binding.copy_outputs_to_cpu()[0]
+
+        # Exact p=2 normalization math required by CSCS
         embedding = torch.from_numpy(output).to("cpu")
         embedding = torch.nn.functional.normalize(embedding, dim=-1, p=2)
         embedding = embedding.numpy().flatten()
 
         embedding_id = self.recognize_cscs_id_adapter(img, None)
-        # FS-BUG-02: guard against empty embedding_id before combining
+
         if embedding_id.size == embedding.size:
-            # FS-BUG-01: normalize the combined embedding to avoid magnitude blow-up
-            combined = embedding + embedding_id
-            norm = np.linalg.norm(combined)
-            embedding = combined / norm if norm > 1e-8 else combined
+            embedding = embedding + embedding_id
 
         return embedding, cropped_image
 
@@ -436,13 +447,17 @@ class FaceSwappers:
 
         if not model:
             print(f"[WARN] {model_name} model not loaded.")
-            return np.array([])  # Return empty array on failure
+            return np.array([])
 
-        # Use preprocess_image_cscs when face_kps is not None. When it is None img is already preprocessed.
         if face_kps is not None:
             img, _ = self.preprocess_image_cscs(img, face_kps)
 
         io_binding = model.io_binding()
+
+        # SAFETY: Clear bindings
+        io_binding.clear_binding_inputs()
+        io_binding.clear_binding_outputs()
+
         io_binding.bind_input(
             name="input",
             device_type=self.models_processor.device,
@@ -453,10 +468,11 @@ class FaceSwappers:
         )
         io_binding.bind_output(name="output", device_type=self.models_processor.device)
 
-        # Run the model with lazy build handling
         self._run_model_with_lazy_build_check(model_name, model, io_binding)
 
         output = io_binding.copy_outputs_to_cpu()[0]
+
+        # Exact p=2 normalization math required by CSCS
         embedding_id = torch.from_numpy(output).to("cpu")
         embedding_id = torch.nn.functional.normalize(embedding_id, dim=-1, p=2)
 
@@ -467,13 +483,27 @@ class FaceSwappers:
         return latent
 
     def run_swapper_cscs(self, image, embedding, output):
-        model_name = "CSCS"  # Use the name from the models_list
+        model_name = "CSCS"
         model = self._load_swapper_model(model_name)
         if not model:
             print("[ERROR] CSCS model not loaded.")
             return
 
+        # SAFETY: Contiguous memory blocks required by TensorRT
+        if not image.is_contiguous():
+            image = image.contiguous()
+        if not embedding.is_contiguous():
+            embedding = embedding.contiguous()
+        if not output.is_contiguous():
+            output = output.contiguous()
+
         io_binding = model.io_binding()
+
+        # SAFETY: Clear bindings
+        io_binding.clear_binding_inputs()
+        io_binding.clear_binding_outputs()
+
+        # Hardcoded IO names validated by standard CSCS export
         io_binding.bind_input(
             name="input_1",
             device_type=self.models_processor.device,
@@ -499,7 +529,6 @@ class FaceSwappers:
             buffer_ptr=output.data_ptr(),
         )
 
-        # Run the model with lazy build handling
         self._run_model_with_lazy_build_check(model_name, model, io_binding)
 
     def _calc_emap_latent(self, source_embedding):

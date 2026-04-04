@@ -78,11 +78,28 @@ fp16_safe_models_list = [
     # --- Restorers ---
     "GPENBFR256",
     "GPENBFR512",
-    # "GPENBFR1024",
-    # "GPENBFR2048",
     "CodeFormer",
     "VQFRv2",
     "RestoreFormerPlusPlus",
+    # --- Recognition ---
+    "Inswapper128ArcFace",
+    "SimSwapArcFace",
+    "GhostArcFace",
+    "CSCSArcFace",
+    "CSCSIDArcFace",
+    # --- Denoiser ---
+    "RefLDMVAEEncoder",
+    "RefLDMVAEDecoder",
+    "RefLDM_UNET_EXTERNAL_KV",
+    # --- Texture ---
+    "combo_relu3_3_relu3_1",
+    # --- Swappers ---
+    "InStyleSwapper256 Version A",
+    "InStyleSwapper256 Version B",
+    "InStyleSwapper256 Version C",
+    "GhostFacev1",
+    "GhostFacev2",
+    "GhostFacev3",
 ]
 
 models_list = [
