@@ -1818,6 +1818,20 @@ class ModelsProcessor(QtCore.QObject):
     ):
         self.face_swappers.run_hyperswap(image, embedding, output, swapper_model)
 
+    def run_swapper_ghostface_batched(
+        self, images, embedding, output, swapper_model: str = "GhostFace-v2"
+    ) -> bool:
+        return self.face_swappers.run_swapper_ghostface_batched(
+            images, embedding, output, swapper_model
+        )
+
+    def run_hyperswap_batched(
+        self, images, embedding, output, swapper_model: str = "HyperSwap-v3"
+    ) -> bool:
+        return self.face_swappers.run_hyperswap_batched(
+            images, embedding, output, swapper_model
+        )
+
     def calc_rehiface_source_latent(self, source_embedding):
         return self.face_swappers.calc_rehiface_source_latent(source_embedding)
 

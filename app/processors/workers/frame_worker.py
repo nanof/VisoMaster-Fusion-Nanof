@@ -858,6 +858,7 @@ class FrameWorker(threading.Thread):
         edit_button_is_checked_global: bool,
         eye_side_for_debug: str = "",
         kv_map_for_swap: Dict | None = None,
+        source_latent_cache: dict[tuple[int, str], torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Processes a single perspective crop extracted from a VR frame.
 
@@ -959,6 +960,7 @@ class FrameWorker(threading.Thread):
                     dfm_model_name=parameters_for_face["DFMModelSelection"],
                     is_perspective_crop=True,
                     kv_map=kv_map_for_swap,
+                    source_latent_cache=source_latent_cache,
                 )
             except Exception as e_swap_core:
                 print(
@@ -2116,6 +2118,7 @@ class FrameWorker(threading.Thread):
         for _unmatched in unmatched_compare_crops:
             vr_compare_crops.append((_unmatched, _unmatched, None))
 
+        _vr_source_latent_cache: dict[tuple[int, str], torch.Tensor] = {}
         for item_data in analyzed_faces_for_vr:
             original_crop_for_compare = (
                 item_data["face_crop_tensor"].clone()
@@ -2141,6 +2144,7 @@ class FrameWorker(threading.Thread):
                             is not None
                             else item_data["target_button"].assigned_kv_map
                         ),
+                        source_latent_cache=_vr_source_latent_cache,
                     )
                 )
             else:
@@ -2284,6 +2288,476 @@ class FrameWorker(threading.Thread):
                 return torch.cat(padded, dim=1)
 
         return processed_tensor_rgb_uint8
+
+    def _face_makeup_sliders_on(self, parameters) -> bool:
+        p = parameters.data if hasattr(parameters, "data") else parameters
+        return any(
+            p.get(f, False)
+            for f in (
+                "FaceMakeupEnableToggle",
+                "HairMakeupEnableToggle",
+                "EyeBrowsMakeupEnableToggle",
+                "LipsMakeupEnableToggle",
+            )
+        )
+
+    def _plane_multi_face_batch_key(
+        self, parameters, control: dict, swap_on: bool, s_e: np.ndarray | None
+    ) -> str | None:
+        """Return ``SwapModelSelection`` when this face can join multi-face plane batch."""
+        if not swap_on:
+            return None
+        if s_e is None or not isinstance(s_e, np.ndarray) or s_e.size == 0:
+            return None
+        if parameters.get("StrengthMode2EnableToggle", False):
+            return None
+        if parameters.get("StrengthEnableToggle", False):
+            if ceil(float(parameters.get("StrengthAmountSlider", 100)) / 100.0) != 1:
+                return None
+        m = parameters.get("SwapModelSelection")
+        if m == "Inswapper128":
+            if self.models_processor.provider_name != "Custom":
+                return None
+            return m
+        if m in self.GHOSTFACE_MODELS or m in self.HYPERSWAP_MODELS:
+            return m
+        return None
+
+    def _flush_plane_swap_all_batch(
+        self,
+        img: torch.Tensor,
+        specs: list[dict],
+        snap: torch.Tensor | None,
+        source_latent_cache: dict | None,
+        edit_button_is_checked_global: bool,
+    ) -> torch.Tensor:
+        if not specs:
+            return img
+        try:
+            if len(specs) == 1:
+                s0 = specs[0]
+                img, s0["fface"]["original_face"], s0["fface"]["swap_mask"] = (
+                    self.swap_core(
+                        img,
+                        s0["kps_5"],
+                        s0["kps_all"],
+                        s_e=s0["s_e"],
+                        t_e=s0["t_e"],
+                        parameters=s0["parameters"],
+                        control=s0["control"],
+                        dfm_model_name=s0["parameters"]["DFMModelSelection"],
+                        kv_map=s0["kv_map"],
+                        source_latent_cache=source_latent_cache,
+                    )
+                )
+                if edit_button_is_checked_global and self._face_makeup_sliders_on(
+                    s0["parameters"]
+                ):
+                    _pd = (
+                        s0["parameters"].data
+                        if hasattr(s0["parameters"], "data")
+                        else s0["parameters"]
+                    )
+                    img = self.frame_edits.swap_edit_face_core_makeup(
+                        img, s0["fface"]["kps_all"], _pd, s0["control"]
+                    )
+                return img
+            assert snap is not None
+            sel = specs[0]["parameters"]["SwapModelSelection"]
+            if sel == "Inswapper128":
+                return self._run_inswapper128_batched_plane_swap_all(
+                    img,
+                    snap,
+                    specs,
+                    source_latent_cache,
+                    edit_button_is_checked_global,
+                )
+            if sel in self.GHOSTFACE_MODELS or sel in self.HYPERSWAP_MODELS:
+                return self._run_ort_256_swapper_batched_plane_swap_all(
+                    img,
+                    snap,
+                    specs,
+                    source_latent_cache,
+                    edit_button_is_checked_global,
+                    sel,
+                )
+            out = img
+            for sp in specs:
+                out, sp["fface"]["original_face"], sp["fface"]["swap_mask"] = (
+                    self.swap_core(
+                        out,
+                        sp["kps_5"],
+                        sp["kps_all"],
+                        s_e=sp["s_e"],
+                        t_e=sp["t_e"],
+                        parameters=sp["parameters"],
+                        control=sp["control"],
+                        dfm_model_name=sp["parameters"]["DFMModelSelection"],
+                        kv_map=sp["kv_map"],
+                        source_latent_cache=source_latent_cache,
+                    )
+                )
+                if edit_button_is_checked_global and self._face_makeup_sliders_on(
+                    sp["parameters"]
+                ):
+                    _pd = (
+                        sp["parameters"].data
+                        if hasattr(sp["parameters"], "data")
+                        else sp["parameters"]
+                    )
+                    out = self.frame_edits.swap_edit_face_core_makeup(
+                        out, sp["fface"]["kps_all"], _pd, sp["control"]
+                    )
+            return out
+        except Exception as e:
+            print(f"[ERROR] Plane swap batch flush failed ({e}); falling back sequential.")
+            out = img
+            for sp in specs:
+                try:
+                    out, sp["fface"]["original_face"], sp["fface"]["swap_mask"] = (
+                        self.swap_core(
+                            out,
+                            sp["kps_5"],
+                            sp["kps_all"],
+                            s_e=sp["s_e"],
+                            t_e=sp["t_e"],
+                            parameters=sp["parameters"],
+                            control=sp["control"],
+                            dfm_model_name=sp["parameters"]["DFMModelSelection"],
+                            kv_map=sp["kv_map"],
+                            source_latent_cache=source_latent_cache,
+                        )
+                    )
+                    if edit_button_is_checked_global and self._face_makeup_sliders_on(
+                        sp["parameters"]
+                    ):
+                        _pd = (
+                            sp["parameters"].data
+                            if hasattr(sp["parameters"], "data")
+                            else sp["parameters"]
+                        )
+                        out = self.frame_edits.swap_edit_face_core_makeup(
+                            out, sp["fface"]["kps_all"], _pd, sp["control"]
+                        )
+                except Exception as e2:
+                    print(f"[ERROR] Sequential swap fallback failed: {e2}")
+            return out
+        finally:
+            specs.clear()
+
+    def _run_inswapper128_batched_plane_swap_all(
+        self,
+        img: torch.Tensor,
+        batch_snap: torch.Tensor,
+        specs: list[dict],
+        source_latent_cache: dict | None,
+        edit_button_is_checked_global: bool,
+    ) -> torch.Tensor:
+        ordered = sorted(specs, key=lambda x: x["det_index"])
+        device = self.models_processor.device
+        chw_tiles: list[torch.Tensor] = []
+        lat_rows: list[torch.Tensor] = []
+
+        def _sequential_from_ordered() -> torch.Tensor:
+            out_img = img
+            for sp in ordered:
+                out_img, sp["fface"]["original_face"], sp["fface"]["swap_mask"] = (
+                    self.swap_core(
+                        out_img,
+                        sp["kps_5"],
+                        sp["kps_all"],
+                        s_e=sp["s_e"],
+                        t_e=sp["t_e"],
+                        parameters=sp["parameters"],
+                        control=sp["control"],
+                        dfm_model_name=sp["parameters"]["DFMModelSelection"],
+                        kv_map=sp["kv_map"],
+                        source_latent_cache=source_latent_cache,
+                    )
+                )
+                if edit_button_is_checked_global and self._face_makeup_sliders_on(
+                    sp["parameters"]
+                ):
+                    _pd = (
+                        sp["parameters"].data
+                        if hasattr(sp["parameters"], "data")
+                        else sp["parameters"]
+                    )
+                    out_img = self.frame_edits.swap_edit_face_core_makeup(
+                        out_img, sp["fface"]["kps_all"], _pd, sp["control"]
+                    )
+            return out_img
+
+        for s in ordered:
+            params = s["parameters"]
+            swap_model = params["SwapModelSelection"]
+            tform = self.get_face_similarity_tform(swap_model, s["kps_5"])
+            _interp = (
+                "bicubic"
+                if params.get("FaceAlignmentInterpolation", "Bilinear") == "Bicubic"
+                else "bilinear"
+            )
+            original_faces = self.get_transformed_and_scaled_faces(
+                tform, batch_snap, interp_mode=_interp
+            )
+            _sl = None
+            if source_latent_cache is not None and s["s_e"] is not None:
+                _m = str(swap_model)
+                _sl = source_latent_cache.get((id(s["s_e"]), _m))
+                if _sl is None:
+                    try:
+                        _sl = source_latent_cache.get(
+                            ("h", hash(s["s_e"].tobytes()), _m)
+                        )
+                    except Exception:
+                        pass
+            dbg = s["control"].get("CommandLineDebugEnableToggle", False)
+            inp_f, _dfm, dim, latent = self.get_affined_face_dim_and_swapping_latents(
+                original_faces,
+                swap_model,
+                params["DFMModelSelection"],
+                s["s_e"],
+                s["t_e"],
+                params,
+                dbg,
+                tform,
+                cached_source_latent_torch=_sl,
+                source_latent_out_cache=source_latent_cache,
+            )
+            if inp_f is None or dim != 1 or latent is None:
+                return _sequential_from_ordered()
+            # Match swap_core → get_swapped preprocessing (FaceAdj, /255, pre-swap sharpness).
+            w_chw = inp_f
+            if params.get("FaceAdjEnableToggle", False):
+                w_chw = v2.functional.affine(
+                    w_chw,
+                    0,
+                    (0, 0),
+                    1 + float(params["FaceScaleAmountSlider"]) / 100.0,
+                    0,
+                    center=(float(dim * 128 / 2), float(dim * 128 / 2)),
+                    interpolation=v2.InterpolationMode.BILINEAR,
+                )
+            hwc = w_chw.permute(1, 2, 0).contiguous().float() / 255.0
+            if float(params.get("PreSwapSharpnessDecimalSlider", 1.0)) != 1.0:
+                _sh = hwc.permute(2, 0, 1)
+                _sh = v2.functional.adjust_sharpness(
+                    _sh, float(params["PreSwapSharpnessDecimalSlider"])
+                )
+                hwc = _sh.permute(1, 2, 0)
+            tchw = hwc.permute(2, 0, 1).unsqueeze(0).contiguous()
+            chw_tiles.append(tchw)
+            lt = latent
+            if lt.dim() == 1:
+                lr = lt.unsqueeze(0)
+            else:
+                lr = lt
+            lat_rows.append(lr)
+
+        batch_in = torch.cat(chw_tiles, dim=0).to(device=device, dtype=torch.float32)
+        lat_mat = torch.cat(lat_rows, dim=0).to(device=device, dtype=torch.float32)
+        if lat_mat.dim() != 2 or lat_mat.shape[1] != 512:
+            return _sequential_from_ordered()
+        batch_out = torch.empty_like(batch_in)
+        self.models_processor.run_inswapper_batched(batch_in, lat_mat, batch_out)
+        prefetched_list: list[torch.Tensor] = []
+        for bi in range(batch_out.shape[0]):
+            prefetched_list.append(
+                (batch_out[bi] * 255.0).clamp(0, 255).to(torch.uint8)
+            )
+
+        out_img = img
+        for s, pre in zip(ordered, prefetched_list):
+            out_img, s["fface"]["original_face"], s["fface"]["swap_mask"] = (
+                self.swap_core(
+                    out_img,
+                    s["kps_5"],
+                    s["kps_all"],
+                    s_e=s["s_e"],
+                    t_e=s["t_e"],
+                    parameters=s["parameters"],
+                    control=s["control"],
+                    dfm_model_name=s["parameters"]["DFMModelSelection"],
+                    kv_map=s["kv_map"],
+                    source_latent_cache=source_latent_cache,
+                    prefetched_swap_chw_uint8=pre,
+                    alignment_img=batch_snap,
+                )
+            )
+            if edit_button_is_checked_global and self._face_makeup_sliders_on(
+                s["parameters"]
+            ):
+                _pd = (
+                    s["parameters"].data
+                    if hasattr(s["parameters"], "data")
+                    else s["parameters"]
+                )
+                out_img = self.frame_edits.swap_edit_face_core_makeup(
+                    out_img, s["fface"]["kps_all"], _pd, s["control"]
+                )
+        return out_img
+
+    def _run_ort_256_swapper_batched_plane_swap_all(
+        self,
+        img: torch.Tensor,
+        batch_snap: torch.Tensor,
+        specs: list[dict],
+        source_latent_cache: dict | None,
+        edit_button_is_checked_global: bool,
+        swapper_model: str,
+    ) -> torch.Tensor:
+        """GhostFace / HyperSwap: one ORT batch B×256² when the engine accepts dynamic N."""
+        ordered = sorted(specs, key=lambda x: x["det_index"])
+        device = self.models_processor.device
+        chw_tiles: list[torch.Tensor] = []
+        lat_rows: list[torch.Tensor] = []
+
+        def _sequential_from_ordered() -> torch.Tensor:
+            out_img = img
+            for sp in ordered:
+                out_img, sp["fface"]["original_face"], sp["fface"]["swap_mask"] = (
+                    self.swap_core(
+                        out_img,
+                        sp["kps_5"],
+                        sp["kps_all"],
+                        s_e=sp["s_e"],
+                        t_e=sp["t_e"],
+                        parameters=sp["parameters"],
+                        control=sp["control"],
+                        dfm_model_name=sp["parameters"]["DFMModelSelection"],
+                        kv_map=sp["kv_map"],
+                        source_latent_cache=source_latent_cache,
+                    )
+                )
+                if edit_button_is_checked_global and self._face_makeup_sliders_on(
+                    sp["parameters"]
+                ):
+                    _pd = (
+                        sp["parameters"].data
+                        if hasattr(sp["parameters"], "data")
+                        else sp["parameters"]
+                    )
+                    out_img = self.frame_edits.swap_edit_face_core_makeup(
+                        out_img, sp["fface"]["kps_all"], _pd, sp["control"]
+                    )
+            return out_img
+
+        for s in ordered:
+            params = s["parameters"]
+            if params["SwapModelSelection"] != swapper_model:
+                return _sequential_from_ordered()
+            tform = self.get_face_similarity_tform(swapper_model, s["kps_5"])
+            _interp = (
+                "bicubic"
+                if params.get("FaceAlignmentInterpolation", "Bilinear") == "Bicubic"
+                else "bilinear"
+            )
+            original_faces = self.get_transformed_and_scaled_faces(
+                tform, batch_snap, interp_mode=_interp
+            )
+            _sl = None
+            if source_latent_cache is not None and s["s_e"] is not None:
+                _m = str(swapper_model)
+                _sl = source_latent_cache.get((id(s["s_e"]), _m))
+                if _sl is None:
+                    try:
+                        _sl = source_latent_cache.get(
+                            ("h", hash(s["s_e"].tobytes()), _m)
+                        )
+                    except Exception:
+                        pass
+            dbg = s["control"].get("CommandLineDebugEnableToggle", False)
+            inp_f, _dfm, dim, latent = self.get_affined_face_dim_and_swapping_latents(
+                original_faces,
+                swapper_model,
+                params["DFMModelSelection"],
+                s["s_e"],
+                s["t_e"],
+                params,
+                dbg,
+                tform,
+                cached_source_latent_torch=_sl,
+                source_latent_out_cache=source_latent_cache,
+            )
+            if inp_f is None or dim != 2 or latent is None:
+                return _sequential_from_ordered()
+            w_chw = inp_f
+            if params.get("FaceAdjEnableToggle", False):
+                w_chw = v2.functional.affine(
+                    w_chw,
+                    0,
+                    (0, 0),
+                    1 + float(params["FaceScaleAmountSlider"]) / 100.0,
+                    0,
+                    center=(float(dim * 128 / 2), float(dim * 128 / 2)),
+                    interpolation=v2.InterpolationMode.BILINEAR,
+                )
+            hwc = w_chw.permute(1, 2, 0).contiguous().float() / 255.0
+            if float(params.get("PreSwapSharpnessDecimalSlider", 1.0)) != 1.0:
+                _sh = hwc.permute(2, 0, 1)
+                _sh = v2.functional.adjust_sharpness(
+                    _sh, float(params["PreSwapSharpnessDecimalSlider"])
+                )
+                hwc = _sh.permute(1, 2, 0)
+            tchw = hwc.permute(2, 0, 1).unsqueeze(0).contiguous()
+            chw_tiles.append(tchw)
+            lt = latent
+            lr = lt.unsqueeze(0) if lt.dim() == 1 else lt
+            lat_rows.append(lr)
+
+        batch_in = torch.cat(chw_tiles, dim=0).to(device=device, dtype=torch.float32)
+        lat_mat = torch.cat(lat_rows, dim=0).to(device=device, dtype=torch.float32)
+        if lat_mat.dim() != 2 or lat_mat.shape[1] != 512:
+            return _sequential_from_ordered()
+        batch_out = torch.empty_like(batch_in)
+        ok = False
+        if swapper_model in self.GHOSTFACE_MODELS:
+            ok = self.models_processor.run_swapper_ghostface_batched(
+                batch_in, lat_mat, batch_out, swapper_model
+            )
+        elif swapper_model in self.HYPERSWAP_MODELS:
+            ok = self.models_processor.run_hyperswap_batched(
+                batch_in, lat_mat, batch_out, swapper_model
+            )
+        if not ok:
+            return _sequential_from_ordered()
+
+        prefetched_list: list[torch.Tensor] = []
+        for bi in range(batch_out.shape[0]):
+            prefetched_list.append(
+                (batch_out[bi] * 255.0).clamp(0, 255).to(torch.uint8)
+            )
+
+        out_img = img
+        for s, pre in zip(ordered, prefetched_list):
+            out_img, s["fface"]["original_face"], s["fface"]["swap_mask"] = (
+                self.swap_core(
+                    out_img,
+                    s["kps_5"],
+                    s["kps_all"],
+                    s_e=s["s_e"],
+                    t_e=s["t_e"],
+                    parameters=s["parameters"],
+                    control=s["control"],
+                    dfm_model_name=s["parameters"]["DFMModelSelection"],
+                    kv_map=s["kv_map"],
+                    source_latent_cache=source_latent_cache,
+                    prefetched_swap_chw_uint8=pre,
+                    alignment_img=batch_snap,
+                )
+            )
+            if edit_button_is_checked_global and self._face_makeup_sliders_on(
+                s["parameters"]
+            ):
+                _pd = (
+                    s["parameters"].data
+                    if hasattr(s["parameters"], "data")
+                    else s["parameters"]
+                )
+                out_img = self.frame_edits.swap_edit_face_core_makeup(
+                    out_img, s["fface"]["kps_all"], _pd, s["control"]
+                )
+        return out_img
 
     def _process_frame_standard(
         self,
@@ -2568,6 +3042,9 @@ class FrameWorker(threading.Thread):
 
         # Swapping / Editing Loop
         if det_faces_data_for_display:
+            # Reuse source-side emap/swap latents when the same input embedding + model
+            # applies to several detections on this frame (one source → N faces).
+            _source_latent_cache: dict[tuple[int, str], torch.Tensor] = {}
             if control["SwapOnlyBestMatchEnableToggle"]:
                 # --- Branch: Swap Only Best Match ---
                 # FW-RACE-01: iterate the snapshot, not the live dict
@@ -2683,6 +3160,7 @@ class FrameWorker(threading.Thread):
                                 control=control,
                                 dfm_model_name=params["DFMModelSelection"],
                                 kv_map=_reaging_kv,
+                                source_latent_cache=_source_latent_cache,
                             )
                             if edit_button_is_checked_global and any(
                                 params[f]
@@ -2708,11 +3186,25 @@ class FrameWorker(threading.Thread):
                 if _sequential_match_active:
                     _params_rr_rotate = self._parameters_for_input_rotate_mode()
 
+                _plane_batch_specs: list[dict] = []
+                _plane_batch_snap: torch.Tensor | None = None
+                _plane_batch_kind: str | None = None
+
                 for det_index, fface in enumerate(det_faces_data_for_display):
                     if stop_event.is_set():
                         break
 
                     if _sequential_match_active:
+                        if _plane_batch_specs:
+                            img = self._flush_plane_swap_all_batch(
+                                img,
+                                _plane_batch_specs,
+                                _plane_batch_snap,
+                                _source_latent_cache,
+                                edit_button_is_checked_global,
+                            )
+                        _plane_batch_snap = None
+                        _plane_batch_kind = None
                         fface["matched_target"] = None
                         if not _checked_inputs_ordered:
                             continue
@@ -2814,6 +3306,7 @@ class FrameWorker(threading.Thread):
                                         control=control,
                                         dfm_model_name=params_rr["DFMModelSelection"],
                                         kv_map=_kv_rr,
+                                        source_latent_cache=_source_latent_cache,
                                     )
                                 )
                                 if edit_button_is_checked_global and any(
@@ -2913,6 +3406,49 @@ class FrameWorker(threading.Thread):
                             best_target,
                             face_bbox=fface["bbox"],
                         )
+                        bk = self._plane_multi_face_batch_key(
+                            cast(dict, _params_for_swap_b),
+                            control,
+                            swap_button_is_checked_global,
+                            s_e,
+                        )
+                        if bk:
+                            if _plane_batch_specs and _plane_batch_kind != bk:
+                                img = self._flush_plane_swap_all_batch(
+                                    img,
+                                    _plane_batch_specs,
+                                    _plane_batch_snap,
+                                    _source_latent_cache,
+                                    edit_button_is_checked_global,
+                                )
+                                _plane_batch_snap = None
+                            _plane_batch_kind = bk
+                            if _plane_batch_snap is None:
+                                _plane_batch_snap = img.detach().clone()
+                            _plane_batch_specs.append(
+                                {
+                                    "det_index": det_index,
+                                    "fface": fface,
+                                    "kps_5": fface["kps_5"],
+                                    "kps_all": fface["kps_all"],
+                                    "s_e": s_e,
+                                    "t_e": best_target.get_embedding(arcface_model),
+                                    "parameters": _params_for_swap_b,
+                                    "control": control,
+                                    "kv_map": _reaging_kv,
+                                }
+                            )
+                            continue
+                        if _plane_batch_specs:
+                            img = self._flush_plane_swap_all_batch(
+                                img,
+                                _plane_batch_specs,
+                                _plane_batch_snap,
+                                _source_latent_cache,
+                                edit_button_is_checked_global,
+                            )
+                        _plane_batch_snap = None
+                        _plane_batch_kind = None
                         try:
                             img, fface["original_face"], fface["swap_mask"] = (
                                 self.swap_core(
@@ -2925,6 +3461,7 @@ class FrameWorker(threading.Thread):
                                     control=control,
                                     dfm_model_name=params["DFMModelSelection"],
                                     kv_map=_reaging_kv,
+                                    source_latent_cache=_source_latent_cache,
                                 )
                             )
                             if edit_button_is_checked_global and any(
@@ -2944,6 +3481,16 @@ class FrameWorker(threading.Thread):
                                 f"[ERROR] Standard mode swap_core failed for a face: {e}"
                             )
                             continue
+
+                if _plane_batch_specs:
+                    img = self._flush_plane_swap_all_batch(
+                        img,
+                        _plane_batch_specs,
+                        _plane_batch_snap,
+                        _source_latent_cache,
+                        edit_button_is_checked_global,
+                    )
+                    _plane_batch_kind = None
 
         if perf_stages is not None:
             perf_stages.mark("std_swap_edit")
@@ -3400,6 +3947,25 @@ class FrameWorker(threading.Thread):
 
         return final_latent
 
+    def _store_raw_source_latent_in_cache(
+        self,
+        latent_s: torch.Tensor,
+        out_cache: dict | None,
+        s_e: np.ndarray | None,
+        swapper_model: str,
+    ) -> None:
+        """Store source-side latent under id(s_e) and under hash(s_e) for buffer dedup."""
+        if out_cache is None or s_e is None:
+            return
+        t = latent_s.clone()
+        _m = str(swapper_model)
+        kid = (id(s_e), _m)
+        out_cache[kid] = t
+        try:
+            out_cache[("h", hash(s_e.tobytes()), _m)] = t
+        except Exception:
+            pass
+
     def get_affined_face_dim_and_swapping_latents(
         self,
         original_faces: tuple,
@@ -3410,6 +3976,9 @@ class FrameWorker(threading.Thread):
         parameters,
         cmddebug,
         tform,
+        *,
+        cached_source_latent_torch: torch.Tensor | None = None,
+        source_latent_out_cache: dict | None = None,
     ):
         """
         Selects the correct input face resolution and computes the swapping latent vector
@@ -3424,6 +3993,8 @@ class FrameWorker(threading.Thread):
             parameters:     Per-face parameter dict.
             cmddebug:       Whether command-line debug output is enabled.
             tform:          Similarity transform (used by Inswapper auto-resolution).
+            cached_source_latent_torch: Precomputed source-side latent tensor (before Face Likeness).
+            source_latent_out_cache: Optional dict; stores S-latent under id(s_e) and hash(s_e).
 
         Returns:
             Tuple ``(input_face_affined, dfm_model_instance, dim, latent)`` where
@@ -3445,21 +4016,29 @@ class FrameWorker(threading.Thread):
         # --- Inswapper128 Logic ---
         if swapper_model == "Inswapper128":
             # FS-ROBUST-01: calc_inswapper_latent may return None on emap failure
-            _s_latent_np = self.models_processor.calc_inswapper_latent(s_e)
+            _device = self.models_processor.device
+            if cached_source_latent_torch is not None:
+                latent_s = cached_source_latent_torch
+            else:
+                _s_latent_np = self.models_processor.calc_inswapper_latent(s_e)
+                if _s_latent_np is None:
+                    print(
+                        "[ERROR] calc_inswapper_latent returned None (emap unavailable). Skipping swap."
+                    )
+                    return input_face_affined, dfm_model_instance, dim, latent
+                latent_s = torch.from_numpy(_s_latent_np).float().to(_device)
+                self._store_raw_source_latent_in_cache(
+                    latent_s, source_latent_out_cache, s_e, swapper_model
+                )
             _t_latent_np = self.models_processor.calc_inswapper_latent(t_e)
-            if _s_latent_np is None or _t_latent_np is None:
+            if _t_latent_np is None:
                 print(
                     "[ERROR] calc_inswapper_latent returned None (emap unavailable). Skipping swap."
                 )
                 return input_face_affined, dfm_model_instance, dim, latent
-            latent = (
-                torch.from_numpy(_s_latent_np).float().to(self.models_processor.device)
-            )
-            dst_latent = (
-                torch.from_numpy(_t_latent_np).float().to(self.models_processor.device)
-            )
+            dst_latent = torch.from_numpy(_t_latent_np).float().to(_device)
 
-            latent = self._apply_likeness(latent, dst_latent, parameters)
+            latent = self._apply_likeness(latent_s, dst_latent, parameters)
 
             dim = 1
             if parameters["SwapperResAutoSelectEnableToggle"]:
@@ -3496,22 +4075,29 @@ class FrameWorker(threading.Thread):
             "InStyleSwapper256 Version C",
         ):
             version = swapper_model[-1]
-            latent = (
-                torch.from_numpy(
-                    self.models_processor.calc_swapper_latent_iss(s_e, version)
+            _device = self.models_processor.device
+            if cached_source_latent_torch is not None:
+                latent_s = cached_source_latent_torch
+            else:
+                latent_s = (
+                    torch.from_numpy(
+                        self.models_processor.calc_swapper_latent_iss(s_e, version)
+                    )
+                    .float()
+                    .to(_device)
                 )
-                .float()
-                .to(self.models_processor.device)
-            )
+                self._store_raw_source_latent_in_cache(
+                    latent_s, source_latent_out_cache, s_e, swapper_model
+                )
             dst_latent = (
                 torch.from_numpy(
                     self.models_processor.calc_swapper_latent_iss(t_e, version)
                 )
                 .float()
-                .to(self.models_processor.device)
+                .to(_device)
             )
 
-            latent = self._apply_likeness(latent, dst_latent, parameters)
+            latent = self._apply_likeness(latent_s, dst_latent, parameters)
 
             if (
                 (
@@ -3535,22 +4121,29 @@ class FrameWorker(threading.Thread):
 
         # --- SimSwap Logic ---
         elif swapper_model == "SimSwap512":
-            latent = (
-                torch.from_numpy(
-                    self.models_processor.calc_swapper_latent_simswap512(s_e)
+            _device = self.models_processor.device
+            if cached_source_latent_torch is not None:
+                latent_s = cached_source_latent_torch
+            else:
+                latent_s = (
+                    torch.from_numpy(
+                        self.models_processor.calc_swapper_latent_simswap512(s_e)
+                    )
+                    .float()
+                    .to(_device)
                 )
-                .float()
-                .to(self.models_processor.device)
-            )
+                self._store_raw_source_latent_in_cache(
+                    latent_s, source_latent_out_cache, s_e, swapper_model
+                )
             dst_latent = (
                 torch.from_numpy(
                     self.models_processor.calc_swapper_latent_simswap512(t_e)
                 )
                 .float()
-                .to(self.models_processor.device)
+                .to(_device)
             )
 
-            latent = self._apply_likeness(latent, dst_latent, parameters)
+            latent = self._apply_likeness(latent_s, dst_latent, parameters)
 
             dim = 4
             input_face_affined = original_face_512
@@ -3558,78 +4151,112 @@ class FrameWorker(threading.Thread):
         # --- GhostFace Logic ---
         # FW-QUAL-10: use GHOSTFACE_MODELS frozenset
         elif swapper_model in self.GHOSTFACE_MODELS:
-            latent = (
-                torch.from_numpy(self.models_processor.calc_swapper_latent_ghost(s_e))
-                .float()
-                .to(self.models_processor.device)
-            )
+            _device = self.models_processor.device
+            if cached_source_latent_torch is not None:
+                latent_s = cached_source_latent_torch
+            else:
+                latent_s = (
+                    torch.from_numpy(
+                        self.models_processor.calc_swapper_latent_ghost(s_e)
+                    )
+                    .float()
+                    .to(_device)
+                )
+                self._store_raw_source_latent_in_cache(
+                    latent_s, source_latent_out_cache, s_e, swapper_model
+                )
             dst_latent = (
                 torch.from_numpy(self.models_processor.calc_swapper_latent_ghost(t_e))
                 .float()
-                .to(self.models_processor.device)
+                .to(_device)
             )
 
-            latent = self._apply_likeness(latent, dst_latent, parameters)
+            latent = self._apply_likeness(latent_s, dst_latent, parameters)
 
             dim = 2
             input_face_affined = original_face_256
 
         # --- HyperSwap (FaceFusion 3.3, 256 px, arcface_128 crop + L2-normalized w600k embedding) ---
         elif swapper_model in self.HYPERSWAP_MODELS:
-            _s_lat = self.models_processor.calc_hyperswap_latent(s_e)
+            _device = self.models_processor.device
+            if cached_source_latent_torch is not None:
+                latent_s = cached_source_latent_torch
+            else:
+                _s_lat = self.models_processor.calc_hyperswap_latent(s_e)
+                if _s_lat is None:
+                    print(
+                        "[ERROR] calc_hyperswap_latent returned None (invalid embedding). Skipping swap."
+                    )
+                    return input_face_affined, dfm_model_instance, dim, latent
+                latent_s = torch.from_numpy(_s_lat).float().to(_device)
+                self._store_raw_source_latent_in_cache(
+                    latent_s, source_latent_out_cache, s_e, swapper_model
+                )
             _t_lat = self.models_processor.calc_hyperswap_latent(t_e)
-            if _s_lat is None or _t_lat is None:
+            if _t_lat is None:
                 print(
                     "[ERROR] calc_hyperswap_latent returned None (invalid embedding). Skipping swap."
                 )
                 return input_face_affined, dfm_model_instance, dim, latent
-            latent = (
-                torch.from_numpy(_s_lat).float().to(self.models_processor.device)
-            )
-            dst_latent = (
-                torch.from_numpy(_t_lat).float().to(self.models_processor.device)
-            )
+            dst_latent = torch.from_numpy(_t_lat).float().to(_device)
 
-            latent = self._apply_likeness(latent, dst_latent, parameters)
+            latent = self._apply_likeness(latent_s, dst_latent, parameters)
 
             dim = 2
             input_face_affined = original_face_256
 
         # --- ReHiFace-S (FaceFusion hififace_unofficial_256 + crossface_hififace, mtcnn_512 crop) ---
         elif swapper_model in self.REHIFACE_MODELS:
-            _s_lat = self.models_processor.calc_rehiface_source_latent(s_e)
+            _device = self.models_processor.device
+            if cached_source_latent_torch is not None:
+                latent_s = cached_source_latent_torch
+            else:
+                _s_lat = self.models_processor.calc_rehiface_source_latent(s_e)
+                if _s_lat is None:
+                    print(
+                        "[ERROR] ReHiFace-S latent prep returned None (invalid embedding). Skipping swap."
+                    )
+                    return input_face_affined, dfm_model_instance, dim, latent
+                latent_s = torch.from_numpy(_s_lat).float().to(_device)
+                self._store_raw_source_latent_in_cache(
+                    latent_s, source_latent_out_cache, s_e, swapper_model
+                )
             _t_lat = self.models_processor.calc_hyperswap_latent(t_e)
-            if _s_lat is None or _t_lat is None:
+            if _t_lat is None:
                 print(
                     "[ERROR] ReHiFace-S latent prep returned None (invalid embedding). Skipping swap."
                 )
                 return input_face_affined, dfm_model_instance, dim, latent
-            latent = (
-                torch.from_numpy(_s_lat).float().to(self.models_processor.device)
-            )
-            dst_latent = (
-                torch.from_numpy(_t_lat).float().to(self.models_processor.device)
-            )
+            dst_latent = torch.from_numpy(_t_lat).float().to(_device)
 
-            latent = self._apply_likeness(latent, dst_latent, parameters)
+            latent = self._apply_likeness(latent_s, dst_latent, parameters)
 
             dim = 2
             input_face_affined = original_face_256
 
         # --- CSCS Logic ---
         elif swapper_model == "CSCS":
-            latent = (
-                torch.from_numpy(self.models_processor.calc_swapper_latent_cscs(s_e))
-                .float()
-                .to(self.models_processor.device)
-            )
+            _device = self.models_processor.device
+            if cached_source_latent_torch is not None:
+                latent_s = cached_source_latent_torch
+            else:
+                latent_s = (
+                    torch.from_numpy(
+                        self.models_processor.calc_swapper_latent_cscs(s_e)
+                    )
+                    .float()
+                    .to(_device)
+                )
+                self._store_raw_source_latent_in_cache(
+                    latent_s, source_latent_out_cache, s_e, swapper_model
+                )
             dst_latent = (
                 torch.from_numpy(self.models_processor.calc_swapper_latent_cscs(t_e))
                 .float()
-                .to(self.models_processor.device)
+                .to(_device)
             )
 
-            latent = self._apply_likeness(latent, dst_latent, parameters)
+            latent = self._apply_likeness(latent_s, dst_latent, parameters)
 
             dim = 2
             input_face_affined = original_face_256
@@ -4772,6 +5399,9 @@ class FrameWorker(threading.Thread):
         dfm_model_name: str | None = None,
         is_perspective_crop: bool = False,
         kv_map: Dict | None = None,
+        source_latent_cache: dict | None = None,
+        alignment_img: torch.Tensor | None = None,
+        prefetched_swap_chw_uint8: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """
         Core function for face swapping. Handles:
@@ -4828,8 +5458,11 @@ class FrameWorker(threading.Thread):
             if parameters.get("FaceAlignmentInterpolation", "Bilinear") == "Bicubic"
             else "bilinear"
         )
+        _img_align = img if alignment_img is None else alignment_img
         original_face_512, original_face_384, original_face_256, original_face_128 = (
-            self.get_transformed_and_scaled_faces(tform, img, interp_mode=_face_interp)
+            self.get_transformed_and_scaled_faces(
+                tform, _img_align, interp_mode=_face_interp
+            )
         )
         original_faces = (
             original_face_512,
@@ -4847,10 +5480,39 @@ class FrameWorker(threading.Thread):
         if _swap_core_perf is not None:
             _swap_core_perf.mark("sc_align_crop")
 
+        dfm_model_instance = None
+
         # --- SWAPPING INFERENCE ---
-        if valid_s_e is not None or (
+        if prefetched_swap_chw_uint8 is not None:
+            swap = prefetched_swap_chw_uint8
+            if swap.dtype != torch.uint8:
+                swap = torch.clamp(swap, 0, 255).to(torch.uint8)
+            _ps = swap.shape
+            if len(_ps) != 3 or _ps[1] != _ps[2] or _ps[1] % 128 != 0:
+                raise ValueError(
+                    "prefetched_swap_chw_uint8 must be CHW with square side multiple of 128"
+                )
+            dim = _ps[1] // 128
+            itex = 1
+            prev_face = torch.div(swap.float(), 255.0).permute(1, 2, 0)
+        elif valid_s_e is not None or (
             swapper_model == "DeepFaceLive (DFM)" and dfm_model_name
         ):
+            _sl_cached: torch.Tensor | None = None
+            if (
+                source_latent_cache is not None
+                and valid_s_e is not None
+                and swapper_model != "DeepFaceLive (DFM)"
+            ):
+                _m = str(swapper_model)
+                _sl_cached = source_latent_cache.get((id(valid_s_e), _m))
+                if _sl_cached is None:
+                    try:
+                        _sl_cached = source_latent_cache.get(
+                            ("h", hash(valid_s_e.tobytes()), _m)
+                        )
+                    except Exception:
+                        pass
             input_face_affined, dfm_model_instance, dim, latent = (
                 self.get_affined_face_dim_and_swapping_latents(
                     original_faces,
@@ -4861,6 +5523,8 @@ class FrameWorker(threading.Thread):
                     parameters,
                     debug,
                     tform,
+                    cached_source_latent_torch=_sl_cached,
+                    source_latent_out_cache=source_latent_cache,
                 )
             )
 

@@ -1073,6 +1073,25 @@ class InSwapperTorch(torch.nn.Module):
         saving one full read+write of the activation volume per style block.
         Priority: Triton > pure PyTorch.
         """
+        # Per-batch style (multi-source): Triton path uses scale.view(C) and breaks for B>1.
+        if (
+            scale.dim() == 4
+            and scale.shape[0] > 1
+            and scale.shape[0] == x.shape[0]
+        ):
+            eps = self._eps_val
+            xf = x.float()
+            mean = xf.mean(dim=(2, 3), keepdim=True)
+            var = ((xf - mean) ** 2).mean(dim=(2, 3), keepdim=True)
+            x_n = ((xf - mean) / (var + eps).sqrt()).half()
+            sc = scale.to(dtype=x_n.dtype, device=x_n.device)
+            bi = bias.to(dtype=x_n.dtype, device=x_n.device)
+            out = sc * x_n + bi
+            if residual is not None:
+                res = residual.half() if residual.dtype != torch.float16 else residual
+                out = out + res
+            return F.relu(out, inplace=True) if fuse_relu else out
+
         if _TRITON_AVAILABLE:
             return _triton_adain(
                 x, scale, bias, self._eps_val, fuse_relu=fuse_relu, residual=residual
@@ -1096,8 +1115,8 @@ class InSwapperTorch(torch.nn.Module):
             target: Float32 CUDA tensor of shape [B, 3, 128, 128].  B=1 for
                     standard single-tile inference; B=dim*dim for batched
                     pixel-shift inference where all tiles share the same source.
-            source: Float32 CUDA tensor of shape [1, 512] — ArcFace latent.
-                    Always batch-size 1; style vectors broadcast over all B tiles.
+            source: Float32 tensor of shape [1, 512] (broadcast to all B targets) or
+                    [B, 512] when B matches ``target`` (one identity latent per target).
 
         Returns:
             Float32 tensor of shape [B, 3, 128, 128] in [0, 1].
@@ -1112,7 +1131,17 @@ class InSwapperTorch(torch.nn.Module):
             x = target.to(dtype=torch.float16, memory_format=torch.channels_last)
         else:
             x = target.half()  # [B, 3, 128, 128]
-        src = source.half()  # [1, 512]
+        B_t = target.shape[0]
+        if source.ndim != 2 or source.shape[-1] != 512:
+            raise ValueError(
+                f"InSwapperTorch: source must be [1,512] or [B,512], got {tuple(source.shape)}"
+            )
+        B_s = source.shape[0]
+        if B_s not in (1, B_t):
+            raise ValueError(
+                f"InSwapperTorch: source batch {B_s} must be 1 or match target batch {B_t}"
+            )
+        src = source.half()
 
         # ---- Encoder ----
         x = F.leaky_relu(self.enc0(x), 0.2, inplace=True)
@@ -1121,17 +1150,24 @@ class InSwapperTorch(torch.nn.Module):
         x = F.leaky_relu(self.enc3(x), 0.2, inplace=True)
 
         # ---- Style residual blocks ----
-        all_s = F.linear(src, self.all_style_w, self.all_style_b).view(
-            self.N_BLOCKS * 2, 1, 2048
-        )
+        if B_s == 1:
+            all_s = F.linear(src, self.all_style_w, self.all_style_b).view(
+                self.N_BLOCKS * 2, 1, 2048
+            )
+        else:
+            all_s = (
+                F.linear(src, self.all_style_w, self.all_style_b)
+                .view(B_t, self.N_BLOCKS * 2, 2048)
+                .permute(1, 0, 2)
+            )
 
         for i in range(self.N_BLOCKS):
             c1 = getattr(self, f"s{i}_c1")
             c2 = getattr(self, f"s{i}_c2")
 
-            s1 = all_s[i * 2]  # [1, 2048]
-            sc1 = s1[:, :1024, None, None]  # [1, 1024, 1, 1]
-            bi1 = s1[:, 1024:, None, None]  # [1, 1024, 1, 1]
+            s1 = all_s[i * 2]
+            sc1 = s1[:, :1024, None, None]
+            bi1 = s1[:, 1024:, None, None]
             s2 = all_s[i * 2 + 1]
             sc2 = s2[:, :1024, None, None]
             bi2 = s2[:, 1024:, None, None]

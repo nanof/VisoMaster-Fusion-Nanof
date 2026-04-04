@@ -832,6 +832,11 @@ class FaceSwappers:
                     if embedding.is_contiguous()
                     else embedding.contiguous()
                 )
+                B = inp.shape[0]
+                if emb.shape[0] not in (1, B):
+                    raise ValueError(
+                        f"InSwapper batched: embedding batch {emb.shape[0]} vs images {B}"
+                    )
                 result = torch_model(inp, emb)  # [B, 3, 128, 128] float32
                 output.copy_(result)
                 if self.models_processor.device == "cuda":
@@ -990,6 +995,86 @@ class FaceSwappers:
             model_name, ghostfaceswap_model, io_binding
         )
 
+    def run_swapper_ghostface_batched(
+        self,
+        images: torch.Tensor,
+        embedding: torch.Tensor,
+        output: torch.Tensor,
+        swapper_model: str = "GhostFace-v2",
+    ) -> bool:
+        """Try one ORT run with batch B>1. Returns False if binding/engine rejects batch."""
+        model_name = None
+        if swapper_model == "GhostFace-v1":
+            model_name = "GhostFacev1"
+        elif swapper_model == "GhostFace-v2":
+            model_name = "GhostFacev2"
+        elif swapper_model == "GhostFace-v3":
+            model_name = "GhostFacev3"
+        if not model_name:
+            return False
+
+        ghostfaceswap_model = self._load_swapper_model(model_name)
+        if not ghostfaceswap_model:
+            return False
+
+        B = int(images.shape[0])
+        if B < 1:
+            return False
+        emb = embedding if embedding.is_contiguous() else embedding.contiguous()
+        if emb.shape[0] == 1 and B > 1:
+            emb = emb.expand(B, -1).contiguous()
+        elif emb.shape[0] != B:
+            return False
+
+        inp = images if images.is_contiguous() else images.contiguous()
+        out = output if output.is_contiguous() else output.contiguous()
+
+        session_id = id(ghostfaceswap_model)
+        with self._io_cache_lock:
+            if session_id not in self._session_io_name_cache:
+                self._session_io_name_cache[session_id] = {
+                    "input": ghostfaceswap_model.get_inputs()[0].name,
+                    "outputs": [o.name for o in ghostfaceswap_model.get_outputs()],
+                }
+            output_name = self._session_io_name_cache[session_id]["outputs"][0]
+
+        io_binding = ghostfaceswap_model.io_binding()
+        try:
+            io_binding.bind_input(
+                name="target",
+                device_type=self.models_processor.device,
+                device_id=0,
+                element_type=np.float32,
+                shape=(B, 3, 256, 256),
+                buffer_ptr=inp.data_ptr(),
+            )
+            io_binding.bind_input(
+                name="source",
+                device_type=self.models_processor.device,
+                device_id=0,
+                element_type=np.float32,
+                shape=(B, 512),
+                buffer_ptr=emb.data_ptr(),
+            )
+            io_binding.bind_output(
+                name=output_name,
+                device_type=self.models_processor.device,
+                device_id=0,
+                element_type=np.float32,
+                shape=(B, 3, 256, 256),
+                buffer_ptr=out.data_ptr(),
+            )
+            self._run_model_with_lazy_build_check(
+                model_name, ghostfaceswap_model, io_binding
+            )
+            return True
+        except Exception as e:
+            print(
+                f"[WARN] GhostFace batched ORT bind/run failed (B={B}): {e!s:.200}",
+                flush=True,
+            )
+            return False
+
     def calc_hyperswap_latent(self, source_embedding):
         """FaceFusion HyperSwap: L2-normalized 512-D ArcFace row (1, 512)."""
         if source_embedding is None or len(source_embedding) == 0:
@@ -1045,6 +1130,73 @@ class FaceSwappers:
         )
 
         self._run_model_with_lazy_build_check(model_name, model, io_binding)
+
+    def run_hyperswap_batched(
+        self,
+        images: torch.Tensor,
+        embedding: torch.Tensor,
+        output: torch.Tensor,
+        swapper_model: str = "HyperSwap-v3",
+    ) -> bool:
+        if swapper_model == "HyperSwap-v1":
+            model_name = "HyperSwapv1"
+        elif swapper_model == "HyperSwap-v2":
+            model_name = "HyperSwapv2"
+        elif swapper_model == "HyperSwap-v3":
+            model_name = "HyperSwapv3"
+        else:
+            return False
+
+        model = self._load_swapper_model(model_name)
+        if not model:
+            return False
+
+        B = int(images.shape[0])
+        if B < 1:
+            return False
+        emb = embedding if embedding.is_contiguous() else embedding.contiguous()
+        if emb.shape[0] == 1 and B > 1:
+            emb = emb.expand(B, -1).contiguous()
+        elif emb.shape[0] != B:
+            return False
+
+        inp = images if images.is_contiguous() else images.contiguous()
+        out = output if output.is_contiguous() else output.contiguous()
+
+        io_binding = model.io_binding()
+        try:
+            io_binding.bind_input(
+                name="target",
+                device_type=self.models_processor.device,
+                device_id=0,
+                element_type=np.float32,
+                shape=(B, 3, 256, 256),
+                buffer_ptr=inp.data_ptr(),
+            )
+            io_binding.bind_input(
+                name="source",
+                device_type=self.models_processor.device,
+                device_id=0,
+                element_type=np.float32,
+                shape=(B, 512),
+                buffer_ptr=emb.data_ptr(),
+            )
+            io_binding.bind_output(
+                name="output",
+                device_type=self.models_processor.device,
+                device_id=0,
+                element_type=np.float32,
+                shape=(B, 3, 256, 256),
+                buffer_ptr=out.data_ptr(),
+            )
+            self._run_model_with_lazy_build_check(model_name, model, io_binding)
+            return True
+        except Exception as e:
+            print(
+                f"[WARN] HyperSwap batched ORT bind/run failed (B={B}): {e!s:.200}",
+                flush=True,
+            )
+            return False
 
     def calc_rehiface_source_latent(self, source_embedding):
         """ReHiFace-S: ArcFace 512-D → crossface_hififace → L2-normalized (1, 512)."""
