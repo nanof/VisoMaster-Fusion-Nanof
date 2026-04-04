@@ -925,7 +925,40 @@ class InputFaceCardButton(CardButton):
         self.embedding_store[embedding_swap_model] = embedding
 
     def get_embedding(self, embedding_swap_model: str) -> np.ndarray:
-        return self.embedding_store.get(embedding_swap_model, np.array([]))
+        if embedding_swap_model == "kps_5":
+            return np.array([])
+        stored = self.embedding_store.get(embedding_swap_model)
+        if stored is not None and getattr(stored, "size", 0) > 0:
+            return stored
+        kps_5 = self.embedding_store.get("kps_5")
+        if (
+            kps_5 is None
+            or not isinstance(kps_5, np.ndarray)
+            or kps_5.size == 0
+        ):
+            return np.array([])
+        if not self.media_path or not os.path.isfile(self.media_path):
+            return np.array([])
+        frame = misc_helpers.read_image_file(self.media_path)
+        if frame is None:
+            return np.array([])
+        frame_rgb = misc_helpers.bgr_uint8_to_rgb_contiguous(frame)
+        img = torch.from_numpy(frame_rgb).to(self.main_window.models_processor.device)
+        img = img.permute(2, 0, 1)
+        similarity_type = self.main_window.control.get(
+            "SimilarityTypeSelection", "Optimal"
+        )
+        face_emb, _ = self.main_window.models_processor.run_recognize_direct(
+            img,
+            kps_5,
+            similarity_type,
+            embedding_swap_model,
+        )
+        if face_emb is None or getattr(face_emb, "size", 0) == 0:
+            self.embedding_store[embedding_swap_model] = np.array([])
+            return np.array([])
+        self.embedding_store[embedding_swap_model] = face_emb
+        return face_emb
 
     def load_input_face(self):
         main_window = self.main_window

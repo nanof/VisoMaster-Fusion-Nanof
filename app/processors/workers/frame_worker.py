@@ -890,20 +890,13 @@ class FrameWorker(threading.Thread):
         if swap_button_is_checked_global:
             _vr_reaging_on = parameters_for_face.get("FaceReagingEnableToggle", False)
             _vr_aged_emb = getattr(target_face_button, "aged_input_embedding", {})
-            if _vr_reaging_on and _vr_aged_emb:
-                s_e_for_swap_np = _vr_aged_emb.get(arcface_model_for_swap)
-            else:
-                s_e_for_swap_np = target_face_button.assigned_input_embedding.get(
-                    arcface_model_for_swap
-                )
-            if (
-                s_e_for_swap_np is None
-                or not isinstance(s_e_for_swap_np, np.ndarray)
-                or s_e_for_swap_np.size == 0
-                or np.isnan(s_e_for_swap_np).any()
-                or np.isinf(s_e_for_swap_np).any()
-            ):
-                s_e_for_swap_np = None
+            s_e_for_swap_np = self._resolve_swap_source_embedding(
+                target_face_button,
+                arcface_model_for_swap,
+                control_global,
+                reaging_on=bool(_vr_reaging_on and _vr_aged_emb),
+                aged_embedding=_vr_aged_emb if _vr_reaging_on and _vr_aged_emb else None,
+            )
 
         t_e_for_swap_np = target_face_button.get_embedding(arcface_model_for_swap)
         dfm_model_instance_local = None
@@ -3124,14 +3117,15 @@ class FrameWorker(threading.Thread):
                         ):
                             _reaging_on = params.get("FaceReagingEnableToggle", False)
                             _aged_emb = getattr(target_face, "aged_input_embedding", {})
-                            if _reaging_on and _aged_emb:
-                                s_e = _aged_emb.get(arcface_model)
-                            else:
-                                s_e = target_face.assigned_input_embedding.get(
-                                    arcface_model
-                                )
-                            if s_e is not None and np.isnan(s_e).any():
-                                s_e = None
+                            s_e = self._resolve_swap_source_embedding(
+                                target_face,
+                                arcface_model,
+                                control,
+                                reaging_on=bool(_reaging_on and _aged_emb),
+                                aged_embedding=_aged_emb
+                                if _reaging_on and _aged_emb
+                                else None,
+                            )
 
                         _aged_kv = getattr(target_face, "aged_kv_map", None)
                         _reaging_kv = (
@@ -3385,14 +3379,15 @@ class FrameWorker(threading.Thread):
                             _aged_emb_bt = getattr(
                                 best_target, "aged_input_embedding", {}
                             )
-                            if _reaging_on and _aged_emb_bt:
-                                s_e = _aged_emb_bt.get(arcface_model)
-                            else:
-                                s_e = best_target.assigned_input_embedding.get(
-                                    arcface_model
-                                )
-                            if s_e is not None and np.isnan(s_e).any():
-                                s_e = None
+                            s_e = self._resolve_swap_source_embedding(
+                                best_target,
+                                arcface_model,
+                                control,
+                                reaging_on=bool(_reaging_on and _aged_emb_bt),
+                                aged_embedding=_aged_emb_bt
+                                if _reaging_on and _aged_emb_bt
+                                else None,
+                            )
 
                         _aged_kv_bt = getattr(best_target, "aged_kv_map", None)
                         _reaging_kv = (
@@ -5279,6 +5274,63 @@ class FrameWorker(threading.Thread):
 
         # Return None on no detection so the state machine uses the occlusion grace period
         return raw_score if raw_score > 0.0 else None
+
+    def _resolve_swap_source_embedding(
+        self,
+        target_face: "widget_components.TargetFaceCardButton",
+        arcface_model: str,
+        control: dict,
+        *,
+        reaging_on: bool = False,
+        aged_embedding: dict | None = None,
+    ) -> np.ndarray | None:
+        """Source ArcFace for swap: merged assignment, or lazy compute from input cards.
+
+        ``assigned_input_embedding`` only contains models present when faces were
+        imported (e.g. Inswapper128ArcFace). Swappers like CSCS need CSCSArcFace;
+        without this fallback ``s_e`` stays None and swap_core skips swapping silently.
+        """
+        s_e: np.ndarray | None = None
+        if reaging_on and aged_embedding:
+            s_e = aged_embedding.get(arcface_model)
+        else:
+            s_e = target_face.assigned_input_embedding.get(arcface_model)
+
+        def _usable(e: np.ndarray | None) -> bool:
+            if e is None or not isinstance(e, np.ndarray) or e.size == 0:
+                return False
+            if np.isnan(e).any() or np.isinf(e).any():
+                return False
+            return True
+
+        if _usable(s_e):
+            return s_e
+
+        if reaging_on and aged_embedding:
+            return None
+
+        if not target_face.assigned_input_faces:
+            return None
+
+        embs: list[np.ndarray] = []
+        for iid in target_face.assigned_input_faces:
+            ib = self.main_window.input_faces.get(iid)
+            if ib is None:
+                continue
+            e = ib.get_embedding(arcface_model)
+            if isinstance(e, np.ndarray) and e.size > 0 and not np.isnan(e).any():
+                embs.append(e)
+        if not embs:
+            return None
+
+        print(
+            f"[INFO] Swap source: computed '{arcface_model}' from input face(s) "
+            f"(not stored at import).",
+            flush=True,
+        )
+        if control.get("EmbMergeMethodSelection") == "Median":
+            return np.median(embs, axis=0)
+        return np.mean(embs, axis=0)
 
     # ------------------------------------------------------------------
     # Auto-Mouth Expression helper
