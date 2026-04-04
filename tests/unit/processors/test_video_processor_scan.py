@@ -369,6 +369,7 @@ def test_scan_issue_frames_reports_progress_per_frame_and_skips_dropped_runs():
                 np.empty((0, 4), dtype=np.float32),
                 np.empty((0, 5, 2), dtype=np.float32),
                 np.empty((0, 68, 2), dtype=np.float32),
+                None,
             ),
         ),
     ):
@@ -472,6 +473,7 @@ def test_scan_issue_frames_emits_incremental_issue_callback():
                 np.empty((0, 4), dtype=np.float32),
                 np.empty((0, 5, 2), dtype=np.float32),
                 np.empty((0, 68, 2), dtype=np.float32),
+                None,
             ),
         ),
     ):
@@ -555,6 +557,7 @@ def test_scan_issue_frames_returns_partial_results_on_cancel():
                 np.empty((0, 4), dtype=np.float32),
                 np.empty((0, 5, 2), dtype=np.float32),
                 np.empty((0, 68, 2), dtype=np.float32),
+                None,
             ),
         ),
     ):
@@ -722,6 +725,7 @@ def test_scan_issue_frames_resets_tracker_when_marker_segment_enables_tracking()
                 np.empty((0, 4), dtype=np.float32),
                 np.empty((0, 5, 2), dtype=np.float32),
                 np.empty((0, 68, 2), dtype=np.float32),
+                None,
             ),
         ),
     ):
@@ -807,6 +811,7 @@ def test_scan_issue_frames_resets_tracker_when_tracking_re_enters_after_disabled
                 np.empty((0, 4), dtype=np.float32),
                 np.empty((0, 5, 2), dtype=np.float32),
                 np.empty((0, 68, 2), dtype=np.float32),
+                None,
             ),
         ),
     ):
@@ -882,6 +887,7 @@ def test_scan_issue_frames_clears_sequential_state_when_tracking_re_enters():
             np.empty((0, 4), dtype=np.float32),
             np.empty((0, 5, 2), dtype=np.float32),
             np.empty((0, 68, 2), dtype=np.float32),
+            None,
         )
 
     with (

@@ -1,3 +1,4 @@
+import contextlib
 import threading
 import queue
 from collections import OrderedDict
@@ -123,7 +124,7 @@ class VideoProcessor(QObject):
     processing_stopped_signal = Signal()  # Unified signal for any processing stop
     processing_heartbeat_signal = Signal()  # Emits periodically to show liveness
 
-    def __init__(self, main_window: "MainWindow", num_threads=2):
+    def __init__(self, main_window: "MainWindow", num_threads=4):
         """
         Initialises the VideoProcessor.
 
@@ -154,11 +155,13 @@ class VideoProcessor(QObject):
         )  # Max frames allowed "in flight" (queued + being displayed)
         self.max_frames_to_display_size = 8  # VP-22: Hard cap on frames_to_display dict
 
-        # This queue will hold tasks: (frame_number, frame_rgb_data, params, control) or None (poison pill)
-        # Pool tasks: (frame#, rgb, params, control, bboxes, kpss_5, kpss, feeder_perf)
+        # Pool tasks: (frame#, rgb, params, control, bboxes, kpss_5, kpss, feeder_perf, feeder_chw_uint8?)
         self.frame_queue: queue.Queue[Any] = queue.Queue(
             maxsize=self.max_display_buffer_size
         )
+        # Decode → ordered detection (this queue) → frame_queue (parallel workers)
+        self._raw_frame_queue: Optional[queue.Queue[Any]] = None
+        self._detection_pipeline_thread: Optional[threading.Thread] = None
         self._feeder_cuda_stream: Optional[torch.cuda.Stream] = None
         # This list will hold our *persistent* worker threads
         self.worker_threads: List[threading.Thread] = []
@@ -720,6 +723,9 @@ class VideoProcessor(QObject):
             # Ensure processing loops terminate so the application does not hang.
             self.processing = False
             self.is_processing_segments = False
+        finally:
+            # Unblock the ordered detection thread so it can emit worker shutdown pills.
+            self._signal_detection_pipeline_end()
 
         print("[INFO] Feeder thread finished.")
 
@@ -813,11 +819,9 @@ class VideoProcessor(QObject):
     def _clear_sequential_detection_feed_state(self) -> None:
         """Drop ByteTrack / EMA state after a timeline jump or new playback anchor.
 
-        _run_sequential_detection reuses last_detected_faces when
-        current_frame_number % FaceDetectionIntervalSlider != 0. If the timeline
-        moved (scrub, audio-sync catch-up, reopen) but this state was not cleared,
-        the next frame can inherit bbox/keypoints from the wrong image — no faces,
-        broken swap (Find Faces bypasses the feeder and still works).
+        :meth:`_run_sequential_detection` reuses ``last_detected_faces`` when
+        ``frame_number % FaceDetectionIntervalSlider != 0``. Clear on seek
+        so keypoints are not inherited from the wrong frame.
         """
         self.last_detected_faces.clear()
         self._smoothed_kps.clear()
@@ -861,16 +865,17 @@ class VideoProcessor(QObject):
         local_params_for_worker: dict | None = None,
         frame_tensor: torch.Tensor | None = None,
         *,
+        frame_number: int = 0,
         force_detection: bool = False,
     ):
         """
-        Runs face detection sequentially in the feeder thread to guarantee
-        flawless Temporal EMA smoothing and tracking (ByteTrack).
+        Runs face detection in strict frame order (feeder decode thread enqueues;
+        detection pipeline thread consumes) for ByteTrack + EMA.
         Includes a rigorous Sanitization Shield to prevent dtype('O') crashes.
         """
         # VR180 requires specialized spherical detection in the FrameWorker, skip sequential here.
         if local_control_for_worker.get("VR180ModeEnableToggle", False):
-            return None, None, None
+            return None, None, None, None
 
         if not force_detection and not self._sequential_detection_required(
             local_control_for_worker, local_params_for_worker
@@ -880,10 +885,12 @@ class VideoProcessor(QObject):
                 numpy.empty((0, 4), dtype=numpy.float32),
                 numpy.empty((0, 5, 2), dtype=numpy.float32),
                 numpy.empty((0, 68, 2), dtype=numpy.float32),
+                None,
             )
 
-        import contextlib
-
+        # Only wrap detection in a dedicated CUDA stream when the user enables
+        # "Separate CUDA streams". Otherwise torch.cuda.stream(current_stream()) was a
+        # no-op that still added per-frame context overhead on the feeder hot path.
         use_sep = self.main_window.control.get(
             "PipelineSeparateCudaStreamsToggle", False
         )
@@ -894,17 +901,11 @@ class VideoProcessor(QObject):
         ):
             if self._feeder_cuda_stream is None:
                 self._feeder_cuda_stream = torch.cuda.Stream()
-            local_stream = self._feeder_cuda_stream
+            stream_context = torch.cuda.stream(self._feeder_cuda_stream)
         else:
-            local_stream = (
-                torch.cuda.current_stream() if torch.cuda.is_available() else None
-            )
-        stream_context = (
-            torch.cuda.stream(local_stream)
-            if local_stream
-            else contextlib.nullcontext()
-        )
+            stream_context = contextlib.nullcontext()
 
+        feeder_chw_uint8_for_worker: torch.Tensor | None = None
         with nvtx_range("VisoMaster/feeder/detect"), stream_context:
             use_landmark = local_control_for_worker.get("LandmarkDetectToggle", True)
             landmark_mode = local_control_for_worker.get(
@@ -956,7 +957,7 @@ class VideoProcessor(QObject):
 
             if (
                 len(self.last_detected_faces) > 0
-                and self.current_frame_number % detection_interval != 0
+                and frame_number % detection_interval != 0
             ):
                 previous_faces_arg = self.last_detected_faces
             device = self.main_window.models_processor.device
@@ -994,13 +995,22 @@ class VideoProcessor(QObject):
                 ),
                 previous_detections=previous_faces_arg,
             )
-            # Free up VRAM immediately since the tensor is no longer needed in this thread
-            if owns_frame_tensor:
-                del frame_tensor
+            # When we allocated the CHW tensor here, hand it to the worker to skip a second
+            # host→device copy of the same frame (feeder already uploaded for run_detect).
+            feeder_chw_uint8_for_worker = (
+                frame_tensor if owns_frame_tensor else None
+            )
 
-            # CUDA Stream Sync: Safely wait for GPU on the current stream
-            if local_stream:
-                local_stream.synchronize()
+            # ORT/TensorRT + copy_outputs_to_cpu() already finish GPU work before numpy exists.
+            # An extra stream sync here blocks the feeder every frame (~0.5–3ms) and limits
+            # overlap with workers. Enable only for debugging: VISIOMASTER_FEEDER_POST_DETECT_SYNC=1
+            if os.environ.get(
+                "VISIOMASTER_FEEDER_POST_DETECT_SYNC", ""
+            ).strip().lower() in ("1", "true", "yes", "on"):
+                if torch.cuda.is_available() and str(
+                    self.main_window.models_processor.device
+                ).startswith("cuda"):
+                    torch.cuda.current_stream().synchronize()
 
         # TensorRT and ONNX reuse memory buffers for maximum performance.
         # If we do not copy these arrays, the feeder thread will overwrite the memory
@@ -1153,7 +1163,157 @@ class VideoProcessor(QObject):
             self._smoothed_kps.clear()
             self._smoothed_dense_kps.clear()
 
-        return bboxes, kpss_5, kpss
+        return bboxes, kpss_5, kpss, feeder_chw_uint8_for_worker
+
+    def _clear_frame_and_raw_queues(self) -> None:
+        """Drop pending decode and worker tasks (used on seek / pipeline reset)."""
+        with self.frame_queue.mutex:
+            self.frame_queue.queue.clear()
+            self.frame_queue.not_full.notify_all()
+            self.frame_queue.all_tasks_done.notify_all()
+        rq = self._raw_frame_queue
+        if rq is not None:
+            with rq.mutex:
+                rq.queue.clear()
+                rq.not_full.notify_all()
+
+    def _signal_detection_pipeline_end(self) -> None:
+        """Unblock the detection thread after the decode feeder exits (sentinel)."""
+        t = self._detection_pipeline_thread
+        rq = self._raw_frame_queue
+        if rq is None or t is None or not t.is_alive():
+            return
+        try:
+            rq.put_nowait(None)
+        except queue.Full:
+            try:
+                rq.put(None, timeout=8.0)
+            except Exception:
+                pass
+
+    def _start_detection_pipeline_thread(self) -> None:
+        """Runs ordered GPU detection off the decode path so workers can swap in parallel."""
+        rq = self._raw_frame_queue
+        if rq is None:
+            print(
+                "[WARN] _raw_frame_queue missing; call _rebuild_frame_queue_from_control first."
+            )
+            return
+        if self._detection_pipeline_thread and self._detection_pipeline_thread.is_alive():
+            print("[WARN] Detection pipeline thread already running; not starting another.")
+            return
+        self._detection_pipeline_thread = threading.Thread(
+            target=self._detection_pipeline_loop,
+            daemon=True,
+            name="VisoMaster-DetectPipeline",
+        )
+        self._detection_pipeline_thread.start()
+
+    def _join_detection_pipeline_thread(self, timeout: float = 10.0) -> None:
+        t = self._detection_pipeline_thread
+        if t is not None and t.is_alive():
+            t.join(timeout=timeout)
+            if t.is_alive():
+                print(
+                    f"[WARN] Detection pipeline thread did not finish within {timeout}s.",
+                    flush=True,
+                )
+        self._detection_pipeline_thread = None
+
+    def _detection_pipeline_loop(self) -> None:
+        """Ordered detect → ``frame_queue``; decode thread feeds ``_raw_frame_queue``."""
+        print("[INFO] Detection pipeline thread started.", flush=True)
+        rq = self._raw_frame_queue
+        if rq is None:
+            return
+        while True:
+            raw = rq.get()
+            if raw is None:
+                break
+            (
+                logical_fn,
+                display_fn,
+                frame_rgb,
+                local_params,
+                local_control,
+                perf_pre,
+                perf_on,
+                perf_role,
+            ) = raw
+            feeder_perf: dict[str, float] | None = None
+            if perf_on and isinstance(perf_pre, dict):
+                feeder_perf = {k: float(v) for k, v in perf_pre.items()}
+            _sync_det = (
+                perf_on
+                and self.main_window.models_processor.device == "cuda"
+                and torch.cuda.is_available()
+                and (
+                    _env_flag("VISIOMASTER_PERF_STAGES")
+                    or bool(
+                        self.main_window.control.get(
+                            "PipelineProfileGpuSyncToggle", False
+                        )
+                    )
+                )
+            )
+            _t_seq = time.perf_counter() if perf_on else 0.0
+            bboxes, kpss_5, kpss, feeder_chw_uint8 = self._run_sequential_detection(
+                frame_rgb,
+                local_control,
+                local_params,
+                frame_number=int(logical_fn),
+            )
+            if perf_on:
+                if _sync_det:
+                    torch.cuda.synchronize()
+                _det_ms = (time.perf_counter() - _t_seq) * 1000.0
+                if feeder_perf is not None:
+                    feeder_perf["sequential_detect_ms"] = _det_ms
+                if _env_flag("VISIOMASTER_PERF_STAGES"):
+                    if perf_role == "live" and feeder_perf is not None:
+                        parts = " ".join(
+                            f"{k}={feeder_perf[k]:.2f}" for k in sorted(feeder_perf)
+                        )
+                        print(
+                            f"[PERF-STAGES] frame=live role=detect_pipeline {parts}",
+                            flush=True,
+                        )
+                    elif feeder_perf is not None:
+                        print(
+                            f"[PERF-STAGES] frame={display_fn} role=detect_pipeline "
+                            f"read_frame_ms={feeder_perf.get('read_frame_ms', 0):.2f} "
+                            f"feeder_state_ms={feeder_perf.get('feeder_state_ms', 0):.2f} "
+                            f"rgb_pack_ms={feeder_perf.get('rgb_pack_ms', 0):.2f} "
+                            f"sequential_detect_ms={_det_ms:.2f}",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"[PERF-STAGES] frame={display_fn} role=detect_pipeline "
+                            f"sequential_detect_ms={_det_ms:.2f}",
+                            flush=True,
+                        )
+
+            task = (
+                display_fn,
+                frame_rgb,
+                local_params,
+                local_control,
+                bboxes,
+                kpss_5,
+                kpss,
+                feeder_perf,
+                feeder_chw_uint8,
+            )
+            self.frame_queue.put(task)
+
+        nw = len(self.worker_threads)
+        for _ in range(nw):
+            try:
+                self.frame_queue.put(None, timeout=30.0)
+            except Exception:
+                break
+        print("[INFO] Detection pipeline thread finished.", flush=True)
 
     def _feed_video_loop(self):
         """
@@ -1213,8 +1373,7 @@ class VideoProcessor(QObject):
                         self._clear_frames_to_display_and_profiles()
                         self.current_frame_number = pending_interactive_seek
                         self.next_frame_to_display = pending_interactive_seek
-                    with self.frame_queue.mutex:
-                        self.frame_queue.queue.clear()
+                    self._clear_frame_and_raw_queues()
                     seek_before_read = pending_interactive_seek
                     self.consecutive_read_errors = 0
                     self._audio_sync_last_seek_monotonic = time.perf_counter()
@@ -1240,8 +1399,12 @@ class VideoProcessor(QObject):
                 if len(self.frames_to_display) >= self.max_frames_to_display_size:
                     time.sleep(0.005)  # Wait 5ms (display dict full)
                     continue
+                _raw_q = self._raw_frame_queue
+                _raw_sz = _raw_q.qsize() if _raw_q is not None else 0
                 in_flight_frames = (
-                    len(self.frames_to_display) + self.frame_queue.qsize()
+                    len(self.frames_to_display)
+                    + self.frame_queue.qsize()
+                    + _raw_sz
                 )
                 if in_flight_frames >= self.max_display_buffer_size:
                     time.sleep(0.005)  # Wait 5ms (buffer full)
@@ -1290,8 +1453,7 @@ class VideoProcessor(QObject):
                                     # of seek+clear+continue never reached read_frame/enqueue).
                                     self._clear_frames_to_display_and_profiles()
                                 seek_before_read = jump_to
-                                with self.frame_queue.mutex:
-                                    self.frame_queue.queue.clear()
+                                self._clear_frame_and_raw_queues()
                                 self._clear_sequential_detection_feed_state()
                                 print(
                                     f"[INFO] Feeder: audio-sync catch-up +{jump_to - cur_fn}f "
@@ -1445,68 +1607,41 @@ class VideoProcessor(QObject):
 
                         last_marker_data = marker_data
 
-                    # Use the (potentially updated) feeder state
-                    # We MUST send copies, as the worker will use them in parallel
-                    local_params_for_worker = copy.deepcopy(self.feeder_parameters)
-                    local_control_for_worker = copy.deepcopy(self.feeder_control)
+                    # Use the (potentially updated) feeder state.
+                    # Shallow copy only: same contract as _feed_webcam (parameters.copy /
+                    # control.copy()). feeder_* are already snapshots (deepcopy on marker
+                    # or at playback start); inner per-face dicts are treated read-only by
+                    # workers. Deep-copying the full tree every frame cost ~several ms on
+                    # busy projects and capped FPS vs pre-GPU-refactor builds.
+                    local_params_for_worker = self.feeder_parameters.copy()
+                    local_control_for_worker = self.feeder_control.copy()
 
                 _t_feed_before_rgb = time.perf_counter()
                 frame_rgb = misc_helpers.bgr_uint8_to_rgb_contiguous(frame_bgr)
                 _t_feed_after_rgb = time.perf_counter()
 
-                # --- Inject Sequential Detection ---
-                _t_seq_det = time.perf_counter()
-                bboxes, kpss_5, kpss = self._run_sequential_detection(
-                    frame_rgb, local_control_for_worker, local_params_for_worker
-                )
-                feeder_perf = None
+                perf_pre = None
                 if _perf_stages_feed:
-                    _sync_det = (
-                        self.main_window.models_processor.device == "cuda"
-                        and torch.cuda.is_available()
-                        and (
-                            _env_flag("VISIOMASTER_PERF_STAGES")
-                            or bool(
-                                self.main_window.control.get(
-                                    "PipelineProfileGpuSyncToggle", False
-                                )
-                            )
-                        )
-                    )
-                    if _sync_det:
-                        torch.cuda.synchronize()
-                    _det_ms = (time.perf_counter() - _t_seq_det) * 1000.0
-                    _read_ms = (_t_feed_after_read - _t_feed_read0) * 1000.0
-                    _state_ms = (_t_feed_before_rgb - _t_feed_after_read) * 1000.0
-                    _rgb_ms = (_t_feed_after_rgb - _t_feed_before_rgb) * 1000.0
-                    feeder_perf = {
-                        "read_frame_ms": _read_ms,
-                        "feeder_state_ms": _state_ms,
-                        "rgb_pack_ms": _rgb_ms,
-                        "sequential_detect_ms": _det_ms,
+                    perf_pre = {
+                        "read_frame_ms": (_t_feed_after_read - _t_feed_read0) * 1000.0,
+                        "feeder_state_ms": (_t_feed_before_rgb - _t_feed_after_read)
+                        * 1000.0,
+                        "rgb_pack_ms": (_t_feed_after_rgb - _t_feed_before_rgb) * 1000.0,
                     }
-                    if _env_flag("VISIOMASTER_PERF_STAGES"):
-                        print(
-                            f"[PERF-STAGES] frame={frame_num_to_process} role=feeder "
-                            f"read_frame_ms={_read_ms:.2f} feeder_state_ms={_state_ms:.2f} "
-                            f"rgb_pack_ms={_rgb_ms:.2f} sequential_detect_ms={_det_ms:.2f}",
-                            flush=True,
-                        )
-
-                # The worker will use the feeder's state *from this exact moment*
-                task = (
+                raw_task = (
+                    frame_num_to_process,
                     frame_num_to_process,
                     frame_rgb,
                     local_params_for_worker,
                     local_control_for_worker,
-                    bboxes,
-                    kpss_5,
-                    kpss,
-                    feeder_perf,
+                    perf_pre,
+                    bool(_perf_stages_feed),
+                    "video",
                 )
-
-                # Put the task in the queue for the worker pool
-                self.frame_queue.put(task)
+                rq = self._raw_frame_queue
+                if rq is None:
+                    raise RuntimeError("_raw_frame_queue is not initialized")
+                rq.put(raw_task)
 
                 # DO NOT START A WORKER HERE
                 self.current_frame_number += 1
@@ -1519,13 +1654,16 @@ class VideoProcessor(QObject):
                     self.is_processing_segments = False
                 else:
                     self.processing = False  # Stop the loop
-                # Send poison pills to unblock all waiting worker threads immediately.
-                for _ in self.worker_threads:
-                    try:
-                        # Use block=False instead of false timeout
-                        self.frame_queue.put(None, block=False)
-                    except queue.Full:
-                        pass
+                self._signal_detection_pipeline_end()
+                if not (
+                    self._detection_pipeline_thread
+                    and self._detection_pipeline_thread.is_alive()
+                ):
+                    for _ in self.worker_threads:
+                        try:
+                            self.frame_queue.put(None, block=False)
+                        except queue.Full:
+                            pass
 
         # Log summary of skipped frames at end
         if self.total_skipped_frames > 0:
@@ -1543,8 +1681,12 @@ class VideoProcessor(QObject):
         """Feeder logic for webcam streaming."""
         while self.processing:
             try:
+                _wrq = self._raw_frame_queue
+                _wrz = _wrq.qsize() if _wrq is not None else 0
                 in_flight_frames = (
-                    len(self.webcam_frames_to_display.queue) + self.frame_queue.qsize()
+                    len(self.webcam_frames_to_display.queue)
+                    + self.frame_queue.qsize()
+                    + _wrz
                 )
                 if in_flight_frames >= self.max_display_buffer_size:
                     time.sleep(0.005)  # Wait 5ms (buffer full)
@@ -1579,69 +1721,46 @@ class VideoProcessor(QObject):
                     local_control_for_worker = self.main_window.control.copy()
                 _t_w_after_params = time.perf_counter()
 
-                # --- Inject Sequential Detection ---
-                _t_seq_det_w = time.perf_counter()
-                bboxes, kpss_5, kpss = self._run_sequential_detection(
-                    frame_rgb, local_control_for_worker, local_params_for_worker
-                )
-                feeder_perf_w = None
+                logical_live = int(self.current_frame_number)
+                perf_pre_w = None
                 if _perf_stages_wcam:
-                    _sync_w = (
-                        self.main_window.models_processor.device == "cuda"
-                        and torch.cuda.is_available()
-                        and (
-                            _env_flag("VISIOMASTER_PERF_STAGES")
-                            or bool(
-                                self.main_window.control.get(
-                                    "PipelineProfileGpuSyncToggle", False
-                                )
-                            )
+                    perf_pre_w = {
+                        "read_frame_ms": (_t_w_after_read - _t_w_read0) * 1000.0,
+                        "rgb_pack_ms": (_t_w_after_rgb - _t_w_before_rgb) * 1000.0,
+                        "feeder_params_lock_ms": (
+                            _t_w_after_params - _t_w_before_params
                         )
-                    )
-                    if _sync_w:
-                        torch.cuda.synchronize()
-                    _det_ms_w = (time.perf_counter() - _t_seq_det_w) * 1000.0
-                    _read_ms_w = (_t_w_after_read - _t_w_read0) * 1000.0
-                    _rgb_ms_w = (_t_w_after_rgb - _t_w_before_rgb) * 1000.0
-                    _param_ms_w = (_t_w_after_params - _t_w_before_params) * 1000.0
-                    feeder_perf_w = {
-                        "read_frame_ms": _read_ms_w,
-                        "rgb_pack_ms": _rgb_ms_w,
-                        "feeder_params_lock_ms": _param_ms_w,
-                        "sequential_detect_ms": _det_ms_w,
+                        * 1000.0,
                     }
-                    if _env_flag("VISIOMASTER_PERF_STAGES"):
-                        print(
-                            f"[PERF-STAGES] frame=live role=feeder "
-                            f"read_frame_ms={_read_ms_w:.2f} rgb_pack_ms={_rgb_ms_w:.2f} "
-                            f"feeder_params_lock_ms={_param_ms_w:.2f} "
-                            f"sequential_detect_ms={_det_ms_w:.2f}",
-                            flush=True,
-                        )
-
-                task = (
-                    0,  # frame_number is always 0 for live streams
+                raw_live = (
+                    logical_live,
+                    0,
                     frame_rgb,
                     local_params_for_worker,
                     local_control_for_worker,
-                    bboxes,
-                    kpss_5,
-                    kpss,
-                    feeder_perf_w,
+                    perf_pre_w,
+                    bool(_perf_stages_wcam),
+                    "live",
                 )
-
-                # Put the task in the queue for the worker pool
-                self.frame_queue.put(task)
-                # Live streams must advance this counter each fed frame: _run_sequential_detection
-                # uses current_frame_number % FaceDetectionIntervalSlider to choose full detect vs
-                # ByteTrack carry-over. It never advanced here (unlike _feed_video_loop), so after
-                # video playback the index could stay odd/even-stuck and skip real detection on
-                # every screen/webcam frame — swap/find-faces diverge (find faces bypasses feeder).
+                wrq = self._raw_frame_queue
+                if wrq is None:
+                    raise RuntimeError("_raw_frame_queue is not initialized")
+                wrq.put(raw_live)
                 self.current_frame_number += 1
 
             except Exception as e:
                 print(f"[ERROR] Error in _feed_webcam loop: {e}")
                 self.processing = False
+                self._signal_detection_pipeline_end()
+                if not (
+                    self._detection_pipeline_thread
+                    and self._detection_pipeline_thread.is_alive()
+                ):
+                    for _ in self.worker_threads:
+                        try:
+                            self.frame_queue.put(None, block=False)
+                        except queue.Full:
+                            pass
 
     def _mark_skipped_frame(self, frame_number: int, reason: str) -> None:
         """Track skipped-frame reasons for later audio-rebuild diagnostics."""
@@ -2123,6 +2242,7 @@ class VideoProcessor(QObject):
         self.preroll_target = max(20, self.num_threads * 2)
         self.max_display_buffer_size = max(16, self.preroll_target * mult)
         self.frame_queue = queue.Queue(maxsize=self.max_display_buffer_size)
+        self._raw_frame_queue = queue.Queue(maxsize=self.max_display_buffer_size)
         print(
             f"[INFO] Frame queue: maxsize={self.max_display_buffer_size} "
             f"(preroll={self.preroll_target}, multiplier={mult})"
@@ -2281,16 +2401,14 @@ class VideoProcessor(QObject):
         print(f"[INFO] Starting {self.num_threads} persistent worker thread(s)...")
         # Ensure old workers are cleared (from a previous run)
         self.join_and_clear_threads()
+        self._join_detection_pipeline_thread(timeout=3.0)
         self.worker_threads = []
         self._rebuild_frame_queue_from_control()
         # Clear any stale tasks or poison pills left from the previous session.
         # join_and_clear_threads() returns early when worker_threads is empty,
         # so pills from workers that exited via stop_event (not pill consumption)
         # can remain in the queue and kill new workers immediately.
-        with self.frame_queue.mutex:
-            self.frame_queue.queue.clear()
-            self.frame_queue.all_tasks_done.notify_all()
-            self.frame_queue.not_full.notify_all()
+        self._clear_frame_and_raw_queues()
         for i in range(self.num_threads):
             worker = FrameWorker(
                 frame_queue=self.frame_queue,  # Pass the task queue
@@ -2299,6 +2417,8 @@ class VideoProcessor(QObject):
             )
             worker.start()
             self.worker_threads.append(worker)
+
+        self._start_detection_pipeline_thread()
 
         # --- 7. AUDIO/VIDEO SYNC LOGIC ---
 
@@ -2609,9 +2729,7 @@ class VideoProcessor(QObject):
             )
 
             if ret and frame_bgr is not None:
-                frame_to_process = numpy.ascontiguousarray(
-                    frame_bgr[..., ::-1]
-                )  # BGR to RGB
+                frame_to_process = misc_helpers.bgr_uint8_to_rgb_contiguous(frame_bgr)
                 read_successful = True
                 misc_helpers.seek_frame(self.media_capture, self.current_frame_number)
             else:
@@ -2638,7 +2756,9 @@ class VideoProcessor(QObject):
                             (int(w * scale), target_height),
                             interpolation=cv2.INTER_AREA,
                         )
-                    frame_to_process = cached_frame_bgr[..., ::-1]  # BGR to RGB
+                    frame_to_process = misc_helpers.bgr_uint8_to_rgb_contiguous(
+                        cached_frame_bgr
+                    )
                     read_successful = True
                     misc_helpers.seek_frame(self.media_capture, fn)
                     print(
@@ -2668,9 +2788,7 @@ class VideoProcessor(QObject):
                         frame_bgr, (new_w, target_height), interpolation=cv2.INTER_AREA
                     )
 
-                frame_to_process = numpy.ascontiguousarray(
-                    frame_bgr[..., ::-1]
-                )  # BGR to RGB
+                frame_to_process = misc_helpers.bgr_uint8_to_rgb_contiguous(frame_bgr)
                 read_successful = True
             else:
                 print("[ERROR] Unable to read image file for processing.")
@@ -2681,9 +2799,7 @@ class VideoProcessor(QObject):
                 self.media_capture, 0, preview_target_height=None
             )
             if ret and frame_bgr is not None:
-                frame_to_process = numpy.ascontiguousarray(
-                    frame_bgr[..., ::-1]
-                )  # BGR to RGB
+                frame_to_process = misc_helpers.bgr_uint8_to_rgb_contiguous(frame_bgr)
                 read_successful = True
             else:
                 print("[ERROR] Unable to read live capture frame for processing!")
@@ -2759,12 +2875,13 @@ class VideoProcessor(QObject):
         self.feeder_thread = None
         print("[INFO] Feeder thread joined.")
 
+        self._join_detection_pipeline_thread(timeout=3.0)
+
         self._clear_frames_to_display_and_profiles()
         self.clear_recognition_embedding_cache()
         self._seek_cached_frame = None
         self.webcam_frames_to_display.queue.clear()
-        with self.frame_queue.mutex:
-            self.frame_queue.queue.clear()
+        self._clear_frame_and_raw_queues()
 
         print("[INFO] Waiting for worker threads to complete...")
         self.join_and_clear_threads(skip_post_join_gpu_cleanup=True)
@@ -4196,11 +4313,12 @@ class VideoProcessor(QObject):
                         .permute(2, 0, 1)
                     )
                     self.current_frame_number = frame_number
-                    bboxes, kpss_5, _ = self._run_sequential_detection(
+                    bboxes, kpss_5, _, _ = self._run_sequential_detection(
                         frame_rgb,
                         local_control,
                         local_params,
                         frame_tensor=frame_tensor,
+                        frame_number=frame_number,
                         force_detection=True,
                     )
                     detected_embeddings: list[numpy.ndarray] = []
@@ -5014,10 +5132,11 @@ class VideoProcessor(QObject):
             self.feeder_thread = None
             print("[INFO] Feeder thread joined.")
 
+            self._join_detection_pipeline_thread(timeout=3.0)
+
             # 4. Clear buffers and join worker threads.
             self._clear_frames_to_display_and_profiles()
-            with self.frame_queue.mutex:
-                self.frame_queue.queue.clear()
+            self._clear_frame_and_raw_queues()
             print("[INFO] Waiting for final worker threads...")
             self.join_and_clear_threads()
             print("[INFO] Worker threads joined.")
@@ -5583,9 +5702,7 @@ class VideoProcessor(QObject):
             preview_target_height=target_height,  # <--- Used to be None
         )
         if ret:
-            self.current_frame = numpy.ascontiguousarray(
-                frame_bgr[..., ::-1]
-            )  # BGR to RGB
+            self.current_frame = misc_helpers.bgr_uint8_to_rgb_contiguous(frame_bgr)
             # Must re-set position, as read() advances it
             misc_helpers.seek_frame(self.media_capture, start_frame)
             self.current_frame_number = start_frame
@@ -5603,14 +5720,14 @@ class VideoProcessor(QObject):
 
         # 5. Clear containers AND START WORKER POOL for the new segment
         self._clear_frames_to_display_and_profiles()
-        with self.frame_queue.mutex:
-            self.frame_queue.queue.clear()
+        self._clear_frame_and_raw_queues()
 
         print(
             f"[INFO] Starting {self.num_threads} persistent worker thread(s) for segment..."
         )
         # Ensure old workers are cleaned up (if present)
         self.join_and_clear_threads()
+        self._join_detection_pipeline_thread(timeout=3.0)
         self.worker_threads = []
         self._rebuild_frame_queue_from_control()
         for i in range(self.num_threads):
@@ -5644,8 +5761,7 @@ class VideoProcessor(QObject):
         print(
             f"[INFO] Sync: Synchronously processing first frame {current_start_frame} of segment..."
         )
-        with self.frame_queue.mutex:
-            self.frame_queue.queue.clear()
+        self._clear_frame_and_raw_queues()
 
         self.start_frame_worker(
             current_start_frame,
@@ -5672,6 +5788,7 @@ class VideoProcessor(QObject):
         print(
             f"[INFO] Starting feeder thread (Mode: segment {self.current_segment_index})..."
         )
+        self._start_detection_pipeline_thread()
         self.feeder_thread = threading.Thread(target=self._feeder_loop, daemon=True)
         self.feeder_thread.start()
 
@@ -5714,6 +5831,8 @@ class VideoProcessor(QObject):
             print("[INFO] Feeder thread was already finished.")
 
         self.feeder_thread = None
+
+        self._join_detection_pipeline_thread(timeout=3.0)
 
         # 2b. Wait for workers
         print(f"[INFO] Waiting for workers from segment {segment_num}...")
@@ -5995,8 +6114,7 @@ class VideoProcessor(QObject):
             self.triggered_by_job_manager = False
             self.active_output_folder = ""
             print("[INFO] Clearing frame queue of residual pills...")
-            with self.frame_queue.mutex:
-                self.frame_queue.queue.clear()
+            self._clear_frame_and_raw_queues()
 
             # 8. Final timing
             self.end_time = time.perf_counter()
@@ -6328,8 +6446,7 @@ class VideoProcessor(QObject):
         # 6. Clear Containers
         self._clear_frames_to_display_and_profiles()
         self.webcam_frames_to_display.queue.clear()
-        with self.frame_queue.mutex:
-            self.frame_queue.queue.clear()
+        self._clear_frame_and_raw_queues()
 
         # Feeder detection interval / smoothing state must not carry over from video sessions.
         self.current_frame_number = 0
@@ -6345,6 +6462,7 @@ class VideoProcessor(QObject):
         print(f"[INFO] Webcam target FPS: {self.fps}")
 
         self.join_and_clear_threads()
+        self._join_detection_pipeline_thread(timeout=3.0)
         self.worker_threads = []
         self._rebuild_frame_queue_from_control()
         for i in range(self.num_threads):
@@ -6358,6 +6476,7 @@ class VideoProcessor(QObject):
 
         # Start the feeder thread
         print("[INFO] Starting feeder thread (Mode: webcam)...")
+        self._start_detection_pipeline_thread()
         self.feeder_thread = threading.Thread(target=self._feeder_loop, daemon=True)
         self.feeder_thread.start()
 
@@ -6405,8 +6524,7 @@ class VideoProcessor(QObject):
 
         self._clear_frames_to_display_and_profiles()
         self.webcam_frames_to_display.queue.clear()
-        with self.frame_queue.mutex:
-            self.frame_queue.queue.clear()
+        self._clear_frame_and_raw_queues()
 
         # Same as process_webcam: sequential detection uses current_frame_number; reset so
         # interval/ByteTrack logic matches each live session (fixes screen swap after video).
@@ -6421,6 +6539,7 @@ class VideoProcessor(QObject):
         print(f"[INFO] Screen capture target FPS: {self.fps}")
 
         self.join_and_clear_threads()
+        self._join_detection_pipeline_thread(timeout=3.0)
         self.worker_threads = []
         self._rebuild_frame_queue_from_control()
         for i in range(self.num_threads):
@@ -6433,6 +6552,7 @@ class VideoProcessor(QObject):
             self.worker_threads.append(worker)
 
         print("[INFO] Starting feeder thread (Mode: screen)...")
+        self._start_detection_pipeline_thread()
         self.feeder_thread = threading.Thread(target=self._feeder_loop, daemon=True)
         self.feeder_thread.start()
 

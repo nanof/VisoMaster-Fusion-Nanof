@@ -354,6 +354,7 @@ class ModelsProcessor(QtCore.QObject):
 
         self._ddim_schedule_cache: _OD = _OD()
         self._DDIM_CACHE_MAX = 20
+        self._ddim_cache_lock = threading.Lock()
 
         self.clip_session: list = []
 
@@ -2290,43 +2291,50 @@ class ModelsProcessor(QtCore.QObject):
 
         # --- PROCESS: Full Restore (DDIM) ---
         elif denoiser_mode == "Full Restore (DDIM)":
-            # Removed the redundant and wrong cuda stream sync here as the worker are now in a separate global stream
             num_ddpm_timesteps = self.alphas_cumprod_np.shape[0]
 
-            _ddim_raw_ddpm_timesteps_np = ModelsProcessor.make_ddim_timesteps(
-                ddim_discr_method="uniform",
-                num_ddim_timesteps=denoiser_ddim_steps,
-                num_ddpm_timesteps=num_ddpm_timesteps,
-                verbose=DEBUG_DENOISER,
-            )
-            _ddim_sigmas_np, _ddim_alphas_np, _ddim_alphas_prev_np = (
-                ModelsProcessor.make_ddim_sampling_parameters(
-                    alphacums=self.alphas_cumprod_np,
-                    ddim_timesteps=_ddim_raw_ddpm_timesteps_np,
-                    eta=denoiser_ddim_eta,
-                    verbose=DEBUG_DENOISER,
-                )
-            )
+            _ddim_cache_key = (denoiser_ddim_steps, denoiser_ddim_eta)
+            with self._ddim_cache_lock:
+                if _ddim_cache_key in self._ddim_schedule_cache:
+                    self._ddim_schedule_cache.move_to_end(_ddim_cache_key)
+                else:
+                    _ddim_raw_np = ModelsProcessor.make_ddim_timesteps(
+                        ddim_discr_method="uniform",
+                        num_ddim_timesteps=denoiser_ddim_steps,
+                        num_ddpm_timesteps=num_ddpm_timesteps,
+                        verbose=DEBUG_DENOISER,
+                    )
+                    _sig_np, _alp_np, _alp_prev_np = (
+                        ModelsProcessor.make_ddim_sampling_parameters(
+                            alphacums=self.alphas_cumprod_np,
+                            ddim_timesteps=_ddim_raw_np,
+                            eta=denoiser_ddim_eta,
+                            verbose=DEBUG_DENOISER,
+                        )
+                    )
+                    _ddim_sigmas = torch.from_numpy(_sig_np).float().to(self.device)
+                    _ddim_alphas = torch.from_numpy(_alp_np).float().to(self.device)
+                    _ddim_alphas_prev = torch.from_numpy(_alp_prev_np).float().to(
+                        self.device
+                    )
+                    _ddim_sqrt_1m = torch.sqrt(torch.clamp(1.0 - _ddim_alphas, min=0.0))
+                    if len(self._ddim_schedule_cache) >= self._DDIM_CACHE_MAX:
+                        self._ddim_schedule_cache.popitem(last=False)
+                    self._ddim_schedule_cache[_ddim_cache_key] = (
+                        _ddim_raw_np,
+                        _ddim_sigmas,
+                        _ddim_alphas,
+                        _ddim_alphas_prev,
+                        _ddim_sqrt_1m,
+                    )
 
-            # OPTIMISATION PCIe : Numpy -> Tensor async
-            ddim_sigmas = (
-                torch.from_numpy(_ddim_sigmas_np)
-                .float()
-                .to(self.device, non_blocking=True)
-            )
-            ddim_alphas = (
-                torch.from_numpy(_ddim_alphas_np)
-                .float()
-                .to(self.device, non_blocking=True)
-            )
-            ddim_alphas_prev = (
-                torch.from_numpy(_ddim_alphas_prev_np)
-                .float()
-                .to(self.device, non_blocking=True)
-            )
-            ddim_sqrt_one_minus_alphas = torch.sqrt(
-                torch.clamp(1.0 - ddim_alphas, min=0.0)
-            )
+                (
+                    _ddim_raw_ddpm_timesteps_np,
+                    ddim_sigmas,
+                    ddim_alphas,
+                    ddim_alphas_prev,
+                    ddim_sqrt_one_minus_alphas,
+                ) = self._ddim_schedule_cache[_ddim_cache_key]
 
             current_latent_xt_scaled = torch.randn(
                 lq_latent_x0_scaled_for_unet.shape,
@@ -2337,31 +2345,46 @@ class ModelsProcessor(QtCore.QObject):
             time_range_ddpm_indices = np.flip(_ddim_raw_ddpm_timesteps_np).copy()
             total_steps = len(time_range_ddpm_indices)
 
+            latent_shape = lq_latent_x0_scaled_for_unet.shape
+            e_t_cond = torch.empty(
+                latent_shape, dtype=torch.float32, device=self.device
+            )
+            unet_input_cond = torch.empty(
+                (
+                    latent_shape[0],
+                    latent_shape[1] * 2,
+                    latent_shape[2],
+                    latent_shape[3],
+                ),
+                dtype=torch.float32,
+                device=self.device,
+            )
             pred_x0_scaled_current_step = torch.empty_like(lq_latent_x0_scaled_for_unet)
 
-            # Pre-allocate tensor
-            false_tensor_for_unet = (
-                torch.tensor([False], dtype=torch.bool)
-                .to(self.device, non_blocking=True)
-                .contiguous()
-            )
+            if denoiser_cfg_scale != 1.0:
+                e_t_uncond = torch.empty(
+                    latent_shape, dtype=torch.float32, device=self.device
+                )
+                unet_input_uncond = torch.empty_like(unet_input_cond)
+                false_tensor_for_unet = (
+                    torch.tensor([False], dtype=torch.bool, device=self.device)
+                    .contiguous()
+                )
+            else:
+                e_t_uncond = None
+                unet_input_uncond = None
+                false_tensor_for_unet = None
 
             for i, step_ddpm_idx in enumerate(time_range_ddpm_indices):
                 index_for_schedules = total_steps - 1 - i
 
-                # OPTIMISATION PCIe
-                ts_unet = torch.full((1,), step_ddpm_idx, dtype=torch.int64).to(
-                    self.device, non_blocking=True
+                ts_unet = torch.full(
+                    (1,), step_ddpm_idx, device=self.device, dtype=torch.int64
                 )
 
-                unet_input_cond = torch.cat(
-                    [current_latent_xt_scaled, lq_latent_x0_scaled_for_unet],
-                    dim=1,
-                )
-                e_t_cond = torch.empty_like(lq_latent_x0_scaled_for_unet)
+                unet_input_cond[:, : latent_shape[1]] = current_latent_xt_scaled
+                unet_input_cond[:, latent_shape[1] :] = lq_latent_x0_scaled_for_unet
 
-                # CUDA Stream Sync: Wait for the async timestep tensor transfer
-                # before running the UNet in the conditional pass.
                 if torch.cuda.is_available():
                     torch.cuda.current_stream().synchronize()
 
@@ -2376,16 +2399,16 @@ class ModelsProcessor(QtCore.QObject):
                 e_t = e_t_cond
 
                 if denoiser_cfg_scale != 1.0:
-                    unet_input_uncond = torch.cat(
-                        [
-                            current_latent_xt_scaled,
-                            lq_latent_x0_scaled_for_unet,
-                        ],
-                        dim=1,
+                    assert (
+                        e_t_uncond is not None
+                        and unet_input_uncond is not None
+                        and false_tensor_for_unet is not None
                     )
-                    e_t_uncond = torch.empty_like(lq_latent_x0_scaled_for_unet)
+                    unet_input_uncond[:, : latent_shape[1]] = current_latent_xt_scaled
+                    unet_input_uncond[:, latent_shape[1] :] = (
+                        lq_latent_x0_scaled_for_unet
+                    )
 
-                    # Optional secondary sync if there are any other async operations between calls.
                     if torch.cuda.is_available():
                         torch.cuda.current_stream().synchronize()
 
@@ -2399,10 +2422,9 @@ class ModelsProcessor(QtCore.QObject):
                     )
                     e_t = e_t_uncond + denoiser_cfg_scale * (e_t_cond - e_t_uncond)
 
-                # OPTIMISATION PCIe
                 schedule_idx_tensor = torch.tensor(
-                    [index_for_schedules], dtype=torch.long
-                ).to(self.device, non_blocking=True)
+                    [index_for_schedules], device=self.device, dtype=torch.long
+                )
 
                 a_t = ModelsProcessor.extract_into_tensor_torch(
                     ddim_alphas,
@@ -2425,9 +2447,10 @@ class ModelsProcessor(QtCore.QObject):
                     current_latent_xt_scaled.shape,
                 )
 
-                pred_x0_scaled_current_step = (
-                    current_latent_xt_scaled - sqrt_one_minus_a_t * e_t
-                ) / torch.sqrt(a_t).clamp(min=1e-8)
+                pred_x0_scaled_current_step.copy_(
+                    (current_latent_xt_scaled - sqrt_one_minus_a_t * e_t)
+                    / torch.sqrt(a_t).clamp(min=1e-8)
+                )
 
                 dir_xt = (
                     torch.sqrt(torch.clamp(1.0 - a_prev - sigma_t**2, min=1e-8)) * e_t

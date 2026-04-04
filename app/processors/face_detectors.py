@@ -570,7 +570,10 @@ class FaceDetectors:
         """
         Runs the ONNX session with IOBinding, handling TensorRT lazy build dialogs.
         This centralizes the try/finally logic for showing/hiding the build progress dialog
-        and includes the critical CUDA synchronization steps (Pre and Post inference).
+        and synchronizes CUDA before inference so PyTorch-prepared input buffers are
+        visible to ORT. A second sync after Run was redundant: ORT blocks until the CUDA
+        EP finishes before returning; ``copy_outputs_to_cpu`` then reads stable outputs.
+        Set ``VISIOMASTER_ORT_IOBINDING_POST_SYNC=1`` to restore the old post-sync if needed.
 
         Args:
             model_name (str): The name of the model being run.
@@ -597,13 +600,16 @@ class FaceDetectors:
 
             ort_session.run_with_iobinding(io_binding)
 
-            # POST-INFERENCE SYNC : Ensure the GPU has completed all
-            # calculations before ONNX Runtime attempts to copy the result back to CPU RAM.
-            # Without this, copy_outputs_to_cpu() might grab an incomplete tensor.
-            if self.models_processor.device == "cuda":
-                torch.cuda.current_stream().synchronize()
-            elif self.models_processor.device != "cpu":
-                self.models_processor.syncvec.cpu()
+            if os.environ.get("VISIOMASTER_ORT_IOBINDING_POST_SYNC", "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            ):
+                if self.models_processor.device == "cuda":
+                    torch.cuda.current_stream().synchronize()
+                elif self.models_processor.device != "cpu":
+                    self.models_processor.syncvec.cpu()
 
             net_outs = io_binding.copy_outputs_to_cpu()
 
@@ -1106,7 +1112,8 @@ class FaceDetectors:
             kwargs.get("score"),
             kwargs.get("rotation_angles"),
         )
-        img_landmark = img.clone() if kwargs.get("use_landmark_detection") else None
+        # Share img with landmark refinement (read-only crops); avoids a full-frame GPU clone per detect.
+        img_landmark = img if kwargs.get("use_landmark_detection") else None
 
         det_img, det_scale, final_input_size = self._prepare_detection_image(
             img, input_size, "retinaface"
@@ -1328,7 +1335,7 @@ class FaceDetectors:
             kwargs.get("score"),
             kwargs.get("rotation_angles"),
         )
-        img_landmark = img.clone() if kwargs.get("use_landmark_detection") else None
+        img_landmark = img if kwargs.get("use_landmark_detection") else None
 
         det_img, det_scale, final_input_size = self._prepare_detection_image(
             img, input_size, "scrfd"
@@ -1507,7 +1514,7 @@ class FaceDetectors:
             kwargs.get("score"),
             kwargs.get("rotation_angles"),
         )
-        img_landmark = img.clone() if kwargs.get("use_landmark_detection") else None
+        img_landmark = img if kwargs.get("use_landmark_detection") else None
 
         input_size = (640, 640)
         # _prepare_detection_image returns uint8 CHW tensor for yolo mode
@@ -1696,7 +1703,7 @@ class FaceDetectors:
             kwargs.get("score"),
             kwargs.get("rotation_angles"),
         )
-        img_landmark = img.clone() if kwargs.get("use_landmark_detection") else None
+        img_landmark = img if kwargs.get("use_landmark_detection") else None
 
         input_size = (640, 640)
         # _prepare_detection_image returns uint8 CHW BGR tensor for yunet mode

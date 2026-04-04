@@ -7,7 +7,7 @@ import queue
 import copy
 import math
 import time
-from math import ceil
+from math import ceil, floor
 from app.ui.widgets import widget_components
 import torch
 from skimage import transform as trans
@@ -37,7 +37,6 @@ from app.helpers.miscellaneous import (
     get_grid_for_pasting,
 )
 from app.helpers.cuda_timeline import nvtx_range
-from app.helpers.vr_utils import EquirectangularConverter, PerspectiveConverter
 from app.helpers.typing_helper import ParametersTypes
 from app.processors.frame_enhancers import FrameEnhancers
 from app.processors.frame_edits import FrameEdits
@@ -178,7 +177,8 @@ class FrameWorker(threading.Thread):
 
         The worker operates in one of two modes:
           - **Pool mode** (frame_queue is not None, worker_id >= 0): runs continuously,
-            pulling (frame_number, frame, params, control) tasks from the shared queue.
+            pulling 8- or 9-tuples: last element is optional feeder CHW uint8 tensor when
+            sequential detection already uploaded the frame to the device.
           - **Single-frame mode** (frame_queue is None): processes one frame supplied at
             construction time and then exits.
 
@@ -287,10 +287,11 @@ class FrameWorker(threading.Thread):
         self.local_control_state_from_feeder: dict = {}
 
         # VR converter cache (VR-08)
-        self._vr_converter: Optional[EquirectangularConverter] = None
+        # VR helpers loaded lazily on first VR frame (see _process_frame_vr180).
+        self._vr_converter: Any = None
         self._vr_frame_size: Optional[tuple] = None
         # Improvement K: cache PerspectiveConverter across frames (same lifetime as E2P converter)
-        self._vr_p2e_converter: Optional[PerspectiveConverter] = None
+        self._vr_p2e_converter: Any = None
         # Tracked separately from _vr_frame_size: _vr_frame_size is updated by the E2P branch
         # before the P2E check executes, making them always equal and preventing P2E recreation
         # on resolution change.  This dedicated attribute fixes that race.
@@ -316,11 +317,12 @@ class FrameWorker(threading.Thread):
         # Mouth action detection score (set per-face call in _detect_mouth_action_score)
         self._mouth_action_score: float = 0.0
 
-        # Precalculater bboxes and kps from the video_processor in chronological order
         self.precomputed_bboxes: Optional[list] = None
         self.precomputed_kpss_5: Optional[list] = None
         self.precomputed_kpss: Optional[list] = None
         self._feeder_perf_from_task: dict[str, float] | None = None
+        # CHW uint8 frame tensor from feeder sequential detect (avoids duplicate H2D)
+        self._feeder_chw_tensor: Optional[torch.Tensor] = None
 
         # --- OPTIMIZATION: Cached Convolution Kernels (VRAM) ---
         # Pre-allocating mathematical filters prevents massive CPU-to-GPU
@@ -463,17 +465,30 @@ class FrameWorker(threading.Thread):
                         # Stopped while waiting, discard task
                         break  # 'finally' will call task_done()
 
-                    # Unpack the task which includes frame, specific parameters AND precomputed detections
-                    (
-                        self.frame_number,
-                        self.frame,
-                        local_params_from_feeder,
-                        local_control_from_feeder,
-                        self.precomputed_bboxes,
-                        self.precomputed_kpss_5,
-                        self.precomputed_kpss,
-                        _feeder_perf_task,
-                    ) = task
+                    if len(task) >= 9:
+                        (
+                            self.frame_number,
+                            self.frame,
+                            local_params_from_feeder,
+                            local_control_from_feeder,
+                            self.precomputed_bboxes,
+                            self.precomputed_kpss_5,
+                            self.precomputed_kpss,
+                            _feeder_perf_task,
+                            self._feeder_chw_tensor,
+                        ) = task[:9]
+                    else:
+                        (
+                            self.frame_number,
+                            self.frame,
+                            local_params_from_feeder,
+                            local_control_from_feeder,
+                            self.precomputed_bboxes,
+                            self.precomputed_kpss_5,
+                            self.precomputed_kpss,
+                            _feeder_perf_task,
+                        ) = task
+                        self._feeder_chw_tensor = None
                     self._feeder_perf_from_task: dict[str, float] | None = (
                         _feeder_perf_task
                         if isinstance(_feeder_perf_task, dict)
@@ -641,9 +656,8 @@ class FrameWorker(threading.Thread):
                             }
                         )
 
-                # Sync thread before returning to cpu
-                if self.worker_stream:
-                    self.worker_stream.synchronize()
+                # _hwc_rgb_uint8_from_chw_tensor already synchronizes the active CUDA stream
+                # after D2H; avoid a second full stream sync here on every frame.
 
             # Check stop event again
             if self.stop_event.is_set():
@@ -1118,51 +1132,76 @@ class FrameWorker(threading.Thread):
         if stop_event.is_set():
             assert self.frame is not None
             self._pipeline_profile_merged = None
+            self._feeder_chw_tensor = None
             return self.frame[..., ::-1]  # Return original BGR frame
 
-        # Keep last frame number for reference (this is the single-frame path read; pool
-        # workers update last_processed_frame_number under lock in _process_frame_standard)
-        self.last_processed_frame_number = self.frame_number
-
-        # FW-PERF-07: dirty-check — only rebuild scaling transforms when interpolation
-        # settings actually change (the underlying get_scaling_transforms has its own
-        # module-level cache but calling set_scaling_transforms also rebuilds the mask
-        # transform objects, so we guard it too).
-        _scaling_keys = {
-            k: control.get(k)
-            for k in (
-                "get_cropped_face_kpsTypeSelection",
-                "original_face_128_384TypeSelection",
-                "original_face_512TypeSelection",
-                "UntransformTypeSelection",
-                "ScalebackFrameTypeSelection",
-                "expression_faceeditor_t256TypeSelection",
-                "expression_faceeditor_backTypeSelection",
-                "block_shiftTypeSelection",
-                "AntialiasTypeSelection",
-            )
-        }
-        if self._last_scaling_control != _scaling_keys:
-            self.set_scaling_transforms(control)
-            self._last_scaling_control = _scaling_keys
         img_numpy_rgb_uint8 = self.frame
         assert img_numpy_rgb_uint8 is not None, "frame must be set before processing"
+
+        _vr_on = bool(control.get("VR180ModeEnableToggle", False))
+
+        # FW-PERF-07: standard-path scaling only. VR uses _process_frame_vr180's own
+        # _vr_scaling_keys / set_scaling_transforms — skip this dict compare when VR
+        # is off so non-VR sessions never pay for VR-irrelevant work.
+        if not _vr_on:
+            _scaling_keys = {
+                k: control.get(k)
+                for k in (
+                    "get_cropped_face_kpsTypeSelection",
+                    "original_face_128_384TypeSelection",
+                    "original_face_512TypeSelection",
+                    "UntransformTypeSelection",
+                    "ScalebackFrameTypeSelection",
+                    "expression_faceeditor_t256TypeSelection",
+                    "expression_faceeditor_backTypeSelection",
+                    "block_shiftTypeSelection",
+                    "AntialiasTypeSelection",
+                )
+            }
+            if self._last_scaling_control != _scaling_keys:
+                self.set_scaling_transforms(control)
+                self._last_scaling_control = _scaling_keys
 
         _collect = _pipeline_profile_collect_enabled(self.main_window)
         _cuda_stage_sync = _pipeline_profile_cuda_sync(self.main_window)
         perf_stages = _PerfStageCollector(_cuda_stage_sync) if _collect else None
 
-        # Prepare the base tensor
-        processed_tensor_rgb_uint8 = (
-            torch.from_numpy(img_numpy_rgb_uint8)
-            .to(self.models_processor.device)
-            .permute(2, 0, 1)
+        # Prepare the base tensor: reuse feeder CHW upload when sequential detect already H2D'd.
+        _dev = self.models_processor.device
+        _nb = torch.cuda.is_available() and str(_dev).startswith("cuda")
+        _handoff = self._feeder_chw_tensor
+        self._feeder_chw_tensor = None
+        _reuse = (
+            _handoff is not None
+            and not _vr_on
+            and os.environ.get("VISIOMASTER_DISABLE_FEEDER_CHW_REUSE", "")
+            .strip()
+            .lower()
+            not in ("1", "true", "yes", "on")
         )
+        if _reuse:
+            processed_tensor_rgb_uint8 = _handoff
+            if not processed_tensor_rgb_uint8.is_contiguous():
+                processed_tensor_rgb_uint8 = processed_tensor_rgb_uint8.contiguous()
+            if (
+                self.worker_stream is not None
+                and processed_tensor_rgb_uint8.device.type == "cuda"
+            ):
+                _fcs = getattr(self.video_processor, "_feeder_cuda_stream", None)
+                if _fcs is not None:
+                    self.worker_stream.wait_stream(_fcs)
+        else:
+            processed_tensor_rgb_uint8 = torch.from_numpy(img_numpy_rgb_uint8).to(
+                _dev, non_blocking=_nb
+            )
+            processed_tensor_rgb_uint8 = processed_tensor_rgb_uint8.permute(2, 0, 1)
+            if not processed_tensor_rgb_uint8.is_contiguous():
+                processed_tensor_rgb_uint8 = processed_tensor_rgb_uint8.contiguous()
         if perf_stages is not None:
             perf_stages.mark("prep_scaling_h2d")
 
         # --- ROUTING LOGIC ---
-        if control.get("VR180ModeEnableToggle", False):
+        if _vr_on:
             processed_tensor_rgb_uint8 = self._process_frame_vr180(
                 processed_tensor_rgb_uint8, img_numpy_rgb_uint8, control, stop_event
             )
@@ -1181,6 +1220,8 @@ class FrameWorker(threading.Thread):
             if stop_event.is_set():
                 assert img_numpy_rgb_uint8 is not None
                 self._pipeline_profile_merged = None
+                if self.worker_stream is not None:
+                    self.worker_stream.synchronize()
                 return img_numpy_rgb_uint8[..., ::-1]
 
             processed_tensor_rgb_uint8 = self.frame_enhancers.enhance_core(
@@ -1340,7 +1381,7 @@ class FrameWorker(threading.Thread):
 
     def _detect_faces_vr_tiled(
         self,
-        equirect_converter: EquirectangularConverter,
+        equirect_converter: Any,
         control: dict,
         eq_h: int,
         eq_w: int,
@@ -1452,6 +1493,8 @@ class FrameWorker(threading.Thread):
         - Processing per crop
         - Stitching back
         """
+        from app.helpers.vr_utils import EquirectangularConverter, PerspectiveConverter
+
         # FW-RACE-02: read from snapshotted feeder state instead of live Qt button
         swap_button_is_checked_global = self.local_control_state_from_feeder.get(
             "swap_enabled", True
@@ -2304,18 +2347,15 @@ class FrameWorker(threading.Thread):
                 )
             img = self._resize_cache[_up_key](img)
             scale_applied = True
-            # Upscale Feeder KPS if necessary
             if self.precomputed_bboxes is not None:
                 ratio_w = new_w / img_w
                 ratio_h = new_h / img_h
-
                 self.precomputed_bboxes = [b.copy() for b in self.precomputed_bboxes]
                 for b in self.precomputed_bboxes:
                     b[0] *= ratio_w
                     b[2] *= ratio_w
                     b[1] *= ratio_h
                     b[3] *= ratio_h
-
                 if self.precomputed_kpss_5 is not None:
                     self.precomputed_kpss_5 = [
                         k.copy() for k in self.precomputed_kpss_5
@@ -2323,7 +2363,6 @@ class FrameWorker(threading.Thread):
                     for k in self.precomputed_kpss_5:
                         k[:, 0] *= ratio_w
                         k[:, 1] *= ratio_h
-
                 if self.precomputed_kpss is not None:
                     self.precomputed_kpss = [
                         k.copy() if k is not None else None
@@ -2347,16 +2386,16 @@ class FrameWorker(threading.Thread):
             perf_stages.mark("std_upscale_rotate")
 
         # --- DETECTION PHASE ---
-        # The workers are now "Stateless Render Engines". They no longer track time or state.
-        # They consume perfectly sequenced and EMA-smoothed detections from the Feeder thread.
+        # Video/webcam: feeder runs detection in frame order so FaceDetectionInterval +
+        # ByteTrack skip paths work. VR180 / single-frame preview: run here (fallback).
 
-        if self.precomputed_bboxes is not None and self.precomputed_kpss_5 is not None:
-            # 1. Primary Path (Video/Webcam): Use the sequentially precomputed detections
+        if getattr(self, "precomputed_bboxes", None) is not None and getattr(
+            self, "precomputed_kpss_5", None
+        ) is not None:
             bboxes = self.precomputed_bboxes
             kpss_5 = self.precomputed_kpss_5
             kpss = self.precomputed_kpss
         else:
-            # 2. Fallback Path (Single-Frame Mode / Static Images)
             use_landmark, landmark_mode, from_points = (
                 control.get("LandmarkDetectToggle", True),
                 control.get("LandmarkDetectModelSelection", "203"),
@@ -2365,11 +2404,10 @@ class FrameWorker(threading.Thread):
             if edit_button_is_checked_global:
                 use_landmark, landmark_mode, from_points = True, "203", True
 
-            # Run detection strictly for this single image
             bboxes, kpss_5, kpss = self.models_processor.run_detect(
                 img,
                 control.get("DetectorModelSelection", "RetinaFace"),
-                max_num=control.get("MaxFacesToDetectSlider", 1),
+                max_num=int(control.get("MaxFacesToDetectSlider", 20)),
                 score=control.get("DetectorScoreSlider", 50) / 100.0,
                 input_size=detector_input_size_from_control(control),
                 use_landmark_detection=use_landmark,
@@ -2380,9 +2418,33 @@ class FrameWorker(threading.Thread):
                 if not control.get("AutoRotationToggle", False)
                 else [0, 90, 180, 270],
                 use_mean_eyes=control.get("LandmarkMeanEyesToggle", False),
-                previous_detections=None,  # No historical tracking for single images
-                bypass_bytetrack=True,  # Bypassing ByteTrack to avoid corrupting the global Kalman filter state
+                previous_detections=None,
+                bypass_bytetrack=True,
             )
+
+            img_h_for_kps_ema = img.shape[-2]
+            img_w_for_kps_ema = img.shape[-1]
+            if isinstance(kpss_5, np.ndarray) and kpss_5.shape[0] > 0:
+                kpss_5 = kpss_5.copy()
+                n_faces = kpss_5.shape[0]
+                if len(self._smoothed_kps) != n_faces:
+                    self._smoothed_kps = {}
+                for _i in range(n_faces):
+                    _raw = kpss_5[_i]
+                    if not self._is_kps_valid(
+                        _raw, img_h_for_kps_ema, img_w_for_kps_ema
+                    ):
+                        if _i in self._smoothed_kps:
+                            kpss_5[_i] = self._smoothed_kps[_i]
+                        continue
+                    if _i in self._smoothed_kps:
+                        self._smoothed_kps[_i] = (
+                            self._KPS_EMA_ALPHA * _raw
+                            + (1.0 - self._KPS_EMA_ALPHA) * self._smoothed_kps[_i]
+                        )
+                    else:
+                        self._smoothed_kps[_i] = _raw.copy()
+                    kpss_5[_i] = self._smoothed_kps[_i]
 
         if perf_stages is not None:
             perf_stages.mark("std_detect_feeder_or_fallback")
@@ -6105,45 +6167,64 @@ class FrameWorker(threading.Thread):
         if _swap_core_perf is not None:
             _swap_core_perf.mark("sc_tail_view_maskpost")
 
-        # --- OPTIMIZED UNTRANSFORM (PASTE BACK) USING KORNIA ---
-        # Eliminates CPU bound calculations, manual slicing, and memory-heavy paddings.
-        # Warps directly to the full frame resolution in one highly optimized GPU pass.
+        # --- UNTRANSFORM (PASTE BACK): ROI + affine on patch (faster than full-frame warp)
+        _tinv = cast(np.ndarray, tform.inverse.params)
+        IM512 = _tinv[0:2, :]
+        corners = np.array([[0, 0], [0, 511], [511, 0], [511, 511]])
 
-        M_inv = (
-            torch.from_numpy(cast(np.ndarray, tform.inverse.params)[0:2])
-            .float()
-            .unsqueeze(0)
-            .to(self.models_processor.device)
+        x = IM512[0][0] * corners[:, 0] + IM512[0][1] * corners[:, 1] + IM512[0][2]
+        y = IM512[1][0] * corners[:, 0] + IM512[1][1] * corners[:, 1] + IM512[1][2]
+
+        left = floor(np.min(x))
+        if left < 0:
+            left = 0
+        top = floor(np.min(y))
+        if top < 0:
+            top = 0
+        right = ceil(np.max(x))
+        if right > img.shape[2]:
+            right = img.shape[2]
+        bottom = ceil(np.max(y))
+        if bottom > img.shape[1]:
+            bottom = img.shape[1]
+
+        pad_w = max(0, img.shape[2] - 512)
+        pad_h = max(0, img.shape[1] - 512)
+        swap = v2.functional.pad(swap, (0, 0, pad_w, pad_h))
+        assert self.interpolation_Untransform is not None
+        swap = v2.functional.affine(
+            swap,
+            tform.inverse.rotation * 57.2958,
+            (tform.inverse.translation[0], tform.inverse.translation[1]),
+            tform.inverse.scale,
+            0,
+            interpolation=self.interpolation_Untransform,
+            center=(0, 0),
         )
-        dsize = (img.shape[1], img.shape[2])  # Full frame size (H, W)
+        swap = swap[0:3, top:bottom, left:right]
 
-        # Warp the 512x512 face and mask directly into the full frame space
-        swap_full = kgm.warp_affine(
-            swap.unsqueeze(0).float(),
-            M_inv,
-            dsize=dsize,
-            mode="bilinear",
-            padding_mode="zeros",
-            align_corners=True,
-        ).squeeze(0)
+        swap_mask = v2.functional.pad(swap_mask, (0, 0, pad_w, pad_h))
+        swap_mask = v2.functional.affine(
+            swap_mask,
+            tform.inverse.rotation * 57.2958,
+            (tform.inverse.translation[0], tform.inverse.translation[1]),
+            tform.inverse.scale,
+            0,
+            interpolation=v2.InterpolationMode.BILINEAR,
+            center=(0, 0),
+        )
+        swap_mask = swap_mask[0:1, top:bottom, left:right]
+        swap_mask_minus = swap_mask.clone()
+        swap_mask_minus = torch.sub(1, swap_mask)
 
-        swap_mask_full = kgm.warp_affine(
-            swap_mask.unsqueeze(0).float(),
-            M_inv,
-            dsize=dsize,
-            mode="bilinear",
-            padding_mode="zeros",
-            align_corners=True,
-        ).squeeze(0)
+        img_crop = img[0:3, top:bottom, left:right]
+        img_crop = torch.mul(swap_mask_minus, img_crop)
 
-        # Alpha blending on the GPU
-        img_float = img.float()
-        swap_mask_minus = 1.0 - swap_mask_full
+        swap = torch.add(swap, img_crop)
+        swap = swap.type(torch.uint8)
+        swap = swap.clamp(0, 255)
 
-        # We just add the pre-multiplied face to the masked background.
-        img_float = swap_full + (img_float * swap_mask_minus)
-
-        img = img_float.clamp_(0, 255).type(torch.uint8)
+        img[0:3, top:bottom, left:right] = swap
 
         if _swap_core_perf is not None:
             _swap_core_perf.mark("sc_warp_paste")
