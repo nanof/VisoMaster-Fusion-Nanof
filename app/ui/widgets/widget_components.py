@@ -21,6 +21,7 @@ from app.ui.widgets.actions import card_actions
 from app.ui.widgets.actions import save_load_actions
 from app.ui.widgets.actions import transcode_actions
 import app.helpers.miscellaneous as misc_helpers
+from app.helpers import input_face_favorites_storage
 from app.helpers.miscellaneous import get_video_rotation
 from app.helpers.screen_capture import (
     create_screen_capture_from_control,
@@ -903,6 +904,7 @@ class InputFaceCardButton(CardButton):
         )
         self.media_path = media_path
         self.kv_map: Dict | None = None
+        self.is_favorite_clip = bool(kwargs.pop("is_favorite_clip", False))
 
         self.setCheckable(True)
         self.setToolTip(media_path)
@@ -912,7 +914,7 @@ class InputFaceCardButton(CardButton):
         self.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         # Connect the custom context menu request signal to the custom slot
         self.customContextMenuRequested.connect(self.on_context_menu)
-        self.create_context_menu()
+        # create_context_menu() runs after list_widget is set in add_media_thumbnail_button
 
     def set_embedding(self, embedding_swap_model: str, embedding: np.ndarray):
         self.embedding_store[embedding_swap_model] = embedding
@@ -1023,7 +1025,12 @@ class InputFaceCardButton(CardButton):
         main_window = self.main_window
         i = self.get_item_position()
         if i is not None:
-            main_window.inputFacesList.takeItem(i)
+            if (
+                self.is_favorite_clip
+                and self.list_widget is main_window.inputFacesFavoritesList
+            ):
+                input_face_favorites_storage.delete_favorite(main_window, self.face_id)
+            self.list_widget.takeItem(i)
             main_window.input_faces.pop(self.face_id)
             for target_face_id in main_window.target_faces:
                 main_window.target_faces[target_face_id].remove_assigned_input_face(
@@ -1039,10 +1046,10 @@ class InputFaceCardButton(CardButton):
 
         common_widget_actions.refresh_frame(self.main_window)
 
-        if not main_window.input_faces:
-            main_window.placeholder_update_signal.emit(
-                self.main_window.inputFacesList, False
-            )
+        main_window.placeholder_update_signal.emit(main_window.inputFacesList, False)
+        main_window.placeholder_update_signal.emit(
+            main_window.inputFacesFavoritesList, False
+        )
 
     def remove_input_face_from_list(self):
         main_window = self.main_window
@@ -1064,10 +1071,10 @@ class InputFaceCardButton(CardButton):
 
         if was_removed:
             common_widget_actions.refresh_frame(main_window)
-            if not main_window.input_faces:
-                main_window.placeholder_update_signal.emit(
-                    main_window.inputFacesList, False
-                )
+            main_window.placeholder_update_signal.emit(main_window.inputFacesList, False)
+            main_window.placeholder_update_signal.emit(
+                main_window.inputFacesFavoritesList, False
+            )
 
     def delete_input_face_to_trash(self):
         main_window = self.main_window
@@ -1082,10 +1089,10 @@ class InputFaceCardButton(CardButton):
             print(f"[ERROR] {self.media_path} does not exist.")
 
         common_widget_actions.refresh_frame(main_window)
-        if not main_window.input_faces:
-            main_window.placeholder_update_signal.emit(
-                main_window.inputFacesList, False
-            )
+        main_window.placeholder_update_signal.emit(main_window.inputFacesList, False)
+        main_window.placeholder_update_signal.emit(
+            main_window.inputFacesFavoritesList, False
+        )
 
     def open_target_path_by_explorer(self):
         if os.path.exists(self.media_path):
@@ -1119,21 +1126,47 @@ class InputFaceCardButton(CardButton):
         create_embed_action.triggered.connect(self.create_embedding_from_selected_faces)
         self.popMenu.addAction(create_embed_action)
 
-        remove_action = QtGui.QAction("Remove from list", self)
+        main_window = self.main_window
+        fav_list = getattr(main_window, "inputFacesFavoritesList", None)
+        if (
+            fav_list is not None
+            and self.list_widget is main_window.inputFacesList
+            and not self.is_favorite_clip
+        ):
+            add_to_favorites_action = QtGui.QAction("Add to favorites", self)
+            add_to_favorites_action.triggered.connect(
+                self.add_input_faces_selection_to_favorites
+            )
+            self.popMenu.addAction(add_to_favorites_action)
+
+        remove_label = (
+            "Remove from favorites"
+            if fav_list is not None and self.list_widget is main_window.inputFacesFavoritesList
+            else "Remove from list"
+        )
+        remove_action = QtGui.QAction(remove_label, self)
         remove_action.triggered.connect(self.remove_input_face_from_list)
         self.popMenu.addAction(remove_action)
 
-        delete_action = QtGui.QAction("Delete file to recycle bin", self)
-        delete_action.triggered.connect(self.delete_input_face_to_trash)
-        self.popMenu.addAction(delete_action)
+        if not self.is_favorite_clip:
+            delete_action = QtGui.QAction("Delete file to recycle bin", self)
+            delete_action.triggered.connect(self.delete_input_face_to_trash)
+            self.popMenu.addAction(delete_action)
 
-        open_path_action = QtGui.QAction("Open file location", self)
-        open_path_action.triggered.connect(self.open_target_path_by_explorer)
-        self.popMenu.addAction(open_path_action)
+            open_path_action = QtGui.QAction("Open file location", self)
+            open_path_action.triggered.connect(self.open_target_path_by_explorer)
+            self.popMenu.addAction(open_path_action)
 
     def on_context_menu(self, point):
         # show context menu
         self.popMenu.exec_(self.mapToGlobal(point))
+
+    def add_input_faces_selection_to_favorites(self):
+        from app.ui.widgets.actions import list_view_actions
+
+        list_view_actions.add_input_faces_selection_to_favorites(
+            self.main_window, self
+        )
 
     def create_embedding_from_selected_faces(self):
         # Raccogli l'intero embedding_store dalle facce selezionate

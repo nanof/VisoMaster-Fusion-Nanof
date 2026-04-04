@@ -55,6 +55,24 @@ def filter_input_faces(main_window: "MainWindow", *args):
     worker.start()
 
 
+def filter_input_faces_favorites(main_window: "MainWindow", *args):
+    main_window.input_faces_favorites_filter_worker.stop_thread()
+
+    search_text = main_window.inputFacesFavoritesSearchBox.text().lower()
+
+    items_snapshot = []
+    for i in range(main_window.inputFacesFavoritesList.count()):
+        item = main_window.inputFacesFavoritesList.item(i)
+        item_widget = main_window.inputFacesFavoritesList.itemWidget(item)
+        if item_widget is not None:
+            items_snapshot.append((i, item_widget.media_path))
+
+    worker = main_window.input_faces_favorites_filter_worker
+    worker.search_text = search_text
+    worker.items_snapshot = items_snapshot
+    worker.start()
+
+
 def filter_merged_embeddings(main_window: "MainWindow", *args):
     main_window.merged_embeddings_filter_worker.stop_thread()
 

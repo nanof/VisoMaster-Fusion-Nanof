@@ -26,6 +26,7 @@ dependencies/Python/
 dependencies/TensorRT/
 install.dat
 jobs/
+input_face_favorites/
 merged_embeddings*.txt
 model_assets/liveportrait_onnx/*.onnx
 model_assets/liveportrait_onnx/*.trt

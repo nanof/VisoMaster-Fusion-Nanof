@@ -38,6 +38,7 @@ from app.ui.widgets.swapper_layout_data import SWAPPER_LAYOUT_DATA
 from app.ui.widgets.settings_layout_data import SETTINGS_LAYOUT_DATA
 from app.ui.widgets.face_editor_layout_data import FACE_EDITOR_LAYOUT_DATA
 from app.helpers.app_metadata import get_app_display_metadata
+from app.helpers import input_face_favorites_storage
 from app.helpers.miscellaneous import DFMModelManager, ParametersDict, ThumbnailManager
 from app.helpers.typing_helper import (
     FacesParametersTypes,
@@ -83,6 +84,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         )
         self.input_faces_filter_worker = ui_workers.FilterWorker(
             main_window=self, search_text="", filter_list="input_faces"
+        )
+        self.input_faces_favorites_filter_worker = ui_workers.FilterWorker(
+            main_window=self, search_text="", filter_list="input_faces_favorites"
         )
         self.merged_embeddings_filter_worker = ui_workers.FilterWorker(
             main_window=self, search_text="", filter_list="merged_embeddings"
@@ -208,6 +212,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.inputFacesList.setWrapping(True)
         self.inputFacesList.setResizeMode(QtWidgets.QListWidget.Adjust)
 
+        self.inputFacesFavoritesList.setFlow(QtWidgets.QListWidget.LeftToRight)
+        self.inputFacesFavoritesList.setWrapping(True)
+        self.inputFacesFavoritesList.setResizeMode(QtWidgets.QListWidget.Adjust)
+
         # Initialize list widgets with consistent sizing and layout configuration
         list_view_actions.initialize_media_list_widgets(self)
         list_view_actions.initialize_embeddings_list_widget(self)
@@ -218,6 +226,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         # Set up placeholder texts in ListWidgets (Target Videos and Input Faces)
         list_view_actions.set_up_list_widget_placeholder(self, self.targetVideosList)
         list_view_actions.set_up_list_widget_placeholder(self, self.inputFacesList)
+        list_view_actions.set_up_list_widget_placeholder(
+            self, self.inputFacesFavoritesList
+        )
 
         # Set up click to select and drop action on ListWidgets
         self.targetVideosList.setAcceptDrops(True)
@@ -229,6 +240,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.targetVideosList.viewport().installEventFilter(list_widget_event_filter)
         self.inputFacesList.installEventFilter(list_widget_event_filter)
         self.inputFacesList.viewport().installEventFilter(list_widget_event_filter)
+        self.inputFacesFavoritesList.installEventFilter(list_widget_event_filter)
+        self.inputFacesFavoritesList.viewport().installEventFilter(
+            list_widget_event_filter
+        )
+
+        input_face_favorites_storage.load_persisted_favorites(self)
 
         # Set up folder open buttons for Target and Input
         self.buttonTargetVideosPath.clicked.connect(
@@ -401,6 +418,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         self.inputFacesSearchBox.textChanged.connect(
             partial(filter_actions.filter_input_faces, self)
+        )
+        self.inputFacesFavoritesSearchBox.textChanged.connect(
+            partial(filter_actions.filter_input_faces_favorites, self)
         )
         self.inputEmbeddingsSearchBox.textChanged.connect(
             partial(filter_actions.filter_merged_embeddings, self)

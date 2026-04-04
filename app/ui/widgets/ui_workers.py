@@ -425,6 +425,8 @@ class FilterWorker(qtc.QThread):
             list_widget = self.main_window.targetVideosList
         elif self.filter_list == "input_faces":
             list_widget = self.main_window.inputFacesList
+        elif self.filter_list == "input_faces_favorites":
+            list_widget = self.main_window.inputFacesFavoritesList
         elif self.filter_list == "merged_embeddings":
             list_widget = self.main_window.inputEmbeddingsList
         return list_widget
@@ -433,6 +435,8 @@ class FilterWorker(qtc.QThread):
         if self.filter_list == "target_videos":
             self.filter_target_videos()
         elif self.filter_list == "input_faces":
+            self.filter_input_faces()
+        elif self.filter_list == "input_faces_favorites":
             self.filter_input_faces()
         elif self.filter_list == "merged_embeddings":
             self.filter_merged_embeddings()

@@ -9,6 +9,7 @@ from PySide6 import QtGui
 
 import app.ui.widgets.actions.common_actions as common_widget_actions
 from app.ui.widgets.actions import list_view_actions
+from app.helpers import input_face_favorites_storage
 import app.helpers.miscellaneous as misc_helpers
 
 if TYPE_CHECKING:
@@ -50,6 +51,7 @@ def clear_target_faces(main_window: "MainWindow", refresh_frame=True):
 
 def clear_input_faces(main_window: "MainWindow"):
     main_window.inputFacesList.clear()
+    main_window.inputFacesFavoritesList.clear()
 
     for input_face in list(main_window.input_faces.values()):
         input_face.deleteLater()
@@ -59,6 +61,8 @@ def clear_input_faces(main_window: "MainWindow"):
         target_face.assigned_input_faces = {}
         target_face.calculate_assigned_input_embedding()
     common_widget_actions.refresh_frame(main_window=main_window)
+
+    input_face_favorites_storage.load_persisted_favorites(main_window)
 
 
 def clear_merged_embeddings(main_window: "MainWindow"):

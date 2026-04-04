@@ -224,4 +224,17 @@ class ListWidgetEventFilter(QtCore.QObject):
                     )
                     return True
 
+        elif (
+            list_widget == self.main_window.inputFacesFavoritesList
+            or list_widget == self.main_window.inputFacesFavoritesList.viewport()
+        ):
+            if event.type() == QtCore.QEvent.Type.Wheel:
+                if event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier:
+                    list_view_actions.apply_wheel_zoom_to_thumbnail_list(
+                        self.main_window,
+                        self.main_window.inputFacesFavoritesList,
+                        event.angleDelta().y(),
+                    )
+                    return True
+
         return super().eventFilter(list_widget, event)

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from functools import partial
 from typing import TYPE_CHECKING, Dict, Type
 from pathlib import Path
@@ -6,6 +8,7 @@ import os
 import uuid
 import subprocess
 
+import numpy as np
 from PySide6 import QtWidgets, QtGui, QtCore
 
 from app.helpers.app_metadata import AppDisplayMetadata, get_app_display_metadata
@@ -14,6 +17,7 @@ from app.ui.widgets.actions import card_actions
 from app.ui.widgets.actions import filter_actions
 from app.ui.widgets import widget_components
 import app.helpers.miscellaneous as misc_helpers
+from app.helpers import input_face_favorites_storage
 from app.ui.widgets import ui_workers
 from app.helpers.screen_capture import SCREEN_CAPTURE_MEDIA_LABEL, mss_available
 
@@ -66,7 +70,10 @@ def refresh_thumbnail_sizes_for_list(
         zoom = main_window.target_videos_thumbnail_zoom
         base = _TARGET_BUTTON_SIZE
         buttons = main_window.target_videos
-    elif list_widget == main_window.inputFacesList:
+    elif list_widget in (
+        main_window.inputFacesList,
+        main_window.inputFacesFavoritesList,
+    ):
         zoom = main_window.input_faces_thumbnail_zoom
         base = _FACE_BUTTON_SIZE
         buttons = main_window.input_faces
@@ -89,7 +96,10 @@ def apply_wheel_zoom_to_thumbnail_list(
     """Ctrl+wheel zoom for target videos or input faces lists. Returns True if handled."""
     if list_widget == main_window.targetVideosList:
         attr = "target_videos_thumbnail_zoom"
-    elif list_widget == main_window.inputFacesList:
+    elif list_widget in (
+        main_window.inputFacesList,
+        main_window.inputFacesFavoritesList,
+    ):
         attr = "input_faces_thumbnail_zoom"
     else:
         return False
@@ -210,6 +220,102 @@ def add_media_thumbnail_to_source_faces_list(
     )
 
 
+def _copy_payload_to_favorites_list(
+    main_window: MainWindow,
+    cropped_bgr: np.ndarray,
+    embedding_store: dict,
+    media_path: str,
+) -> None:
+    cropped_bgr = np.ascontiguousarray(cropped_bgr)
+    face_id = str(uuid.uuid1().int)
+    h, w = cropped_bgr.shape[:2]
+    bytes_per_line = 3 * w
+    q_image = QtGui.QImage(
+        cropped_bgr.data,
+        w,
+        h,
+        bytes_per_line,
+        QtGui.QImage.Format.Format_BGR888,
+    ).copy()
+
+    add_media_thumbnail_button(
+        main_window,
+        widget_components.InputFaceCardButton,
+        main_window.inputFacesFavoritesList,
+        main_window.input_faces,
+        q_image,
+        media_path=media_path,
+        cropped_face=cropped_bgr,
+        embedding_store=embedding_store,
+        face_id=face_id,
+        is_favorite_clip=True,
+    )
+    input_face_favorites_storage.save_favorite(
+        main_window,
+        face_id,
+        media_path,
+        cropped_bgr,
+        embedding_store,
+    )
+    main_window.placeholder_update_signal.emit(main_window.inputFacesFavoritesList, False)
+
+
+def add_input_faces_selection_to_favorites(
+    main_window: MainWindow,
+    source_button: widget_components.InputFaceCardButton,
+):
+    """Add checked faces from the main Input Faces list to Favorites, or the clicked face if none checked."""
+    main_list = main_window.inputFacesList
+    candidates = [
+        b
+        for b in main_window.input_faces.values()
+        if b.isChecked()
+        and b.list_widget is main_list
+        and not getattr(b, "is_favorite_clip", False)
+    ]
+    if not candidates:
+        if (
+            source_button.list_widget is main_list
+            and not source_button.is_favorite_clip
+        ):
+            candidates = [source_button]
+
+    if not candidates:
+        common_widget_actions.create_and_show_messagebox(
+            main_window,
+            "No faces to add",
+            "Select one or more faces in the Faces list, or right‑click a face card.",
+            source_button,
+        )
+        return
+
+    added = 0
+    for btn in candidates:
+        cropped = btn.cropped_face
+        if cropped is None or getattr(cropped, "size", 0) == 0:
+            continue
+        embedding_store: dict = {}
+        for key, val in btn.embedding_store.items():
+            if isinstance(val, np.ndarray):
+                embedding_store[key] = val.copy()
+            else:
+                embedding_store[key] = val
+        mp = btn.media_path
+        if not isinstance(mp, str):
+            mp = str(mp)
+        label = f"Favorite (Input Faces · {mp})"
+        _copy_payload_to_favorites_list(main_window, cropped, embedding_store, label)
+        added += 1
+
+    if added == 0:
+        common_widget_actions.create_and_show_messagebox(
+            main_window,
+            "Cannot add favorite",
+            "The selected faces have no cropped image to save.",
+            source_button,
+        )
+
+
 def add_media_thumbnail_button(
     main_window: "MainWindow",
     buttonClass: "Type[widget_components.CardButton]",
@@ -250,8 +356,13 @@ def add_media_thumbnail_button(
     else:
         button_size = QtCore.QSize(*_FACE_BUTTON_SIZE)
 
+    button_kw: dict = {"main_window": main_window}
+    if buttonClass == widget_components.InputFaceCardButton and kwargs.get(
+        "is_favorite_clip"
+    ):
+        button_kw["is_favorite_clip"] = True
     button: widget_components.CardButton = buttonClass(
-        *constructor_args, main_window=main_window
+        *constructor_args, **button_kw
     )
 
     # --- Main thread conversion ---
@@ -288,6 +399,8 @@ def add_media_thumbnail_button(
     list_item.setSizeHint(button_size)
     button.list_item = list_item
     button.list_widget = listWidget
+    if buttonClass == widget_components.InputFaceCardButton:
+        button.create_context_menu()
     # Align the item to center
     list_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
     listWidget.setItemWidget(list_item, button)
@@ -299,6 +412,11 @@ def initialize_media_list_widgets(main_window: "MainWindow"):
         (main_window.targetVideosList, _TARGET_BUTTON_SIZE, "target_videos_thumbnail_zoom"),
         (main_window.targetFacesList, _FACE_BUTTON_SIZE, None),
         (main_window.inputFacesList, _FACE_BUTTON_SIZE, "input_faces_thumbnail_zoom"),
+        (
+            main_window.inputFacesFavoritesList,
+            _FACE_BUTTON_SIZE,
+            "input_faces_thumbnail_zoom",
+        ),
     ]:
         if zoom_attr is not None:
             button_size = thumbnail_size_for_zoom(
@@ -491,6 +609,7 @@ def clear_stop_loading_input_media(main_window: "MainWindow"):
             worker.wait()
         main_window.input_faces_loader_worker = None
         main_window.inputFacesList.clear()
+        main_window.inputFacesFavoritesList.clear()
 
 
 @QtCore.Slot()
