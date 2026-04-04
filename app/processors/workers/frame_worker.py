@@ -884,10 +884,10 @@ class FrameWorker(threading.Thread):
         assert img_numpy_rgb_uint8 is not None, "frame must be set before processing"
 
         # Prepare the base tensor
-        processed_tensor_rgb_uint8 = (
-            torch.from_numpy(img_numpy_rgb_uint8)
-            .to(self.models_processor.device)
-            .permute(2, 0, 1)
+        img_chw = np.ascontiguousarray(img_numpy_rgb_uint8.transpose(2, 0, 1))
+
+        processed_tensor_rgb_uint8 = torch.from_numpy(img_chw).to(
+            self.models_processor.device
         )
 
         # --- ROUTING LOGIC ---
@@ -3580,6 +3580,10 @@ class FrameWorker(threading.Thread):
             )
 
         output = output.permute(2, 0, 1)
+
+        assert self.t512 is not None, (
+            "t512 transform must be initialized before swapping"
+        )
         swap = self.t512(output)
         return swap, prev_face
 
@@ -3757,9 +3761,10 @@ class FrameWorker(threading.Thread):
                     debug_info[debug_key] = f": {alpha_auto2 * 100:.2f}"
         else:
             alpha_restorer2 = float(parameters["FaceRestorerBlend2Slider"]) / 100.0
-            swap = torch.add(
-                torch.mul(swap2, alpha_restorer2),
-                torch.mul(swap_original2, 1 - alpha_restorer2),
+            swap = (
+                torch.lerp(swap_original2.float(), swap2.float(), alpha_restorer2)
+                .to(swap2.dtype)
+                .contiguous()
             )
         return swap
 
@@ -4110,9 +4115,11 @@ class FrameWorker(threading.Thread):
                         (swap.shape[-2], swap.shape[-1]), antialias=True
                     )(prev_face)
 
-                swap = torch.mul(swap, alpha)
-                prev_face = torch.mul(prev_face, 1 - alpha)
-                swap = torch.add(swap, prev_face)
+                swap = (
+                    torch.lerp(prev_face.float(), swap.float(), alpha)
+                    .to(swap.dtype)
+                    .contiguous()
+                )
 
         # --- DYNAMIC MASKS INITIALIZATION ---
         current_swap_h, current_swap_w = swap.shape[1], swap.shape[2]
@@ -4160,19 +4167,12 @@ class FrameWorker(threading.Thread):
         BgExclude = torch.ones(
             (1, 512, 512), dtype=torch.float32, device=self.models_processor.device
         )
-        diff_mask = BgExclude  # overwritten inside Differencing block before read
-        texture_mask_view = BgExclude  # overwritten inside FaceParser block before read
-        # FW-QUAL-04: restore_mask removed here; it is always assigned inside the
-        # FaceRestorerAutoEnable2Toggle branch before being read (no early init needed)
-        texture_exclude_512 = (
-            BgExclude.clone()
-        )  # used as default in out.get(); needs own copy
-
-        calc_mask = (
-            BgExclude.clone()
-        )  # may be read before overwrite in face-parser path
-        calc_mask_dill = BgExclude.clone()  # consumed by VGG/masking before overwrite
-        mask_forcalc_512 = BgExclude.clone()  # consumed by _apply_restorer_with_auto
+        diff_mask = BgExclude
+        texture_mask_view = BgExclude
+        texture_exclude_512 = BgExclude
+        calc_mask = BgExclude
+        calc_mask_dill = BgExclude
+        mask_forcalc_512 = BgExclude
 
         M_ref = cast(np.ndarray, tform.params)[0:2]
         ones_column_ref = np.ones((kps_5.shape[0], 1), dtype=np.float32)
@@ -4211,7 +4211,11 @@ class FrameWorker(threading.Thread):
             and parameters["FaceEditorBeforeTypeSelection"] == "Beginning"
         ):
             editor_mask = swap_mask.clone()
-            swap = swap * editor_mask + original_face_512 * (1 - editor_mask)
+            swap = (
+                torch.lerp(original_face_512.float(), swap.float(), editor_mask)
+                .to(swap.dtype)
+                .contiguous()
+            )
             swap = self.frame_edits.swap_edit_face_core(
                 swap,
                 swap,
@@ -4280,7 +4284,7 @@ class FrameWorker(threading.Thread):
                 mask = v2.Resize(
                     (swap_mask.shape[-2], swap_mask.shape[-1]), antialias=True
                 )(mask)
-            swap_mask = torch.mul(swap_mask, mask)
+            swap_mask.mul_(mask)
 
             gauss = v2.GaussianBlur(
                 parameters["OccluderXSegBlurSlider"] * 2 + 1,
@@ -4292,7 +4296,7 @@ class FrameWorker(threading.Thread):
                 swap_mask_noFP = v2.Resize(
                     (swap_mask.shape[-2], swap_mask.shape[-1]), antialias=True
                 )(swap_mask_noFP)
-            swap_mask_noFP *= swap_mask
+            swap_mask_noFP.mul_(swap_mask)
 
         # --- MASKS (Parser / CLIPs / Restore) ---
         need_any_parser = (
@@ -4338,7 +4342,7 @@ class FrameWorker(threading.Thread):
                 FaceParser_mask = v2.Resize(
                     (swap_mask.shape[-2], swap_mask.shape[-1]), antialias=True
                 )(FaceParser_mask)
-            swap_mask = swap_mask * FaceParser_mask
+            swap_mask.mul_(FaceParser_mask)
 
         # CLIPs
         if parameters.get("ClipEnableToggle", False):
@@ -4351,12 +4355,12 @@ class FrameWorker(threading.Thread):
                 mask_clip = v2.Resize(
                     (swap_mask.shape[-2], swap_mask.shape[-1]), antialias=True
                 )(mask_clip)
-            swap_mask *= mask_clip
+            swap_mask.mul_(mask_clip)
             if swap_mask_noFP.shape[-1] != mask_clip.shape[-1]:
                 swap_mask_noFP = v2.Resize(
                     (mask_clip.shape[-2], mask_clip.shape[-1]), antialias=True
                 )(swap_mask_noFP)
-            swap_mask_noFP *= mask_clip
+            swap_mask_noFP.mul_(mask_clip)
 
         # Restore Eyes/Mouth
         if parameters.get("RestoreMouthEnableToggle", False) or parameters.get(
@@ -4478,8 +4482,8 @@ class FrameWorker(threading.Thread):
                     antialias=True,
                 )(swap_mask_noFP)
 
-            swap_mask_noFP = swap_mask_noFP * (1.0 - outpred_noFP_res)
-            swap_mask = swap_mask * (1.0 - img_mask_res)
+            swap_mask_noFP.mul_(1.0 - outpred_noFP_res)
+            swap_mask.mul_(1.0 - img_mask_res)
         else:
             calc_mask = t512_mask(swap_mask.clone()).clamp(0, 1)
             calc_mask_dill = calc_mask.clone()
@@ -4538,11 +4542,17 @@ class FrameWorker(threading.Thread):
                     debug_info["Restore1"] = f": {alpha_auto * 100:.2f}"
 
         elif parameters["FaceRestorerEnableToggle"]:
+            assert swap_original is not None, (
+                "swap_original must be set when FaceRestorerEnableToggle is active"
+            )
             alpha_restorer = float(parameters["FaceRestorerBlendSlider"]) / 100.0
-            swap = torch.add(
-                torch.mul(swap_restorecalc, alpha_restorer),
-                torch.mul(swap_original, 1 - alpha_restorer),
-            ).contiguous()
+            swap = (
+                torch.lerp(
+                    swap_original.float(), swap_restorecalc.float(), alpha_restorer
+                )
+                .to(swap_restorecalc.dtype)
+                .contiguous()
+            )
 
         # Expression Restorer (After First)
         if (
@@ -4575,7 +4585,11 @@ class FrameWorker(threading.Thread):
             and parameters["FaceEditorBeforeTypeSelection"] == "After First Restorer"
         ):
             editor_mask = swap_mask.clone()
-            swap = swap * editor_mask + original_face_512 * (1 - editor_mask)
+            swap = (
+                torch.lerp(original_face_512.float(), swap.float(), editor_mask)
+                .to(swap.dtype)
+                .contiguous()
+            )
             swap = self.frame_edits.swap_edit_face_core(
                 swap,
                 swap_restorecalc,
@@ -4656,7 +4670,11 @@ class FrameWorker(threading.Thread):
             and parameters["FaceEditorBeforeTypeSelection"] == "After Second Restorer"
         ):
             editor_mask = t512_mask(swap_mask).clone()
-            swap = swap * editor_mask + original_face_512 * (1 - editor_mask)
+            swap = (
+                torch.lerp(original_face_512.float(), swap.float(), editor_mask)
+                .to(swap.dtype)
+                .contiguous()
+            )
             swap = self.frame_edits.swap_edit_face_core(
                 swap,
                 swap,
@@ -4981,9 +4999,14 @@ class FrameWorker(threading.Thread):
                 mask512 = gauss(mask512.float())
 
             mask512 = torch.max((mask512), 1 - calc_mask_dill)
-            mask512 = (mask512).clamp(0, 1)
+            mask512.clamp_(0, 1)
 
-            swap = (swap * mask512 + original_face_512 * (1.0 - mask512)).clamp(0, 255)
+            swap = (
+                torch.lerp(original_face_512.float(), swap.float(), mask512)
+                .clamp_(0, 255)
+                .to(swap.dtype)
+                .contiguous()
+            )
             diff_mask = 1 - mask512.clone()
 
         # Face Editor (After Texture Transfer)
@@ -4998,7 +5021,11 @@ class FrameWorker(threading.Thread):
             if swap.shape[-1] != 512:
                 swap = t512_mask(swap)
 
-            swap = swap * editor_mask + original_face_512 * (1 - editor_mask)
+            swap = (
+                torch.lerp(original_face_512.float(), swap.float(), editor_mask)
+                .to(swap.dtype)
+                .contiguous()
+            )
             swap = self.frame_edits.swap_edit_face_core(
                 swap,
                 swap,
@@ -5123,7 +5150,7 @@ class FrameWorker(threading.Thread):
                         (swap.shape[-2], swap.shape[-1]), antialias=True
                     )(FaceParser_mask)
 
-                swap_mask = swap_mask * FaceParser_mask
+                swap_mask.mul_(FaceParser_mask)
 
         # Recalculate AutoColor Mask
         calc_mask = t512_mask(swap_mask.clone()).clamp(0, 1)
@@ -5203,7 +5230,11 @@ class FrameWorker(threading.Thread):
                 # FW-BUG-14: renamed swap2 -> swap_jpeg in JPEG block
                 swap_jpeg = faceutil.jpegBlur(swap, jpeg_q_eff)
                 blend = parameters["JPEGCompressionBlendSlider"] / 100.0
-                swap = torch.add(swap_jpeg * blend, swap * (1.0 - blend))
+                swap = (
+                    torch.lerp(swap.float(), swap_jpeg.float(), blend)
+                    .to(swap.dtype)
+                    .contiguous()
+                )
 
         # Artefacts: BlockShift
         if parameters["BlockShiftEnableToggle"]:
@@ -5219,9 +5250,10 @@ class FrameWorker(threading.Thread):
             )
 
             block_shift_blend = parameters["BlockShiftBlendAmountSlider"] / 100.0
-            swap = torch.add(
-                torch.mul(swap_blockshift, block_shift_blend),
-                torch.mul(swap, 1 - block_shift_blend),
+            swap = (
+                torch.lerp(swap.float(), swap_blockshift.float(), block_shift_blend)
+                .to(swap.dtype)
+                .contiguous()
             )
 
         if parameters["ColorNoiseDecimalSlider"] > 0:

@@ -79,7 +79,13 @@ class FrameEnhancers:
             )
 
         try:
+            if self.models_processor.device == "cuda":
+                torch.cuda.current_stream().synchronize()
+
             ort_session.run_with_iobinding(io_binding)
+
+            if self.models_processor.device == "cuda":
+                torch.cuda.current_stream().synchronize()
         finally:
             # Always hide the dialog, even if the run fails
             if is_lazy_build:
@@ -129,7 +135,7 @@ class FrameEnhancers:
 
         # Create an empty output tensor with the new scaled dimensions
         b, c, h, w = img.shape  # Get new padded dimensions
-        output = torch.empty(
+        output = torch.zeros(
             (b, c, h * scale, w * scale),
             dtype=torch.float32,
             device=self.models_processor.device,
@@ -157,7 +163,7 @@ class FrameEnhancers:
         # --- 3. Process Tiles ---
         # Pre-allocate a single reusable output tile (all tiles have the same size
         # because the image was padded to an exact multiple of tile_size above).
-        output_tile = torch.empty(
+        output_tile = torch.zeros(
             (b, c, tile_size * scale, tile_size * scale),
             dtype=torch.float32,
             device=self.models_processor.device,
@@ -218,12 +224,13 @@ class FrameEnhancers:
         model_name = self.model_map.get(model_name, model_name)
 
         # Lazy-load the model if it's not already in memory
-        if not self.models_processor.models[model_name]:
-            self.models_processor.models[model_name] = self.models_processor.load_model(
-                model_name
-            )
-
-        ort_session = self.models_processor.models[model_name]
+        # 1. Thread-safe loading
+        with self.models_processor.model_lock:
+            if not self.models_processor.models[model_name]:
+                self.models_processor.models[model_name] = (
+                    self.models_processor.load_model(model_name)
+                )
+            ort_session = self.models_processor.models[model_name]
 
         if not ort_session:
             # This fix ensures the output tensor is correctly populated instead
@@ -244,9 +251,12 @@ class FrameEnhancers:
         # Bind inputs and outputs directly to GPU memory pointers
         io_binding = ort_session.io_binding()
 
+        input_name = ort_session.get_inputs()[0].name
+        output_name = ort_session.get_outputs()[0].name
+
         # Bind input tensor
         io_binding.bind_input(
-            name="input",
+            name=input_name,
             device_type=self.models_processor.device,
             device_id=0,
             element_type=np.float32,
@@ -255,7 +265,7 @@ class FrameEnhancers:
         )
         # Bind output tensor
         io_binding.bind_output(
-            name="output",
+            name=output_name,
             device_type=self.models_processor.device,
             device_id=0,
             element_type=np.float32,
@@ -425,7 +435,7 @@ class FrameEnhancers:
                 image = torch.div(image, max_range)
                 image = torch.unsqueeze(image, 0).contiguous()
 
-                image = self.models_processor.run_enhance_frame_tile_process(
+                image = self.run_enhance_frame_tile_process(
                     image, enhancer_type, tile_size=tile_size, scale=scale
                 )
 
@@ -457,61 +467,62 @@ class FrameEnhancers:
                     interpolation=v2.InterpolationMode.BILINEAR,
                     antialias=False,
                 )
-                image = t_resize_i(img)
 
-                image = image.type(torch.float32)
-                image = torch.unsqueeze(image, 0).contiguous()
+                image = t_resize_i(img).type(torch.float32)
 
-                output = torch.empty(
-                    (image.shape),
+                # --- Need Black and White image ---
+                r, g, b = image[0], image[1], image[2]
+                gray = 0.299 * r + 0.587 * g + 0.114 * b
+                image_bw = gray.unsqueeze(0).repeat(3, 1, 1).contiguous()
+
+                image_input = torch.unsqueeze(image_bw, 0)
+
+                output = torch.zeros(
+                    (image_input.shape),
                     dtype=torch.float32,
                     device=self.models_processor.device,
                 ).contiguous()
 
                 match enhancer_type:
                     case "DeOldify-Artistic":
-                        self.models_processor.run_deoldify_artistic(image, output)
+                        self.run_deoldify_artistic(image_input, output)
                     case "DeOldify-Stable":
-                        self.models_processor.run_deoldify_stable(image, output)
+                        self.run_deoldify_stable(image_input, output)
                     case "DeOldify-Video":
-                        self.models_processor.run_deoldify_video(image, output)
+                        self.run_deoldify_video(image_input, output)
 
                 output = torch.squeeze(output)
+
                 t_resize_o = v2.Resize(
                     (h, w), interpolation=v2.InterpolationMode.BILINEAR, antialias=False
                 )
                 output = t_resize_o(output)
 
-                output_normalized = output / 255.0 if output.max() > 1.0 else output
-                output_normalized = faceutil.rgb_to_yuv(output_normalized, True)
-                # do a black and white transform first to get better luminance values
-                img_normalized = img / 255.0 if img.max() > 1.0 else img
-                hires = faceutil.rgb_to_yuv(img_normalized, True)
+                if output.max() <= 1.0:
+                    output = output * 255.0
+                output = torch.clamp(output, 0, 255)
 
-                hires[1:3, :, :] = output_normalized[1:3, :, :]
-                hires = faceutil.yuv_to_rgb(hires, True)
+                img_float = img.type(torch.float32)
 
-                # Blend
+                output_yuv = faceutil.rgb_to_yuv(output, normalize=True)
+                hires_yuv = faceutil.rgb_to_yuv(img_float, normalize=True)
+
+                hires_yuv[1:3, :, :] = output_yuv[1:3, :, :]
+
+                hires_rgb = faceutil.yuv_to_rgb(hires_yuv, normalize=True)
+
                 alpha = float(control["FrameEnhancerBlendSlider"]) / 100.0
-                img = torch.add(
-                    torch.mul(hires, alpha), torch.mul(img_normalized, 1 - alpha)
+                blended = torch.add(
+                    torch.mul(hires_rgb, alpha), torch.mul(img_float, 1 - alpha)
                 )
 
-                img = img.type(torch.uint8)
+                img = torch.clamp(blended, 0, 255).type(torch.uint8)
 
             case "DDColor-Artistic" | "DDColor":
-                render_factor = 384  # 12 * 32 | highest quality = 20 * 32 == 640
+                render_factor = 384  # Restored to 384 as expected by your model export
 
-                # Converti RGB a LAB
-                #'''
-                # orig_l = img.permute(1, 2, 0).cpu().numpy()
-                # orig_l = cv2.cvtColor(orig_l, cv2.COLOR_RGB2Lab)
-                # orig_l = torch.from_numpy(orig_l).to(self.models_processor.device)
-                # orig_l = orig_l.permute(2, 0, 1)
-                #'''
-                img_normalized = img / 255.0 if img.max() > 1.0 else img
-                orig_l = faceutil.rgb_to_lab(img_normalized, True)
-
+                # Removed manual normalization, letting faceutil handle the 0-255 range
+                orig_l = faceutil.rgb_to_lab(img, True)
                 orig_l = orig_l[0:1, :, :]  # (1, h, w)
 
                 # Resize per il modello
@@ -522,49 +533,35 @@ class FrameEnhancers:
                 )
                 image = t_resize_i(img)
 
-                # Converti RGB in LAB
-                #'''
-                # img_l = image.permute(1, 2, 0).cpu().numpy()
-                # img_l = cv2.cvtColor(img_l, cv2.COLOR_RGB2Lab)
-                # img_l = torch.from_numpy(img_l).to(self.models_processor.device)
-                # img_l = img_l.permute(2, 0, 1)
-                #'''
-                image_normalized = image / 255.0 if image.max() > 1.0 else image
-                img_l = faceutil.rgb_to_lab(image_normalized, True)
+                # Removed manual normalization
+                img_l = faceutil.rgb_to_lab(image, True)
 
                 img_l = img_l[0:1, :, :]  # (1, render_factor, render_factor)
                 img_gray_lab = torch.cat(
                     (img_l, torch.zeros_like(img_l), torch.zeros_like(img_l)), dim=0
                 )  # (3, render_factor, render_factor)
 
-                # Converti LAB in RGB
-                #'''
-                # img_gray_lab = img_gray_lab.permute(1, 2, 0).cpu().numpy()
-                # img_gray_rgb = cv2.cvtColor(img_gray_lab, cv2.COLOR_LAB2RGB)
-                # img_gray_rgb = torch.from_numpy(img_gray_rgb).to(self.models_processor.device)
-                # img_gray_rgb = img_gray_rgb.permute(2, 0, 1)
-                #'''
                 img_gray_rgb = faceutil.lab_to_rgb(img_gray_lab)
 
                 tensor_gray_rgb = torch.unsqueeze(
                     img_gray_rgb.type(torch.float32), 0
                 ).contiguous()
 
-                # Prepara il tensore per il modello
-                output_ab = torch.empty(
+                # Prepara il tensore per il modello (Added contiguous for safe VRAM binding)
+                output_ab = torch.zeros(
                     (1, 2, render_factor, render_factor),
                     dtype=torch.float32,
                     device=self.models_processor.device,
-                )
+                ).contiguous()
 
                 # Esegui il modello
                 match enhancer_type:
                     case "DDColor-Artistic":
-                        self.models_processor.run_ddcolor_artistic(
+                        self.run_ddcolor_artistic(
                             tensor_gray_rgb, output_ab
-                        )
+                        )  # Safe wrapper
                     case "DDColor":
-                        self.models_processor.run_ddcolor(tensor_gray_rgb, output_ab)
+                        self.run_ddcolor(tensor_gray_rgb, output_ab)  # Safe wrapper
 
                 output_ab = output_ab.squeeze(0)  # (2, render_factor, render_factor)
 
@@ -581,12 +578,6 @@ class FrameEnhancers:
                 )  # (3, original_H, original_W)
 
                 # Convert LAB to RGB
-                #'''
-                # output_rgb = output_lab.permute(1, 2, 0).cpu().numpy()
-                # output_rgb = cv2.cvtColor(output_rgb, cv2.COLOR_Lab2RGB)
-                # output_rgb = torch.from_numpy(output_rgb).to(self.models_processor.device)
-                # output_rgb = output_rgb.permute(2, 0, 1)
-                #'''
                 output_rgb = faceutil.lab_to_rgb(
                     output_lab, True
                 )  # (3, original_H, original_W)

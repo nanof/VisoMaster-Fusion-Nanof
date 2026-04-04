@@ -42,7 +42,6 @@ except ModuleNotFoundError:
 
 # --- Internal Project Imports ---
 
-from app.processors.utils.tensorrt_predictor import TensorRTPredictor
 from app.processors.face_detectors import FaceDetectors
 from app.processors.face_landmark_detectors import FaceLandmarkDetectors
 from app.processors.face_masks import FaceMasks
@@ -55,8 +54,8 @@ from app.processors.utils.dfm_model import DFMModel
 from app.processors.models_data import (
     models_list,
     arcface_mapping_model_dict,
-    models_trt_list,
     models_dir,
+    fp16_safe_models_list,
 )
 from app.helpers.miscellaneous import is_file_exists
 from app.helpers.downloader import download_file
@@ -74,44 +73,10 @@ SRGB_GAMMA = (
     2.2  # More precise sRGB gamma handling is complex, this is an approximation
 )
 
+
 # --- Isolated Process Workers ---
 # These functions run in a separate process to prevent fatal C++/CUDA
 # crashes (like segmentation faults) from killing the main application.
-
-
-def _build_trt_engine_worker(onnx_path, trt_path, precision, plugin_path, verbose):
-    """
-    Worker function to be run in an isolated process to build a TRT engine.
-    Ensures that a crash during compilation does not crash the UI.
-    """
-    try:
-        # We must re-import dependencies within the worker process
-        import os
-        import sys
-        import traceback
-        from app.processors.utils.engine_builder import onnx_to_trt as onnx2trt
-
-        print(f"[TRT Worker]: Starting build for {os.path.basename(onnx_path)}...")
-        onnx2trt(
-            onnx_model_path=onnx_path,
-            trt_model_path=trt_path,
-            precision=precision,
-            custom_plugin_path=plugin_path,
-            verbose=verbose,
-        )
-
-        if not os.path.exists(trt_path):
-            print(f"[TRT Worker]: Build completed but file not found: {trt_path}")
-            sys.exit(1)  # Signal failure
-
-        print(f"[TRT Worker]: Successfully built {trt_path}")
-        sys.exit(0)  # Signal success
-    except Exception:
-        print(f"[TRT Worker]: ERROR during build process for {onnx_path}.")
-        traceback.print_exc()
-        sys.exit(1)  # Signal failure
-
-
 def _probe_onnx_model_worker(
     model_path, providers_list, trt_options, session_options_dict
 ):
@@ -234,12 +199,6 @@ class ModelsProcessor(QtCore.QObject):
         self.device = device
         self.model_lock = threading.RLock()  # Reentrant lock for model access
 
-        # A dictionary to hold locks for each TRT model build process.
-        # Key: path to the .trt file, Value: threading.Lock object.
-        self.trt_build_locks: Dict[str, threading.Lock] = {}
-        # A lock to protect the creation of new locks in the dictionary above.
-        self.trt_build_lock_creation_lock = threading.Lock()
-
         # MP-CUDA-01: Global serialisation lock for CUDA graph capture.
         # Custom kernels use capture_error_mode="relaxed" so ops from other threads
         # don't interfere, but we still serialise all captures so multiple concurrent
@@ -252,6 +211,23 @@ class ModelsProcessor(QtCore.QObject):
         # Keep Triton and torch.compile callback setup off the default startup path.
         # Both are registered lazily when the Custom provider is selected.
 
+        # --- TENSORRT WORKSPACE ---
+        MIN_WORKSPACE_SIZE = 1073741824  # 1 GB
+        FALLBACK_WORKSPACE_SIZE = 4294967296  # 4 GB
+
+        try:
+            # Get total GPU memory in bytes
+            total_vram = torch.cuda.get_device_properties(0).total_memory
+
+            # Safely allocate 40% of total VRAM for TensorRT workspace
+            calculated_workspace = int(total_vram * 0.40)
+
+            # Enforce a minimum of 1 GB to avoid compilation failures on very low-end GPUs
+            workspace_size = max(calculated_workspace, MIN_WORKSPACE_SIZE)
+        except Exception:
+            # Fallback to 4GB if PyTorch fails to detect the GPU
+            workspace_size = FALLBACK_WORKSPACE_SIZE
+
         # Default TensorRT options
         self.trt_ep_options = {
             "trt_engine_cache_enable": True,
@@ -261,7 +237,7 @@ class ModelsProcessor(QtCore.QObject):
             "trt_dump_ep_context_model": True,
             "trt_ep_context_file_path": "tensorrt-engines",
             "trt_layer_norm_fp32_fallback": True,
-            "trt_max_workspace_size": 8589934592,
+            "trt_max_workspace_size": workspace_size,
             "trt_builder_optimization_level": 5,
         }
         # A set to keep track of models that have been loaded but
@@ -293,19 +269,6 @@ class ModelsProcessor(QtCore.QObject):
         self.dfm_models: Dict[str, DFMModel] = {}
         self.dfm_inference_lock = threading.Lock()
         self.force_unload_in_progress = False
-
-        # Initialize TRT dicts
-        self.models_trt: Dict[str, Optional[TensorRTPredictor]] = {}
-        self.models_trt_path = {}
-
-        if TENSORRT_AVAILABLE:
-            for model_data in models_trt_list:
-                model_name, model_path = (
-                    model_data["model_name"],
-                    model_data["local_path"],
-                )
-                self.models_trt[model_name] = None
-                self.models_trt_path[model_name] = model_path
 
         # Initialize Sub-Processors
         self.face_detectors = FaceDetectors(self)
@@ -577,15 +540,10 @@ class ModelsProcessor(QtCore.QObject):
 
     def load_model(self, model_name, session_options=None):
         """
-        Loads an AI model (ONNX or TRT) with thread safety.
+        Loads an AI model (ONNX) with thread safety.
         Handles checking for existing TensorRT caches and launching the build probe if needed.
         """
         with self.model_lock:
-            # Check both TRT and ONNX caches first.
-            if self.provider_name == "TensorRT-Engine" and self.models_trt.get(
-                model_name
-            ):
-                return self.models_trt[model_name]
             if self.models.get(model_name):
                 return self.models[model_name]
 
@@ -597,33 +555,37 @@ class ModelsProcessor(QtCore.QObject):
                 )
                 return None
 
-            # If TensorRT-Engine provider is selected, prioritize loading/building the TRT engine.
-            if self.provider_name in ["TensorRT", "TensorRT-Engine"]:
-                # Check if there is a corresponding TRT model definition
-                trt_model_info = next(
-                    (m for m in models_trt_list if m["model_name"] == model_name), None
-                )
-                if trt_model_info:
-                    print(
-                        f"[INFO] Provider is TensorRT-Engine, attempting to load TRT model for '{model_name}'..."
-                    )
-                    # This will build the engine if it doesn't exist.
-                    model_instance = self.load_model_trt(model_name)
-                    if model_instance:
-                        self.models_trt[model_name] = model_instance
-                        # No need to load ONNX version if TRT succeeds
-                        return model_instance
-                    else:
-                        print(
-                            f"[WARN] Failed to load/build TRT engine for '{model_name}'. Falling back to ONNX Runtime."
-                        )
-
             build_was_triggered = (
                 False  # MP-05: flag to track if build dialog was shown
             )
+
+            # --- DYNAMIC PRECISION CONFIGURATION (WHITELIST FP16) ---
+            model_trt_options = dict(self.trt_ep_options)
+
+            # Check if the model is explicitly marked as safe for FP16 in models_data.py
+            if model_name in fp16_safe_models_list:
+                model_trt_options["trt_fp16_enable"] = True
+                print(f"[INFO] FP16 Acceleration ENABLED for {model_name}")
+            else:
+                model_trt_options["trt_fp16_enable"] = False
+
+            # Reconstruct the providers with model-specific options
+            model_providers = []
+            for p in self.providers:
+                if isinstance(p, tuple) and p[0] == "TensorrtExecutionProvider":
+                    model_providers.append(
+                        ("TensorrtExecutionProvider", model_trt_options)
+                    )
+                elif p == "TensorrtExecutionProvider":
+                    model_providers.append(
+                        ("TensorrtExecutionProvider", model_trt_options)
+                    )
+                else:
+                    model_providers.append(p)
+
             is_tensorrt_load = any(
                 (p[0] if isinstance(p, tuple) else p) == "TensorrtExecutionProvider"
-                for p in self.providers
+                for p in model_providers
             )
 
             if onnx_path.lower().endswith(".onnx"):
@@ -669,21 +631,18 @@ class ModelsProcessor(QtCore.QObject):
                                 # Use the 'providers' variable
                                 current_providers_list = [
                                     p[0] if isinstance(p, tuple) else p
-                                    for p in self.providers
+                                    for p in model_providers
                                 ]
                                 probe_process = ctx.Process(
                                     target=_probe_onnx_model_worker,
                                     args=(
                                         self.models_path[model_name],
                                         current_providers_list,
-                                        self.trt_ep_options,
+                                        model_trt_options,  # On passe les options dynamiques
                                         sess_options_dict,
                                     ),
                                 )
 
-                                # CRITICAL FIX: Removed self.model_lock.release()
-                                # Releasing the RLock here causes severe race conditions where multiple threads
-                                # load models simultaneously, permanently corrupting TensorRT bindings (erratic KPS).
                                 try:
                                     probe_process.start()
                                     build_was_triggered = True
@@ -719,7 +678,6 @@ class ModelsProcessor(QtCore.QObject):
                                     )
                                     if attempt < max_retries - 1:
                                         print("[INFO] Retrying in 2 seconds...")
-                                        # CRITICAL FIX: Safe sleep, no processEvents
                                         time.sleep(2.0)
 
                             if not probe_successful:
@@ -755,13 +713,13 @@ class ModelsProcessor(QtCore.QObject):
                 if session_options is None:
                     model_instance = onnxruntime.InferenceSession(
                         self.models_path[model_name],
-                        providers=self.providers,
+                        providers=model_providers,
                     )
                 else:
                     model_instance = onnxruntime.InferenceSession(
                         self.models_path[model_name],
                         sess_options=session_options,
-                        providers=self.providers,
+                        providers=model_providers,
                     )
 
                 # This ensures the CUDA context is synchronized after a new TRT
@@ -891,6 +849,9 @@ class ModelsProcessor(QtCore.QObject):
                     if "trt_ep_context_file_path" in trt_options:
                         del trt_options["trt_ep_context_file_path"]
 
+                    # Force FP16 pour DFM
+                    trt_options["trt_fp16_enable"] = True
+
                     dfm_providers[0] = ("TensorrtExecutionProvider", trt_options)
 
                 self.dfm_models[dfm_model] = DFMModel(
@@ -907,111 +868,12 @@ class ModelsProcessor(QtCore.QObject):
 
             return self.dfm_models.get(dfm_model)
 
-    def load_model_trt(
-        self,
-        model_name,
-        custom_plugin_path=None,
-        precision="fp16",
-        debug=False,
-    ):
-        """Loads or builds a dedicated TensorRT Engine (.trt file)."""
-        # Use the main model_lock to make the entire load process atomic
-        with self.model_lock:
-            # Check *again* inside the lock, in case another thread loaded it
-            if self.models_trt.get(model_name):
-                return self.models_trt[model_name]
-
-            model_instance = None
-            onnx_path = self.models_path[model_name]
-            trt_path = self.models_trt_path[model_name]
-
-            try:
-                # This lock is for file-system build races
-                with self.trt_build_lock_creation_lock:
-                    if trt_path not in self.trt_build_locks:
-                        self.trt_build_locks[trt_path] = threading.Lock()
-                model_build_lock = self.trt_build_locks[trt_path]
-
-                with model_build_lock:
-                    if not os.path.exists(trt_path):
-                        print(
-                            f"[WARN] TRT engine file not found. Starting isolated build: {trt_path}"
-                        )
-
-                        dialog_title = "Building TensorRT Engine"
-                        dialog_text = (
-                            f"Building TensorRT engine for:\n"
-                            f"{os.path.basename(onnx_path)}\n\n"
-                            f"This may take several minutes.\n"
-                            f"The application will continue once finished."
-                        )
-                        self.show_build_dialog.emit(dialog_title, dialog_text)
-
-                        ctx = multiprocessing.get_context("spawn")
-                        build_process = ctx.Process(
-                            target=_build_trt_engine_worker,
-                            args=(
-                                onnx_path,
-                                trt_path,
-                                precision,
-                                custom_plugin_path,
-                                False,
-                            ),
-                        )
-
-                        build_process.start()
-                        # CRITICAL FIX: Removed non-blocking while loop with processEvents().
-                        # processEvents in this context disrupts the execution flow.
-                        build_process.join()
-
-                        if build_process.exitcode != 0:
-                            raise RuntimeError(
-                                f"[ERROR] TRT engine build process failed or crashed with exit code {build_process.exitcode}."
-                            )
-
-                        if not os.path.exists(trt_path):
-                            raise FileNotFoundError(
-                                f"[ERROR] TRT engine file still not found after isolated build: {trt_path}"
-                            )
-                        print("[INFO] Isolated build successful.")
-
-                print(
-                    f"[INFO] Loading model: {model_name} with provider: TensorRT-Engine"
-                )
-                model_instance = TensorRTPredictor(
-                    model_path=trt_path,
-                    custom_plugin_path=custom_plugin_path,
-                    pool_size=self.nThreads,
-                    device=self.device,
-                    debug=debug,
-                )
-
-                # Assign to the main dictionary *inside* the lock
-                self.models_trt[model_name] = model_instance
-
-            except Exception:
-                print(f"[ERROR] Failed to build or load TensorRT model {model_name}.")
-                traceback.print_exc()
-                model_instance = None
-                self.models_trt[model_name] = None
-            finally:
-                self.hide_build_dialog.emit()
-
-            return model_instance
-
     def delete_models(self):
         """Unloads all ONNX models."""
         model_names_to_unload = list(self.models.keys())
         for model_name in model_names_to_unload:
             self.unload_model(model_name)
         self.clip_session = []
-
-    def delete_models_trt(self):
-        """Unloads all TensorRT Engine models."""
-        if TENSORRT_AVAILABLE:
-            model_names_to_unload = list(self.models_trt.keys())
-            for model_name in model_names_to_unload:
-                self.unload_model(model_name)
 
     def delete_models_dfm(self):
         """Unloads all DFM models."""
@@ -1046,12 +908,11 @@ class ModelsProcessor(QtCore.QObject):
 
     def unload_model(self, model_name_to_unload):
         """
-        Unloads a single ONNX or TensorRT-Engine model from memory.
+        Unloads a single ONNX model from memory.
 
-        Handles both the ``self.models`` (ONNX) and ``self.models_trt`` (TRT-Engine)
-        dictionaries.  Respects the KeepModelsAliveToggle control unless a force-unload
-        is in progress.  Frees the Python object, runs gc.collect(), and clears the
-        CUDA cache when something was actually unloaded.
+        Handles the ``self.models`` (ONNX) dictionary. Respects the KeepModelsAliveToggle
+        control unless a force-unload is in progress. Frees the Python object, runs
+        gc.collect(), and clears the CUDA cache when something was actually unloaded.
         """
         # Check if unloading should be skipped
         if not self.force_unload_in_progress:
@@ -1073,25 +934,6 @@ class ModelsProcessor(QtCore.QObject):
                     unloaded = True
                 else:
                     self.models[model_name_to_unload] = None
-
-            # Handle TRT-Engine models (for the dedicated .trt file provider)
-            if (
-                TENSORRT_AVAILABLE
-                and model_name_to_unload
-                and model_name_to_unload in self.models_trt
-            ):
-                # Get the model instance *before* setting to None
-                trt_model = self.models_trt.get(model_name_to_unload)
-
-                if trt_model is not None:  # Only run cleanup if it's actually loaded
-                    print(f"[INFO] Unloading TRT-Engine model: {model_name_to_unload}")
-                    if isinstance(trt_model, TensorRTPredictor):
-                        trt_model.cleanup()
-                    del trt_model
-                    unloaded = True
-
-                # Set key to None instead of popping to preserve it
-                self.models_trt[model_name_to_unload] = None
 
             if unloaded:
                 gc.collect()
@@ -1270,9 +1112,8 @@ class ModelsProcessor(QtCore.QObject):
         return self.provider_name
 
     def set_number_of_threads(self, value):
-        """Sets the ONNX thread count and unloads all TRT-Engine models so they rebuild with the new setting."""
+        """Sets the ONNX thread count. TRT engine reloading is no longer needed here."""
         self.nThreads = value
-        self.delete_models_trt()
 
     def get_gpu_memory(self):
         """
@@ -1306,7 +1147,7 @@ class ModelsProcessor(QtCore.QObject):
 
     def clear_gpu_memory(self):
         """
-        Force-unloads every loaded model (ONNX, TRT, DFM, KV Extractor, CLIP) and
+        Force-unloads every loaded model (ONNX, DFM, KV Extractor, CLIP) and
         releases all GPU memory.
 
         Bypasses the KeepModelsAliveToggle by temporarily setting
@@ -1331,7 +1172,6 @@ class ModelsProcessor(QtCore.QObject):
             # Unload any remaining models in the main dictionaries
             self.delete_models()
             self.delete_models_dfm()
-            self.delete_models_trt()
 
             # Unload the Clip and KV Extractor models specifically
             self.unload_kv_extractor()
@@ -1791,28 +1631,6 @@ class ModelsProcessor(QtCore.QObject):
 
     def run_swapper_cscs(self, image, embedding, output):
         self.face_swappers.run_swapper_cscs(image, embedding, output)
-
-    def run_enhance_frame_tile_process(
-        self, img, enhancer_type, tile_size=256, scale=1
-    ):
-        return self.frame_enhancers.run_enhance_frame_tile_process(
-            img, enhancer_type, tile_size, scale
-        )
-
-    def run_deoldify_artistic(self, image, output):
-        return self.frame_enhancers.run_deoldify_artistic(image, output)
-
-    def run_deoldify_stable(self, image, output):
-        return self.frame_enhancers.run_deoldify_stable(image, output)
-
-    def run_deoldify_video(self, image, output):
-        return self.frame_enhancers.run_deoldify_video(image, output)
-
-    def run_ddcolor_artistic(self, image, output):
-        return self.frame_enhancers.run_ddcolor_artistic(image, output)
-
-    def run_ddcolor(self, tensor_gray_rgb, output_ab):
-        return self.frame_enhancers.run_ddcolor(tensor_gray_rgb, output_ab)
 
     def run_occluder(self, image, output):
         self.face_masks.run_occluder(image, output)
