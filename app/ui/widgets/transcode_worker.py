@@ -10,6 +10,26 @@ from PySide6 import QtCore as qtc
 from app.helpers import video_transcode as vt
 
 
+class Av1ScanWorker(qtc.QThread):
+    """Enumerate AV1 files in a folder without blocking the GUI thread."""
+
+    found = qtc.Signal(list)
+    failed = qtc.Signal(str)
+
+    def __init__(self, folder: str, recursive: bool, parent=None):
+        super().__init__(parent)
+        self._folder = folder
+        self._recursive = recursive
+
+    def run(self) -> None:
+        try:
+            candidates = vt.iter_candidate_video_paths(self._folder, self._recursive)
+            av1_list = vt.filter_av1_paths(candidates)
+            self.found.emit(av1_list)
+        except Exception as e:  # noqa: BLE001 — surface probe errors in UI
+            self.failed.emit(str(e))
+
+
 class H264TranscodeWorker(qtc.QThread):
     # file_index 0-based, total_files, current path, fraction within current file [0,1]
     progress = qtc.Signal(int, int, str, float)

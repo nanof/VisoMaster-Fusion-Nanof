@@ -10,7 +10,7 @@ from PySide6 import QtCore, QtWidgets
 from app.helpers import miscellaneous as misc_helpers
 from app.helpers import video_transcode as vt
 from app.ui.widgets.transcode_options_dialog import TranscodeOptionsDialog
-from app.ui.widgets.transcode_worker import H264TranscodeWorker
+from app.ui.widgets.transcode_worker import Av1ScanWorker, H264TranscodeWorker
 
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
@@ -20,11 +20,28 @@ def _worker_attr(main_window: MainWindow) -> str:
     return "_h264_transcode_worker"
 
 
+def _scan_worker_attr(main_window: MainWindow) -> str:
+    return "_av1_scan_worker"
+
+
 def _active_worker(main_window: MainWindow) -> H264TranscodeWorker | None:
     w = getattr(main_window, _worker_attr(main_window), None)
     if w is not None and w.isRunning():
         return w
     return None
+
+
+def _active_scan_worker(main_window: MainWindow) -> Av1ScanWorker | None:
+    w = getattr(main_window, _scan_worker_attr(main_window), None)
+    if w is not None and w.isRunning():
+        return w
+    return None
+
+
+def _transcode_or_scan_busy(main_window: MainWindow) -> bool:
+    return _active_worker(main_window) is not None or _active_scan_worker(
+        main_window
+    ) is not None
 
 
 def _run_transcode_worker(
@@ -36,11 +53,11 @@ def _run_transcode_worker(
         Tuple[Optional[int], bool, bool, Optional[float]]
     ] = None,
 ) -> None:
-    if _active_worker(main_window):
+    if _transcode_or_scan_busy(main_window):
         QtWidgets.QMessageBox.information(
             main_window,
             "Transcode in progress",
-            "An H.264 conversion is already running.",
+            "An H.264 conversion or AV1 folder scan is already running.",
         )
         return
 
@@ -54,7 +71,8 @@ def _run_transcode_worker(
 
     prog = QtWidgets.QProgressDialog(main_window)
     prog.setWindowTitle("Converting to H.264")
-    prog.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+    # Non-modal so the rest of the UI keeps accepting events during ffmpeg.
+    prog.setWindowModality(QtCore.Qt.WindowModality.NonModal)
     prog.setMinimumDuration(0)
     prog.setRange(0, 1000)
     prog.setValue(0)
@@ -116,6 +134,13 @@ def _run_transcode_worker(
 
 
 def convert_target_video_to_h264(main_window: MainWindow, media_path: str) -> None:
+    if _transcode_or_scan_busy(main_window):
+        QtWidgets.QMessageBox.information(
+            main_window,
+            "Busy",
+            "An H.264 conversion or AV1 folder scan is already running.",
+        )
+        return
     if not misc_helpers.is_ffmpeg_in_path():
         QtWidgets.QMessageBox.warning(
             main_window,
@@ -178,31 +203,71 @@ def batch_convert_av1_in_folder(main_window: MainWindow) -> None:
         return
 
     max_height, prefer_nvenc, recursive, _overwrite, target_fps = dlg.options()
-    candidates = vt.iter_candidate_video_paths(folder, recursive)
-    av1_list = vt.filter_av1_paths(candidates)
-    if not av1_list:
+
+    if _transcode_or_scan_busy(main_window):
         QtWidgets.QMessageBox.information(
             main_window,
-            "AV1 → H.264",
-            "No AV1-encoded videos were found for the selected folder "
-            + ("(including subfolders)." if recursive else "."),
+            "Busy",
+            "An H.264 conversion or AV1 folder scan is already running.",
         )
         return
 
-    confirm = QtWidgets.QMessageBox.question(
-        main_window,
-        "Confirm replace",
-        f"{len(av1_list)} AV1 file(s) will be converted to H.264 and originals will be "
-        f"replaced after a successful transcode.\n\nContinue?",
-        QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-        QtWidgets.QMessageBox.StandardButton.No,
-    )
-    if confirm != QtWidgets.QMessageBox.StandardButton.Yes:
-        return
+    scan_prog = QtWidgets.QProgressDialog(main_window)
+    scan_prog.setWindowTitle("AV1 → H.264")
+    scan_prog.setLabelText("Scanning folder (ffprobe per file)…")
+    scan_prog.setRange(0, 0)
+    scan_prog.setMinimumDuration(0)
+    scan_prog.setWindowModality(QtCore.Qt.WindowModality.NonModal)
+    scan_prog.setCancelButton(None)
 
-    _run_transcode_worker(
-        main_window,
-        av1_list,
-        batch_av1=True,
-        encode_options=(max_height, prefer_nvenc, True, target_fps),
-    )
+    scan_worker = Av1ScanWorker(folder, recursive, parent=main_window)
+    setattr(main_window, _scan_worker_attr(main_window), scan_worker)
+    qc = QtCore.Qt.ConnectionType.QueuedConnection
+
+    opts = (max_height, prefer_nvenc, True, target_fps)
+
+    def _clear_scan_worker_ref() -> None:
+        setattr(main_window, _scan_worker_attr(main_window), None)
+
+    def on_scan_found(av1_list: List[str]) -> None:
+        scan_prog.close()
+        if not av1_list:
+            QtWidgets.QMessageBox.information(
+                main_window,
+                "AV1 → H.264",
+                "No AV1-encoded videos were found for the selected folder "
+                + ("(including subfolders)." if recursive else "."),
+            )
+            return
+        confirm = QtWidgets.QMessageBox.question(
+            main_window,
+            "Confirm replace",
+            f"{len(av1_list)} AV1 file(s) will be converted to H.264 and originals will be "
+            f"replaced after a successful transcode.\n\nContinue?",
+            QtWidgets.QMessageBox.StandardButton.Yes
+            | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if confirm != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        _run_transcode_worker(
+            main_window,
+            av1_list,
+            batch_av1=True,
+            encode_options=opts,
+        )
+
+    def on_scan_failed(msg: str) -> None:
+        scan_prog.close()
+        QtWidgets.QMessageBox.critical(
+            main_window,
+            "AV1 scan failed",
+            msg,
+        )
+
+    scan_worker.found.connect(on_scan_found, qc)
+    scan_worker.failed.connect(on_scan_failed, qc)
+    scan_worker.finished.connect(_clear_scan_worker_ref)
+    scan_prog.show()
+    QtWidgets.QApplication.processEvents()
+    scan_worker.start()
