@@ -101,6 +101,44 @@ def _clamp_window_frame_to_available_geometry(main_window: "MainWindow"):
         main_window.move(clamped_x, clamped_y)
 
 
+def _apply_workspace_window_state(
+    main_window: "MainWindow", window_state: dict
+) -> bool:
+    is_maximized = window_state.get("isMaximized", False)
+    is_fullscreen = window_state.get("isFullScreen", False)
+
+    main_window._fullscreen_restore_was_maximized = False
+    main_window._fullscreen_restore_geometry = None
+
+    if is_maximized:
+        main_window.resize(main_window.sizeHint())
+        main_window.showMaximized()
+        main_window.menuBar().show()
+        main_window.is_full_screen = False
+        return False
+
+    restored_rect = _get_clamped_window_geometry(
+        main_window,
+        window_state.get("x", main_window.x()),
+        window_state.get("y", main_window.y()),
+        window_state.get("width", main_window.width()),
+        window_state.get("height", main_window.height()),
+    )
+
+    if is_fullscreen:
+        main_window._fullscreen_restore_was_maximized = False
+        main_window._fullscreen_restore_geometry = restored_rect
+        main_window.resize(main_window.sizeHint())
+        main_window.showFullScreen()
+        main_window.is_full_screen = True
+        return False
+
+    main_window.setGeometry(restored_rect)
+    main_window.menuBar().show()
+    main_window.is_full_screen = False
+    return True
+
+
 def open_embeddings_from_file(main_window: "MainWindow"):
     embedding_filename, _ = QtWidgets.QFileDialog.getOpenFileName(
         main_window,
@@ -595,31 +633,9 @@ def load_saved_workspace(
 
             # Restore Window State
             window_state = data.get("window_state_data", {})
-            is_maximized = window_state.get("isMaximized", False)
-            is_fullScreen = window_state.get("isFullScreen", False)
-            needs_post_restore_frame_clamp = False
-
-            if is_maximized:
-                main_window.resize(main_window.sizeHint())
-                main_window.showMaximized()
-                main_window.menuBar().show()
-                main_window.is_full_screen = False
-            elif is_fullScreen:
-                main_window.resize(main_window.sizeHint())
-                main_window.showFullScreen()
-                main_window.is_full_screen = True
-            else:
-                restored_rect = _get_clamped_window_geometry(
-                    main_window,
-                    window_state.get("x", main_window.x()),
-                    window_state.get("y", main_window.y()),
-                    window_state.get("width", main_window.width()),
-                    window_state.get("height", main_window.height()),
-                )
-                main_window.setGeometry(restored_rect)
-                main_window.menuBar().show()
-                main_window.is_full_screen = False
-                needs_post_restore_frame_clamp = True
+            needs_post_restore_frame_clamp = _apply_workspace_window_state(
+                main_window, window_state
+            )
             panel_state_map = {
                 "target_media": window_state.get(
                     "target_media",
@@ -693,21 +709,27 @@ def save_current_workspace(
     # --- Save Window State ---
     # --- Save dock layout / panel sizes ---
     is_theatre_mode = bool(getattr(main_window, "is_theatre_mode", False))
-    saved_is_fullscreen = main_window.is_full_screen
-    saved_is_maximized = main_window.isMaximized()
+    saved_is_fullscreen = bool(main_window.is_full_screen)
+    saved_is_maximized = (
+        bool(main_window.isMaximized()) if not saved_is_fullscreen else False
+    )
     saved_geometry = main_window.geometry()
     dock_state_source = None
     if is_theatre_mode:
         saved_is_fullscreen = bool(
-            getattr(main_window, "_was_custom_fullscreen", False)
+            getattr(main_window, "_was_custom_fullscreen", main_window.is_full_screen)
         )
         saved_is_maximized = (
-            bool(getattr(main_window, "_was_maximized", False))
+            bool(getattr(main_window, "_was_maximized", main_window.isMaximized()))
             if not saved_is_fullscreen
             else False
         )
         saved_geometry = getattr(main_window, "_was_normal_geometry", saved_geometry)
         dock_state_source = getattr(main_window, "_saved_window_state", None)
+    elif saved_is_fullscreen:
+        restore_geometry = getattr(main_window, "_fullscreen_restore_geometry", None)
+        if restore_geometry is not None:
+            saved_geometry = restore_geometry
 
     try:
         # saveState returns QByteArray; convert to base64 string for json compatibility
