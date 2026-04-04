@@ -213,7 +213,9 @@ class FaceLandmarkDetectors:
         has_scores = len(scores) > 0
 
         if has_result:
-            if has_scores:
+            # FW-BUG-FIX: Exclude '478' from the threshold filter because its 'scores'
+            # are actually 52 BlendShape values (expressions), not a detection confidence!
+            if has_scores and detect_mode not in ["478"]:
                 # If the model supports scoring (e.g., 5, 68, 98), we apply the threshold filter.
                 if np.mean(scores) >= score:
                     return kpss_5, kpss, scores
@@ -221,7 +223,8 @@ class FaceLandmarkDetectors:
                     # Filtered out due to low confidence
                     return [], [], []
             else:
-                # If the model does NOT support scoring (e.g., 203, 106, 478),
+                # If the model does NOT support scoring (e.g., 203, 106),
+                # OR if the scores are actually blendshapes (478),
                 # we implicitly trust the Face Detector's result and pass this through.
                 return kpss_5, kpss, scores
 
@@ -1258,6 +1261,8 @@ class FaceLandmarkDetectors:
                     "[ERROR] Failed to load dependency 'FaceBlendShapes'. Aborting landmark detection."
                 )
                 return [], [], []  # Fail fast
+            else:
+                self.active_landmark_models.add("FaceBlendShapes")
 
         aimg, _, IM = self._prepare_crop(
             img,

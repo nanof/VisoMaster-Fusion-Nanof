@@ -984,18 +984,30 @@ class FrameEdits:
                 interpolation=interp_mode,
             )
 
+            # 1. The call generates both the makeup image AND the exact mask from FaceParser
             out, mask_out = self.models_processor.apply_face_makeup(
                 original_face_512, parameters
             )
 
-            # Gaussian blur for soft blending of the crop mask
-            gauss = v2.GaussianBlur(kernel_size=5 * 2 + 1, sigma=(5 + 1) * 0.2)
-            out = torch.clamp(torch.div(out, 255.0), 0, 1).type(torch.float32)
-            mask_crop = gauss(self.models_processor.lp_mask_crop)
+            # 2. Failsafe: Ensure the output tensor remains exactly 512x512
+            if out.shape[-1] != 512:
+                out = v2.Resize((512, 512), antialias=True)(out)
 
-            # Note: We keep faceutil.paste_back_adv here instead of _apply_kornia_warp
-            # because this specific paste operation requires complex alpha blending
-            # based on the generated makeup mask_crop, which the generic helper doesn't support yet.
+            # 3. Quality & Safety Fix: We use the TRUE makeup mask (mask_out)
+            # instead of the generic LivePortrait square mask to preserve original skin quality.
+            if mask_out is None:
+                mask_out = torch.ones(
+                    (1, 512, 512), dtype=torch.float32, device=out.device
+                )
+            elif mask_out.shape[-1] != 512:
+                mask_out = v2.Resize((512, 512), antialias=True)(mask_out)
+
+            # 4. Soften the image and blur the mask edges for smooth blending
+            out = torch.clamp(torch.div(out, 255.0), 0, 1).type(torch.float32)
+            gauss = v2.GaussianBlur(kernel_size=5 * 2 + 1, sigma=(5 + 1) * 0.2)
+            mask_crop = gauss(mask_out)
+
+            # 5. Final pasting: Only the makeup pixels are pasted, keeping the original skin intact
             img = faceutil.paste_back_adv(out, M_c2o, img, mask_crop)
 
         return img

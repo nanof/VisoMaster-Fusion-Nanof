@@ -534,12 +534,14 @@ def set_gpu_memory_progressbar_value(
 
     is_high = memory_total > 0 and (memory_used / memory_total) > 0.85
     was_high = getattr(main_window, "_vram_high_style_active", None)
-    if is_high != was_high:
+    current_style = base_style + (chunk_style_high if is_high else chunk_style_normal)
+    if (
+        is_high != was_high
+        or getattr(main_window, "_vram_progressbar_style", None) != current_style
+    ):
         main_window._vram_high_style_active = is_high
-        if is_high:
-            main_window.vramProgressBar.setStyleSheet(base_style + chunk_style_high)
-        else:
-            main_window.vramProgressBar.setStyleSheet(base_style + chunk_style_normal)
+        main_window._vram_progressbar_style = current_style
+        main_window.vramProgressBar.setStyleSheet(current_style)
 
     main_window.vramProgressBar.update()
 
