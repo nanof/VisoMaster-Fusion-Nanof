@@ -309,7 +309,12 @@ class TargetMediaCardButton(CardButton):
         main_window.loading_new_media = True
         common_widget_actions.refresh_frame(main_window, synchronous=True)
 
-        if main_window.control.get("AutoSwapToggle"):
+        # Skip Auto Swap while a workspace/job JSON is being restored: the session
+        # will load saved target faces after this click; running detection here would
+        # duplicate them (same frame faces + restored list).
+        if main_window.control.get("AutoSwapToggle") and not getattr(
+            main_window, "_loading_workspace", False
+        ):
             # Run detect on 0 frame or image
             card_actions.find_target_faces(main_window)
             if main_window.target_faces and not main_window.selected_target_face_id:
