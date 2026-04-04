@@ -3,9 +3,11 @@ from PySide6 import QtWidgets
 import sys
 
 import qdarktheme
+from app.helpers.console_color import install_colored_console_streams
 from app.ui.core.proxy_style import ProxyStyle
 
 if __name__ == "__main__":
+    install_colored_console_streams()
     app = QtWidgets.QApplication(sys.argv)
     app.setStyle(ProxyStyle())
     with open("app/ui/styles/true_dark_styles.qss", "r") as f:

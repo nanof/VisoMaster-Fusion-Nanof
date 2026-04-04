@@ -8,12 +8,16 @@
 
 import sys
 from PySide6 import QtWidgets
+
+from app.helpers.console_color import install_colored_console_streams
+
 from .core import PATHS, must_exist, apply_theme_to_app
 from .launcher_window import LauncherWindow
 
 
 def main():
     """Initialize and run the VisoMaster Fusion Launcher."""
+    install_colored_console_streams()
     sys.stdout.flush()
 
     try:
