@@ -21,6 +21,7 @@ import math
 import copy
 import json
 from PySide6.QtCore import QObject, QTimer, Signal, Slot, QEventLoop, QThread, Qt
+from PySide6.QtGui import QPixmap
 
 # Internal project imports
 from app.processors.workers.frame_worker import FrameWorker, _env_flag
@@ -401,6 +402,17 @@ class VideoProcessor(QObject):
         except (TypeError, ValueError):
             n = 1
         return max(1, min(n, 5))
+
+    def _preview_use_opengl_linear_display(self) -> bool:
+        """Video + linear interpolation: use shader blend in the main viewer (not webcam/virt cam)."""
+        if self.file_type != "video":
+            return False
+        if not graphics_view_actions.preview_linear_gpu_display_enabled(self.main_window):
+            return False
+        bi = getattr(self.main_window, "_video_preview_blend_gl_item", None)
+        if bi is not None and getattr(bi, "_gl_failed", False):
+            return False
+        return graphics_view_actions.ensure_video_preview_opengl_viewport(self.main_window)
 
     def _clear_frames_to_display_and_profiles(self) -> None:
         self.frames_to_display.clear()
@@ -875,7 +887,7 @@ class VideoProcessor(QObject):
         """
         # VR180 requires specialized spherical detection in the FrameWorker, skip sequential here.
         if local_control_for_worker.get("VR180ModeEnableToggle", False):
-            return None, None, None, None
+            return None, None, None, None, None
 
         if not force_detection and not self._sequential_detection_required(
             local_control_for_worker, local_params_for_worker
@@ -885,6 +897,7 @@ class VideoProcessor(QObject):
                 numpy.empty((0, 4), dtype=numpy.float32),
                 numpy.empty((0, 5, 2), dtype=numpy.float32),
                 numpy.empty((0, 68, 2), dtype=numpy.float32),
+                None,
                 None,
             )
 
@@ -906,6 +919,7 @@ class VideoProcessor(QObject):
             stream_context = contextlib.nullcontext()
 
         feeder_chw_uint8_for_worker: torch.Tensor | None = None
+        detect_track_ids: list[int] = []
         with nvtx_range("VisoMaster/feeder/detect"), stream_context:
             use_landmark = local_control_for_worker.get("LandmarkDetectToggle", True)
             landmark_mode = local_control_for_worker.get(
@@ -994,6 +1008,7 @@ class VideoProcessor(QObject):
                     "LandmarkMeanEyesToggle", False
                 ),
                 previous_detections=previous_faces_arg,
+                out_track_ids=detect_track_ids,
             )
             # When we allocated the CHW tensor here, hand it to the worker to skip a second
             # host→device copy of the same frame (feeder already uploaded for run_detect).
@@ -1047,10 +1062,18 @@ class VideoProcessor(QObject):
                         valid_mask
                     ):
                         kpss = kpss[valid_mask]
+                    if len(detect_track_ids) == int(valid_mask.shape[0]):
+                        detect_track_ids[:] = [
+                            detect_track_ids[i]
+                            for i in range(int(valid_mask.shape[0]))
+                            if bool(valid_mask[i])
+                        ]
             else:
                 bboxes = numpy.empty((0, 4), dtype=numpy.float32)
         else:
             bboxes = numpy.empty((0, 4), dtype=numpy.float32)
+        if len(detect_track_ids) != int(bboxes.shape[0]):
+            detect_track_ids.clear()
         # If the sanitization purged the bboxes, we MUST purge the keypoints too.
         # Otherwise, the FrameWorker receives mismatched arrays and skips the face.
         if bboxes.shape[0] == 0:
@@ -1163,7 +1186,7 @@ class VideoProcessor(QObject):
             self._smoothed_kps.clear()
             self._smoothed_dense_kps.clear()
 
-        return bboxes, kpss_5, kpss, feeder_chw_uint8_for_worker
+        return bboxes, kpss_5, kpss, feeder_chw_uint8_for_worker, detect_track_ids
 
     def _clear_frame_and_raw_queues(self) -> None:
         """Drop pending decode and worker tasks (used on seek / pipeline reset)."""
@@ -1257,7 +1280,13 @@ class VideoProcessor(QObject):
                 )
             )
             _t_seq = time.perf_counter() if perf_on else 0.0
-            bboxes, kpss_5, kpss, feeder_chw_uint8 = self._run_sequential_detection(
+            (
+                bboxes,
+                kpss_5,
+                kpss,
+                feeder_chw_uint8,
+                detect_track_ids,
+            ) = self._run_sequential_detection(
                 frame_rgb,
                 local_control,
                 local_params,
@@ -1304,6 +1333,7 @@ class VideoProcessor(QObject):
                 kpss,
                 feeder_perf,
                 feeder_chw_uint8,
+                detect_track_ids,
             )
             self.frame_queue.put(task)
 
@@ -1908,6 +1938,7 @@ class VideoProcessor(QObject):
         preview_from_pending = False
         preview_skip_ffmpeg = False
         preview_skip_increment = False
+        gpu_blend_for_view: Tuple[numpy.ndarray, numpy.ndarray, float] | None = None
 
         if not preview_fg:
             self._preview_frame_gen_pending = None
@@ -1928,7 +1959,15 @@ class VideoProcessor(QObject):
                     and prev_arr.shape == pf.shape
                     and prev_arr.dtype == pf.dtype
                 ):
-                    frame = self._preview_frame_gen_lerp(prev_arr, pf, w)
+                    if (
+                        self.file_type == "video"
+                        and not self._preview_frame_interpolation_is_neural()
+                        and self._preview_use_opengl_linear_display()
+                    ):
+                        gpu_blend_for_view = (prev_arr, pf, float(w))
+                        frame = numpy.ascontiguousarray(pf).copy()
+                    else:
+                        frame = self._preview_frame_gen_lerp(prev_arr, pf, w)
                 else:
                     frame = pf
                 frame_number_to_display = pfn
@@ -2068,7 +2107,11 @@ class VideoProcessor(QObject):
                             model_key=str(_rife_key),
                         )
                     else:
-                        frame = self._preview_frame_gen_lerp(prev_arr, frame, w0)
+                        if self._preview_use_opengl_linear_display():
+                            gpu_blend_for_view = (prev_arr, frame, float(w0))
+                            frame = numpy.ascontiguousarray(frame).copy()
+                        else:
+                            frame = self._preview_frame_gen_lerp(prev_arr, frame, w0)
                     self._preview_frame_gen_substep = 1
                     profile_for_overlay = None
                     preview_skip_ffmpeg = True
@@ -2148,11 +2191,22 @@ class VideoProcessor(QObject):
             "on",
         )
         _t_disp0 = time.perf_counter() if _perf_disp else 0.0
-        pixmap = common_widget_actions.get_pixmap_from_frame(self.main_window, frame)
-
-        graphics_view_actions.update_graphics_view(
-            self.main_window, pixmap, frame_number_to_display
-        )
+        if (
+            gpu_blend_for_view is not None
+            and self.file_type == "video"
+        ):
+            pixmap = QPixmap()
+            graphics_view_actions.update_graphics_view(
+                self.main_window,
+                pixmap,
+                frame_number_to_display,
+                gpu_blend=gpu_blend_for_view,
+            )
+        else:
+            pixmap = common_widget_actions.get_pixmap_from_frame(self.main_window, frame)
+            graphics_view_actions.update_graphics_view(
+                self.main_window, pixmap, frame_number_to_display
+            )
         graphics_view_actions.update_pipeline_profile_overlay(
             self.main_window, profile_for_overlay
         )
@@ -4320,7 +4374,7 @@ class VideoProcessor(QObject):
                         .permute(2, 0, 1)
                     )
                     self.current_frame_number = frame_number
-                    bboxes, kpss_5, _, _ = self._run_sequential_detection(
+                    bboxes, kpss_5, _, _, _ = self._run_sequential_detection(
                         frame_rgb,
                         local_control,
                         local_params,

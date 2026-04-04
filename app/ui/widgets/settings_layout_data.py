@@ -258,6 +258,22 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "(total preview ticks = K+1). Neural mode ignores K (fixed one RIFE step). "
             "Higher K = smoother linear preview but more CPU and shorter time per tick.",
         },
+        "PreviewLinearInterpolationDisplaySelection": {
+            "level": 3,
+            "label": "Linear preview display",
+            "options": ["CPU (NumPy)", "GPU (OpenGL)"],
+            "default": "CPU (NumPy)",
+            "parentToggle": "PreviewFrameGenEnableToggle",
+            "requiredToggleValue": True,
+            "parentSelection": "FrameInterpolationMethodSelection",
+            "requiredSelectionValue": "Linear (CPU)",
+            "help": "Video file preview in the main viewer only. CPU (NumPy): blend on the UI thread "
+            "(default). GPU (OpenGL): mix in a fragment shader (OpenGL viewport); reduces CPU work "
+            "for the blend step. Virtual cam must be off (it still needs a CPU frame). "
+            "Neural (RIFE) mode ignores this. If GPU fails, switch back to CPU.",
+            "exec_function": control_actions.handle_preview_linear_display_selection_change,
+            "exec_function_args": ["PreviewLinearInterpolationDisplaySelection"],
+        },
         "FrameSkipStepSlider": {
             "level": 1,
             "label": "Frame Skip Step",
@@ -467,7 +483,7 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "level": 1,
             "label": "Rotate checked Input Faces on detections",
             "default": False,
-            "help": "No Find Faces required. Uses only checked Input Faces in list order: detection 0 gets input 0, detection 1 gets input 1, and if there are more detections than inputs, wraps to input 0 again (round-robin). Cosine similarity is not used. Swap/restorer/mask settings use the same parameter set as normal swap: the selected Find Faces card if any, otherwise the current face-parameter panel (current_widget_parameters). Recognition uses the active swapper's ArcFace model for the target embedding. Ignored when 'Swap Input Face only once' is enabled.",
+            "help": "No Find Faces required. Uses only checked Input Faces in list order: detection 0 gets input 0, detection 1 gets input 1, and if there are more detections than inputs, wraps to input 0 again (round-robin). Cosine similarity is not used. Assignments are stabilized across frames (IoU vs previous bboxes; with Face Tracking enabled, ByteTrack IDs are used when available) so brief dropouts do not reshuffle which input maps to which face. Swap/restorer/mask settings use the same parameter set as normal swap: the selected Find Faces card if any, otherwise the current face-parameter panel (current_widget_parameters). Recognition uses the active swapper's ArcFace model for the target embedding. Ignored when 'Swap Input Face only once' is enabled.",
         },
         "VR180ModeEnableToggle": {
             "level": 1,

@@ -320,9 +320,16 @@ class FrameWorker(threading.Thread):
         self.precomputed_bboxes: Optional[list] = None
         self.precomputed_kpss_5: Optional[list] = None
         self.precomputed_kpss: Optional[list] = None
+        self.precomputed_track_ids: list[int] | None = None
         self._feeder_perf_from_task: dict[str, float] | None = None
         # CHW uint8 frame tensor from feeder sequential detect (avoids duplicate H2D)
         self._feeder_chw_tensor: Optional[torch.Tensor] = None
+
+        # RR-TEMP: temporal coherence for "Rotate checked Input Faces on detections"
+        self._rr_prev_slots: list[tuple[np.ndarray, int]] = []
+        self._rr_track_to_input: dict[int, int] = {}
+        self._rr_stabilize_last_fn: int = -999999
+        self._rr_stabilize_last_n_inputs: int = -1
 
         # --- OPTIMIZATION: Cached Convolution Kernels (VRAM) ---
         # Pre-allocating mathematical filters prevents massive CPU-to-GPU
@@ -465,7 +472,20 @@ class FrameWorker(threading.Thread):
                         # Stopped while waiting, discard task
                         break  # 'finally' will call task_done()
 
-                    if len(task) >= 9:
+                    if len(task) >= 10:
+                        (
+                            self.frame_number,
+                            self.frame,
+                            local_params_from_feeder,
+                            local_control_from_feeder,
+                            self.precomputed_bboxes,
+                            self.precomputed_kpss_5,
+                            self.precomputed_kpss,
+                            _feeder_perf_task,
+                            self._feeder_chw_tensor,
+                            self.precomputed_track_ids,
+                        ) = task[:10]
+                    elif len(task) >= 9:
                         (
                             self.frame_number,
                             self.frame,
@@ -477,6 +497,7 @@ class FrameWorker(threading.Thread):
                             _feeder_perf_task,
                             self._feeder_chw_tensor,
                         ) = task[:9]
+                        self.precomputed_track_ids = None
                     else:
                         (
                             self.frame_number,
@@ -489,6 +510,7 @@ class FrameWorker(threading.Thread):
                             _feeder_perf_task,
                         ) = task
                         self._feeder_chw_tensor = None
+                        self.precomputed_track_ids = None
                     self._feeder_perf_from_task: dict[str, float] | None = (
                         _feeder_perf_task
                         if isinstance(_feeder_perf_task, dict)
@@ -830,6 +852,131 @@ class FrameWorker(threading.Thread):
             cast(dict, default_params_dict),
             _rec_for_match,
         )
+
+    def _reset_sequential_rotate_stabilizer(self) -> None:
+        self._rr_prev_slots.clear()
+        self._rr_track_to_input.clear()
+        self._rr_stabilize_last_fn = -999999
+        self._rr_stabilize_last_n_inputs = -1
+
+    @staticmethod
+    def _bbox_center_x(bbox: np.ndarray) -> float:
+        return float((float(bbox[0]) + float(bbox[2])) * 0.5)
+
+    def _rr_calculate_iou(self, box_a: np.ndarray, box_b: np.ndarray) -> float:
+        return float(
+            self.models_processor.face_detectors._calculate_iou(box_a, box_b)
+        )
+
+    def _apply_sequential_rotate_temporal_alignment(
+        self,
+        det_faces: list[dict],
+        checked_inputs_ordered: list,
+        frame_number: int,
+    ) -> None:
+        """Assign stable _rr_input_idx per detection (ByteTrack id or IoU vs previous frame)."""
+        n_in = len(checked_inputs_ordered)
+        if n_in == 0 or not det_faces:
+            return
+
+        if frame_number < 0:
+            self._reset_sequential_rotate_stabilizer()
+
+        gap_ok = (
+            self._rr_stabilize_last_fn < 0
+            or (frame_number - self._rr_stabilize_last_fn) <= 2
+        )
+        if (not gap_ok) or (n_in != self._rr_stabilize_last_n_inputs):
+            self._reset_sequential_rotate_stabilizer()
+        self._rr_stabilize_last_fn = frame_number
+        self._rr_stabilize_last_n_inputs = n_in
+
+        def _sort_key(fi: int) -> tuple[float, float]:
+            bb = det_faces[fi]["bbox"]
+            cy = float((float(bb[1]) + float(bb[3])) * 0.5)
+            return (self._bbox_center_x(bb), cy)
+
+        order = sorted(range(len(det_faces)), key=_sort_key)
+
+        all_tracks_ok = True
+        ordered_tids: list[int] = []
+        for fi in order:
+            tid = int(det_faces[fi].get("track_id", -1))
+            ordered_tids.append(tid)
+            if tid < 0:
+                all_tracks_ok = False
+
+        if (
+            all_tracks_ok
+            and ordered_tids
+            and len(set(ordered_tids)) == len(ordered_tids)
+        ):
+            used_inp: set[int] = set()
+            for pos, fi in enumerate(order):
+                tid = int(det_faces[fi]["track_id"])
+                if tid in self._rr_track_to_input:
+                    inp = self._rr_track_to_input[tid]
+                else:
+                    cand = next((j for j in range(n_in) if j not in used_inp), None)
+                    if cand is None:
+                        cand = pos % n_in
+                    inp = cand
+                    self._rr_track_to_input[tid] = inp
+                used_inp.add(int(inp) % n_in)
+                det_faces[fi]["_rr_input_idx"] = int(inp) % n_in
+        else:
+            curr_boxes = [
+                np.asarray(det_faces[fi]["bbox"], dtype=np.float64).copy()
+                for fi in order
+            ]
+            prev_boxes = [
+                np.asarray(pb, dtype=np.float64).copy() for pb, _ in self._rr_prev_slots
+            ]
+            prev_inp = [ix for _, ix in self._rr_prev_slots]
+
+            curr_assign: list[int | None] = [None] * len(order)
+            if prev_boxes and len(prev_boxes) == len(prev_inp):
+                pairs: list[tuple[float, int, int]] = []
+                for ci in range(len(order)):
+                    for pj in range(len(prev_boxes)):
+                        iou_v = self._rr_calculate_iou(curr_boxes[ci], prev_boxes[pj])
+                        pairs.append((iou_v, ci, pj))
+                pairs.sort(key=lambda x: -x[0])
+                assigned_c: set[int] = set()
+                assigned_p: set[int] = set()
+                iou_floor = 0.08
+                for iou_v, ci, pj in pairs:
+                    if iou_v < iou_floor:
+                        break
+                    if ci in assigned_c or pj in assigned_p:
+                        continue
+                    assigned_c.add(ci)
+                    assigned_p.add(pj)
+                    curr_assign[ci] = prev_inp[pj]
+
+            used_inp_rr: set[int] = set()
+            for ci in range(len(order)):
+                if curr_assign[ci] is not None:
+                    used_inp_rr.add(int(curr_assign[ci]) % n_in)
+            for ci in range(len(order)):
+                if curr_assign[ci] is not None:
+                    continue
+                cand = next((j for j in range(n_in) if j not in used_inp_rr), None)
+                if cand is None:
+                    cand = ci % n_in
+                curr_assign[ci] = cand
+                used_inp_rr.add(int(cand) % n_in)
+
+            for ci, fi in enumerate(order):
+                det_faces[fi]["_rr_input_idx"] = int(curr_assign[ci]) % n_in
+
+        self._rr_prev_slots = [
+            (
+                np.asarray(det_faces[fi]["bbox"], dtype=np.float32).copy(),
+                int(det_faces[fi]["_rr_input_idx"]),
+            )
+            for fi in order
+        ]
 
     def _parameters_for_input_rotate_mode(self) -> ParametersDict:
         """Face swap toggles/sliders (restorers, masks, etc.) use data_type *parameter*,
@@ -2784,6 +2931,12 @@ class FrameWorker(threading.Thread):
                 if b.isChecked()
             ]
 
+        _sequential_match_active = control.get(
+            "SequentialTargetMatchEnableToggle", False
+        ) and not control.get("SwapOnlyBestMatchEnableToggle", False)
+        if not _sequential_match_active:
+            self._reset_sequential_rotate_stabilizer()
+
         det_faces_data_for_display = []
 
         img = processed_tensor_rgb_uint8
@@ -2856,12 +3009,14 @@ class FrameWorker(threading.Thread):
         # Video/webcam: feeder runs detection in frame order so FaceDetectionInterval +
         # ByteTrack skip paths work. VR180 / single-frame preview: run here (fallback).
 
+        std_detect_track_ids: list[int] | None = None
         if getattr(self, "precomputed_bboxes", None) is not None and getattr(
             self, "precomputed_kpss_5", None
         ) is not None:
             bboxes = self.precomputed_bboxes
             kpss_5 = self.precomputed_kpss_5
             kpss = self.precomputed_kpss
+            std_detect_track_ids = getattr(self, "precomputed_track_ids", None)
         else:
             use_landmark, landmark_mode, from_points = (
                 control.get("LandmarkDetectToggle", True),
@@ -2871,6 +3026,13 @@ class FrameWorker(threading.Thread):
             if edit_button_is_checked_global:
                 use_landmark, landmark_mode, from_points = True, "203", True
 
+            _local_out_track: list[int] | None = (
+                [] if _sequential_match_active else None
+            )
+            _bypass_bt_std = not (
+                _sequential_match_active
+                and control.get("FaceTrackingEnableToggle", False)
+            )
             bboxes, kpss_5, kpss = self.models_processor.run_detect(
                 img,
                 control.get("DetectorModelSelection", "RetinaFace"),
@@ -2886,8 +3048,11 @@ class FrameWorker(threading.Thread):
                 else [0, 90, 180, 270],
                 use_mean_eyes=control.get("LandmarkMeanEyesToggle", False),
                 previous_detections=None,
-                bypass_bytetrack=True,
+                bypass_bytetrack=_bypass_bt_std,
+                out_track_ids=_local_out_track,
             )
+            if _sequential_match_active and _local_out_track is not None:
+                std_detect_track_ids = _local_out_track
 
             img_h_for_kps_ema = img.shape[-2]
             img_w_for_kps_ema = img.shape[-1]
@@ -2917,9 +3082,6 @@ class FrameWorker(threading.Thread):
             perf_stages.mark("std_detect_feeder_or_fallback")
 
         _rec_sim = control["SimilarityTypeSelection"]
-        _sequential_match_active = control.get(
-            "SequentialTargetMatchEnableToggle", False
-        ) and not control.get("SwapOnlyBestMatchEnableToggle", False)
         _recognition_arc_model = self._arc_model_for_detected_embeddings(control)
         _use_recognition_cache = (
             self.is_pool_worker
@@ -2937,12 +3099,20 @@ class FrameWorker(threading.Thread):
         ):
             _arcface_batch_on = control.get("ArcFaceBatchInferenceToggle", True)
             _work_faces: list[dict[str, Any]] = []
+            if (
+                std_detect_track_ids is not None
+                and len(std_detect_track_ids) != len(kpss_5)
+            ):
+                std_detect_track_ids = None
             for i in range(len(kpss_5)):
                 _bbox_i = bboxes[i]
                 if not is_detected_face_eligible_for_matching(
                     kpss_5[i], _bbox_i, self._MIN_FACE_PIXELS
                 ):
                     continue  # too small to produce meaningful swap
+                _row_tid = -1
+                if std_detect_track_ids is not None and i < len(std_detect_track_ids):
+                    _row_tid = int(std_detect_track_ids[i])
                 face_emb: np.ndarray | None = None
                 if _use_recognition_cache:
                     _cached_emb = (
@@ -2965,6 +3135,7 @@ class FrameWorker(threading.Thread):
                         "kps_5": kpss_5[i],
                         "kps_all": kps_all_i,
                         "embedding": face_emb,
+                        "track_id": _row_tid,
                     }
                 )
 
@@ -3024,6 +3195,7 @@ class FrameWorker(threading.Thread):
                         "kps_all": _w["kps_all"],
                         "embedding": _w["embedding"],
                         "bbox": _w["bbox"],
+                        "track_id": int(_w.get("track_id", -1)),
                         "original_face": None,
                         "swap_mask": None,
                         "matched_target": None,
@@ -3032,6 +3204,13 @@ class FrameWorker(threading.Thread):
 
         if perf_stages is not None:
             perf_stages.mark("std_recognize")
+
+        if _sequential_match_active and det_faces_data_for_display:
+            self._apply_sequential_rotate_temporal_alignment(
+                det_faces_data_for_display,
+                _checked_inputs_ordered,
+                self.frame_number,
+            )
 
         # Swapping / Editing Loop
         if det_faces_data_for_display:
@@ -3202,8 +3381,11 @@ class FrameWorker(threading.Thread):
                         fface["matched_target"] = None
                         if not _checked_inputs_ordered:
                             continue
+                        _rr_slot = fface.get("_rr_input_idx", None)
+                        if _rr_slot is None:
+                            _rr_slot = det_index % len(_checked_inputs_ordered)
                         in_btn = _checked_inputs_ordered[
-                            det_index % len(_checked_inputs_ordered)
+                            int(_rr_slot) % len(_checked_inputs_ordered)
                         ]
                         params_rr = cast(ParametersDict, _params_rr_rotate)
                         denoiser_on_rr = (

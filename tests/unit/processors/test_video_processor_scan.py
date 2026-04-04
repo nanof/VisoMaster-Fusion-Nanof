@@ -888,6 +888,7 @@ def test_scan_issue_frames_clears_sequential_state_when_tracking_re_enters():
             np.empty((0, 5, 2), dtype=np.float32),
             np.empty((0, 68, 2), dtype=np.float32),
             None,
+            None,
         )
 
     with (

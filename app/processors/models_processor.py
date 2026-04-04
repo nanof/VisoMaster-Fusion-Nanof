@@ -1613,6 +1613,7 @@ class ModelsProcessor(QtCore.QObject):
         landmark_score=0.5,
         from_points=False,
         rotation_angles=None,
+        out_track_ids: list[int] | None = None,
         **kwargs,
     ):
         rotation_angles = rotation_angles or [0]
@@ -1627,6 +1628,7 @@ class ModelsProcessor(QtCore.QObject):
             landmark_score,
             from_points,
             rotation_angles,
+            out_track_ids=out_track_ids,
             **kwargs,
         )
 

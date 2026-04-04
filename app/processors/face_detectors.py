@@ -27,6 +27,25 @@ except ImportError:
     BYTETracker = None  # type: ignore[assignment,misc]
 
 
+def _finalize_out_track_ids(
+    out_track_ids: list[int] | None,
+    det,
+    parallel_ids: list[int] | None,
+) -> None:
+    """Fill ``out_track_ids`` with one ByteTrack id per detection row (-1 if unknown)."""
+    if out_track_ids is None:
+        return
+    out_track_ids.clear()
+    try:
+        n = len(det)
+    except TypeError:
+        n = 0
+    if parallel_ids is not None and len(parallel_ids) == n:
+        out_track_ids.extend(int(x) for x in parallel_ids)
+    else:
+        out_track_ids.extend([-1] * n)
+
+
 class _BYTETRACK_ARGS:
     """BYTETracker parameters — populated from UI control values when available."""
 
@@ -729,6 +748,7 @@ class FaceDetectors:
         rotation_angles=None,
         previous_detections=None,
         bypass_bytetrack=False,
+        out_track_ids: list[int] | None = None,
         **kwargs,
     ):
         """
@@ -782,6 +802,7 @@ class FaceDetectors:
             tracked_kpss_5: list = []
             tracked_kpss_all: list = []
             tracked_scores: list = []
+            coast_track_ids: list[int] = []
             for t in online_targets:
                 tlwh = t.tlwh
                 tid = t.track_id
@@ -795,13 +816,14 @@ class FaceDetectors:
                     tracked_kpss_5.append(hist["kps"])
                     tracked_kpss_all.append(hist["kps"])
                     tracked_scores.append(hist["cum_score"])
+                    coast_track_ids.append(int(tid))
 
             if tracked_det:
-                return (
-                    np.array(tracked_det, dtype=np.float32),
-                    np.array(tracked_kpss_5, dtype=np.float32),
-                    np.array(tracked_kpss_all, dtype=object),
-                )
+                _det_coast = np.array(tracked_det, dtype=np.float32)
+                _k5_coast = np.array(tracked_kpss_5, dtype=np.float32)
+                _kall_coast = np.array(tracked_kpss_all, dtype=object)
+                _finalize_out_track_ids(out_track_ids, _det_coast, coast_track_ids)
+                return (_det_coast, _k5_coast, _kall_coast)
             # Tracker had no active tracks (e.g. first ever frame) → fall through to full detection
             # so the user sees faces immediately rather than waiting one extra frame.
 
@@ -837,14 +859,22 @@ class FaceDetectors:
                         from_points,
                         **kwargs,
                     )
+                    _finalize_out_track_ids(out_track_ids, det_r, None)
                     return det_r, kpss_5_r, kpss_r
+                _finalize_out_track_ids(out_track_ids, t_det, None)
                 return t_det, t_kpss, t_kpss
 
         # FULL DETECTION FALLBACK
         # If no previous detections or tracking failed, run the heavy model
         detector = self.detector_map.get(detect_mode)
         if not detector:
-            return np.empty((0, 4)), np.empty((0, 5, 2)), np.empty((0, 5, 2))
+            _det_empty = np.empty((0, 4), dtype=np.float32)
+            _finalize_out_track_ids(out_track_ids, _det_empty, [])
+            return (
+                _det_empty,
+                np.empty((0, 5, 2), dtype=np.float32),
+                np.empty((0, 5, 2), dtype=np.float32),
+            )
 
         model_name = detector["model_name"]
         # FD-RACE-01: serialise model switch so concurrent workers don't interleave unload/load.
@@ -860,7 +890,13 @@ class FaceDetectors:
             print(
                 f"[ERROR] {model_name} model failed to load or is not available. Skipping detection."
             )
-            return np.empty((0, 4)), np.empty((0, 5, 2)), np.empty((0, 5, 2))
+            _det_empty2 = np.empty((0, 4), dtype=np.float32)
+            _finalize_out_track_ids(out_track_ids, _det_empty2, [])
+            return (
+                _det_empty2,
+                np.empty((0, 5, 2), dtype=np.float32),
+                np.empty((0, 5, 2), dtype=np.float32),
+            )
 
         detection_function = detector["function"]
 
@@ -905,6 +941,7 @@ class FaceDetectors:
         score_values = np.array([])
 
         # ByteTrack Advanced Tracking
+        parallel_track_ids: list[int] | None = None
         if use_bytetrack and BYTETracker is not None:
             # BT-06/BT-07: serialize all tracker access under a dedicated lock to
             # prevent concurrent pool workers from corrupting Kalman filter state
@@ -948,6 +985,7 @@ class FaceDetectors:
             tracked_kpss_5 = []
             tracked_kpss_all = []
             tracked_scores = []
+            tracked_tids: list[int] = []
 
             current_frame_num = getattr(
                 self.models_processor, "current_frame_number", 0
@@ -992,6 +1030,7 @@ class FaceDetectors:
                     tracked_kpss_5.append(kpss_5[match_idx])
                     tracked_kpss_all.append(kpss[match_idx])
                     tracked_scores.append(cum_score)
+                    tracked_tids.append(int(tid))
                 else:
                     # BT-04: coasted track — no matching raw detection; use Kalman-predicted
                     # position with last known landmarks so brief occlusions are handled
@@ -1004,6 +1043,7 @@ class FaceDetectors:
                         # No dense landmarks available for coasted tracks; reuse 5-pt kps
                         tracked_kpss_all.append(last_kps)
                         tracked_scores.append(hist["cum_score"])
+                        tracked_tids.append(int(tid))
 
             # BT-08: evict stale track_history entries (last seen > track_buffer frames ago)
             track_buffer = int(control.get("ByteTrackTrackBufferSlider", 30))
@@ -1024,6 +1064,7 @@ class FaceDetectors:
                 # but refine_landmarks logic handles it
                 kpss = np.array(tracked_kpss_all, dtype=object)
                 score_values = np.array(tracked_scores, dtype=np.float32).flatten()
+                parallel_track_ids = tracked_tids
             else:
                 # BT-12 / BT-14: no confirmed tracks yet (first frame, scene cut, or
                 # tracker reset after seek).  Fall back to raw detector output so that
@@ -1035,12 +1076,14 @@ class FaceDetectors:
                         if len(det_scores) == len(det)
                         else np.full(len(det), 0.9, dtype=np.float32)
                     )
+                    parallel_track_ids = [-1] * len(det)
                     # det, kpss_5, kpss already hold the raw detector output — keep them
                 else:
                     det = np.empty((0, 4), dtype=np.float32)
                     kpss_5 = np.empty((0, 5, 2), dtype=np.float32)
                     kpss = np.empty((0,), dtype=object)
                     score_values = np.empty((0,), dtype=np.float32)
+                    parallel_track_ids = []
 
         # Optionally refine landmarks (if the user wants detailed landmarks)
         bytetrack_active = use_bytetrack and BYTETracker is not None
@@ -1059,8 +1102,10 @@ class FaceDetectors:
                 from_points,
                 **kwargs,
             )
+            _finalize_out_track_ids(out_track_ids, det_r, parallel_track_ids)
             return det_r, kpss_5_r, kpss_r
 
+        _finalize_out_track_ids(out_track_ids, det, parallel_track_ids)
         return det, kpss_5, kpss
 
     def reset_tracker(self):

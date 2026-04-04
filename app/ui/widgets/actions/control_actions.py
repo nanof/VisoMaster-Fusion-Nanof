@@ -595,6 +595,10 @@ def handle_preview_frame_interpolation_toggle(
 ):
     """Frame Interpolation master toggle: sync RIFE session when using Neural mode."""
     sync_rife_preview_interpolation_model(main_window)
+    if not new_value:
+        from app.ui.widgets.actions import graphics_view_actions
+
+        graphics_view_actions.restore_video_preview_raster_viewport(main_window)
 
 
 def handle_frame_interpolation_method_change(
@@ -602,6 +606,27 @@ def handle_frame_interpolation_method_change(
 ):
     """Switching Linear vs Neural: load or unload RIFE accordingly."""
     sync_rife_preview_interpolation_model(main_window)
+    if str(new_method) != "Linear (CPU)":
+        from app.ui.widgets.actions import graphics_view_actions
+
+        graphics_view_actions.restore_video_preview_raster_viewport(main_window)
+
+
+def handle_preview_linear_display_selection_change(
+    main_window: "MainWindow", new_value: str, control_name: str
+):
+    """Linear preview: CPU vs OpenGL viewport; restore raster when using CPU or incompatible mode."""
+    del control_name
+    from app.ui.widgets.actions import graphics_view_actions
+
+    if str(new_value) != "GPU (OpenGL)":
+        graphics_view_actions.restore_video_preview_raster_viewport(main_window)
+    blend_item = getattr(main_window, "_video_preview_blend_gl_item", None)
+    if blend_item is not None:
+        try:
+            blend_item.reset_gl_state()
+        except RuntimeError:
+            graphics_view_actions.invalidate_video_preview_blend_gl_item_ref(main_window)
 
 
 def handle_preview_neural_interp_model_change(

@@ -274,6 +274,7 @@ class TargetMediaCardButton(CardButton):
 
         if frame is not None:
             main_window.scene.clear()
+            graphics_view_actions.invalidate_video_preview_blend_gl_item_ref(main_window)
             if self.file_type == "video":
                 # restore initial video position after reading. == 0
                 media_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -354,6 +355,9 @@ class TargetMediaCardButton(CardButton):
             main_window.video_processor.max_frame_number = 0
 
             self.main_window.scene.clear()
+            graphics_view_actions.invalidate_video_preview_blend_gl_item_ref(
+                self.main_window
+            )
 
             self.reset_related_widgets_and_values()
 
