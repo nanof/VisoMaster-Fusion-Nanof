@@ -56,6 +56,9 @@ landmark_model_mapping = {
     "478": "FaceLandmark478",
 }
 
+# Modelos TensorRT nativos (.engine); mismos campos que en models_list cuando haya entradas.
+models_trt_list: list = []
+
 fp16_safe_models_list = [
     # --- LivePortrait ---
     "LivePortraitAppearanceFeatureExtractor",

@@ -53,6 +53,7 @@ from app.processors.face_reaging import FaceReaging
 from app.processors.utils.dfm_model import DFMModel
 from app.processors.models_data import (
     models_list,
+    models_trt_list,
     arcface_mapping_model_dict,
     models_dir,
     fp16_safe_models_list,
