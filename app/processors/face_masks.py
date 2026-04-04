@@ -276,12 +276,19 @@ class FaceMasks:
             self.models_processor.hide_build_dialog.emit()
         return self._vgg_combo_runner
 
-    def _faceparser_labels(self, img_uint8_3x512x512: torch.Tensor) -> torch.Tensor:
+    def _faceparser_labels(
+        self,
+        img_uint8_3x512x512: torch.Tensor,
+        parameters: dict | None = None,
+    ) -> torch.Tensor:
         """
         Runs FaceParser on a 512x512 input.
         Returns: NATIVE 512x512 label tensor (Long).
         """
-        model_name = "FaceParser"
+        backbone = (parameters or {}).get("FaceParserBackboneSelection", "ResNet34")
+        model_name = (
+            "FaceParsingBiSeNet18" if backbone == "BiSeNet-18" else "FaceParser"
+        )
 
         # Preprocessing: [0..255] -> [0..1] -> Normalize (shared by all paths)
         x = img_uint8_3x512x512.float().div(255.0)
@@ -289,7 +296,10 @@ class FaceMasks:
         x = x.unsqueeze(0).contiguous()
 
         # Custom path: bypass ORT entirely
-        if self.models_processor.provider_name == "Custom":
+        if (
+            model_name == "FaceParser"
+            and self.models_processor.provider_name == "Custom"
+        ):
             runner = self._get_faceparser_runner()
             if runner is not None:
                 with torch.no_grad():
@@ -315,22 +325,27 @@ class FaceMasks:
         # Binding I/O
         out = torch.empty((1, 19, 512, 512), device=self.models_processor.device)
         io = ort_session.io_binding()
+        in0 = ort_session.get_inputs()[0].name
         io.bind_input(
-            "input",
+            in0,
             self.models_processor.device,
             0,
             np.float32,
             (1, 3, 512, 512),
             x.data_ptr(),
         )
-        io.bind_output(
-            "output",
-            self.models_processor.device,
-            0,
-            np.float32,
-            (1, 19, 512, 512),
-            out.data_ptr(),
-        )
+        for ometa in ort_session.get_outputs():
+            if ometa.name == "output":
+                io.bind_output(
+                    "output",
+                    self.models_processor.device,
+                    0,
+                    np.float32,
+                    (1, 19, 512, 512),
+                    out.data_ptr(),
+                )
+            else:
+                io.bind_output(ometa.name, self.models_processor.device)
 
         # Handle Lazy TensorRT Build
         is_lazy_build = self.models_processor.check_and_clear_pending_build(model_name)
@@ -356,6 +371,196 @@ class FaceMasks:
         # Argmax to get class indices: (1, 19, 512, 512) -> (512, 512)
         labels_512 = out.argmax(dim=1).squeeze(0).to(torch.long)
         return labels_512
+
+    def run_rvm_portrait_alpha(self, face_chw_float_rgb_0_255: torch.Tensor) -> torch.Tensor:
+        """
+        RVM ONNX (mobilenetv3): devuelve alfa [1, H, W] float32 en el dispositivo activo.
+        Estado recurrente en cero (calidad de vídeo completo requeriría estado entre frames).
+        """
+        model_name = "RvmPortraitMatting"
+        dev = self.models_processor.device
+        H, W = int(face_chw_float_rgb_0_255.shape[1]), int(
+            face_chw_float_rgb_0_255.shape[2]
+        )
+        src = (face_chw_float_rgb_0_255.float() / 255.0).clamp(0.0, 1.0)
+        src = src.unsqueeze(0).contiguous()
+
+        ort_session = self.models_processor.models.get(model_name)
+        if ort_session is None:
+            ort_session = self.models_processor.load_model(model_name)
+        if ort_session is None:
+            return torch.ones((1, H, W), dtype=torch.float32, device=dev)
+
+        r1 = torch.zeros((1, 16, H // 4, W // 4), dtype=torch.float32, device=dev)
+        r2 = torch.zeros((1, 20, H // 8, W // 8), dtype=torch.float32, device=dev)
+        r3 = torch.zeros((1, 40, H // 16, W // 16), dtype=torch.float32, device=dev)
+        r4 = torch.zeros((1, 64, H // 32, W // 32), dtype=torch.float32, device=dev)
+        dr = torch.tensor([0.5], dtype=torch.float32, device=dev).contiguous()
+        pha = torch.empty((1, 1, H, W), dtype=torch.float32, device=dev).contiguous()
+
+        ins = {i.name: i for i in ort_session.get_inputs()}
+        is_lazy = self.models_processor.check_and_clear_pending_build(model_name)
+        if is_lazy:
+            self.models_processor.show_build_dialog.emit(
+                "Finalizing TensorRT Build",
+                f"Performing first-run inference for:\n{model_name}\n\nThis may take several minutes.",
+            )
+        try:
+            if dev == "cuda" and torch.cuda.is_available():
+                io = ort_session.io_binding()
+                io.bind_input(
+                    name=ins["src"].name,
+                    device_type=dev,
+                    device_id=0,
+                    element_type=np.float32,
+                    shape=tuple(src.shape),
+                    buffer_ptr=src.data_ptr(),
+                )
+                io.bind_input(
+                    name=ins["r1i"].name,
+                    device_type=dev,
+                    device_id=0,
+                    element_type=np.float32,
+                    shape=tuple(r1.shape),
+                    buffer_ptr=r1.data_ptr(),
+                )
+                io.bind_input(
+                    name=ins["r2i"].name,
+                    device_type=dev,
+                    device_id=0,
+                    element_type=np.float32,
+                    shape=tuple(r2.shape),
+                    buffer_ptr=r2.data_ptr(),
+                )
+                io.bind_input(
+                    name=ins["r3i"].name,
+                    device_type=dev,
+                    device_id=0,
+                    element_type=np.float32,
+                    shape=tuple(r3.shape),
+                    buffer_ptr=r3.data_ptr(),
+                )
+                io.bind_input(
+                    name=ins["r4i"].name,
+                    device_type=dev,
+                    device_id=0,
+                    element_type=np.float32,
+                    shape=tuple(r4.shape),
+                    buffer_ptr=r4.data_ptr(),
+                )
+                io.bind_input(
+                    name=ins["downsample_ratio"].name,
+                    device_type=dev,
+                    device_id=0,
+                    element_type=np.float32,
+                    shape=(1,),
+                    buffer_ptr=dr.data_ptr(),
+                )
+                outs_meta = ort_session.get_outputs()
+                for o in outs_meta:
+                    if o.name != "pha":
+                        io.bind_output(o.name, dev)
+                io.bind_output(
+                    name="pha",
+                    device_type=dev,
+                    device_id=0,
+                    element_type=np.float32,
+                    shape=tuple(pha.shape),
+                    buffer_ptr=pha.data_ptr(),
+                )
+                torch.cuda.current_stream().synchronize()
+                ort_session.run_with_iobinding(io)
+                torch.cuda.current_stream().synchronize()
+            else:
+                feed = {
+                    ins["src"].name: src.detach().cpu().numpy(),
+                    ins["r1i"].name: r1.detach().cpu().numpy(),
+                    ins["r2i"].name: r2.detach().cpu().numpy(),
+                    ins["r3i"].name: r3.detach().cpu().numpy(),
+                    ins["r4i"].name: r4.detach().cpu().numpy(),
+                    ins["downsample_ratio"].name: dr.detach().cpu().numpy(),
+                }
+                pha_np = ort_session.run(["pha"], feed)[0]
+                pha = torch.from_numpy(np.asarray(pha_np, dtype=np.float32)).to(
+                    device=face_chw_float_rgb_0_255.device
+                )
+        finally:
+            if is_lazy:
+                self.models_processor.hide_build_dialog.emit()
+        return pha.squeeze(0)
+
+    def run_u2netp_salient_alpha(
+        self, face_chw_float_rgb_0_255: torch.Tensor
+    ) -> torch.Tensor:
+        """u2netp (rembg): máscara saliente 1xHxW, entrada 320."""
+        model_name = "U2NetpSalientSeg"
+        dev = self.models_processor.device
+        H, W = int(face_chw_float_rgb_0_255.shape[1]), int(
+            face_chw_float_rgb_0_255.shape[2]
+        )
+        x = (face_chw_float_rgb_0_255.float() / 255.0).clamp(0.0, 1.0)
+        x = v2.functional.resize(x.unsqueeze(0), [320, 320], antialias=True)
+
+        ort_session = self.models_processor.models.get(model_name)
+        if ort_session is None:
+            ort_session = self.models_processor.load_model(model_name)
+        if ort_session is None:
+            return torch.ones((1, H, W), dtype=torch.float32, device=dev)
+
+        x = v2.functional.normalize(x, (0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        x = x.contiguous()
+        in_name = ort_session.get_inputs()[0].name
+        out_names = [o.name for o in ort_session.get_outputs()]
+        last_name = out_names[-1]
+
+        if dev == "cuda" and torch.cuda.is_available():
+            io = ort_session.io_binding()
+            io.bind_input(
+                name=in_name,
+                device_type=dev,
+                device_id=0,
+                element_type=np.float32,
+                shape=tuple(x.shape),
+                buffer_ptr=x.data_ptr(),
+            )
+            out_t = torch.empty(
+                (1, 1, 320, 320), dtype=torch.float32, device=dev
+            ).contiguous()
+            for name in out_names:
+                if name == last_name:
+                    io.bind_output(
+                        name=name,
+                        device_type=dev,
+                        device_id=0,
+                        element_type=np.float32,
+                        shape=tuple(out_t.shape),
+                        buffer_ptr=out_t.data_ptr(),
+                    )
+                else:
+                    io.bind_output(name, dev)
+            is_lazy = self.models_processor.check_and_clear_pending_build(model_name)
+            if is_lazy:
+                self.models_processor.show_build_dialog.emit(
+                    "Finalizing TensorRT Build",
+                    f"Performing first-run inference for:\n{model_name}\n\nThis may take several minutes.",
+                )
+            try:
+                torch.cuda.current_stream().synchronize()
+                ort_session.run_with_iobinding(io)
+                torch.cuda.current_stream().synchronize()
+            finally:
+                if is_lazy:
+                    self.models_processor.hide_build_dialog.emit()
+            prob = torch.sigmoid(out_t)
+        else:
+            x_np = x.detach().cpu().numpy()
+            out_list = ort_session.run(out_names, {in_name: x_np})
+            prob = torch.sigmoid(
+                torch.from_numpy(out_list[-1].astype(np.float32))
+            ).to(dev)
+
+        prob = v2.functional.resize(prob, [H, W], antialias=True)
+        return prob.squeeze(0)
 
     # --- Mouth Processing Logic ---
 
@@ -664,11 +869,11 @@ class FaceMasks:
         if not parameters.get("MouthParserStretchToggle", False):
             return None
 
-        labels_swap = self._faceparser_labels(swap_img)
+        labels_swap = self._faceparser_labels(swap_img, parameters)
 
         if parameters.get("MouthParserStretchOriginalToggle", False):
             # The user wants the ORIGINAL mouth (with Alignment and Zoom)
-            labels_orig = self._faceparser_labels(original_img)
+            labels_orig = self._faceparser_labels(original_img, parameters)
             return self._enhance_and_align_original_mouth(
                 original_img, swap_img, labels_orig, labels_swap, parameters
             )
@@ -743,7 +948,7 @@ class FaceMasks:
             or need_mouth_stretch
             or need_xseg_mouth_protection
         ):
-            labels_swap = self._faceparser_labels(swap_restorecalc)
+            labels_swap = self._faceparser_labels(swap_restorecalc, parameters)
 
         # We need Original labels if Parser/MouthStretch/ExcludeMask is active
         should_get_orig_labels = need_mouth_stretch or (
@@ -755,7 +960,7 @@ class FaceMasks:
         )
 
         if should_get_orig_labels:
-            labels_orig = self._faceparser_labels(original_face_512)
+            labels_orig = self._faceparser_labels(original_face_512, parameters)
 
         # FM-12: removed dead code (was triple-quoted string acting as a comment)
         # ---------- 1. MOUTH FIT & ALIGN LOGIC ----------
@@ -1044,7 +1249,7 @@ class FaceMasks:
             and original_face_512 is not None
         ):
             # 1. Get FaceParser labels for original face
-            labels = self._faceparser_labels(original_face_512)
+            labels = self._faceparser_labels(original_face_512, parameters)
 
             # 2. Extract Inner Mouth (Class 11)
             mouth_mask = self._mask_from_labels_lut(labels, [11])

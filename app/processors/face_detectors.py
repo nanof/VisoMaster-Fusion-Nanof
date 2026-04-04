@@ -113,6 +113,7 @@ class FaceDetectors:
             "SCRFD": {"model_name": "SCRFD2.5g", "function": self.detect_scrdf},
             "Yolov8": {"model_name": "YoloFace8n", "function": self.detect_yoloface},
             "Yunet": {"model_name": "YunetN", "function": self.detect_yunet},
+            "Yunet-2023": {"model_name": "Yunet2023Mar", "function": self.detect_yunet},
         }
 
     def _get_runner_lock(self, runner):
@@ -884,6 +885,7 @@ class FaceDetectors:
             "from_points": from_points,
             "rotation_angles": rotation_angles,
             "ort_session": ort_session,
+            "detector_model_name": model_name,
         }
         args.update(kwargs)
 
@@ -1695,7 +1697,7 @@ class FaceDetectors:
 
     def detect_yunet(self, **kwargs):
         """Runs the Yunet detection pipeline."""
-        model_name = "YunetN"
+        model_name = kwargs.get("detector_model_name") or "YunetN"
         ort_session = kwargs.get("ort_session")
 
         img, score, rotation_angles = (

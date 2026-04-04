@@ -4120,28 +4120,34 @@ class FrameWorker(threading.Thread):
                 input_face_affined = original_face_256
 
         # --- SimSwap Logic ---
-        elif swapper_model == "SimSwap512":
+        elif swapper_model in ("SimSwap512", "SimSwap512-CrossFace"):
             _device = self.models_processor.device
             if cached_source_latent_torch is not None:
                 latent_s = cached_source_latent_torch
             else:
-                latent_s = (
-                    torch.from_numpy(
-                        self.models_processor.calc_swapper_latent_simswap512(s_e)
-                    )
-                    .float()
-                    .to(_device)
-                )
+                if swapper_model == "SimSwap512-CrossFace":
+                    _src_np = self.models_processor.calc_crossface_simswap_latent(s_e)
+                    if _src_np is None:
+                        print(
+                            "[ERROR] SimSwap512-CrossFace latent prep failed (source). Skipping swap."
+                        )
+                        return input_face_affined, dfm_model_instance, dim, latent
+                else:
+                    _src_np = self.models_processor.calc_swapper_latent_simswap512(s_e)
+                latent_s = torch.from_numpy(_src_np).float().to(_device)
                 self._store_raw_source_latent_in_cache(
                     latent_s, source_latent_out_cache, s_e, swapper_model
                 )
-            dst_latent = (
-                torch.from_numpy(
-                    self.models_processor.calc_swapper_latent_simswap512(t_e)
-                )
-                .float()
-                .to(_device)
-            )
+            if swapper_model == "SimSwap512-CrossFace":
+                _dst_np = self.models_processor.calc_crossface_simswap_latent(t_e)
+                if _dst_np is None:
+                    print(
+                        "[ERROR] SimSwap512-CrossFace latent prep failed (target). Skipping swap."
+                    )
+                    return input_face_affined, dfm_model_instance, dim, latent
+            else:
+                _dst_np = self.models_processor.calc_swapper_latent_simswap512(t_e)
+            dst_latent = torch.from_numpy(_dst_np).float().to(_device)
 
             latent = self._apply_likeness(latent_s, dst_latent, parameters)
 
@@ -4665,7 +4671,7 @@ class FrameWorker(threading.Thread):
                     output = torch.mul(output, 255)
                     output = torch.clamp(output, 0, 255)
 
-        elif swapper_model == "SimSwap512":
+        elif swapper_model in ("SimSwap512", "SimSwap512-CrossFace"):
             for k in range(
                 itex
             ):  # FW-QUAL-06: renamed k -> _ - Fix : restored k to prevent crash
@@ -5769,6 +5775,8 @@ class FrameWorker(threading.Thread):
         _swap_restore_needs_clone = (
             parameters.get("OccluderEnableToggle", False)
             or need_any_parser
+            or parameters.get("PortraitMattingRVMEnableToggle", False)
+            or parameters.get("U2NetSalientMaskEnableToggle", False)
             or (
                 parameters.get("FaceEditorEnableToggle", False)
                 and self.local_control_state_from_feeder.get("edit_enabled", True)
@@ -5823,6 +5831,36 @@ class FrameWorker(threading.Thread):
             )
             swap_mask = gauss(swap_mask)
 
+            if swap_mask_noFP.shape[-1] != swap_mask.shape[-1]:
+                swap_mask_noFP = self._get_cached_resize_bilinear_aa(
+                    swap_mask.shape[-2], swap_mask.shape[-1]
+                )(swap_mask_noFP)
+            swap_mask_noFP *= swap_mask
+
+        if parameters.get("PortraitMattingRVMEnableToggle", False):
+            alpha = self.models_processor.face_masks.run_rvm_portrait_alpha(
+                swap_restorecalc
+            )
+            if alpha.shape[-1] != swap_mask.shape[-1]:
+                alpha = self._get_cached_resize_bilinear_aa(
+                    swap_mask.shape[-2], swap_mask.shape[-1]
+                )(alpha.unsqueeze(0)).squeeze(0)
+            swap_mask = swap_mask * alpha
+            if swap_mask_noFP.shape[-1] != swap_mask.shape[-1]:
+                swap_mask_noFP = self._get_cached_resize_bilinear_aa(
+                    swap_mask.shape[-2], swap_mask.shape[-1]
+                )(swap_mask_noFP)
+            swap_mask_noFP *= swap_mask
+
+        if parameters.get("U2NetSalientMaskEnableToggle", False):
+            sal = self.models_processor.face_masks.run_u2netp_salient_alpha(
+                swap_restorecalc
+            )
+            if sal.shape[-1] != swap_mask.shape[-1]:
+                sal = self._get_cached_resize_bilinear_aa(
+                    swap_mask.shape[-2], swap_mask.shape[-1]
+                )(sal.unsqueeze(0)).squeeze(0)
+            swap_mask = swap_mask * sal
             if swap_mask_noFP.shape[-1] != swap_mask.shape[-1]:
                 swap_mask_noFP = self._get_cached_resize_bilinear_aa(
                     swap_mask.shape[-2], swap_mask.shape[-1]

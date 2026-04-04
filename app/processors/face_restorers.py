@@ -74,6 +74,7 @@ class FaceRestorers:
             "GPEN-1024": "GPENBFR1024",
             "GPEN-2048": "GPENBFR2048",
             "RestoreFormer++": "RestoreFormerPlusPlus",
+            "RestoreFormer": "RestoreFormerFP16",
             "VQFR-v2": "VQFRv2",
         }
 
@@ -738,6 +739,14 @@ class FaceRestorers:
                 device=self.models_processor.device,
             ).contiguous()
             self.run_RestoreFormerPlusPlus(temp, outpred)
+
+        elif restorer_type == "RestoreFormer":
+            outpred = torch.empty(
+                (1, 3, 512, 512),
+                dtype=torch.float32,
+                device=self.models_processor.device,
+            ).contiguous()
+            self.run_RestoreFormer(temp, outpred)
 
         elif restorer_type == "VQFR-v2":
             outpred = torch.empty(
@@ -1475,6 +1484,38 @@ class FaceRestorers:
 
         # Run the model with lazy build handling
         self._run_model_with_lazy_build_check(model_name, ort_session, io_binding)
+
+    def run_RestoreFormer(self, image_fp32_nchw, output_fp32_nchw):
+        """RestoreFormer base (FP16 ONNX): entrada/salida NCHW normalizada [-1,1]."""
+        model_name = "RestoreFormerFP16"
+        ort_session = self._get_model_session(model_name)
+        if not ort_session:
+            return
+        x16 = image_fp32_nchw.half().contiguous()
+        out16 = torch.empty(
+            (1, 3, 512, 512),
+            dtype=torch.float16,
+            device=self.models_processor.device,
+        ).contiguous()
+        io_binding = ort_session.io_binding()
+        io_binding.bind_input(
+            name="input",
+            device_type=self.models_processor.device,
+            device_id=0,
+            element_type=np.float16,
+            shape=tuple(x16.shape),
+            buffer_ptr=x16.data_ptr(),
+        )
+        io_binding.bind_output(
+            name="output",
+            device_type=self.models_processor.device,
+            device_id=0,
+            element_type=np.float16,
+            shape=tuple(out16.shape),
+            buffer_ptr=out16.data_ptr(),
+        )
+        self._run_model_with_lazy_build_check(model_name, ort_session, io_binding)
+        output_fp32_nchw.copy_(out16.float())
 
     def run_RestoreFormerPlusPlus(self, image, output):
         if self.models_processor.provider_name == "Custom":

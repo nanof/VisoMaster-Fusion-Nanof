@@ -234,6 +234,19 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "exec_function": control_actions.handle_frame_interpolation_method_change,
             "exec_function_args": ["FrameInterpolationMethodSelection"],
         },
+        "PreviewNeuralInterpolationModelSelection": {
+            "level": 3,
+            "label": "Neural ONNX checkpoint",
+            "options": ["RifePreviewInterp", "RifePreviewInterpAlt"],
+            "default": "RifePreviewInterp",
+            "parentToggle": "PreviewFrameGenEnableToggle",
+            "requiredToggleValue": True,
+            "parentSelection": "FrameInterpolationMethodSelection",
+            "requiredSelectionValue": "Neural (ONNX)",
+            "help": "Dos ranuras RIFE (TensorStack): misma arquitectura; la alternativa permite sustituir el archivo en interp/ sin tocar el predeterminado.",
+            "exec_function": control_actions.handle_preview_neural_interp_model_change,
+            "exec_function_args": ["PreviewNeuralInterpolationModelSelection"],
+        },
         "PreviewFrameGenIntermediateCountSelection": {
             "level": 2,
             "label": "Interpolation steps (K)",
@@ -539,7 +552,7 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
         "DetectorModelSelection": {
             "level": 1,
             "label": "Face Detect Model",
-            "options": ["RetinaFace", "Yolov8", "SCRFD", "Yunet"],
+            "options": ["RetinaFace", "Yolov8", "SCRFD", "Yunet", "Yunet-2023"],
             "default": "RetinaFace",
             "help": "Select the face detection model. To benchmark alternatives, use the same video and VISIOMASTER_PERF_BUNDLE=1; keep RecognitionModel matched to the swapper (e.g. Inswapper128ArcFace with Inswapper128).",
         },

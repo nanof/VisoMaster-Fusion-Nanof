@@ -854,7 +854,7 @@ class FaceEditors:
             raise RuntimeError(
                 "models_processor.face_masks._faceparser_labels is not available."
             )
-        return fm._faceparser_labels(img_uint8_3x512x512)
+        return fm._faceparser_labels(img_uint8_3x512x512, None)
 
     def face_parser_makeup_direct_rgb_masked(
         self,

@@ -337,19 +337,35 @@ def handle_face_mask_state_change(
     main_window: "MainWindow", new_value: bool, control_name: str
 ):
     """Loads or unloads a specific face mask model based on its toggle state."""
+    mp = main_window.models_processor
+    if control_name == "FaceParserEnableToggle":
+        if new_value:
+            bb = main_window.current_widget_parameters.get(
+                "FaceParserBackboneSelection", "ResNet34"
+            )
+            if bb == "BiSeNet-18":
+                mp.load_model("FaceParsingBiSeNet18")
+            else:
+                mp.load_model("FaceParser")
+        else:
+            mp.unload_model("FaceParser")
+            mp.unload_model("FaceParsingBiSeNet18")
+        return
+
     model_map = {
         "OccluderEnableToggle": "Occluder",
         "DFLXSegEnableToggle": "XSeg",
-        "FaceParserEnableToggle": "FaceParser",
+        "PortraitMattingRVMEnableToggle": "RvmPortraitMatting",
+        "U2NetSalientMaskEnableToggle": "U2NetpSalientSeg",
     }
     model_to_change = model_map.get(control_name)
     if not model_to_change:
         return
 
     if new_value:
-        main_window.models_processor.load_model(model_to_change)
+        mp.load_model(model_to_change)
     else:
-        main_window.models_processor.unload_model(model_to_change)
+        mp.unload_model(model_to_change)
 
 
 def handle_restorer_state_change(
@@ -586,6 +602,29 @@ def handle_frame_interpolation_method_change(
 ):
     """Switching Linear vs Neural: load or unload RIFE accordingly."""
     sync_rife_preview_interpolation_model(main_window)
+
+
+def handle_preview_neural_interp_model_change(
+    main_window: "MainWindow", new_value: str, control_name: str
+):
+    """Al cambiar el checkpoint RIFE, descargar sesiones para evitar mezclar motores TRT."""
+    sync_rife_preview_interpolation_model(main_window)
+
+
+def handle_face_parser_backbone_change(
+    main_window: "MainWindow", new_backbone: str, control_name: str
+):
+    """Precarga el ONNX de parsing coherente con la espina dorsal elegida."""
+    params = main_window.current_widget_parameters
+    if not params.get("FaceParserEnableToggle", False):
+        return
+    mp = main_window.models_processor
+    mp.unload_model("FaceParser")
+    mp.unload_model("FaceParsingBiSeNet18")
+    if new_backbone == "BiSeNet-18":
+        mp.load_model("FaceParsingBiSeNet18")
+    else:
+        mp.load_model("FaceParser")
 
 
 def handle_frame_enhancer_state_change(

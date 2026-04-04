@@ -1,6 +1,6 @@
 from pathlib import Path
 from app.helpers.downloader import download_file
-from app.processors.models_data import models_list
+from app.processors.models_data import models_list, pytorch_assets_list
 
 # When USE_OPTIMIZED_MODELS=true is set in portable.cfg (written by the
 # launcher after running "Optimize Models (onnxsim)"), skip the hash check
@@ -13,7 +13,7 @@ if _cfg_path.is_file():
             _skip_hash = True
             break
 
-for model_data in models_list:
+for model_data in models_list + list(pytorch_assets_list):
     download_file(
         model_data["model_name"],
         model_data["local_path"],

@@ -34,6 +34,7 @@ class FaceSwappers:
             "InStyleSwapper256 Version B",
             "InStyleSwapper256 Version C",
             "SimSwap512",
+            "SimSwap512-CrossFace",
             "GhostFacev1",
             "GhostFacev2",
             "GhostFacev3",
@@ -44,7 +45,7 @@ class FaceSwappers:
             "CSCS",
         ]
         # ONNX used only with ReHiFace-S (FaceFusion crossface_hififace); unload with swapper cleanup
-        self._crossface_aux_model_names = ("CrossFaceHiFaceS",)
+        self._crossface_aux_model_names = ("CrossFaceHiFaceS", "CrossFaceSimSwap")
         self.arcface_models = [
             "Inswapper128ArcFace",
             "SimSwapArcFace",
@@ -1237,6 +1238,52 @@ class FaceSwappers:
             buffer_ptr=out_t.data_ptr(),
         )
         self._run_model_with_lazy_build_check("CrossFaceHiFaceS", cross, io_binding)
+
+        v = out_t.detach().float().cpu().numpy().reshape(-1)
+        n = float(np.linalg.norm(v))
+        if n < 1e-8:
+            return v.reshape(1, -1)
+        return (v / n).reshape(1, -1).astype(np.float32)
+
+    def calc_crossface_simswap_latent(self, source_embedding):
+        """SimSwap512-CrossFace: ArcFace w600k 512-D -> crossface_simswap -> L2 (1, 512)."""
+        if source_embedding is None or len(source_embedding) == 0:
+            return None
+        cross = self.models_processor.models.get("CrossFaceSimSwap")
+        if cross is None:
+            cross = self.models_processor.load_model("CrossFaceSimSwap")
+        if cross is None:
+            print("[ERROR] CrossFaceSimSwap model not loaded.")
+            return None
+
+        emb = (
+            torch.from_numpy(np.asarray(source_embedding, dtype=np.float32).reshape(1, -1))
+            .contiguous()
+            .to(self.models_processor.device)
+        )
+        out_t = torch.empty(
+            (1, 512),
+            dtype=torch.float32,
+            device=self.models_processor.device,
+        ).contiguous()
+        io_binding = cross.io_binding()
+        io_binding.bind_input(
+            name="input",
+            device_type=self.models_processor.device,
+            device_id=0,
+            element_type=np.float32,
+            shape=(1, 512),
+            buffer_ptr=emb.data_ptr(),
+        )
+        io_binding.bind_output(
+            name="output",
+            device_type=self.models_processor.device,
+            device_id=0,
+            element_type=np.float32,
+            shape=(1, 512),
+            buffer_ptr=out_t.data_ptr(),
+        )
+        self._run_model_with_lazy_build_check("CrossFaceSimSwap", cross, io_binding)
 
         v = out_t.detach().float().cpu().numpy().reshape(-1)
         n = float(np.linalg.norm(v))

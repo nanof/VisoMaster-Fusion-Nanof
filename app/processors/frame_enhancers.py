@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 # Preview frame interpolation (TensorStack/RIFE ONNX): img0, img1, timestep -> output
 RIFE_PREVIEW_MODEL_NAME = "RifePreviewInterp"
+RIFE_PREVIEW_MODEL_NAMES = ("RifePreviewInterp", "RifePreviewInterpAlt")
 _RIFE_ALIGN = 32
 
 
@@ -65,11 +66,12 @@ class FrameEnhancers:
                 self.current_enhancer_model = None
 
     def unload_rife_preview_model(self) -> None:
-        """Unload RIFE preview-interpolation ONNX session if loaded."""
+        """Unload RIFE preview-interpolation ONNX session(s) if loaded."""
         with self.models_processor.model_lock:
-            if self.current_rife_preview_model:
-                self.models_processor.unload_model(self.current_rife_preview_model)
-                self.current_rife_preview_model = None
+            for name in RIFE_PREVIEW_MODEL_NAMES:
+                if self.models_processor.models.get(name):
+                    self.models_processor.unload_model(name)
+            self.current_rife_preview_model = None
 
     @staticmethod
     def _bgr_hwc_uint8_to_rgb01_nchw(
@@ -90,6 +92,7 @@ class FrameEnhancers:
         img0_bgr: np.ndarray,
         img1_bgr: np.ndarray,
         timestep: float = 0.5,
+        model_key: str | None = None,
     ) -> np.ndarray:
         """
         One RIFE forward between two BGR uint8 HWC frames (same shape). Pads to /32.
@@ -102,15 +105,18 @@ class FrameEnhancers:
         ):
             return img1_bgr
         h0, w0 = int(img0_bgr.shape[0]), int(img0_bgr.shape[1])
-        ort_session = self.models_processor.models.get(RIFE_PREVIEW_MODEL_NAME)
+        mk = model_key or RIFE_PREVIEW_MODEL_NAME
+        if mk not in RIFE_PREVIEW_MODEL_NAMES:
+            mk = RIFE_PREVIEW_MODEL_NAME
+        ort_session = self.models_processor.models.get(mk)
         if not ort_session:
             print(
                 "[INFO] RIFE preview interpolation: loading model (first use; may take a while)…"
             )
-            sess = self.models_processor.load_model(RIFE_PREVIEW_MODEL_NAME)
+            sess = self.models_processor.load_model(mk)
             if sess:
-                self.current_rife_preview_model = RIFE_PREVIEW_MODEL_NAME
-            ort_session = self.models_processor.models.get(RIFE_PREVIEW_MODEL_NAME)
+                self.current_rife_preview_model = mk
+            ort_session = self.models_processor.models.get(mk)
         if not ort_session:
             return (
                 img0_bgr.astype(np.float32) * 0.5 + img1_bgr.astype(np.float32) * 0.5
@@ -181,9 +187,7 @@ class FrameEnhancers:
                     shape=tuple(out_t.shape),
                     buffer_ptr=out_t.data_ptr(),
                 )
-                self._run_model_with_lazy_build_check(
-                    RIFE_PREVIEW_MODEL_NAME, ort_session, io_binding
-                )
+                self._run_model_with_lazy_build_check(mk, ort_session, io_binding)
                 torch.cuda.current_stream().synchronize()
             else:
                 out_np = ort_session.run(

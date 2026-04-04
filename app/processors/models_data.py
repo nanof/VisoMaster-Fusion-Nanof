@@ -6,6 +6,18 @@ models_dir = Path(__file__).resolve().parent.parent.parent / "model_assets"
 refldm_ckpts_path = models_dir / "ref-ldm_embedding/ckpts"
 os.makedirs(refldm_ckpts_path, exist_ok=True)
 
+# Plan multi-categoría: subcarpetas estándar bajo model_assets/
+for _sub in (
+    "swap_512",
+    "matting",
+    "sam2",
+    "sr_extra",
+    "interp",
+    "parsing",
+    "pytorch_weights",
+):
+    os.makedirs(models_dir / _sub, exist_ok=True)
+
 assets_repo = "https://github.com/visomaster/visomaster-assets/releases/download"
 
 try:
@@ -65,6 +77,7 @@ arcface_mapping_model_dict = {
     "InStyleSwapper256 Version C": "Inswapper128ArcFace",
     "DeepFaceLive (DFM)": "Inswapper128ArcFace",
     "SimSwap512": "SimSwapArcFace",
+    "SimSwap512-CrossFace": "Inswapper128ArcFace",
     "GhostFace-v1": "GhostArcFace",
     "GhostFace-v2": "GhostArcFace",
     "GhostFace-v3": "GhostArcFace",
@@ -80,6 +93,7 @@ detection_model_mapping = {
     "SCRFD": "SCRFD2.5g",
     "Yolov8": "YoloFace8n",
     "Yunet": "YunetN",
+    "Yunet-2023": "Yunet2023Mar",
 }
 
 landmark_model_mapping = {
@@ -390,6 +404,12 @@ models_list = [
         "url": "https://huggingface.co/TensorStack/RIFE/resolve/main/model.onnx",
     },
     {
+        "model_name": "RifePreviewInterpAlt",
+        "local_path": f"{models_dir}/interp/rife_preview_interp_alt.onnx",
+        "hash": "76e4cef9ab42fa7dd4e8f6e4aba47462051e3faa969e4bca6479784fbab0ac6f",
+        "url": "https://huggingface.co/TensorStack/RIFE/resolve/main/model.onnx",
+    },
+    {
         "model_name": "DeoldifyArt",
         "local_path": f"{models_dir}/ColorizeArtistic.fp16.onnx",
         "hash": "c8ad5c54b1b333361e959fdc6591828931b731f6652055f891d6118532cad081",
@@ -436,6 +456,42 @@ models_list = [
         "local_path": f"{models_dir}/faceparser_resnet34.onnx",
         "hash": "5b805bba7b5660ab7070b5a381dcf75e5b3e04199f1e9387232a77a00095102e",
         "url": f"{assets_repo}/v0.1.0/faceparser_resnet34.onnx",
+    },
+    {
+        "model_name": "FaceParsingBiSeNet18",
+        "local_path": f"{models_dir}/parsing/face_parsing_bisenet18.onnx",
+        "hash": "0d9bd318e46987c3bdbfacae9e2c0f461cae1c6ac6ea6d43bbe541a91727e33f",
+        "url": "https://github.com/yakhyo/face-parsing/releases/download/weights/resnet18.onnx",
+    },
+    {
+        "model_name": "CrossFaceSimSwap",
+        "local_path": f"{models_dir}/crossface_simswap.onnx",
+        "hash": "6452a261ec30cc30afdbe4a426d82c3b10a476f2df794e3494071c02574e6829",
+        "url": "https://huggingface.co/facefusion/models-3.4.0/resolve/main/crossface_simswap.onnx",
+    },
+    {
+        "model_name": "RvmPortraitMatting",
+        "local_path": f"{models_dir}/matting/rvm_mobilenetv3_fp32.onnx",
+        "hash": "88d4531297118f595bf2fd60f6f566aec2e559393802d1f436c380f0cbbd2828",
+        "url": "https://github.com/PeterL1n/RobustVideoMatting/releases/download/v1.0.0/rvm_mobilenetv3_fp32.onnx",
+    },
+    {
+        "model_name": "U2NetpSalientSeg",
+        "local_path": f"{models_dir}/sam2/u2netp_human_seg.onnx",
+        "hash": "309c8469258dda742793dce0ebea8e6dd393174f89934733ecc8b14c76f4ddd8",
+        "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx",
+    },
+    {
+        "model_name": "RestoreFormerFP16",
+        "local_path": f"{models_dir}/RestoreFormer.fp16.onnx",
+        "hash": "150a5e35395012933614b3770b63b22b1c75f5d38087857969256baacfff4006",
+        "url": "https://huggingface.co/netrunner-exe/Face-Upscalers-onnx/resolve/main/restoreformer.fp16.onnx",
+    },
+    {
+        "model_name": "Yunet2023Mar",
+        "local_path": f"{models_dir}/yunet_2023_mar.onnx",
+        "hash": "490d79bc15c0e958d91c999c566c6a338b310ead96e0274dd004e59dd6abecb9",
+        "url": "https://huggingface.co/facefusion/models-3.4.0/resolve/main/yunet_2023_mar.onnx",
     },
     {
         "model_name": "combo_relu3_3_relu3_1",
@@ -528,3 +584,6 @@ models_list = [
         "url": "https://github.com/VisoMasterFusion/VisoMaster-Fusion/releases/download/v1.0.0/face_reaging.onnx",
     },
 ]
+
+# Pesos opcionales (PyTorch / retalking): descarga con download_models.py si la lista no está vacía.
+pytorch_assets_list: list = []

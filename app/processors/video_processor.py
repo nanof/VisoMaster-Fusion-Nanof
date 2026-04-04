@@ -2057,8 +2057,15 @@ class VideoProcessor(QObject):
                     self._preview_frame_gen_substep = 0
                     w0 = 1.0 / float(k_int + 1)
                     if self._preview_frame_interpolation_is_neural():
+                        _rife_key = self.main_window.control.get(
+                            "PreviewNeuralInterpolationModelSelection",
+                            "RifePreviewInterp",
+                        )
                         frame = self.main_window.models_processor.frame_enhancers.run_rife_preview_interpolate(
-                            prev_arr, frame, timestep=float(w0)
+                            prev_arr,
+                            frame,
+                            timestep=float(w0),
+                            model_key=str(_rife_key),
                         )
                     else:
                         frame = self._preview_frame_gen_lerp(prev_arr, frame, w0)

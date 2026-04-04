@@ -1,0 +1,8 @@
+# Dependencias opcionales para pipelines PyTorch (InstantID, retalking, etc.).
+# Instalar solo si usas VISOFUSION_PYTORCH_EXTRAS=1 y módulos en app/processors/pytorch_extras/.
+#
+# pip install -r requirements-pytorch-extra.txt
+
+torch>=2.1.0
+torchvision>=0.16.0
+numpy>=1.24.0

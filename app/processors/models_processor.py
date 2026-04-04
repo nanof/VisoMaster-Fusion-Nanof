@@ -186,6 +186,11 @@ def gamma_decode_srgb_to_linear_rgb(srgb: torch.Tensor, gamma=SRGB_GAMMA):
         return torch.pow(srgb.clamp(0.0, 1.0), gamma)
 
 
+# TensorRT EP needs static shapes on subgraph inputs; some ONNX exports omit them
+# (ORT CUDA still runs them). See ORT: shape inference for TensorRT subgraphs.
+ONNX_MODELS_SKIP_TENSORRT_EP = frozenset({"RvmPortraitMatting"})
+
+
 class ModelsProcessor(QtCore.QObject):
     """
     Central hub for managing AI models (ONNX, TensorRT, PyTorch).
@@ -576,6 +581,20 @@ class ModelsProcessor(QtCore.QObject):
             print(f"[ERROR] Failed TensorRT cache check: {e}")
             return False
 
+    def _providers_for_onnx_model(self, model_name: str):
+        """ORT provider list for one ONNX file (CUDA fallback when TRT cannot init)."""
+        if model_name not in ONNX_MODELS_SKIP_TENSORRT_EP:
+            return self.providers
+        uses_trt = any(
+            (p[0] if isinstance(p, tuple) else p) == "TensorrtExecutionProvider"
+            for p in self.providers
+        )
+        if not uses_trt:
+            return self.providers
+        if self.device == "cpu":
+            return [("CPUExecutionProvider")]
+        return [("CUDAExecutionProvider"), ("CPUExecutionProvider")]
+
     def load_model(self, model_name, session_options=None):
         """
         Loads an AI model (ONNX or TRT) with thread safety.
@@ -597,6 +616,15 @@ class ModelsProcessor(QtCore.QObject):
                     f"[ERROR] Model path for '{model_name}' not found in models_data."
                 )
                 return None
+
+            providers_for_model = self._providers_for_onnx_model(model_name)
+            if (
+                model_name in ONNX_MODELS_SKIP_TENSORRT_EP
+                and providers_for_model is not self.providers
+            ):
+                print(
+                    f"[INFO] {model_name}: using CUDA EP (TensorRT EP incompatible with this ONNX graph)."
+                )
 
             # If TensorRT-Engine provider is selected, prioritize loading/building the TRT engine.
             if self.provider_name in ["TensorRT", "TensorRT-Engine"]:
@@ -624,7 +652,7 @@ class ModelsProcessor(QtCore.QObject):
             )
             is_tensorrt_load = any(
                 (p[0] if isinstance(p, tuple) else p) == "TensorrtExecutionProvider"
-                for p in self.providers
+                for p in providers_for_model
             )
 
             if onnx_path.lower().endswith(".onnx"):
@@ -680,7 +708,7 @@ class ModelsProcessor(QtCore.QObject):
                                 # Use the 'providers' variable
                                 current_providers_list = [
                                     p[0] if isinstance(p, tuple) else p
-                                    for p in self.providers
+                                    for p in providers_for_model
                                 ]
                                 probe_process = ctx.Process(
                                     target=_probe_onnx_model_worker,
@@ -766,13 +794,13 @@ class ModelsProcessor(QtCore.QObject):
                 if session_options is None:
                     model_instance = onnxruntime.InferenceSession(
                         self.models_path[model_name],
-                        providers=self.providers,
+                        providers=providers_for_model,
                     )
                 else:
                     model_instance = onnxruntime.InferenceSession(
                         self.models_path[model_name],
                         sess_options=session_options,
-                        providers=self.providers,
+                        providers=providers_for_model,
                     )
 
                 # This ensures the CUDA context is synchronized after a new TRT
@@ -1834,6 +1862,9 @@ class ModelsProcessor(QtCore.QObject):
 
     def calc_rehiface_source_latent(self, source_embedding):
         return self.face_swappers.calc_rehiface_source_latent(source_embedding)
+
+    def calc_crossface_simswap_latent(self, source_embedding):
+        return self.face_swappers.calc_crossface_simswap_latent(source_embedding)
 
     def run_rehiface(self, image, embedding, output):
         self.face_swappers.run_rehiface(image, embedding, output)
