@@ -599,7 +599,7 @@ class FaceDetectors:
             elif self.models_processor.device != "cpu":
                 self.models_processor.syncvec.cpu()
 
-            ort_session.run_with_iobinding(io_binding)
+            self.models_processor.run_session_with_iobinding(ort_session, io_binding)
 
             if os.environ.get("VISIOMASTER_ORT_IOBINDING_POST_SYNC", "").strip().lower() in (
                 "1",

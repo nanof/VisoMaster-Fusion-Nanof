@@ -236,7 +236,7 @@ class FrameEnhancers:
             )
 
         try:
-            ort_session.run_with_iobinding(io_binding)
+            self.models_processor.run_session_with_iobinding(ort_session, io_binding)
         finally:
             # Always hide the dialog, even if the run fails
             if is_lazy_build:

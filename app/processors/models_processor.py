@@ -251,6 +251,10 @@ class ModelsProcessor(QtCore.QObject):
         # captures don't compete for resources.  All _get_*_runner() lazy-builders
         # MUST hold this lock while calling torch.cuda.graph() / build_cuda_graph_runner().
         self.cuda_graph_capture_lock = threading.Lock()
+        # MP-CUDA-02: Serialize ORT GPU inference across threads. Concurrent TRT/CUDA EP
+        # runs (e.g. RIFE preview + face landmarks on different threads) can trigger
+        # CUDA error 906 (legacy stream sync vs. peer graph capture).
+        self.ort_cuda_inference_lock = threading.Lock()
         self._triton_dialog_hooks_registered = False
         self._compile_callbacks_registered = False
 
@@ -936,6 +940,7 @@ class ModelsProcessor(QtCore.QObject):
                     self.main_window.dfm_model_manager.get_models_data()[dfm_model],
                     dfm_providers,
                     self.device,
+                    ort_cuda_run_lock=self.ort_cuda_inference_lock,
                 )
             except Exception:
                 print(f"[ERROR] Failed to load DFM model {dfm_model}.")
@@ -1308,6 +1313,14 @@ class ModelsProcessor(QtCore.QObject):
         self.alphas_cumprod_torch = self.alphas_cumprod_torch.to(self.device)
 
         return self.provider_name
+
+    def run_session_with_iobinding(self, session, io_binding) -> None:
+        """Run ORT with IO binding; serialized on CUDA to avoid cross-thread capture races."""
+        if self.device == "cuda":
+            with self.ort_cuda_inference_lock:
+                session.run_with_iobinding(io_binding)
+        else:
+            session.run_with_iobinding(io_binding)
 
     def set_number_of_threads(self, value):
         """Sets the ONNX thread count and unloads all TRT-Engine models so they rebuild with the new setting."""

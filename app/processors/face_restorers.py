@@ -571,7 +571,7 @@ class FaceRestorers:
                 # by synchronizing with a placeholder vector.
                 self.models_processor.syncvec.cpu()
 
-            ort_session.run_with_iobinding(io_binding)
+            self.models_processor.run_session_with_iobinding(ort_session, io_binding)
 
         finally:
             if is_lazy_build:

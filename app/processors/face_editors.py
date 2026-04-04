@@ -192,7 +192,7 @@ class FaceEditors:
             elif self.models_processor.device != "cpu":
                 self.models_processor.syncvec.cpu()
 
-            model.run_with_iobinding(io_binding)
+            self.models_processor.run_session_with_iobinding(model, io_binding)
 
         finally:
             if is_lazy_build:

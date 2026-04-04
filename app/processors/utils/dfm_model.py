@@ -31,10 +31,11 @@ def _load_model_bytes_with_shape_inference(model_path: str) -> bytes:
 
 
 class DFMModel:
-    def __init__(self, model_path: str, providers, device="cuda"):
+    def __init__(self, model_path: str, providers, device="cuda", ort_cuda_run_lock=None):
         self._model_path = model_path
         self.providers = providers
         self.device = device
+        self._ort_cuda_run_lock = ort_cuda_run_lock
         self.syncvec = torch.empty((1, 1), dtype=torch.float32, device=device)
 
         # Run ONNX shape inference before session creation so TensorRT can
@@ -201,7 +202,11 @@ class DFMModel:
 
         if self.device == "cuda":
             torch.cuda.current_stream().synchronize()
-        self._sess.run_with_iobinding(io_binding)
+        if self.device == "cuda" and self._ort_cuda_run_lock is not None:
+            with self._ort_cuda_run_lock:
+                self._sess.run_with_iobinding(io_binding)
+        else:
+            self._sess.run_with_iobinding(io_binding)
 
         # Process outputs (resize, clip channels, and convert back to original dtype)
         out_face_mask = self.to_dtype(

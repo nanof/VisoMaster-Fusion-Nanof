@@ -362,7 +362,7 @@ class FaceMasks:
             elif self.models_processor.device != "cpu":
                 self.models_processor.syncvec.cpu()
 
-            ort_session.run_with_iobinding(io)
+            self.models_processor.run_session_with_iobinding(ort_session, io)
 
         finally:
             if is_lazy_build:
@@ -469,7 +469,7 @@ class FaceMasks:
                     buffer_ptr=pha.data_ptr(),
                 )
                 torch.cuda.current_stream().synchronize()
-                ort_session.run_with_iobinding(io)
+                self.models_processor.run_session_with_iobinding(ort_session, io)
                 torch.cuda.current_stream().synchronize()
             else:
                 feed = {
@@ -546,7 +546,7 @@ class FaceMasks:
                 )
             try:
                 torch.cuda.current_stream().synchronize()
-                ort_session.run_with_iobinding(io)
+                self.models_processor.run_session_with_iobinding(ort_session, io)
                 torch.cuda.current_stream().synchronize()
             finally:
                 if is_lazy:
@@ -1362,7 +1362,7 @@ class FaceMasks:
             elif self.models_processor.device != "cpu":
                 self.models_processor.syncvec.cpu()
 
-            ort_session.run_with_iobinding(io_binding)
+            self.models_processor.run_session_with_iobinding(ort_session, io_binding)
 
         finally:
             if is_lazy_build:
@@ -1589,7 +1589,7 @@ class FaceMasks:
             elif self.models_processor.device != "cpu":
                 self.models_processor.syncvec.cpu()
 
-            ort_session.run_with_iobinding(io_binding)
+            self.models_processor.run_session_with_iobinding(ort_session, io_binding)
 
         finally:
             if is_lazy_build:
@@ -1642,7 +1642,7 @@ class FaceMasks:
             elif self.models_processor.device != "cpu":
                 self.models_processor.syncvec.cpu()
 
-            sess.run_with_iobinding(io_binding)
+            self.models_processor.run_session_with_iobinding(sess, io_binding)
 
         finally:
             if is_lazy_build:
