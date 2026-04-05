@@ -213,11 +213,10 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "level": 1,
             "label": "Frame Interpolation",
             "default": False,
-            "help": "Preview and virtual cam only: extra frames between each processed frame so motion "
-            "looks smoother. Metronome step is divided by K+1 (linear) or 2 (neural) so playback speed "
-            "stays correct. Recording still writes only full processed frames (no extra FFmpeg frames). "
-            "Neural (ONNX) uses GPU/VRAM and RIFE; Linear uses OpenGL shader blends (K below) in the main video preview. "
-            "If preview drifts vs Live Sound, try disabling sync.",
+            "help": "Preview and virtual cam only: smoother motion between processed frames. Linear: "
+            "decoupled OpenGL crossfade. Neural: decoupled RIFE off the GUI thread. Use “Preview steps per frame” "
+            "for smoothness; metronome subdivides so playback speed stays correct. Recording writes only full "
+            "processed frames. If preview drifts vs Live Sound, try disabling sync.",
             "exec_function": control_actions.handle_preview_frame_interpolation_toggle,
             "exec_function_args": ["PreviewFrameGenEnableToggle"],
         },
@@ -228,9 +227,9 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "default": "Linear (GPU)",
             "parentToggle": "PreviewFrameGenEnableToggle",
             "requiredToggleValue": True,
-            "help": "Linear (GPU): K weighted mixes in the preview (OpenGL); K below. Virtual cam off "
-            "(needs a CPU frame path). Neural (ONNX): one RIFE intermediate per processed frame "
-            "(always 2 preview ticks), GPU-heavy; same preview/virtual-cam scope, not written to recording files.",
+            "help": "Linear (GPU): OpenGL decoupled preview (steps per frame below). Virtual cam off "
+            "(needs a CPU frame path). Neural (ONNX): RIFE off the GUI thread with the same step cadence; "
+            "GPU-heavy; same preview/virtual-cam scope, not written to recording files.",
             "exec_function": control_actions.handle_frame_interpolation_method_change,
             "exec_function_args": ["FrameInterpolationMethodSelection"],
         },
@@ -247,16 +246,18 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "exec_function": control_actions.handle_preview_neural_interp_model_change,
             "exec_function_args": ["PreviewNeuralInterpolationModelSelection"],
         },
-        "PreviewFrameGenIntermediateCountSelection": {
+        "PreviewInterpolationStepsPerFrameSelection": {
             "level": 2,
-            "label": "Interpolation steps (K)",
-            "options": ["1", "2", "3", "4", "5"],
-            "default": "1",
+            "label": "Preview steps per frame",
+            "options": ["2", "3", "4", "5", "6"],
+            "default": "2",
             "parentToggle": "PreviewFrameGenEnableToggle",
             "requiredToggleValue": True,
-            "help": "Linear mode only: K blend-only ticks before each full processed frame "
-            "(total preview ticks = K+1). Neural mode ignores K (fixed one RIFE step). "
-            "Higher K = smoother motion but more GPU upload work per processed frame and shorter time per tick.",
+            "help": "Single smoothness control for Linear and Neural: display substeps per processed frame "
+            "(2–6; capped vs video FPS so total rate stays ≤ ~240 Hz). Linear: more steps = smoother crossfade. "
+            "Neural: same cadence; RIFE timestep = 1/steps. Webcam/screen coupled preview uses K = steps − 1.",
+            "exec_function": control_actions.handle_preview_interpolation_steps_per_frame_change,
+            "exec_function_args": ["PreviewInterpolationStepsPerFrameSelection"],
         },
         "PreviewLinearBlendShaderSelection": {
             "level": 3,
@@ -278,33 +279,6 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "Luma-weighted: re-weight mix by local luminance (reduces some ghosting). "
             "Edge-aware: soften blend weight on strong edges (few extra taps). "
             "Pro: luma-weighted + edge-aware. Neural (RIFE) mode ignores this.",
-        },
-        "PreviewSmoothDisplayDecoupledToggle": {
-            "level": 3,
-            "label": "Smooth display (decoupled)",
-            "default": False,
-            "parentToggle": "PreviewFrameGenEnableToggle",
-            "requiredToggleValue": True,
-            "parentSelection": "FrameInterpolationMethodSelection",
-            "requiredSelectionValue": "Linear (GPU)",
-            "help": "Presenter redraws independent of pipeline latency. Refresh Hz = video FPS × "
-            "max(multiplier below, K+1) so it never falls below the non-decoupled linear tick rate "
-            "(capped ~240 Hz). Crossfade prev→curr after each new frame; metronome: one source frame "
-            "per step. Neural mode unchanged when you use that instead.",
-            "exec_function": control_actions.handle_smooth_display_decouple_toggle,
-            "exec_function_args": ["PreviewSmoothDisplayDecoupledToggle"],
-        },
-        "PreviewSmoothDisplayFpsMultiplierSelection": {
-            "level": 4,
-            "label": "Decoupled refresh (× video FPS)",
-            "options": ["1", "2", "3"],
-            "default": "2",
-            "parentToggle": "PreviewSmoothDisplayDecoupledToggle",
-            "requiredToggleValue": True,
-            "help": "Minimum ×1/×2/×3 over video FPS; effective rate uses max(this, K+1 from "
-            "Interpolation steps) so decoupled mode stays at least as smooth as coupled linear.",
-            "exec_function": control_actions.handle_smooth_display_fps_multiplier_change,
-            "exec_function_args": ["PreviewSmoothDisplayFpsMultiplierSelection"],
         },
         "FrameSkipStepSlider": {
             "level": 1,

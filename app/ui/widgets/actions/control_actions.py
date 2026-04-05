@@ -602,18 +602,9 @@ def handle_preview_frame_interpolation_toggle(
         main_window.video_processor._smooth_decouple_stop_presenter()
 
 
-def handle_smooth_display_decouple_toggle(
-    main_window: "MainWindow", new_value: bool, control_name: str
-):
-    del control_name
-    if not new_value:
-        main_window.video_processor._smooth_decouple_stop_presenter()
-
-
-def handle_smooth_display_fps_multiplier_change(
-    main_window: "MainWindow", mult_value: str, control_name: str
-):
-    del control_name, mult_value
+def handle_preview_interpolation_steps_per_frame_change(
+    main_window: "MainWindow", _value: str, _control_name: str
+) -> None:
     main_window.video_processor._smooth_decouple_refresh_presenter_rate()
 
 
@@ -829,7 +820,7 @@ def apply_face_reaging(main_window: "MainWindow", *_args) -> None:
         return
 
     target_face = main_window.cur_selected_target_face_button
-    if target_face is None:
+    if not target_face:
         return
 
     face_id = target_face.face_id
@@ -975,7 +966,7 @@ def handle_face_reaging_toggle_change(
         # Toggle just enabled — user still needs to press Apply, nothing to clear.
         return
     target_face = main_window.cur_selected_target_face_button
-    if target_face is None:
+    if not target_face:
         return
     target_face.aged_input_embedding = {}
     target_face.aged_kv_map = None

@@ -800,7 +800,46 @@ def migrate_interpolation_control_keys(control: dict) -> None:
     if str(control.get(fm, "")).strip() == "Linear (CPU)":
         control[fm] = "Linear (GPU)"
     control.pop("PreviewLinearInterpolationDisplaySelection", None)
+    control.pop("PreviewSmoothDisplayDecoupledToggle", None)
     _migrate_preview_smooth_display_multiplier_keys(control)
+    _migrate_unified_interpolation_steps_per_frame(control)
+
+
+def _migrate_unified_interpolation_steps_per_frame(control: dict) -> None:
+    """Merge legacy K + refresh multiplier into PreviewInterpolationStepsPerFrameSelection (2–6)."""
+    newk = "PreviewInterpolationStepsPerFrameSelection"
+    try:
+        cur = int(float(str(control.get(newk, "")).strip()))
+        if 2 <= cur <= 6:
+            control.pop("PreviewFrameGenIntermediateCountSelection", None)
+            control.pop("PreviewSmoothDisplayFpsMultiplierSelection", None)
+            return
+    except (TypeError, ValueError):
+        pass
+
+    k = 1
+    try:
+        kk = int(
+            float(str(control.get("PreviewFrameGenIntermediateCountSelection", "1")).strip())
+        )
+        k = max(1, min(5, kk))
+    except (TypeError, ValueError):
+        k = 1
+
+    m = 2
+    raw_m = control.get("PreviewSmoothDisplayFpsMultiplierSelection")
+    if raw_m is not None:
+        try:
+            mm = int(float(str(raw_m).strip()))
+            m = max(1, min(3, mm))
+        except (TypeError, ValueError):
+            m = 2
+
+    s = max(m, k + 1)
+    s = max(2, min(6, s))
+    control[newk] = str(s)
+    control.pop("PreviewFrameGenIntermediateCountSelection", None)
+    control.pop("PreviewSmoothDisplayFpsMultiplierSelection", None)
 
 
 def _migrate_preview_smooth_display_multiplier_keys(control: dict) -> None:

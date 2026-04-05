@@ -20,7 +20,17 @@ import pyvirtualcam
 import math
 import copy
 import json
-from PySide6.QtCore import QObject, QTimer, Signal, Slot, QEventLoop, QThread, Qt
+from PySide6.QtCore import (
+    QObject,
+    QRunnable,
+    QThread,
+    QThreadPool,
+    QTimer,
+    Signal,
+    Slot,
+    QEventLoop,
+    Qt,
+)
 from PySide6.QtGui import QPixmap
 
 # Internal project imports
@@ -99,6 +109,42 @@ class _HeavyStopThread(QThread):
         self._vp._execute_heavy_stop_body()
 
 
+class _RifeDecoupleRunnable(QRunnable):
+    """Runs RIFE preview inference off the GUI thread; result delivered via VideoProcessor signal."""
+
+    def __init__(
+        self,
+        vp: "VideoProcessor",
+        img0_bgr: numpy.ndarray,
+        img1_bgr: numpy.ndarray,
+        generation: int,
+        model_key: str,
+        timestep: float,
+    ) -> None:
+        super().__init__()
+        self._vp = vp
+        self._img0 = numpy.ascontiguousarray(img0_bgr).copy()
+        self._img1 = numpy.ascontiguousarray(img1_bgr).copy()
+        self._generation = int(generation)
+        self._model_key = str(model_key)
+        self._timestep = float(timestep)
+
+    def run(self) -> None:
+        vp = self._vp
+        mw = vp.main_window
+        try:
+            with mw.models_processor.model_lock:
+                out = mw.models_processor.frame_enhancers.run_rife_preview_interpolate(
+                    self._img0,
+                    self._img1,
+                    timestep=self._timestep,
+                    model_key=self._model_key,
+                )
+            vp.neural_rife_preview_async_done.emit(out, self._generation, None)
+        except Exception as e:
+            vp.neural_rife_preview_async_done.emit(None, self._generation, e)
+
+
 class VideoProcessor(QObject):
     """
     Manages all video, image, and webcam processing pipelines.
@@ -124,6 +170,8 @@ class VideoProcessor(QObject):
     processing_started_signal = Signal()  # Unified signal for any processing start
     processing_stopped_signal = Signal()  # Unified signal for any processing stop
     processing_heartbeat_signal = Signal()  # Emits periodically to show liveness
+    # ndarray|None, generation, exception|None — emitted from QThreadPool worker
+    neural_rife_preview_async_done = Signal(object, int, object)
 
     def __init__(self, main_window: "MainWindow", num_threads=4):
         """
@@ -362,7 +410,22 @@ class VideoProcessor(QObject):
         # Subtick index 0..S-1: same metronome drives S paints per source frame (no separate QTimer).
         self._smooth_decouple_substep: int = 0
 
+        # Neural decoupled preview: RIFE(prev, curr) async; presenter blends prev→mid→curr in time.
+        self._neural_decouple_prev: numpy.ndarray | None = None
+        self._neural_decouple_curr: numpy.ndarray | None = None
+        self._neural_decouple_rife_mid: numpy.ndarray | None = None
+        self._neural_decouple_phase_t0: float = 0.0
+        self._neural_decouple_ema_dt: float = 1.0 / 30.0
+        self._neural_decouple_last_arrival_t: float | None = None
+        self._neural_decouple_last_fn: int = 0
+        self._neural_decouple_profile: Any = None
+        self._neural_rife_gen_counter: int = 0
+        self._neural_rife_applicable_gen: int = 0
+
         # --- Signal Connections ---
+        self.neural_rife_preview_async_done.connect(
+            self._on_neural_rife_async_done, Qt.ConnectionType.QueuedConnection
+        )
         self.frame_processed_signal.connect(self.store_frame_to_display)
         self.webcam_frame_processed_signal.connect(self.store_webcam_frame_to_display)
         self.single_frame_processed_signal.connect(self.display_current_frame)
@@ -388,13 +451,25 @@ class VideoProcessor(QObject):
         self._smooth_decouple_last_fn = 0
         self._smooth_decouple_profile = None
         self._smooth_decouple_substep = 0
+        self._reset_neural_decouple_buffers()
+
+    def _reset_neural_decouple_buffers(self) -> None:
+        self._neural_decouple_prev = None
+        self._neural_decouple_curr = None
+        self._neural_decouple_rife_mid = None
+        self._neural_decouple_phase_t0 = 0.0
+        self._neural_decouple_ema_dt = 1.0 / 30.0
+        self._neural_decouple_last_arrival_t = None
+        self._neural_decouple_last_fn = 0
+        self._neural_decouple_profile = None
+        self._neural_rife_gen_counter = 0
+        self._neural_rife_applicable_gen = 0
 
     def _preview_smooth_decouple_linear_active(self) -> bool:
+        """True when linear preview interpolation uses the decoupled presenter (always on; no separate toggle)."""
         if self.file_type != "video":
             return False
         if not self.main_window.control.get("PreviewFrameGenEnableToggle", False):
-            return False
-        if not self.main_window.control.get("PreviewSmoothDisplayDecoupledToggle", False):
             return False
         m = str(
             self.main_window.control.get(
@@ -403,18 +478,35 @@ class VideoProcessor(QObject):
         )
         return graphics_view_actions.is_linear_preview_interpolation_method(m)
 
-    def _smooth_decouple_steps_per_frame_effective(self) -> int:
-        """Paints per advanced source frame: max(multiplier, K+1), capped so fps*S ≤ ~240."""
-        raw = self.main_window.control.get(
-            "PreviewSmoothDisplayFpsMultiplierSelection", "2"
-        )
+    def _preview_neural_decouple_display_active(self) -> bool:
+        if self.file_type != "video":
+            return False
+        if not self.main_window.control.get("PreviewFrameGenEnableToggle", False):
+            return False
+        return self._preview_frame_interpolation_is_neural()
+
+    def _preview_any_decouple_display_active(self) -> bool:
+        return self._preview_smooth_decouple_linear_active() or self._preview_neural_decouple_display_active()
+
+    def _preview_steps_per_frame_base(self) -> int:
+        """User setting: preview substeps per processed frame (2–6); unifies former K + refresh multiplier."""
         try:
-            m = int(float(str(raw).strip()))
+            s = int(
+                float(
+                    str(
+                        self.main_window.control.get(
+                            "PreviewInterpolationStepsPerFrameSelection", "2"
+                        )
+                    ).strip()
+                )
+            )
         except (TypeError, ValueError):
-            m = 2
-        m = max(1, min(3, m))
-        k1 = self._get_preview_frame_gen_intermediate_count() + 1
-        s = max(m, k1)
+            s = 2
+        return max(2, min(6, s))
+
+    def _smooth_decouple_steps_per_frame_effective(self) -> int:
+        """Paints per advanced source frame; capped so fps×S ≤ ~240."""
+        s = self._preview_steps_per_frame_base()
         fp = float(self.fps) if self.fps > 0 else 30.0
         s_cap = max(2, int(240.0 / max(fp, 1.0)))
         return max(2, min(int(s), s_cap))
@@ -525,6 +617,124 @@ class VideoProcessor(QObject):
                 self.main_window, pixmap, fn
             )
 
+    @Slot(object, int, object)
+    def _on_neural_rife_async_done(self, out: Any, generation: int, err: Any) -> None:
+        if int(generation) != int(self._neural_rife_applicable_gen):
+            return
+        if err is not None:
+            print(f"[WARN] Neural decoupled RIFE: {err}")
+            return
+        if out is None:
+            return
+        try:
+            self._neural_decouple_rife_mid = numpy.ascontiguousarray(out).copy()
+        except Exception:
+            self._neural_decouple_rife_mid = None
+
+    def _neural_decouple_phase_u(self) -> float:
+        """0→1 smooth ramp over ~one processed-frame window (matches linear decouple pacing)."""
+        prev = self._neural_decouple_prev
+        curr = self._neural_decouple_curr
+        if (
+            prev is None
+            or curr is None
+            or prev.shape != curr.shape
+            or prev.dtype != curr.dtype
+        ):
+            return 1.0
+        ema = max(float(self._neural_decouple_ema_dt), 1.0 / 120.0)
+        window = min(0.13, max(0.02, 0.40 * ema))
+        age = time.perf_counter() - self._neural_decouple_phase_t0
+        if age >= window:
+            return 1.0
+        return self._smooth_decouple_smoothstep01(age / window)
+
+    def _neural_decouple_composite_frame(self) -> numpy.ndarray:
+        """First half: prev→RIFE (or 50% linear fallback); second half: mid→curr."""
+        curr = self._neural_decouple_curr
+        if curr is None:
+            raise RuntimeError("neural decouple: missing curr")
+        prev = self._neural_decouple_prev
+        if prev is None:
+            return curr
+        u = self._neural_decouple_phase_u()
+        mid = self._neural_decouple_rife_mid
+        if (
+            mid is None
+            or mid.shape != curr.shape
+            or mid.dtype != curr.dtype
+        ):
+            mid = cv2.addWeighted(prev, 0.5, curr, 0.5, 0.0)
+        if u <= 0.5:
+            return self._preview_frame_gen_lerp(prev, mid, 2.0 * u)
+        return self._preview_frame_gen_lerp(mid, curr, 2.0 * u - 1.0)
+
+    def _neural_decouple_on_metronome_frame(
+        self,
+        frame: numpy.ndarray,
+        frame_number: int,
+        profile: Any,
+    ) -> None:
+        now = time.perf_counter()
+        if self._neural_decouple_curr is not None:
+            self._neural_decouple_prev = numpy.ascontiguousarray(
+                self._neural_decouple_curr
+            ).copy()
+            if self._neural_decouple_last_arrival_t is not None:
+                dt = now - self._neural_decouple_last_arrival_t
+                self._neural_decouple_ema_dt = 0.85 * self._neural_decouple_ema_dt + 0.15 * max(
+                    dt, 1.0 / 240.0
+                )
+        self._neural_decouple_curr = numpy.ascontiguousarray(frame).copy()
+        self._neural_decouple_last_arrival_t = now
+        self._neural_decouple_phase_t0 = now
+        self._neural_decouple_last_fn = frame_number
+        self._neural_decouple_profile = profile
+        td = float(self.target_delay_sec)
+        if td > 1e-6:
+            self._neural_decouple_ema_dt = max(self._neural_decouple_ema_dt, td * 0.35)
+
+        self._neural_decouple_rife_mid = None
+        self._neural_rife_gen_counter += 1
+        g = self._neural_rife_gen_counter
+        self._neural_rife_applicable_gen = g
+
+        p = self._neural_decouple_prev
+        c = self._neural_decouple_curr
+        if (
+            p is not None
+            and c is not None
+            and p.shape == c.shape
+            and p.dtype == c.dtype
+            and p.dtype == numpy.uint8
+            and p.ndim == 3
+            and p.shape[2] == 3
+        ):
+            ts = 1.0 / float(self._preview_steps_per_frame_base())
+            mk = str(
+                self.main_window.control.get(
+                    "PreviewNeuralInterpolationModelSelection",
+                    "RifePreviewInterp",
+                )
+            )
+            QThreadPool.globalInstance().start(
+                _RifeDecoupleRunnable(self, p, c, g, mk, ts)
+            )
+
+    def _neural_decouple_present_tick(self) -> None:
+        if not self.processing or not self._preview_neural_decouple_display_active():
+            return
+        curr = self._neural_decouple_curr
+        if curr is None:
+            return
+        fn = self._neural_decouple_last_fn
+        try:
+            blend = self._neural_decouple_composite_frame()
+        except Exception:
+            blend = curr
+        pixmap = common_widget_actions.get_pixmap_from_frame(self.main_window, blend)
+        graphics_view_actions.update_graphics_view(self.main_window, pixmap, fn)
+
     @staticmethod
     def _preview_frame_gen_lerp(
         a: numpy.ndarray, b: numpy.ndarray, w: float
@@ -554,20 +764,10 @@ class VideoProcessor(QObject):
         return m == "Neural (ONNX)"
 
     def _get_preview_frame_gen_intermediate_count(self) -> int:
-        """Number of blend-only preview ticks before the full processed frame (1–5)."""
+        """Blend-only ticks before full frame in coupled paths: K = S − 1 from unified steps (1–5)."""
         if self._preview_frame_interpolation_is_neural():
             return 1
-        try:
-            n = int(
-                str(
-                    self.main_window.control.get(
-                        "PreviewFrameGenIntermediateCountSelection", "1"
-                    )
-                )
-            )
-        except (TypeError, ValueError):
-            n = 1
-        return max(1, min(n, 5))
+        return max(1, self._preview_steps_per_frame_base() - 1)
 
     def _preview_use_opengl_linear_display(self) -> bool:
         """Video + linear interpolation: use shader blend in the main viewer (not webcam/virt cam)."""
@@ -712,6 +912,8 @@ class VideoProcessor(QObject):
         if self.file_type == "video" and frame_number != self.next_frame_to_display:
             return
 
+        self._reset_smooth_decouple_frame_buffers()
+
         pixmap = common_widget_actions.get_pixmap_from_frame(self.main_window, frame)
 
         if self.main_window.loading_new_media:
@@ -833,7 +1035,7 @@ class VideoProcessor(QObject):
         now_sec = time.perf_counter()
         step_sec = self.target_delay_sec
         if self.main_window.control.get("PreviewFrameGenEnableToggle", False):
-            if self._preview_smooth_decouple_linear_active():
+            if self._preview_any_decouple_display_active():
                 # S substeps per processed frame (same clock as linear K+1, but buffer advances once per S ticks).
                 step_sec /= float(self._smooth_decouple_steps_per_frame_effective())
             else:
@@ -2101,12 +2303,22 @@ class VideoProcessor(QObject):
         # cadence clock — otherwise we "lose" display slots and cap FPS below nominal.
         _retry_ms = max(2, min(12, int(self.target_delay_sec * 250)))
 
-        # Decoupled smooth: between buffer frames, repaint from prev→curr crossfade only (metronome / S).
-        if self._preview_smooth_decouple_linear_active() and self._smooth_decouple_substep > 0:
-            if self._smooth_decouple_curr is None:
+        # Decoupled smooth: between buffer frames, repaint only (metronome / S).
+        if self._preview_any_decouple_display_active() and self._smooth_decouple_substep > 0:
+            if self._preview_smooth_decouple_linear_active():
+                if self._smooth_decouple_curr is None:
+                    self._smooth_decouple_substep = 0
+                else:
+                    self._smooth_decouple_present_tick()
+                    S = self._smooth_decouple_steps_per_frame_effective()
+                    self._smooth_decouple_substep = (self._smooth_decouple_substep + 1) % S
+                    self.playback_frames_displayed += 1
+                    self._arm_display_metronome_after_frame_shown()
+                    return
+            if self._neural_decouple_curr is None:
                 self._smooth_decouple_substep = 0
             else:
-                self._smooth_decouple_present_tick()
+                self._neural_decouple_present_tick()
                 S = self._smooth_decouple_steps_per_frame_effective()
                 self._smooth_decouple_substep = (self._smooth_decouple_substep + 1) % S
                 self.playback_frames_displayed += 1
@@ -2118,7 +2330,7 @@ class VideoProcessor(QObject):
         frame_number_to_display = 0  # Used for UI update
         profile_for_overlay = None
         preview_fg = self.main_window.control.get("PreviewFrameGenEnableToggle", False)
-        if preview_fg and self._preview_smooth_decouple_linear_active():
+        if preview_fg and self._preview_any_decouple_display_active():
             preview_fg = False
         preview_from_pending = False
         preview_skip_ffmpeg = False
@@ -2219,7 +2431,7 @@ class VideoProcessor(QObject):
                                     del arr
                                 self.frames_pipeline_profile.pop(k, None)
                         self.next_frame_to_display = best
-                        if self._preview_smooth_decouple_linear_active():
+                        if self._preview_any_decouple_display_active():
                             self._smooth_decouple_substep = 0
                         if best - low >= 10:
                             print(
@@ -2247,7 +2459,7 @@ class VideoProcessor(QObject):
                             f"[INFO] Display: Advancing past {skipped_count} skipped frame(s), jumping to frame {frame_number_to_display}"
                         )
                         self.next_frame_to_display = frame_number_to_display
-                        if self._preview_smooth_decouple_linear_active():
+                        if self._preview_any_decouple_display_active():
                             self._smooth_decouple_substep = 0
 
                 if frame_number_to_display not in self.frames_to_display:
@@ -2385,6 +2597,13 @@ class VideoProcessor(QObject):
                 frame, frame_number_to_display, profile_for_overlay
             )
             self._smooth_decouple_present_tick()
+            S = self._smooth_decouple_steps_per_frame_effective()
+            self._smooth_decouple_substep = (self._smooth_decouple_substep + 1) % S
+        elif self._preview_neural_decouple_display_active():
+            self._neural_decouple_on_metronome_frame(
+                frame, frame_number_to_display, profile_for_overlay
+            )
+            self._neural_decouple_present_tick()
             S = self._smooth_decouple_steps_per_frame_effective()
             self._smooth_decouple_substep = (self._smooth_decouple_substep + 1) % S
         elif (
