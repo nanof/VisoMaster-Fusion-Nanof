@@ -5646,6 +5646,24 @@ class FrameWorker(threading.Thread):
 
         return mask
 
+    @staticmethod
+    def _face_restorer_skip_for_small_face(parameters: dict, tform_scale: float) -> bool:
+        """True when user enabled gate and alignment scale ≥ threshold (small face in frame)."""
+        if not parameters.get("FaceRestorerSkipSmallFaceToggle", False):
+            return False
+        try:
+            s = float(tform_scale)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(s):
+            return False
+        raw_thr = parameters.get("FaceRestorerSmallFaceScaleGeDecimalSlider", "2.0")
+        try:
+            thr = float(raw_thr)
+        except (TypeError, ValueError):
+            thr = 2.0
+        return s >= thr
+
     def _apply_restorer_with_auto(
         self,
         swap: torch.Tensor,
@@ -6510,17 +6528,20 @@ class FrameWorker(threading.Thread):
         if parameters["FaceRestorerEnableToggle"]:
             # FW-PERF-11: clone only when the restorer will actually run
             swap_original = swap.clone()
-            swap_restorecalc = self.models_processor.apply_facerestorer(
-                swap,
-                parameters["FaceRestorerDetTypeSelection"],
-                parameters["FaceRestorerTypeSelection"],
-                parameters["FaceRestorerBlendSlider"],
-                parameters["FaceFidelityWeightDecimalSlider"],
-                control["DetectorScoreSlider"],
-                kps_ref,
-                slot_id=1,
-                dmd_landmarks_68_crop=dmd_lm68_crop,
-            )
+            if self._face_restorer_skip_for_small_face(parameters, float(tform.scale)):
+                swap_restorecalc = swap_original
+            else:
+                swap_restorecalc = self.models_processor.apply_facerestorer(
+                    swap,
+                    parameters["FaceRestorerDetTypeSelection"],
+                    parameters["FaceRestorerTypeSelection"],
+                    parameters["FaceRestorerBlendSlider"],
+                    parameters["FaceFidelityWeightDecimalSlider"],
+                    control["DetectorScoreSlider"],
+                    kps_ref,
+                    slot_id=1,
+                    dmd_landmarks_68_crop=dmd_lm68_crop,
+                )
         elif _swap_restore_needs_clone:
             swap_restorecalc = swap.clone()
         else:
@@ -6882,17 +6903,20 @@ class FrameWorker(threading.Thread):
             and not parameters["FaceRestorerEnable2EndToggle"]
         ):
             swap_original2 = swap.clone()
-            swap2 = self.models_processor.apply_facerestorer(
-                swap,
-                parameters["FaceRestorerDetType2Selection"],
-                parameters["FaceRestorerType2Selection"],
-                parameters["FaceRestorerBlend2Slider"],
-                parameters["FaceFidelityWeight2DecimalSlider"],
-                control["DetectorScoreSlider"],
-                kps_ref,
-                slot_id=2,
-                dmd_landmarks_68_crop=dmd_lm68_crop,
-            )
+            if self._face_restorer_skip_for_small_face(parameters, float(tform.scale)):
+                swap2 = swap_original2
+            else:
+                swap2 = self.models_processor.apply_facerestorer(
+                    swap,
+                    parameters["FaceRestorerDetType2Selection"],
+                    parameters["FaceRestorerType2Selection"],
+                    parameters["FaceRestorerBlend2Slider"],
+                    parameters["FaceFidelityWeight2DecimalSlider"],
+                    control["DetectorScoreSlider"],
+                    kps_ref,
+                    slot_id=2,
+                    dmd_landmarks_68_crop=dmd_lm68_crop,
+                )
             swap = self._apply_restorer_with_auto(
                 swap,
                 swap2,
@@ -7357,17 +7381,20 @@ class FrameWorker(threading.Thread):
             and parameters["FaceRestorerEnable2EndToggle"]
         ):
             swap_original2 = swap.clone()
-            swap2 = self.models_processor.apply_facerestorer(
-                swap,
-                parameters["FaceRestorerDetType2Selection"],
-                parameters["FaceRestorerType2Selection"],
-                parameters["FaceRestorerBlend2Slider"],
-                parameters["FaceFidelityWeight2DecimalSlider"],
-                control["DetectorScoreSlider"],
-                kps_ref,
-                slot_id=2,
-                dmd_landmarks_68_crop=dmd_lm68_crop,
-            )
+            if self._face_restorer_skip_for_small_face(parameters, float(tform.scale)):
+                swap2 = swap_original2
+            else:
+                swap2 = self.models_processor.apply_facerestorer(
+                    swap,
+                    parameters["FaceRestorerDetType2Selection"],
+                    parameters["FaceRestorerType2Selection"],
+                    parameters["FaceRestorerBlend2Slider"],
+                    parameters["FaceFidelityWeight2DecimalSlider"],
+                    control["DetectorScoreSlider"],
+                    kps_ref,
+                    slot_id=2,
+                    dmd_landmarks_68_crop=dmd_lm68_crop,
+                )
             swap = self._apply_restorer_with_auto(
                 swap,
                 swap2,

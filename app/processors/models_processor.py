@@ -156,6 +156,19 @@ def gamma_decode_srgb_to_linear_rgb(srgb: torch.Tensor, gamma=SRGB_GAMMA):
 ONNX_MODELS_SKIP_TENSORRT_EP = frozenset({"RvmPortraitMatting"})
 
 
+def _providers_without_tensorrt_execution_provider(providers_for_model):
+    """Drop TensorrtExecutionProvider entries for ORT fallback (CUDA EP still fast on Windows)."""
+    out = []
+    for p in providers_for_model:
+        name = p[0] if isinstance(p, (tuple, list)) else p
+        if name == "TensorrtExecutionProvider":
+            continue
+        out.append(p)
+    if not out:
+        return [("CUDAExecutionProvider"), ("CPUExecutionProvider")]
+    return out
+
+
 class ModelsProcessor(QtCore.QObject):
     """
     Central hub for managing AI models (ONNX, TensorRT, PyTorch).
@@ -758,17 +771,52 @@ class ModelsProcessor(QtCore.QObject):
                     )
                     return self.models.get(model_name)
 
-                if session_options is None:
-                    model_instance = onnxruntime.InferenceSession(
-                        self.models_path[model_name],
-                        providers=providers_for_model,
+                try:
+                    if session_options is None:
+                        model_instance = onnxruntime.InferenceSession(
+                            self.models_path[model_name],
+                            providers=providers_for_model,
+                        )
+                    else:
+                        model_instance = onnxruntime.InferenceSession(
+                            self.models_path[model_name],
+                            sess_options=session_options,
+                            providers=providers_for_model,
+                        )
+                except Exception as e_ort_first:
+                    fb_providers = _providers_without_tensorrt_execution_provider(
+                        providers_for_model
                     )
-                else:
-                    model_instance = onnxruntime.InferenceSession(
-                        self.models_path[model_name],
-                        sess_options=session_options,
-                        providers=providers_for_model,
-                    )
+                    if (
+                        is_tensorrt_load
+                        and self.device != "cpu"
+                        and len(fb_providers) < len(providers_for_model)
+                    ):
+                        print(
+                            f"[WARN] {model_name}: ONNX Runtime load failed with current "
+                            f"providers ({e_ort_first!s}); retrying without TensorrtExecutionProvider."
+                        )
+                        try:
+                            if session_options is None:
+                                model_instance = onnxruntime.InferenceSession(
+                                    self.models_path[model_name],
+                                    providers=fb_providers,
+                                )
+                            else:
+                                model_instance = onnxruntime.InferenceSession(
+                                    self.models_path[model_name],
+                                    sess_options=session_options,
+                                    providers=fb_providers,
+                                )
+                        except Exception:
+                            print(
+                                f"[ERROR] {model_name}: CUDA/CPU fallback session also failed."
+                            )
+                            traceback.print_exc()
+                            self.models[model_name] = None
+                            return None
+                    else:
+                        raise e_ort_first
 
                 # This ensures the CUDA context is synchronized after a new TRT
                 # engine build, before we try to load it.

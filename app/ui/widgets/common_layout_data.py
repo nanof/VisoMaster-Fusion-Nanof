@@ -70,6 +70,27 @@ COMMON_LAYOUT_DATA: Any = {
             "requiredToggleValue": True,
             "help": "Control the blend ratio between the restored face and the swapped face.",
         },
+        "FaceRestorerSkipSmallFaceToggle": {
+            "level": 2,
+            "label": "Skip restorer on small target face",
+            "default": False,
+            "parentToggle": "FaceRestorerEnableToggle",
+            "requiredToggleValue": True,
+            "help": "When ON, skips Face Restorer 1 and 2 for this face if the alignment scale is at or above the threshold "
+            "(small face in frame — same idea as Inswapper auto-res: higher scale means more zoom). Saves GPU; applies to both restorer slots.",
+        },
+        "FaceRestorerSmallFaceScaleGeDecimalSlider": {
+            "level": 2,
+            "label": "Small-face scale threshold (≥ skip)",
+            "min_value": "1.00",
+            "max_value": "4.00",
+            "default": "2.00",
+            "decimals": 2,
+            "step": 0.05,
+            "parentToggle": "FaceRestorerEnableToggle & FaceRestorerSkipSmallFaceToggle",
+            "requiredToggleValue": True,
+            "help": "Skip restoration when similarity-transform scale ≥ this value. Default 2.0 matches the boundary where Inswapper auto-res switches past 256 px.",
+        },
         "FaceRestorerAutoEnableToggle": {
             "level": 2,
             "label": "Auto Restore",

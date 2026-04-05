@@ -100,10 +100,12 @@ fp16_safe_models_list = [
     "FaceBlendShapes",
     # --- Restorers ---
     "GPENBFR256",
+    "GPENBFR256FP16",
     "GPENBFR512",
     "CodeFormer",
     "VQFRv2",
     "RestoreFormerPlusPlus",
+    "RestoreFormerFP16",
     # --- Recognition ---
     "Inswapper128ArcFace",
     "SimSwapArcFace",
