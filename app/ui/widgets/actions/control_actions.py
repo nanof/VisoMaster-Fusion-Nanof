@@ -599,6 +599,22 @@ def handle_preview_frame_interpolation_toggle(
         from app.ui.widgets.actions import graphics_view_actions
 
         graphics_view_actions.restore_video_preview_raster_viewport(main_window)
+        main_window.video_processor._smooth_decouple_stop_presenter()
+
+
+def handle_smooth_display_decouple_toggle(
+    main_window: "MainWindow", new_value: bool, control_name: str
+):
+    del control_name
+    if not new_value:
+        main_window.video_processor._smooth_decouple_stop_presenter()
+
+
+def handle_smooth_display_fps_multiplier_change(
+    main_window: "MainWindow", mult_value: str, control_name: str
+):
+    del control_name, mult_value
+    main_window.video_processor._smooth_decouple_refresh_presenter_rate()
 
 
 def handle_frame_interpolation_method_change(
@@ -611,6 +627,7 @@ def handle_frame_interpolation_method_change(
     sync_rife_preview_interpolation_model(main_window)
     if not graphics_view_actions.is_linear_preview_interpolation_method(new_method):
         graphics_view_actions.restore_video_preview_raster_viewport(main_window)
+        main_window.video_processor._smooth_decouple_stop_presenter()
 
 
 def handle_preview_neural_interp_model_change(

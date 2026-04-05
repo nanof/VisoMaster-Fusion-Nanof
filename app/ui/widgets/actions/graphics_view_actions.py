@@ -43,6 +43,17 @@ def ensure_video_preview_opengl_viewport(main_window: "MainWindow") -> bool:
     Returns False if QtOpenGLWidgets is unavailable or setViewport fails.
     """
     if getattr(main_window, "_video_preview_opengl_viewport_active", False):
+        try:
+            from PySide6.QtOpenGLWidgets import QOpenGLWidget
+
+            vport = main_window.graphicsViewFrame.viewport()
+            if isinstance(vport, QOpenGLWidget) and not getattr(
+                vport, "_visomaster_no_partial_done", False
+            ):
+                vport.setUpdateBehavior(QOpenGLWidget.UpdateBehavior.NoPartialUpdate)
+                setattr(vport, "_visomaster_no_partial_done", True)
+        except Exception:
+            pass
         return True
     try:
         from PySide6.QtOpenGLWidgets import QOpenGLWidget
@@ -55,6 +66,9 @@ def ensure_video_preview_opengl_viewport(main_window: "MainWindow") -> bool:
         return False
     try:
         gl_vp = QOpenGLWidget()
+        # PartialUpdate (default) can coalesce rapid repaints → ~half the visible refresh rate
+        # (e.g. 30 logical updates / 15 compositor presents). Decoupled presenter needs each tick.
+        gl_vp.setUpdateBehavior(QOpenGLWidget.UpdateBehavior.NoPartialUpdate)
         main_window.graphicsViewFrame.setViewport(gl_vp)
         main_window._video_preview_opengl_viewport_active = True
         main_window._video_preview_opengl_viewport_failed = False
@@ -100,6 +114,32 @@ def preview_linear_gpu_display_enabled(main_window: "MainWindow") -> bool:
 def invalidate_video_preview_blend_gl_item_ref(main_window: "MainWindow") -> None:
     """Call after scene.clear() (or similar): the C++ QGraphicsItem is destroyed but Python may still hold a wrapper."""
     main_window._video_preview_blend_gl_item = None
+    setattr(main_window, "_gv_preview_pixmap_item", None)
+
+
+def _cached_graphics_view_pixmap_item(
+    main_window: "MainWindow", scene: QtWidgets.QGraphicsScene | None
+) -> QtWidgets.QGraphicsPixmapItem | None:
+    """Reuse the preview pixmap item ref; avoids O(n) scene.items() on every interpolation tick."""
+    if scene is None:
+        setattr(main_window, "_gv_preview_pixmap_item", None)
+        return None
+    cached = getattr(main_window, "_gv_preview_pixmap_item", None)
+    if cached is not None:
+        try:
+            if (
+                isinstance(cached, QtWidgets.QGraphicsPixmapItem)
+                and cached.scene() is scene
+            ):
+                return cached
+        except RuntimeError:
+            pass
+    for item in scene.items():
+        if isinstance(item, QtWidgets.QGraphicsPixmapItem):
+            main_window._gv_preview_pixmap_item = item
+            return item
+    main_window._gv_preview_pixmap_item = None
+    return None
 
 
 def _blend_gl_item_still_valid(
@@ -112,6 +152,21 @@ def _blend_gl_item_still_valid(
     except RuntimeError:
         return False
     return sc is scene
+
+
+def bump_graphics_view_repaint(main_window: "MainWindow", *, sync: bool = False) -> None:
+    """Nudge QGraphicsView + viewport so OpenGL repaints are not dropped (helps decoupled presenter / overlays)."""
+    gv = main_window.graphicsViewFrame
+    vp = gv.viewport()
+    gl_vp = getattr(main_window, "_video_preview_opengl_viewport_active", False)
+    if vp is not None:
+        if sync and gl_vp:
+            vp.repaint()
+        else:
+            vp.update()
+    # With QOpenGLWidget viewport, updating the view as well doubles Qt's scheduling work.
+    if not gl_vp:
+        gv.update()
 
 
 def _get_or_create_blend_gl_item(
@@ -150,13 +205,8 @@ def update_graphics_view(
     if current_text != str(current_frame_number):
         main_window.videoSeekLineEdit.setText(str(current_frame_number))
 
-    # Safely find the QGraphicsPixmapItem in the scene, ignoring other overlays (rectangles, text, etc.)
     scene = main_window.graphicsViewFrame.scene()
-    pixmap_item = None
-    for item in scene.items():
-        if isinstance(item, QtWidgets.QGraphicsPixmapItem):
-            pixmap_item = item
-            break
+    pixmap_item = _cached_graphics_view_pixmap_item(main_window, scene)
 
     blend_item = getattr(main_window, "_video_preview_blend_gl_item", None)
     if not _blend_gl_item_still_valid(blend_item, scene):
@@ -182,12 +232,20 @@ def update_graphics_view(
                 QtCore.Qt.TransformationMode.SmoothTransformation
             )
             scene.addItem(pixmap_item)
+            main_window._gv_preview_pixmap_item = pixmap_item
         pixmap_item.setVisible(False)
         scene_rect = b_item.boundingRect()
-        main_window.graphicsViewFrame.setSceneRect(scene_rect)
+        gv = main_window.graphicsViewFrame
+        prev = gv.sceneRect()
+        if (
+            abs(prev.width() - scene_rect.width()) > 0.5
+            or abs(prev.height() - scene_rect.height()) > 0.5
+        ):
+            gv.setSceneRect(scene_rect)
         if reset_fit:
             fit_image_to_view(main_window, b_item, scene_rect)
         record_preview_frame_tick(main_window)
+        bump_graphics_view_repaint(main_window)
         return
 
     if blend_item is not None and _blend_gl_item_still_valid(blend_item, scene):
@@ -220,16 +278,24 @@ def update_graphics_view(
             QtCore.Qt.TransformationMode.SmoothTransformation
         )
         scene.addItem(pixmap_item)
+        main_window._gv_preview_pixmap_item = pixmap_item
 
     # Set the scene rectangle to the bounding rectangle of the pixmap
     scene_rect = pixmap_item.boundingRect()
-    main_window.graphicsViewFrame.setSceneRect(scene_rect)
+    gv = main_window.graphicsViewFrame
+    prev = gv.sceneRect()
+    if (
+        abs(prev.width() - scene_rect.width()) > 0.5
+        or abs(prev.height() - scene_rect.height()) > 0.5
+    ):
+        gv.setSceneRect(scene_rect)
 
     # Reset the view or restore the previous transform
     if reset_fit:
         fit_image_to_view(main_window, pixmap_item, scene_rect)
 
     record_preview_frame_tick(main_window)
+    bump_graphics_view_repaint(main_window)
 
 
 def zoom_andfit_image_to_view_onchange(main_window: "MainWindow", new_transform):

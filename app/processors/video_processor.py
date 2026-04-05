@@ -350,6 +350,18 @@ class VideoProcessor(QObject):
         self._preview_frame_gen_prev: numpy.ndarray | None = None
         self._preview_frame_gen_prev_fn: int | None = None
 
+        # Decoupled preview: presenter interpolates prev → curr over a short monotonic crossfade
+        # after each new processed frame (w only increases until curr is full; never eases back to prev).
+        self._smooth_decouple_prev: numpy.ndarray | None = None
+        self._smooth_decouple_curr: numpy.ndarray | None = None
+        self._smooth_decouple_crossfade_t0: float = 0.0
+        self._smooth_decouple_ema_dt: float = 1.0 / 30.0
+        self._smooth_decouple_last_arrival_t: float | None = None
+        self._smooth_decouple_last_fn: int = 0
+        self._smooth_decouple_profile: Any = None
+        # Subtick index 0..S-1: same metronome drives S paints per source frame (no separate QTimer).
+        self._smooth_decouple_substep: int = 0
+
         # --- Signal Connections ---
         self.frame_processed_signal.connect(self.store_frame_to_display)
         self.webcam_frame_processed_signal.connect(self.store_webcam_frame_to_display)
@@ -366,12 +378,166 @@ class VideoProcessor(QObject):
         self._preview_frame_gen_substep = 0
         self._preview_frame_gen_prev = None
         self._preview_frame_gen_prev_fn = None
+        self._reset_smooth_decouple_frame_buffers()
+
+    def _reset_smooth_decouple_frame_buffers(self) -> None:
+        self._smooth_decouple_prev = None
+        self._smooth_decouple_curr = None
+        self._smooth_decouple_crossfade_t0 = 0.0
+        self._smooth_decouple_last_arrival_t = None
+        self._smooth_decouple_last_fn = 0
+        self._smooth_decouple_profile = None
+        self._smooth_decouple_substep = 0
+
+    def _preview_smooth_decouple_linear_active(self) -> bool:
+        if self.file_type != "video":
+            return False
+        if not self.main_window.control.get("PreviewFrameGenEnableToggle", False):
+            return False
+        if not self.main_window.control.get("PreviewSmoothDisplayDecoupledToggle", False):
+            return False
+        m = str(
+            self.main_window.control.get(
+                "FrameInterpolationMethodSelection", "Linear (GPU)"
+            )
+        )
+        return graphics_view_actions.is_linear_preview_interpolation_method(m)
+
+    def _smooth_decouple_steps_per_frame_effective(self) -> int:
+        """Paints per advanced source frame: max(multiplier, K+1), capped so fps*S ≤ ~240."""
+        raw = self.main_window.control.get(
+            "PreviewSmoothDisplayFpsMultiplierSelection", "2"
+        )
+        try:
+            m = int(float(str(raw).strip()))
+        except (TypeError, ValueError):
+            m = 2
+        m = max(1, min(3, m))
+        k1 = self._get_preview_frame_gen_intermediate_count() + 1
+        s = max(m, k1)
+        fp = float(self.fps) if self.fps > 0 else 30.0
+        s_cap = max(2, int(240.0 / max(fp, 1.0)))
+        return max(2, min(int(s), s_cap))
+
+    @staticmethod
+    def _smooth_decouple_smoothstep01(t: float) -> float:
+        t = max(0.0, min(1.0, float(t)))
+        return t * t * (3.0 - 2.0 * t)
+
+    def _smooth_decouple_crossfade_weight(self) -> float:
+        """Blend factor for lerp(prev, curr, w): 0 = prev only, 1 = curr only; never decreases until next cut."""
+        prev = self._smooth_decouple_prev
+        curr = self._smooth_decouple_curr
+        if (
+            prev is None
+            or curr is None
+            or prev.shape != curr.shape
+            or prev.dtype != curr.dtype
+        ):
+            return 1.0
+        ema = max(float(self._smooth_decouple_ema_dt), 1.0 / 120.0)
+        # Crossfade length ~fraction of typical gap between processed frames (clamped for stability).
+        window = min(0.13, max(0.02, 0.40 * ema))
+        age = time.perf_counter() - self._smooth_decouple_crossfade_t0
+        if age >= window:
+            return 1.0
+        return self._smooth_decouple_smoothstep01(age / window)
+
+    def _smooth_decouple_stop_presenter(self) -> None:
+        """Legacy QTimer cleanup (presenter now uses display metronome substeps)."""
+        t = getattr(self, "_smooth_decouple_present_timer", None)
+        if t is not None:
+            try:
+                t.stop()
+                t.deleteLater()
+            except Exception:
+                pass
+            self._smooth_decouple_present_timer = None  # type: ignore[attr-defined]
+
+    def _smooth_decouple_refresh_presenter_rate(self) -> None:
+        """Multiplier changed mid-playback: realign subtick phase."""
+        self._smooth_decouple_substep = 0
+
+    def _smooth_decouple_on_metronome_frame(
+        self,
+        frame: numpy.ndarray,
+        frame_number: int,
+        profile: Any,
+    ) -> None:
+        now = time.perf_counter()
+        if self._smooth_decouple_curr is not None:
+            self._smooth_decouple_prev = numpy.ascontiguousarray(
+                self._smooth_decouple_curr
+            ).copy()
+            if self._smooth_decouple_last_arrival_t is not None:
+                dt = now - self._smooth_decouple_last_arrival_t
+                self._smooth_decouple_ema_dt = 0.85 * self._smooth_decouple_ema_dt + 0.15 * max(
+                    dt, 1.0 / 240.0
+                )
+        self._smooth_decouple_curr = numpy.ascontiguousarray(frame).copy()
+        self._smooth_decouple_last_arrival_t = now
+        self._smooth_decouple_crossfade_t0 = now
+        self._smooth_decouple_last_fn = frame_number
+        self._smooth_decouple_profile = profile
+        td = float(self.target_delay_sec)
+        if td > 1e-6:
+            self._smooth_decouple_ema_dt = max(self._smooth_decouple_ema_dt, td * 0.35)
+
+    def _smooth_decouple_present_tick(self) -> None:
+        if not self.processing or not self._preview_smooth_decouple_linear_active():
+            return
+        curr = self._smooth_decouple_curr
+        if curr is None:
+            return
+        fn = self._smooth_decouple_last_fn
+        profile = self._smooth_decouple_profile
+        prev = self._smooth_decouple_prev
+        w = self._smooth_decouple_crossfade_weight()
+        w_gl = float(w)
+        use_gl_blend = (
+            prev is not None
+            and w_gl < 1.0 - 1e-5
+            and self._preview_use_opengl_linear_display()
+        )
+        if use_gl_blend:
+            pixmap = QPixmap()
+            graphics_view_actions.update_graphics_view(
+                self.main_window,
+                pixmap,
+                fn,
+                gpu_blend=(prev, curr, w_gl),
+            )
+        elif self._preview_use_opengl_linear_display():
+            pixmap = QPixmap()
+            graphics_view_actions.update_graphics_view(
+                self.main_window,
+                pixmap,
+                fn,
+                gpu_blend=(curr, curr, 1.0),
+            )
+        else:
+            if prev is not None and w_gl < 1.0 - 1e-5:
+                blend = self._preview_frame_gen_lerp(prev, curr, w_gl)
+            else:
+                blend = curr
+            pixmap = common_widget_actions.get_pixmap_from_frame(self.main_window, blend)
+            graphics_view_actions.update_graphics_view(
+                self.main_window, pixmap, fn
+            )
 
     @staticmethod
     def _preview_frame_gen_lerp(
         a: numpy.ndarray, b: numpy.ndarray, w: float
     ) -> numpy.ndarray:
         w = max(0.0, min(1.0, float(w)))
+        if (
+            a.dtype == numpy.uint8
+            and b.dtype == numpy.uint8
+            and a.shape == b.shape
+            and a.ndim == 3
+            and a.shape[2] == 3
+        ):
+            return cv2.addWeighted(a, 1.0 - w, b, w, 0.0)
         return (
             a.astype(numpy.float32) * (1.0 - w) + b.astype(numpy.float32) * w
         ).astype(numpy.uint8)
@@ -538,6 +704,8 @@ class VideoProcessor(QObject):
         ):
             return
 
+        self._smooth_decouple_stop_presenter()
+
         # During fast scrubbing with AI workers enabled, an older thread might finish processing
         # a frame AFTER the user has already seeked to a newer frame.
         # We must reject these "ghost" frames to prevent the UI from jumping backward.
@@ -665,9 +833,12 @@ class VideoProcessor(QObject):
         now_sec = time.perf_counter()
         step_sec = self.target_delay_sec
         if self.main_window.control.get("PreviewFrameGenEnableToggle", False):
-            # K blends + 1 full tick per processed frame.
-            k = self._get_preview_frame_gen_intermediate_count()
-            step_sec /= float(k + 1)
+            if self._preview_smooth_decouple_linear_active():
+                # S substeps per processed frame (same clock as linear K+1, but buffer advances once per S ticks).
+                step_sec /= float(self._smooth_decouple_steps_per_frame_effective())
+            else:
+                k = self._get_preview_frame_gen_intermediate_count()
+                step_sec /= float(k + 1)
         self.last_display_schedule_time_sec += step_sec
         if self.last_display_schedule_time_sec < now_sec:
             self.last_display_schedule_time_sec = now_sec + 0.001
@@ -1930,11 +2101,25 @@ class VideoProcessor(QObject):
         # cadence clock — otherwise we "lose" display slots and cap FPS below nominal.
         _retry_ms = max(2, min(12, int(self.target_delay_sec * 250)))
 
+        # Decoupled smooth: between buffer frames, repaint from prev→curr crossfade only (metronome / S).
+        if self._preview_smooth_decouple_linear_active() and self._smooth_decouple_substep > 0:
+            if self._smooth_decouple_curr is None:
+                self._smooth_decouple_substep = 0
+            else:
+                self._smooth_decouple_present_tick()
+                S = self._smooth_decouple_steps_per_frame_effective()
+                self._smooth_decouple_substep = (self._smooth_decouple_substep + 1) % S
+                self.playback_frames_displayed += 1
+                self._arm_display_metronome_after_frame_shown()
+                return
+
         # --- 6. Get the frame to display (if ready) ---
         frame = None
         frame_number_to_display = 0  # Used for UI update
         profile_for_overlay = None
         preview_fg = self.main_window.control.get("PreviewFrameGenEnableToggle", False)
+        if preview_fg and self._preview_smooth_decouple_linear_active():
+            preview_fg = False
         preview_from_pending = False
         preview_skip_ffmpeg = False
         preview_skip_increment = False
@@ -2034,6 +2219,8 @@ class VideoProcessor(QObject):
                                     del arr
                                 self.frames_pipeline_profile.pop(k, None)
                         self.next_frame_to_display = best
+                        if self._preview_smooth_decouple_linear_active():
+                            self._smooth_decouple_substep = 0
                         if best - low >= 10:
                             print(
                                 f"[INFO] Display: Wall-clock catch-up, skipping to frame {best} "
@@ -2060,6 +2247,8 @@ class VideoProcessor(QObject):
                             f"[INFO] Display: Advancing past {skipped_count} skipped frame(s), jumping to frame {frame_number_to_display}"
                         )
                         self.next_frame_to_display = frame_number_to_display
+                        if self._preview_smooth_decouple_linear_active():
+                            self._smooth_decouple_substep = 0
 
                 if frame_number_to_display not in self.frames_to_display:
                     # Frame not ready.
@@ -2191,7 +2380,14 @@ class VideoProcessor(QObject):
             "on",
         )
         _t_disp0 = time.perf_counter() if _perf_disp else 0.0
-        if (
+        if self._preview_smooth_decouple_linear_active():
+            self._smooth_decouple_on_metronome_frame(
+                frame, frame_number_to_display, profile_for_overlay
+            )
+            self._smooth_decouple_present_tick()
+            S = self._smooth_decouple_steps_per_frame_effective()
+            self._smooth_decouple_substep = (self._smooth_decouple_substep + 1) % S
+        elif (
             gpu_blend_for_view is not None
             and self.file_type == "video"
         ):
@@ -2910,6 +3106,7 @@ class VideoProcessor(QObject):
         pm = getattr(self, "precise_metronome", None)
         if pm is not None:
             pm.stop()
+        self._smooth_decouple_stop_presenter()
         if stop_audio_on_main_thread:
             self.stop_live_sound()
         self.main_window.models_processor.face_detectors.reset_tracker()

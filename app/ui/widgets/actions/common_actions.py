@@ -800,6 +800,38 @@ def migrate_interpolation_control_keys(control: dict) -> None:
     if str(control.get(fm, "")).strip() == "Linear (CPU)":
         control[fm] = "Linear (GPU)"
     control.pop("PreviewLinearInterpolationDisplaySelection", None)
+    _migrate_preview_smooth_display_multiplier_keys(control)
+
+
+def _migrate_preview_smooth_display_multiplier_keys(control: dict) -> None:
+    sel_k = "PreviewSmoothDisplayFpsMultiplierSelection"
+    if sel_k in control:
+        control.pop("PreviewSmoothDisplayHzSlider", None)
+        control.pop("PreviewSmoothDisplayFpsMultiplierDecimalSlider", None)
+        return
+
+    old_dec = control.pop("PreviewSmoothDisplayFpsMultiplierDecimalSlider", None)
+    if old_dec is not None:
+        try:
+            v = float(old_dec)
+            m = int(round(v))
+            m = max(1, min(3, m))
+            control[sel_k] = str(m)
+        except (TypeError, ValueError):
+            control[sel_k] = "2"
+        control.pop("PreviewSmoothDisplayHzSlider", None)
+        return
+
+    old_hz = control.pop("PreviewSmoothDisplayHzSlider", None)
+    if old_hz is None:
+        return
+    try:
+        hz = float(old_hz)
+        m = int(round(max(1.0, min(3.0, hz / 30.0))))
+        m = max(1, min(3, m))
+        control[sel_k] = str(m)
+    except (TypeError, ValueError):
+        control[sel_k] = "2"
 
 
 def set_control_widgets_values(main_window: "MainWindow", enable_exec_func=True):

@@ -279,6 +279,33 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "Edge-aware: soften blend weight on strong edges (few extra taps). "
             "Pro: luma-weighted + edge-aware. Neural (RIFE) mode ignores this.",
         },
+        "PreviewSmoothDisplayDecoupledToggle": {
+            "level": 3,
+            "label": "Smooth display (decoupled)",
+            "default": False,
+            "parentToggle": "PreviewFrameGenEnableToggle",
+            "requiredToggleValue": True,
+            "parentSelection": "FrameInterpolationMethodSelection",
+            "requiredSelectionValue": "Linear (GPU)",
+            "help": "Presenter redraws independent of pipeline latency. Refresh Hz = video FPS × "
+            "max(multiplier below, K+1) so it never falls below the non-decoupled linear tick rate "
+            "(capped ~240 Hz). Crossfade prev→curr after each new frame; metronome: one source frame "
+            "per step. Neural mode unchanged when you use that instead.",
+            "exec_function": control_actions.handle_smooth_display_decouple_toggle,
+            "exec_function_args": ["PreviewSmoothDisplayDecoupledToggle"],
+        },
+        "PreviewSmoothDisplayFpsMultiplierSelection": {
+            "level": 4,
+            "label": "Decoupled refresh (× video FPS)",
+            "options": ["1", "2", "3"],
+            "default": "2",
+            "parentToggle": "PreviewSmoothDisplayDecoupledToggle",
+            "requiredToggleValue": True,
+            "help": "Minimum ×1/×2/×3 over video FPS; effective rate uses max(this, K+1 from "
+            "Interpolation steps) so decoupled mode stays at least as smooth as coupled linear.",
+            "exec_function": control_actions.handle_smooth_display_fps_multiplier_change,
+            "exec_function_args": ["PreviewSmoothDisplayFpsMultiplierSelection"],
+        },
         "FrameSkipStepSlider": {
             "level": 1,
             "label": "Frame Skip Step",

@@ -7,6 +7,8 @@ Requires QGraphicsView viewport to be a QOpenGLWidget.
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -145,6 +147,11 @@ class VideoBlendOpenGLItem(QtWidgets.QGraphicsObject):
         self._tex_staging1: np.ndarray | None = None
         self._gl_failed: bool = False
         self._blend_mode: int = 0
+        # Skip full GPU re-upload when only blend weight changes (same ndarray refs as last paint).
+        self._uploaded_prev_id: int | None = None
+        self._uploaded_curr_id: int | None = None
+        self._vbo_cache_key: tuple[Any, ...] | None = None
+        self._cached_verts: np.ndarray | None = None
         self.setZValue(1.0)
 
     def boundingRect(self) -> QtCore.QRectF:  # noqa: N802
@@ -166,6 +173,10 @@ class VideoBlendOpenGLItem(QtWidgets.QGraphicsObject):
             self.prepareGeometryChange()
             self._bw = int(wi)
             self._bh = int(h)
+            self._uploaded_prev_id = None
+            self._uploaded_curr_id = None
+            self._vbo_cache_key = None
+            self._cached_verts = None
         self.update()
 
     def _destroy_gl_objects(self) -> None:
@@ -181,6 +192,10 @@ class VideoBlendOpenGLItem(QtWidgets.QGraphicsObject):
         if self._program is not None:
             self._program.removeAllShaders()
             self._program = None
+        self._uploaded_prev_id = None
+        self._uploaded_curr_id = None
+        self._vbo_cache_key = None
+        self._cached_verts = None
 
     def _ensure_program(self) -> bool:
         if QOpenGLShaderProgram is None or QOpenGLShader is None:
@@ -336,28 +351,62 @@ class VideoBlendOpenGLItem(QtWidgets.QGraphicsObject):
             if not self._ensure_program() or not self._ensure_vbo():
                 self._gl_failed = True
                 return
-            r0 = _numpy_bgr_to_rgb_contiguous(self._prev)
-            r1 = _numpy_bgr_to_rgb_contiguous(self._curr)
-            if r0.shape != r1.shape:
+            if self._prev.shape != self._curr.shape:
                 return
-            h, w = r1.shape[:2]
-            self._tex_staging0 = r0
-            self._tex_staging1 = r1
+            h, w = self._curr.shape[:2]
+            pid = id(self._prev)
+            cid = id(self._curr)
+            need0 = self._uploaded_prev_id != pid
+            need1 = self._uploaded_curr_id != cid
 
             self._tex0 = self._ensure_texture(self._tex0, w, h)
             self._tex1 = self._ensure_texture(self._tex1, w, h)
             if self._tex0 is None or self._tex1 is None:
                 self._gl_failed = True
                 return
-            self._upload_tex(self._tex0, r0)
-            self._upload_tex(self._tex1, r1)
 
-            verts = self._build_vertices(painter)
-            assert self._vbo is not None
-            self._vbo.bind()
-            self._vbo.allocate(verts.tobytes(), verts.nbytes)
+            if need0:
+                r0 = _numpy_bgr_to_rgb_contiguous(self._prev)
+                if r0.shape[:2] != (h, w):
+                    return
+                self._tex_staging0 = r0
+                self._upload_tex(self._tex0, r0)
+                self._uploaded_prev_id = pid
+            if need1:
+                r1 = _numpy_bgr_to_rgb_contiguous(self._curr)
+                if r1.shape[:2] != (h, w):
+                    return
+                self._tex_staging1 = r1
+                self._upload_tex(self._tex1, r1)
+                self._uploaded_curr_id = cid
 
             dev = painter.device()
+            vw = max(1, dev.width())
+            vh = max(1, dev.height())
+            dt = painter.deviceTransform()
+            vbo_key = (
+                vw,
+                vh,
+                self._bw,
+                self._bh,
+                round(dt.m11(), 5),
+                round(dt.m12(), 5),
+                round(dt.m13(), 5),
+                round(dt.m21(), 5),
+                round(dt.m22(), 5),
+                round(dt.m23(), 5),
+            )
+            rebuild_verts = vbo_key != self._vbo_cache_key or self._cached_verts is None
+            if rebuild_verts:
+                self._cached_verts = self._build_vertices(painter)
+                self._vbo_cache_key = vbo_key
+            verts = self._cached_verts
+
+            assert self._vbo is not None
+            self._vbo.bind()
+            if rebuild_verts:
+                self._vbo.allocate(verts.tobytes(), verts.nbytes)
+
             f = ctx.functions()
             f.glViewport(0, 0, max(1, dev.width()), max(1, dev.height()))
             f.glDisable(_GL_DEPTH_TEST)
@@ -389,4 +438,8 @@ class VideoBlendOpenGLItem(QtWidgets.QGraphicsObject):
 
     def reset_gl_state(self) -> None:
         self._gl_failed = False
+        self._uploaded_prev_id = None
+        self._uploaded_curr_id = None
+        self._vbo_cache_key = None
+        self._cached_verts = None
         self._destroy_gl_objects()
