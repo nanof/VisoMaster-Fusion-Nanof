@@ -100,8 +100,8 @@ class VideoProcessor(QObject):
 
         # --- Worker Thread Management ---
         self.num_threads = num_threads
-        self.preroll_target = max(
-            20, self.num_threads * 2
+        self.preroll_target = min(
+            max(20, int(self.num_threads * 1.5)), 40
         )  # Target number of frames before playback starts
         self.max_display_buffer_size = (
             self.preroll_target * 4
@@ -388,12 +388,16 @@ class VideoProcessor(QObject):
             self.preroll_timer.stop()
             return
 
-        # Check if the buffer is filled
-        if len(self.frames_to_display) >= self.preroll_target:
+        is_feeder_done = (
+            not self.feeder_thread.is_alive() if self.feeder_thread else False
+        )
+
+        # Check if the buffer is filled OR if we reached EOF
+        if len(self.frames_to_display) >= self.preroll_target or is_feeder_done:
             self.preroll_timer.stop()
             self.playback_started = True
             print(
-                f"[INFO] Preroll buffer filled ({len(self.frames_to_display)} frames). Starting playback components..."
+                f"[INFO] Preroll buffer ready ({len(self.frames_to_display)} frames). Starting playback components..."
             )
 
             # Call the dedicated playback start function
@@ -1373,6 +1377,8 @@ class VideoProcessor(QObject):
 
         self.main_window.models_processor.set_number_of_threads(value)
         self.num_threads = value
+        self.preroll_target = min(max(20, int(self.num_threads * 1.5)), 40)
+        self.max_display_buffer_size = self.preroll_target * 4
 
     def process_video(self):
         """
@@ -1634,11 +1640,13 @@ class VideoProcessor(QObject):
         self.feeder_thread.start()
 
         if self.recording:
+            self.max_frames_to_display_size = 8
             # Recording: start the display metronome immediately
             print("[INFO] Recording mode: Starting metronome immediately.")
             self._start_metronome(9999.0, is_first_start=True)
         else:
             if self.main_window.control.get("VideoPlaybackBufferingToggle", False):
+                self.max_frames_to_display_size = self.preroll_target + 10
                 # Playback: start the preroll monitor
                 print(
                     f"[INFO] Playback mode: Waiting for preroll buffer (target: {self.preroll_target} frames)..."
@@ -1657,6 +1665,7 @@ class VideoProcessor(QObject):
                 )
                 self.preroll_timer.start(100)
             else:
+                self.max_frames_to_display_size = 8
                 # Recording: start the display metronome immediately
                 print("[INFO] Playback mode.")
                 self._start_synchronized_playback()
