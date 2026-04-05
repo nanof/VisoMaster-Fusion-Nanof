@@ -838,9 +838,6 @@ class ModelsProcessor(QtCore.QObject):
                     if "trt_ep_context_file_path" in trt_options:
                         del trt_options["trt_ep_context_file_path"]
 
-                    # Force FP16 pour DFM
-                    trt_options["trt_fp16_enable"] = True
-
                     dfm_providers[0] = ("TensorrtExecutionProvider", trt_options)
 
                 self.dfm_models[dfm_model] = DFMModel(
