@@ -32,11 +32,18 @@ def calc_mean_std_4D(feat, eps=1e-5):
     return feat_mean, feat_std
 
 def adaptive_instance_normalization_4D(content_feat, style_feat): # content_feat is ref feature, style is degradate feature
-    size = content_feat.size()
-    style_mean, style_std = calc_mean_std_4D(style_feat)
-    content_mean, content_std = calc_mean_std_4D(content_feat)
-    normalized_feat = (content_feat - content_mean.expand(size)) / content_std.expand(size)
-    return normalized_feat * style_std.expand(size) + style_mean.expand(size)
+    # Under torch.autocast(FP16), var/std and division here can overflow → NaN → black ROI tiles.
+    orig_dtype = content_feat.dtype
+    dev_type = content_feat.device.type
+    with torch.autocast(device_type=dev_type, enabled=False):
+        size = content_feat.size()
+        cf = content_feat.float()
+        sf = style_feat.float()
+        style_mean, style_std = calc_mean_std_4D(sf)
+        content_mean, content_std = calc_mean_std_4D(cf)
+        normalized_feat = (cf - content_mean.expand(size)) / content_std.expand(size)
+        out = normalized_feat * style_std.expand(size) + style_mean.expand(size)
+    return out.to(orig_dtype)
 
 
 def convU(in_channels, out_channels,conv_layer, norm_layer, kernel_size=3, stride=1,dilation=1, bias=True):
@@ -423,14 +430,21 @@ class DMDNet(nn.Module):
 
     
     def readMem(self, k, v, q):
-        sim = F.conv2d(q, k)
-        score = F.softmax(sim/sqrt(sim.size(1)), dim=1) #B * S * 1 * 1 6*128
-        sb,sn,sw,sh = score.size()
-        s_m = score.view(sb, -1).unsqueeze(1)#2*1*M
-        vb,vn,vw,vh = v.size()
-        v_in = v.view(vb, -1).repeat(sb,1,1)#2*M*(c*w*h)
-        mem_out = torch.bmm(s_m, v_in).squeeze(1).view(sb, vn, vw,vh)
-        max_inds = torch.argmax(score, dim=1).squeeze()
+        # FP16 softmax + bmm on attention scores is unstable; produces NaN memory reads → black squares on face.
+        orig_dtype = q.dtype
+        dev_type = q.device.type
+        with torch.autocast(device_type=dev_type, enabled=False):
+            qf, kf, vf = q.float(), k.float(), v.float()
+            sim = F.conv2d(qf, kf)
+            score = F.softmax(sim / sqrt(float(sim.size(1))), dim=1)
+            sb, sn, sw, sh = score.size()
+            s_m = score.view(sb, -1).unsqueeze(1)
+            vb, vn, vw, vh = vf.size()
+            v_in = vf.view(vb, -1).repeat(sb, 1, 1)
+            mem_out = torch.bmm(s_m, v_in).squeeze(1).view(sb, vn, vw, vh)
+            max_inds = torch.argmax(score, dim=1).squeeze()
+        if orig_dtype in (torch.float16, torch.bfloat16):
+            mem_out = mem_out.to(orig_dtype)
         return mem_out, max_inds
     
 

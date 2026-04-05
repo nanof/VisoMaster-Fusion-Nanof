@@ -16,7 +16,7 @@ Weight download: from the project root, `python download_models.py` (or the port
 | **Yunet2023Mar** | YuNet variant (March 2023) with the same head logic as classic YuNet; replaces the older checkpoint when you pick detector **Yunet-2023**. | `model_assets/yunet_2023_mar.onnx` |
 | **RifePreviewInterpAlt** | Second slot for the same RIFE graph (TensorStack) on a different path; lets you swap only `interp/rife_preview_interp_alt.onnx` for another compatible ONNX without touching the primary file. | `model_assets/interp/rife_preview_interp_alt.onnx` |
 
-**Infra:** subfolders under `model_assets/` (`matting/`, `sam2/`, `parsing/`, `interp/`, etc.), `scripts/hash_model.py` for SHA256, and `pytorch_assets_list` in `models_data.py` (empty; `download_models.py` iterates it when it has entries).
+**Infra:** subfolders under `model_assets/` (`matting/`, `sam2/`, `parsing/`, `interp/`, etc.), `scripts/hash_model.py` for SHA256, and `pytorch_assets_list` in `models_data.py` (PyTorch-only weights such as **DMDNet.pth**; `download_models.py` merges `models_list` + `pytorch_assets_list`).
 
 ---
 
@@ -52,6 +52,13 @@ Weight download: from the project root, `python download_models.py` (or the port
 - **Where:** **Face Restorer** (and **Face Restorer 2** if applicable) → **Restorer Type** → **RestoreFormer**.
 - **Requirement:** **RestoreFormerFP16**.
 
+### DMDNet (restorer, PyTorch / CUDA)
+
+- **Description:** Dictionary-guided face restoration (DMDNet). The app runs the **generic** memory bank by default. `FaceRestorers.run_dmdnet` also accepts optional **reference** crop + 68 landmarks for the **specific** branch (`memorize` → `GSOut`); wiring from the UI is not required for basic use.
+- **Where:** **Face Restorer** / **Face Restorer 2** → **Restorer Type** → **DMDNet**.
+- **Requirements:** **CUDA**; weights **`model_assets/pytorch_weights/DMDNet.pth`** (via `download_models.py` / `pytorch_assets_list`). **Target landmarks** in swap crop: 106-point detection (recommended) or 68-point so `dmd_lm68_crop` can be built in `frame_worker.swap_core`.
+- **Code:** `app/processors/face_restorers.py` (`ensure_dmdnet_loaded`, `run_dmdnet`), `app/processors/dmdnet_landmarks.py`, `app/processors/external/dmdnet_arch.py`.
+
 ### Yunet-2023 (detector)
 
 - **Description:** YuNet face detector with newer weights (same output family as standard YuNet in code).
@@ -82,5 +89,6 @@ Weight download: from the project root, `python download_models.py` (or the port
 | Saliency-based mask | **Salient mask (U2Net-p)** |
 | Lighter parser | **Face parser backbone → BiSeNet-18** |
 | Base RestoreFormer restorer | **Restorer Type → RestoreFormer** |
+| DMDNet (CUDA, PyTorch weights) | **Restorer Type → DMDNet** + `DMDNet.pth` |
 | Newer YuNet | **Detector → Yunet-2023** |
 | Second RIFE slot | **Neural ONNX checkpoint → RifePreviewInterpAlt** |

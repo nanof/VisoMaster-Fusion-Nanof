@@ -7715,6 +7715,9 @@ class FrameWorker(threading.Thread):
                 _perm = lambda t: np.ascontiguousarray(
                     t.permute(1, 2, 0).numpy(), dtype=np.uint8
                 )
+                _bw = float(parameters.get("PoissonRingEdgeBandwidthSlider", 50))
+                _pk = float(parameters.get("PoissonRingEdgePeakScaleSlider", 4))
+                _bsig = float(parameters.get("PoissonRingEdgeMaskBlurSlider", 0))
                 _out_np = faceutil.poisson_ring_edge_blend_numpy(
                     _perm(_orig),
                     _perm(_std),
@@ -7722,6 +7725,9 @@ class FrameWorker(threading.Thread):
                     _sm,
                     _pa,
                     _cv_mode,
+                    bandwidth_0_100=_bw,
+                    peak_scale=_pk,
+                    mask_blur_sigma=_bsig,
                 )
                 swap = torch.from_numpy(_out_np).permute(2, 0, 1).to(
                     device=img.device, dtype=torch.uint8

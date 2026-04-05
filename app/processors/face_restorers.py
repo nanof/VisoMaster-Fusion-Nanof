@@ -1,3 +1,4 @@
+import contextlib
 import gc
 import os
 import threading
@@ -81,6 +82,7 @@ class FaceRestorers:
             "RestoreFormer": "RestoreFormerFP16",
             "VQFR-v2": "VQFRv2",
             "DMDNet": "DMDNetTorch",
+            "DMDNet FP16": "DMDNetTorch",
         }
 
     def unload_dmdnet(self) -> None:
@@ -133,25 +135,81 @@ class FaceRestorers:
         temp_nchw: torch.Tensor,
         lm68_xy: np.ndarray,
         output: torch.Tensor,
+        sp_bchw_normalized: Optional[torch.Tensor] = None,
+        sp_lm68_xy: Optional[np.ndarray] = None,
+        use_half_autocast: bool = False,
     ) -> bool:
+        """Run DMDNet on ``temp_nchw`` (B×3×512×512, normalized [-1,1]).
+
+        Optional **specific** path: high-quality reference crop ``sp_bchw_normalized``
+        with 68 landmarks ``sp_lm68_xy`` in the **same 512×512** space (runs ``memorize``
+        then uses the specific branch in ``forward``). When omitted, uses generic memory only.
+
+        ``use_half_autocast``: CUDA AMP (FP16) for ``memorize``/``forward``; weights stay FP32.
+        Attention readout and AdaIN run in FP32 inside the model to avoid NaN/black ROI tiles.
+        """
         model = self.ensure_dmdnet_loaded()
         if model is None:
             return False
         from app.processors.dmdnet_landmarks import get_component_location_tensor
 
-        dev = temp_nchw.device
-        loc_t = get_component_location_tensor(lm68_xy, dev).unsqueeze(0)
-        try:
-            with torch.no_grad():
-                with self._dmdnet_lock:
-                    gen, _spec = model(
-                        lq=temp_nchw,
-                        loc=loc_t,
-                        sp_256=None,
-                        sp_128=None,
-                        sp_64=None,
+        dev = next(model.parameters()).device
+        dtype = torch.float32
+        lq = temp_nchw.to(device=dev, dtype=dtype).contiguous()
+        loc_t = get_component_location_tensor(lm68_xy, dev).unsqueeze(0).to(
+            device=dev, dtype=dtype
+        )
+
+        amp_ctx = (
+            torch.autocast(device_type="cuda", dtype=torch.float16)
+            if use_half_autocast
+            else contextlib.nullcontext()
+        )
+
+        sp_256 = sp_128 = sp_64 = None
+        if sp_bchw_normalized is not None and sp_lm68_xy is not None:
+            try:
+                sp = sp_bchw_normalized.to(device=dev, dtype=dtype).contiguous()
+                if sp.dim() != 4 or sp.shape[0] != 1 or sp.shape[1] != 3:
+                    raise ValueError(f"expected sp (1,3,H,W), got {tuple(sp.shape)}")
+                if sp.shape[2] != 512 or sp.shape[3] != 512:
+                    sp = v2.functional.resize(sp, [512, 512], antialias=True)
+                lm_sp = np.asarray(sp_lm68_xy, dtype=np.float32).reshape(68, 2)
+                loc_sp = get_component_location_tensor(lm_sp, dev).unsqueeze(0).to(
+                    device=dev, dtype=dtype
+                )
+                with torch.no_grad(), amp_ctx:
+                    with self._dmdnet_lock:
+                        sp_256, sp_128, sp_64 = model.memorize(sp, loc_sp)
+            except Exception as e:
+                if "DMDNetSpWarn" not in self._warned_models:
+                    print(
+                        f"[WARN] DMDNet specific-memory path failed ({e}); using generic memory only."
                     )
-            output.copy_(gen)
+                    self._warned_models.add("DMDNetSpWarn")
+                sp_256 = sp_128 = sp_64 = None
+
+        try:
+            with torch.no_grad(), amp_ctx:
+                with self._dmdnet_lock:
+                    ge, gs = model(
+                        lq=lq,
+                        loc=loc_t,
+                        sp_256=sp_256,
+                        sp_128=sp_128,
+                        sp_64=sp_64,
+                    )
+            # Drop the unused head tensor immediately so peak VRAM does not hold both
+            # GeOut and GSOut until this function returns (specific path = two full outputs).
+            if gs is not None:
+                output.copy_(gs.to(device=output.device, dtype=output.dtype))
+                del ge, gs
+            else:
+                output.copy_(ge.to(device=output.device, dtype=output.dtype))
+                del ge
+            del lq, loc_t
+            if sp_256 is not None:
+                del sp_256, sp_128, sp_64
             return True
         except Exception as e:
             print(f"[ERROR] DMDNet forward failed: {e}")
@@ -665,7 +723,7 @@ class FaceRestorers:
         if not model_name_to_load:
             return swapped_face_upscaled
 
-        if restorer_type == "DMDNet" and self.models_processor.device != "cuda":
+        if restorer_type in ("DMDNet", "DMDNet FP16") and self.models_processor.device != "cuda":
             return swapped_face_upscaled
 
         # If using a separate detection mode
@@ -832,7 +890,7 @@ class FaceRestorers:
             ).contiguous()
             self.run_VQFR_v2(temp, outpred, fidelity_weight)
 
-        elif restorer_type == "DMDNet":
+        elif restorer_type in ("DMDNet", "DMDNet FP16"):
             outpred = torch.empty(
                 (1, 3, 512, 512),
                 dtype=torch.float32,
@@ -849,7 +907,10 @@ class FaceRestorers:
             lm68 = np.asarray(dmd_landmarks_68_crop, dtype=np.float32).reshape(68, 2)
             if restorer_det_type in ("Blend", "Reference"):
                 lm68 = np.array(tform(lm68), dtype=np.float32)
-            if not self.run_dmdnet(temp, lm68, outpred):
+            _dmd_amp = restorer_type == "DMDNet FP16"
+            if not self.run_dmdnet(
+                temp, lm68, outpred, use_half_autocast=_dmd_amp
+            ):
                 return swapped_face_upscaled
 
         if outpred is None:

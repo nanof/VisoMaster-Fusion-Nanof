@@ -1984,6 +1984,9 @@ def poisson_ring_edge_blend_numpy(
     mask_hw: np.ndarray,
     amount: float,
     mode: Optional[int] = None,
+    bandwidth_0_100: float = 50.0,
+    peak_scale: float = 4.0,
+    mask_blur_sigma: float = 0.0,
 ) -> np.ndarray:
     """Blend OpenCV seamlessClone (gradient-domain) at the mask feather, keep interior standard.
 
@@ -1997,6 +2000,10 @@ def poisson_ring_edge_blend_numpy(
         mask_hw: H×W float or H×W×1 soft mask in ROI space.
         amount: 0–1 scales how much seamless vs standard in the feather band.
         mode: ``cv2.MIXED_CLONE`` (default) or ``cv2.NORMAL_CLONE``.
+        bandwidth_0_100: 0 = narrow ring (high exponent on feather weight), 100 = wide ring.
+        peak_scale: Multiplier for ``m * (1-m)`` before normalization (classic value 4).
+        mask_blur_sigma: Optional Gaussian σ applied to the soft mask before band weights
+            (0 = off); widens the transition used only for mixing, not for seamlessClone mask.
 
     Returns:
         H×W×3 uint8 RGB (copy); on failure returns ``standard_roi_rgb`` unchanged.
@@ -2017,6 +2024,11 @@ def poisson_ring_edge_blend_numpy(
         m = np.clip(mask_hw, 0.0, 1.0)
     if m.shape[:2] != (h, w):
         return standard_roi_rgb
+
+    m_band = m.astype(np.float32, copy=True)
+    sig = float(max(0.0, mask_blur_sigma))
+    if sig > 1e-3:
+        m_band = cv2.GaussianBlur(m_band, (0, 0), sigmaX=sig, sigmaY=sig)
 
     mask_u8 = (m > 0.35).astype(np.uint8) * 255
     if int(mask_u8.sum()) < 64:
@@ -2041,10 +2053,22 @@ def poisson_ring_edge_blend_numpy(
         return standard_roi_rgb
 
     seam_rgb = cv2.cvtColor(seam_bgr, cv2.COLOR_BGR2RGB)
-    band = 4.0 * m * (1.0 - m)
-    bmax = float(band.max())
+    bw = float(np.clip(bandwidth_0_100, 0.0, 100.0))
+    # Narrow ring (bw→0): high exponent; wide (bw→100): low exponent.
+    # bw=50 → exp=1.0 matches legacy ``normalize(peak_scale * m * (1-m))`` with no extra power.
+    if bw <= 50.0:
+        exp = 4.0 - (bw / 50.0) * 3.0
+    else:
+        exp = 1.0 - ((bw - 50.0) / 50.0) * 0.35
+    pk = float(np.clip(peak_scale, 1.0, 12.0))
+    raw = np.clip(pk * m_band * (1.0 - m_band), 0.0, None)
+    bmax = float(raw.max())
     if bmax > 1e-6:
-        band = band / bmax
+        raw = raw / bmax
+    band = np.power(np.clip(raw, 0.0, 1.0), exp)
+    bmax2 = float(band.max())
+    if bmax2 > 1e-6:
+        band = band / bmax2
     band3 = np.stack([band] * 3, axis=-1, dtype=np.float32)
     mix = np.clip(band3 * float(amount), 0.0, 1.0)
     out = (

@@ -452,7 +452,7 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "label": "Seamless edge blend (Poisson)",
             "default": False,
             "help": "Face Swap → Masks: reduces halo at the face boundary using OpenCV seamlessClone "
-            "in the mask feather band (CPU on the face crop). Also listed under Blend Adjustments.",
+            "in the mask feather band (CPU on the face crop).",
         },
         "PoissonRingEdgeAmountSlider": {
             "level": 2,
@@ -473,6 +473,41 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "parentToggle": "PoissonRingEdgeEnableToggle",
             "requiredToggleValue": True,
             "help": "Mixed = MIXED_CLONE (gradients + texture). Normal = NORMAL_CLONE (stronger match to scene color at edge).",
+        },
+        "PoissonRingEdgeBandwidthSlider": {
+            "level": 2,
+            "label": "Ring bandwidth",
+            "min_value": "0",
+            "max_value": "100",
+            "default": "50",
+            "step": 1,
+            "parentToggle": "PoissonRingEdgeEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Where seamless vs standard alpha is mixed: 0 = narrow band (only the steepest part of the feather), "
+            "100 = wide band (more of the soft mask). Default 50 ≈ previous single curve.",
+        },
+        "PoissonRingEdgePeakScaleSlider": {
+            "level": 2,
+            "label": "Feather curve peak",
+            "min_value": "2",
+            "max_value": "10",
+            "default": "4",
+            "step": 1,
+            "parentToggle": "PoissonRingEdgeEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Multiplier for m·(1−m) before shaping (was fixed at 4). Higher pushes weight toward the middle of the feather.",
+        },
+        "PoissonRingEdgeMaskBlurSlider": {
+            "level": 2,
+            "label": "Mask blur (σ px)",
+            "min_value": "0",
+            "max_value": "12",
+            "default": "0",
+            "step": 1,
+            "parentToggle": "PoissonRingEdgeEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Gaussian blur on the soft mask before computing the ring weights only (not the seamlessClone binary mask). "
+            "Higher σ widens the transition region used for mixing.",
         },
     },
     "Original Face Parsers": {
