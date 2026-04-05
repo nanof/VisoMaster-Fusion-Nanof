@@ -1,5 +1,4 @@
 import time
-from collections import deque
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -10,8 +9,9 @@ import app.helpers.miscellaneous as misc_helpers
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
 
-_PREVIEW_FPS_WINDOW_SEC = 1.0
-_PREVIEW_FPS_STALE_SEC = 0.85
+_PREVIEW_FPS_STALE_SEC = 1.15
+# Session-average FPS (second overlay line): ignore this many seconds after Play (buffer/preroll).
+_SESSION_FPS_WARMUP_SEC = 3.0
 
 
 # Maps Settings → Linear blend quality (fragment shader u_mode).
@@ -303,16 +303,6 @@ def zoom_andfit_image_to_view_onchange(main_window: "MainWindow", new_transform)
     main_window.graphicsViewFrame.setTransform(new_transform, combine=False)
 
 
-def _instant_fps_text_from_deque(main_window: "MainWindow", now: float) -> str:
-    times = main_window._preview_fps_times
-    if len(times) < 2:
-        return "— FPS"
-    span = now - times[0]
-    if span <= 0:
-        return "— FPS"
-    return f"{(len(times) - 1) / span:.1f} FPS"
-
-
 def _session_fps_line(main_window: "MainWindow", now: float) -> str | None:
     """Second line: 'session: X.X' live while playing or frozen after Stop."""
     vp = main_window.video_processor
@@ -321,10 +311,12 @@ def _session_fps_line(main_window: "MainWindow", now: float) -> str | None:
 
     live_avg: float | None = None
     if active and vp.processing and vp.file_type in ("video", "webcam", "screen"):
-        n = main_window._playback_preview_fps_frames
-        elapsed = now - main_window._playback_preview_fps_start
-        if elapsed >= 0.12 and n >= 2:
-            live_avg = n / elapsed
+        t0 = getattr(main_window, "_playback_session_fps_measure_t0", None)
+        n = int(getattr(main_window, "_playback_session_fps_frames", 0))
+        if t0 is not None:
+            elapsed = now - float(t0)
+            if elapsed >= 0.12 and n >= 2:
+                live_avg = float(n) / elapsed
 
     if live_avg is not None:
         return f"session: {live_avg:.1f}"
@@ -411,39 +403,45 @@ def update_preview_media_metadata(main_window: "MainWindow") -> None:
     meta.setVisible(bool(text.strip()))
     meta.adjustSize()
     now = time.perf_counter()
-    _set_preview_fps_label(
-        main_window, _instant_fps_text_from_deque(main_window, now), now
-    )
+    _set_preview_fps_label(main_window, "— FPS", now)
 
 
 def start_playback_fps_preview_session(main_window: "MainWindow") -> None:
     """Start session-average FPS measurement from Play (video or webcam)."""
     from app.ui.widgets.actions import pipeline_profile_actions as _ppa_sess
 
-    main_window._preview_fps_label_last_ui_sec = 0.0
+    main_window._preview_fps_sec_last_fire = time.perf_counter()
+    main_window._preview_fps_sec_frames = 0
     main_window._playback_preview_fps_active = True
-    main_window._playback_preview_fps_start = time.perf_counter()
-    main_window._playback_preview_fps_frames = 0
+    _t0 = time.perf_counter()
+    main_window._playback_session_warmup_until = _t0 + _SESSION_FPS_WARMUP_SEC
+    main_window._playback_session_fps_measure_t0 = None
+    main_window._playback_session_fps_frames = 0
     _ppa_sess.clear_pipeline_profile_session_samples(main_window)
 
 
 def reset_playback_fps_preview_session(main_window: "MainWindow") -> None:
     """On stop, freeze session-average FPS; value remains visible on the 'session:' line."""
-    main_window._preview_fps_label_last_ui_sec = 0.0
+    main_window._preview_fps_sec_last_fire = time.perf_counter()
+    main_window._preview_fps_sec_frames = 0
     now = time.perf_counter()
     frozen_new: float | None = None
-    if main_window._playback_preview_fps_active:
-        n = main_window._playback_preview_fps_frames
-        elapsed = now - main_window._playback_preview_fps_start
-        if elapsed > 0 and n > 0:
-            frozen_new = n / elapsed
+    had_active_session = main_window._playback_preview_fps_active
+    if had_active_session:
+        mt0 = getattr(main_window, "_playback_session_fps_measure_t0", None)
+        n = int(getattr(main_window, "_playback_session_fps_frames", 0))
+        if mt0 is not None and now > float(mt0) and n > 0:
+            frozen_new = float(n) / (now - float(mt0))
 
     main_window._playback_preview_fps_active = False
-    main_window._playback_preview_fps_start = 0.0
-    main_window._playback_preview_fps_frames = 0
+    main_window._playback_session_warmup_until = 0.0
+    main_window._playback_session_fps_measure_t0 = None
+    main_window._playback_session_fps_frames = 0
 
     if frozen_new is not None:
         main_window._preview_session_fps_frozen = frozen_new
+    elif had_active_session:
+        main_window._preview_session_fps_frozen = None
 
     from app.ui.widgets.actions import pipeline_profile_actions as ppa
 
@@ -451,24 +449,23 @@ def reset_playback_fps_preview_session(main_window: "MainWindow") -> None:
     ppa.reset_pipeline_profile_state(main_window)
     update_pipeline_profile_overlay(main_window, None)
 
-    inst_text = _instant_fps_text_from_deque(main_window, now)
-    _set_preview_fps_label(main_window, inst_text, now)
+    _set_preview_fps_label(main_window, "— FPS", now)
 
 
-def record_preview_frame_tick(main_window: "MainWindow") -> None:
+def on_preview_fps_second_tick(main_window: "MainWindow") -> None:
     """
-    Track preview redraw rate with a ~1s sliding window for instant FPS.
-    While playing, update the second line 'session:' live; after stop it shows the frozen average.
+    Once per second: set the first-line FPS to the average preview redraw rate
+    over that interval (frame count / elapsed wall time since last tick).
     """
     now = time.perf_counter()
-    main_window._preview_fps_last_tick = now
-    times: deque[float] = main_window._preview_fps_times
-    times.append(now)
-    cutoff = now - _PREVIEW_FPS_WINDOW_SEC
-    while times and times[0] < cutoff:
-        times.popleft()
-
-    inst_text = _instant_fps_text_from_deque(main_window, now)
+    last = float(getattr(main_window, "_preview_fps_sec_last_fire", 0.0))
+    if last <= 0.0:
+        main_window._preview_fps_sec_last_fire = now
+        return
+    elapsed = now - last
+    main_window._preview_fps_sec_last_fire = now
+    n = int(getattr(main_window, "_preview_fps_sec_frames", 0))
+    main_window._preview_fps_sec_frames = 0
 
     vp = main_window.video_processor
     active = (
@@ -476,19 +473,39 @@ def record_preview_frame_tick(main_window: "MainWindow") -> None:
         and vp.processing
         and vp.file_type in ("video", "webcam", "screen")
     )
-    if active:
-        main_window._playback_preview_fps_frames += 1
-
-    # Repositioning labels and setText every frame competes with the display metronome
-    # (~30 Hz). Throttle overlay updates during active playback; deque/session counters
-    # stay per-frame accurate.
-    _throttle_sec = 0.1
-    last_ui = getattr(main_window, "_preview_fps_label_last_ui_sec", 0.0)
-    if active and (now - last_ui) < _throttle_sec:
+    if n == 0 and not active:
         return
-    main_window._preview_fps_label_last_ui_sec = now
-
+    avg = (float(n) / elapsed) if elapsed > 1e-6 else 0.0
+    inst_text = f"{avg:.1f} FPS" if n > 0 else "0 FPS"
     _set_preview_fps_label(main_window, inst_text, now)
+
+
+def record_preview_frame_tick(main_window: "MainWindow") -> None:
+    """
+    Count each preview redraw; the first-line FPS label is updated once per second
+    in on_preview_fps_second_tick with the average over that second.
+    Session-average line counts only frames after _SESSION_FPS_WARMUP_SEC from Play.
+    """
+    now = time.perf_counter()
+    main_window._preview_fps_last_tick = now
+    main_window._preview_fps_sec_frames = int(
+        getattr(main_window, "_preview_fps_sec_frames", 0)
+    ) + 1
+
+    vp = main_window.video_processor
+    active = (
+        getattr(main_window, "_playback_preview_fps_active", False)
+        and vp.processing
+        and vp.file_type in ("video", "webcam", "screen")
+    )
+    if active and now >= float(
+        getattr(main_window, "_playback_session_warmup_until", 0.0)
+    ):
+        if getattr(main_window, "_playback_session_fps_measure_t0", None) is None:
+            main_window._playback_session_fps_measure_t0 = now
+        main_window._playback_session_fps_frames = int(
+            getattr(main_window, "_playback_session_fps_frames", 0)
+        ) + 1
 
 
 def on_pipeline_profile_overlay_toggle(main_window: "MainWindow", _value: object) -> None:
@@ -558,12 +575,20 @@ def update_pipeline_profile_overlay(
 
 
 def refresh_preview_fps_stale(main_window: "MainWindow") -> None:
-    """If no new frames arrive, show 0 FPS for the instant line (session line may remain)."""
+    """If preview is idle (not playing), fade the first line to — after no redraws."""
     if main_window._preview_fps_last_tick == 0.0:
+        return
+    vp = main_window.video_processor
+    active = (
+        getattr(main_window, "_playback_preview_fps_active", False)
+        and vp.processing
+        and vp.file_type in ("video", "webcam", "screen")
+    )
+    if active:
         return
     if time.perf_counter() - main_window._preview_fps_last_tick > _PREVIEW_FPS_STALE_SEC:
         now = time.perf_counter()
-        _set_preview_fps_label(main_window, "0 FPS", now)
+        _set_preview_fps_label(main_window, "— FPS", now)
 
 
 def fit_image_to_view(

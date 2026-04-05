@@ -6,6 +6,7 @@ import numpy as np
 import cv2
 from skimage import transform as trans
 import torch
+import torch.nn.functional as F
 
 import torchvision
 from torchvision.transforms import v2

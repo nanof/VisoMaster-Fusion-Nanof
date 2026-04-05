@@ -3,6 +3,7 @@ from typing import Dict, Optional
 from pathlib import Path
 from functools import partial
 import copy
+import time
 
 from PySide6 import QtWidgets, QtGui
 from PySide6 import QtCore
@@ -194,11 +195,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.last_seek_read_failed = False
         self.embedding_editor_window = None
 
-        self._preview_fps_times: deque[float] = deque()
         self._preview_fps_last_tick = 0.0
+        self._preview_fps_sec_frames: int = 0
+        self._preview_fps_sec_last_fire: float = 0.0
         self._playback_preview_fps_active = False
-        self._playback_preview_fps_start = 0.0
-        self._playback_preview_fps_frames = 0
+        self._playback_session_warmup_until: float = 0.0
+        self._playback_session_fps_measure_t0: float | None = None
+        self._playback_session_fps_frames: int = 0
         self._preview_session_fps_frozen: float | None = None
         self._pipeline_profile_ema_by_thread: dict[str, dict[str, float]] = {}
         self._pipeline_profile_window_deques: dict[str, deque] = {}
@@ -281,8 +284,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop
         )
         self.previewFpsLabel.setToolTip(
-            "First line: instant FPS (~1 s window).\n"
-            "Second line: session: value — live while playing; after Stop the last average stays visible."
+            "First line: average preview FPS over the last second (updated once per second).\n"
+            "Second line: session: value — average while playing excluding the first ~3 s after Play "
+            "(buffer/preroll); after Stop the last average stays visible."
         )
         self.previewFpsLabel.setAttribute(
             QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
@@ -341,6 +345,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             partial(graphics_view_actions.refresh_preview_fps_stale, self)
         )
         self._preview_fps_stale_timer.start()
+
+        self._preview_fps_sec_last_fire = time.perf_counter()
+        self._preview_fps_sec_timer = QtCore.QTimer(self)
+        self._preview_fps_sec_timer.setInterval(1000)
+        self._preview_fps_sec_timer.timeout.connect(
+            partial(graphics_view_actions.on_preview_fps_second_tick, self)
+        )
+        self._preview_fps_sec_timer.start()
 
         video_control_actions.enable_zoom_and_pan(self, self.graphicsViewFrame)
 
