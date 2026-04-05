@@ -457,6 +457,10 @@ def _load_job_controls_and_state(
     if swap_faces_state and not is_batch_load:
         # This will trigger a frame refresh via its own logic
         video_control_actions.process_swap_faces(main_window)
+    elif not swap_faces_state and not is_batch_load:
+        from app.ui.widgets.actions import preview_notification_actions as _preview_notify
+
+        _preview_notify.show_swap_faces_state(main_window, False)
     print(f"[INFO] Swap Faces button state restored: {swap_faces_state}")
 
     # Restore misc paths and settings

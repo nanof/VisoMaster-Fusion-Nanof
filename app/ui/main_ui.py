@@ -321,6 +321,18 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         )
         self.previewPipelineProfileLabel.setVisible(False)
 
+        self.previewNotificationLabel = QtWidgets.QLabel("", self.graphicsViewFrame)
+        self.previewNotificationLabel.setStyleSheet(
+            "QLabel { background-color: rgba(20, 20, 20, 220); color: #f0f0f0; "
+            "padding: 10px 18px; border-radius: 6px; font-size: 13px; "
+            "font-weight: 600; font-family: 'Segoe UI', 'Segoe UI Historic', sans-serif; }"
+        )
+        self.previewNotificationLabel.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.previewNotificationLabel.setAttribute(
+            QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+        )
+        self.previewNotificationLabel.setVisible(False)
+
         graphics_view_actions.position_preview_overlay_labels(self)
 
         self._preview_fps_stale_timer = QtCore.QTimer(self)

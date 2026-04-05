@@ -361,10 +361,18 @@ def position_preview_overlay_labels(main_window: "MainWindow") -> None:
         meta_lbl.raise_()
     fps_lbl.raise_()
     vw = main_window.graphicsViewFrame.width()
+    vh = main_window.graphicsViewFrame.height()
     prof_lbl.adjustSize()
     if prof_lbl.isVisible():
         prof_lbl.move(max(margin, vw - prof_lbl.width() - margin), margin)
         prof_lbl.raise_()
+    notif_lbl = getattr(main_window, "previewNotificationLabel", None)
+    if notif_lbl is not None and notif_lbl.isVisible():
+        notif_lbl.adjustSize()
+        x = max(margin, (vw - notif_lbl.width()) // 2)
+        y = max(margin, vh - notif_lbl.height() - margin)
+        notif_lbl.move(x, y)
+        notif_lbl.raise_()
 
 
 def position_preview_fps_label(main_window: "MainWindow") -> None:

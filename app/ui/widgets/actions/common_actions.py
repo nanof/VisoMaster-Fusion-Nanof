@@ -552,6 +552,9 @@ def clear_gpu_memory(main_window: "MainWindow"):
     main_window.models_processor.clear_gpu_memory()
     main_window.swapfacesButton.setChecked(False)
     main_window.editFacesButton.setChecked(False)
+    from app.ui.widgets.actions import preview_notification_actions as _preview_notify
+
+    _preview_notify.show_swap_faces_state(main_window, False)
     update_gpu_memory_progressbar(main_window)
 
     # main_window.videoSeekSlider.markers = set() # Comment this to keep markers visible after vram clear
@@ -881,81 +884,85 @@ def set_control_widgets_values(main_window: "MainWindow", enable_exec_func=True)
 
     Temporarily disables frame refreshing while setting values to avoid unnecessary processing.
     """
-    migrate_interpolation_control_keys(main_window.control)
-    # Get control values and parameter widgets from the main window
-    control = main_window.control.copy()
-    parameter_widgets = main_window.parameter_widgets
+    setattr(main_window, "_preview_notifications_suppressed", True)
+    try:
+        migrate_interpolation_control_keys(main_window.control)
+        # Get control values and parameter widgets from the main window
+        control = main_window.control.copy()
+        parameter_widgets = main_window.parameter_widgets
 
-    # Prepare a dictionary of ALL widget options from layout data
-    all_widget_options = {}
-    for layout_data_source in [
-        SETTINGS_LAYOUT_DATA,
-        COMMON_LAYOUT_DATA,
-    ]:  # Iterate over both
-        for group_name, group_data in layout_data_source.items():
-            for widget_key, widget_data in group_data.items():
-                all_widget_options[widget_key] = widget_data
+        # Prepare a dictionary of ALL widget options from layout data
+        all_widget_options = {}
+        for layout_data_source in [
+            SETTINGS_LAYOUT_DATA,
+            COMMON_LAYOUT_DATA,
+        ]:  # Iterate over both
+            for group_name, group_data in layout_data_source.items():
+                for widget_key, widget_data in group_data.items():
+                    all_widget_options[widget_key] = widget_data
 
-    # Iterate through control items and update widgets
-    for control_name, control_value in control.items():
-        widget = parameter_widgets.get(control_name)
+        # Iterate through control items and update widgets
+        for control_name, control_value in control.items():
+            widget = parameter_widgets.get(control_name)
 
-        if widget:
-            # Temporarily disable frame refresh
-            widget.enable_refresh_frame = False
+            if widget:
+                # Temporarily disable frame refresh
+                widget.enable_refresh_frame = False
 
-            # Set the widget value
-            if isinstance(
-                widget,
-                (
-                    widget_components.ParameterLineEdit,
-                    widget_components.ParameterSlider,
-                ),
-            ):
-                try:
-                    int_value = int(float(control_value))
-                    widget.set_value(int_value)
-                except (ValueError, TypeError):
-                    pass
-            elif isinstance(
-                widget,
-                (
-                    widget_components.ParameterLineDecimalEdit,
-                    widget_components.ParameterDecimalSlider,
-                ),
-            ):
-                try:
-                    float_value = float(control_value)
-                    widget.set_value(float_value)
-                except (ValueError, TypeError):
-                    pass
-            elif isinstance(widget, widget_components.ToggleButton):
-                widget.set_value(bool(control_value))
-            elif isinstance(widget, widget_components.SelectionBox):
-                widget.set_value(str(control_value))
-            else:
-                widget.set_value(control_value)
+                # Set the widget value
+                if isinstance(
+                    widget,
+                    (
+                        widget_components.ParameterLineEdit,
+                        widget_components.ParameterSlider,
+                    ),
+                ):
+                    try:
+                        int_value = int(float(control_value))
+                        widget.set_value(int_value)
+                    except (ValueError, TypeError):
+                        pass
+                elif isinstance(
+                    widget,
+                    (
+                        widget_components.ParameterLineDecimalEdit,
+                        widget_components.ParameterDecimalSlider,
+                    ),
+                ):
+                    try:
+                        float_value = float(control_value)
+                        widget.set_value(float_value)
+                    except (ValueError, TypeError):
+                        pass
+                elif isinstance(widget, widget_components.ToggleButton):
+                    widget.set_value(bool(control_value))
+                elif isinstance(widget, widget_components.SelectionBox):
+                    widget.set_value(str(control_value))
+                else:
+                    widget.set_value(control_value)
 
-            if enable_exec_func:
-                # Execute any associated function, if defined
-                widget_definition = all_widget_options.get(
-                    control_name
-                )  # Use .get() for safety
-                if widget_definition:
-                    exec_function_data = widget_definition.get("exec_function")
-                    if exec_function_data:
-                        # The functions in control_actions.py are typically (main_window, value, *additional_args)
-                        exec_args_from_layout = widget_definition.get(
-                            "exec_function_args", []
-                        )
-                        final_exec_args = [
-                            main_window,
-                            control_value,
-                        ] + exec_args_from_layout
-                        exec_function_data(*final_exec_args)
+                if enable_exec_func:
+                    # Execute any associated function, if defined
+                    widget_definition = all_widget_options.get(
+                        control_name
+                    )  # Use .get() for safety
+                    if widget_definition:
+                        exec_function_data = widget_definition.get("exec_function")
+                        if exec_function_data:
+                            # The functions in control_actions.py are typically (main_window, value, *additional_args)
+                            exec_args_from_layout = widget_definition.get(
+                                "exec_function_args", []
+                            )
+                            final_exec_args = [
+                                main_window,
+                                control_value,
+                            ] + exec_args_from_layout
+                            exec_function_data(*final_exec_args)
 
-            # Re-enable frame refresh
-            widget.enable_refresh_frame = True
+                # Re-enable frame refresh
+                widget.enable_refresh_frame = True
+    finally:
+        setattr(main_window, "_preview_notifications_suppressed", False)
 
 
 @QtCore.Slot(QtWidgets.QListWidget, bool)

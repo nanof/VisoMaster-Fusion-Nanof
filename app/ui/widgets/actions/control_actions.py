@@ -600,6 +600,9 @@ def handle_preview_frame_interpolation_toggle(
 
         graphics_view_actions.restore_video_preview_raster_viewport(main_window)
         main_window.video_processor._smooth_decouple_stop_presenter()
+    from app.ui.widgets.actions import preview_notification_actions as _preview_notify
+
+    _preview_notify.show_frame_interpolation_state(main_window, bool(new_value))
 
 
 def handle_preview_interpolation_steps_per_frame_change(

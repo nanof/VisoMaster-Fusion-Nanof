@@ -2330,8 +2330,18 @@ def process_swap_faces(main_window: "MainWindow"):
     video_processor = main_window.video_processor
     video_processor.sync_feeder_ui_face_flags_from_main_window()
     if video_processor.processing or video_processor.is_processing_segments:
+        from app.ui.widgets.actions import preview_notification_actions as _preview_notify
+
+        _preview_notify.show_swap_faces_state(
+            main_window, main_window.swapfacesButton.isChecked()
+        )
         return
     video_processor.process_current_frame(synchronous=True)
+    from app.ui.widgets.actions import preview_notification_actions as _preview_notify
+
+    _preview_notify.show_swap_faces_state(
+        main_window, main_window.swapfacesButton.isChecked()
+    )
 
 
 def process_edit_faces(main_window: "MainWindow"):
