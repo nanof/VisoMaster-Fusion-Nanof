@@ -1,3 +1,4 @@
+import gc
 import os
 import threading
 from typing import TYPE_CHECKING, Dict, Optional, Tuple
@@ -65,6 +66,8 @@ class FaceRestorers:
         self._custom_inference_lock = threading.Lock()
         self._runner_locks: Dict[int, threading.Lock] = {}
         self._custom_init_lock = threading.Lock()  # serialises Custom-kernel lazy inits
+        self._dmdnet_model: Optional[torch.nn.Module] = None
+        self._dmdnet_lock = threading.Lock()
         self.model_map = {
             "GFPGAN-v1.4": "GFPGANv1.4",
             "GFPGAN-1024": "GFPGAN1024",
@@ -77,7 +80,82 @@ class FaceRestorers:
             "RestoreFormer++": "RestoreFormerPlusPlus",
             "RestoreFormer": "RestoreFormerFP16",
             "VQFR-v2": "VQFRv2",
+            "DMDNet": "DMDNetTorch",
         }
+
+    def unload_dmdnet(self) -> None:
+        with self._custom_init_lock:
+            self._dmdnet_model = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def ensure_dmdnet_loaded(self) -> Optional[torch.nn.Module]:
+        if self.models_processor.device != "cuda":
+            if "DMDNetCuda" not in self._warned_models:
+                print("[WARN] DMDNet is only supported on CUDA; skipping load.")
+                self._warned_models.add("DMDNetCuda")
+            return None
+        with self._custom_init_lock:
+            if self._dmdnet_model is not None:
+                return self._dmdnet_model
+            from pathlib import Path
+
+            from app.processors.external.dmdnet_arch import DMDNet
+            from app.processors.models_data import models_dir
+
+            pth = Path(models_dir) / "pytorch_weights" / "DMDNet.pth"
+            if not pth.is_file():
+                if "DMDNetPath" not in self._warned_models:
+                    print(
+                        f"[WARN] DMDNet weights not found at {pth}. "
+                        "Run download_models.py (includes pytorch_weights/DMDNet.pth)."
+                    )
+                    self._warned_models.add("DMDNetPath")
+                return None
+            try:
+                net = DMDNet().to("cuda")
+                state = torch.load(
+                    str(pth), map_location="cuda", weights_only=False
+                )
+                net.load_state_dict(state, strict=True)
+                net.eval()
+                self._dmdnet_model = net
+                print("[INFO] DMDNet (PyTorch) loaded.")
+                return net
+            except Exception as e:
+                print(f"[ERROR] Failed to load DMDNet: {e}")
+                self._dmdnet_model = None
+                return None
+
+    def run_dmdnet(
+        self,
+        temp_nchw: torch.Tensor,
+        lm68_xy: np.ndarray,
+        output: torch.Tensor,
+    ) -> bool:
+        model = self.ensure_dmdnet_loaded()
+        if model is None:
+            return False
+        from app.processors.dmdnet_landmarks import get_component_location_tensor
+
+        dev = temp_nchw.device
+        loc_t = get_component_location_tensor(lm68_xy, dev).unsqueeze(0)
+        try:
+            with torch.no_grad():
+                with self._dmdnet_lock:
+                    gen, _spec = model(
+                        lq=temp_nchw,
+                        loc=loc_t,
+                        sp_256=None,
+                        sp_128=None,
+                        sp_64=None,
+                    )
+            output.copy_(gen)
+            return True
+        except Exception as e:
+            print(f"[ERROR] DMDNet forward failed: {e}")
+            return False
 
     def unload_models(self):
         """Unloads the restorer models held in both slots and resets state."""
@@ -87,6 +165,7 @@ class FaceRestorers:
         if self.active_model_slot2:
             self.models_processor.unload_model(self.active_model_slot2)
             self.active_model_slot2 = None
+        self.unload_dmdnet()
 
     def _get_model_session(self, model_name: str):
         """
@@ -580,9 +659,13 @@ class FaceRestorers:
         detect_score,
         target_kps=None,
         slot_id: int = 1,
+        dmd_landmarks_68_crop: Optional[np.ndarray] = None,
     ):
         model_name_to_load = self.model_map.get(restorer_type)
         if not model_name_to_load:
+            return swapped_face_upscaled
+
+        if restorer_type == "DMDNet" and self.models_processor.device != "cuda":
             return swapped_face_upscaled
 
         # If using a separate detection mode
@@ -748,6 +831,26 @@ class FaceRestorers:
                 device=self.models_processor.device,
             ).contiguous()
             self.run_VQFR_v2(temp, outpred, fidelity_weight)
+
+        elif restorer_type == "DMDNet":
+            outpred = torch.empty(
+                (1, 3, 512, 512),
+                dtype=torch.float32,
+                device=self.models_processor.device,
+            ).contiguous()
+            if dmd_landmarks_68_crop is None or np.asarray(dmd_landmarks_68_crop).size < 136:
+                if "DMDNetLm" not in self._warned_models:
+                    print(
+                        "[WARN] DMDNet: need target landmarks (106-point mode recommended). "
+                        "Skipping restoration for this face."
+                    )
+                    self._warned_models.add("DMDNetLm")
+                return swapped_face_upscaled
+            lm68 = np.asarray(dmd_landmarks_68_crop, dtype=np.float32).reshape(68, 2)
+            if restorer_det_type in ("Blend", "Reference"):
+                lm68 = np.array(tform(lm68), dtype=np.float32)
+            if not self.run_dmdnet(temp, lm68, outpred):
+                return swapped_face_upscaled
 
         if outpred is None:
             return swapped_face_upscaled

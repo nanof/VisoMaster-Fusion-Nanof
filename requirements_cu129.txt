@@ -2,6 +2,7 @@ numpy
 opencv-python
 pillow
 scikit-image==0.26.0
+scipy
 onnx
 protobuf
 psutil

@@ -5788,6 +5788,27 @@ class FrameWorker(threading.Thread):
             raw_kps_crop = tform(kps_203)
             kps_all_crop = np.array(raw_kps_crop, dtype=np.float32)
 
+        # DMDNet: 68 pts in swap-crop space (from 106-pt target landmarks when available).
+        dmd_lm68_crop: np.ndarray | None = None
+        if kps is not None:
+            try:
+                kp = np.asarray(kps, dtype=np.float32)
+                if kp.ndim == 3:
+                    kp = kp.reshape(-1, kp.shape[-1])
+                nk = int(kp.shape[0])
+                if nk >= 106:
+                    from app.processors.dmdnet_landmarks import landmarks106_to_68_xy
+
+                    lm68_img = landmarks106_to_68_xy(kp)
+                    dmd_lm68_crop = np.asarray(tform(lm68_img), dtype=np.float32)
+                elif nk >= 68:
+                    dmd_lm68_crop = np.asarray(
+                        tform(kp[:68, :2].astype(np.float64)), dtype=np.float32
+                    )
+            except Exception as _e:
+                if debug:
+                    print(f"[DEBUG] DMDNet landmark build failed: {_e}")
+
         # STATE TRACKER: Suit si le tenseur 'swap' a subi une modification géométrique
         is_geometry_altered = False
 
@@ -6147,6 +6168,7 @@ class FrameWorker(threading.Thread):
                 control["DetectorScoreSlider"],
                 kps_ref,
                 slot_id=1,
+                dmd_landmarks_68_crop=dmd_lm68_crop,
             )
         elif _swap_restore_needs_clone:
             swap_restorecalc = swap.clone()
@@ -6518,6 +6540,7 @@ class FrameWorker(threading.Thread):
                 control["DetectorScoreSlider"],
                 kps_ref,
                 slot_id=2,
+                dmd_landmarks_68_crop=dmd_lm68_crop,
             )
             swap = self._apply_restorer_with_auto(
                 swap,
@@ -6992,6 +7015,7 @@ class FrameWorker(threading.Thread):
                 control["DetectorScoreSlider"],
                 kps_ref,
                 slot_id=2,
+                dmd_landmarks_68_crop=dmd_lm68_crop,
             )
             swap = self._apply_restorer_with_auto(
                 swap,

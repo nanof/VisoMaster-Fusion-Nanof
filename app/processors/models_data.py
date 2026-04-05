@@ -602,4 +602,12 @@ models_list = [
 ]
 
 # Pesos opcionales (PyTorch / retalking): descarga con download_models.py si la lista no está vacía.
-pytorch_assets_list: list = []
+# Hash vacío: download_models acepta el fichero si existe y tiene tamaño > 8 bytes (ver integrity_checker).
+pytorch_assets_list: list = [
+    {
+        "model_name": "DMDNet",
+        "local_path": str(models_dir / "pytorch_weights" / "DMDNet.pth"),
+        "hash": "",
+        "url": "https://github.com/csxmli2016/DMDNet/releases/download/v1/DMDNet.pth",
+    },
+]

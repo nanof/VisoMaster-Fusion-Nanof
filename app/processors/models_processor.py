@@ -566,6 +566,9 @@ class ModelsProcessor(QtCore.QObject):
             if self.models.get(model_name):
                 return self.models[model_name]
 
+            if model_name == "DMDNetTorch":
+                return self.face_restorers.ensure_dmdnet_loaded()
+
             model_instance = None
             onnx_path = self.models_path.get(model_name)
             if not onnx_path:
@@ -966,6 +969,10 @@ class ModelsProcessor(QtCore.QObject):
                 return  # Skip unloading
         with self.model_lock:
             unloaded = False
+
+            if model_name_to_unload == "DMDNetTorch":
+                self.face_restorers.unload_dmdnet()
+                return
 
             # Handle ONNX models (for CUDA, CPU, and TensorRT providers)
             if model_name_to_unload and model_name_to_unload in self.models:
@@ -1774,6 +1781,7 @@ class ModelsProcessor(QtCore.QObject):
         detect_score,
         target_kps,
         slot_id: int = 1,
+        dmd_landmarks_68_crop: Optional[np.ndarray] = None,
     ):
         return self.face_restorers.apply_facerestorer(
             swapped_face_upscaled,
@@ -1784,6 +1792,7 @@ class ModelsProcessor(QtCore.QObject):
             detect_score,
             target_kps,
             slot_id=slot_id,
+            dmd_landmarks_68_crop=dmd_landmarks_68_crop,
         )
 
     def apply_occlusion(self, img, amount):

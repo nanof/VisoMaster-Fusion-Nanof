@@ -1,4 +1,6 @@
 import hashlib
+import os
+from pathlib import Path
 
 # --- Constants ---
 
@@ -77,5 +79,10 @@ def check_file_integrity(file_path: str, correct_hash: str) -> bool:
     Returns:
         bool: True if the file's hash matches the expected hash, False otherwise.
     """
+    if not (correct_hash or "").strip():
+        try:
+            return Path(file_path).is_file() and os.path.getsize(file_path) > 8
+        except OSError:
+            return False
     actual_hash = get_file_hash(file_path)
     return actual_hash == correct_hash
