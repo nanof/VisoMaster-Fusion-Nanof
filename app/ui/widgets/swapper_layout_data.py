@@ -447,6 +447,33 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "requiredToggleValue": True,
             "help": "Increase to strengthen the effect.",
         },
+        "PoissonRingEdgeEnableToggle": {
+            "level": 1,
+            "label": "Seamless edge blend (Poisson)",
+            "default": False,
+            "help": "Face Swap → Masks: reduces halo at the face boundary using OpenCV seamlessClone "
+            "in the mask feather band (CPU on the face crop). Also listed under Blend Adjustments.",
+        },
+        "PoissonRingEdgeAmountSlider": {
+            "level": 2,
+            "label": "Seamless edge strength",
+            "min_value": "0",
+            "max_value": "100",
+            "default": "60",
+            "step": 1,
+            "parentToggle": "PoissonRingEdgeEnableToggle",
+            "requiredToggleValue": True,
+            "help": "0 = off, 100 = full seamless mix in the feather band.",
+        },
+        "PoissonRingEdgeModeSelection": {
+            "level": 2,
+            "label": "Seamless mode",
+            "options": ["Mixed", "Normal"],
+            "default": "Mixed",
+            "parentToggle": "PoissonRingEdgeEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Mixed = MIXED_CLONE (gradients + texture). Normal = NORMAL_CLONE (stronger match to scene color at edge).",
+        },
     },
     "Original Face Parsers": {
         "MouthParserStretchToggle": {

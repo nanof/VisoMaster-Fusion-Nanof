@@ -20,6 +20,7 @@ import torchvision
 
 import numpy as np
 import torch.nn.functional as F
+import cv2
 
 from app.processors.utils import faceutil
 
@@ -895,7 +896,10 @@ class FrameWorker(threading.Thread):
         checked_inputs_ordered: list,
         frame_number: int,
     ) -> None:
-        """Assign stable _rr_input_idx per detection (ByteTrack id or IoU vs previous frame)."""
+        """Assign stable _rr_input_idx per detection (ByteTrack id or IoU vs previous frame).
+
+        Indices are canonical 0..n-1; UI offset is applied when selecting the input button.
+        """
         n_in = len(checked_inputs_ordered)
         if n_in == 0 or not det_faces:
             return
@@ -2975,6 +2979,11 @@ class FrameWorker(threading.Thread):
         _sequential_match_active = control.get(
             "SequentialTargetMatchEnableToggle", False
         ) and not control.get("SwapOnlyBestMatchEnableToggle", False)
+        _rr_input_rotate_offset = (
+            int(control.get("SequentialInputRotateOffsetSlider", 0))
+            if _sequential_match_active
+            else 0
+        )
         if not _sequential_match_active:
             self._reset_sequential_rotate_stabilizer()
 
@@ -3508,12 +3517,14 @@ class FrameWorker(threading.Thread):
                         fface["matched_target"] = None
                         if not _checked_inputs_ordered:
                             continue
+                        _n_in_rr = len(_checked_inputs_ordered)
                         _rr_slot = fface.get("_rr_input_idx", None)
                         if _rr_slot is None:
-                            _rr_slot = det_index % len(_checked_inputs_ordered)
-                        in_btn = _checked_inputs_ordered[
-                            int(_rr_slot) % len(_checked_inputs_ordered)
-                        ]
+                            _rr_slot = det_index % _n_in_rr
+                        _rr_effective = (
+                            int(_rr_slot) + _rr_input_rotate_offset
+                        ) % _n_in_rr
+                        in_btn = _checked_inputs_ordered[_rr_effective]
                         params_rr = cast(ParametersDict, _params_rr_rotate)
                         denoiser_on_rr = (
                             control.get(
@@ -7563,6 +7574,9 @@ class FrameWorker(threading.Thread):
             swap = t512_mask(swap)
             swap_mask = t512_mask(swap_mask)
 
+        # Un-premultiplied face (same space as swap) for optional Poisson edge blend at paste.
+        swap_opaque = swap.clone()
+
         swap = torch.mul(swap, swap_mask)
 
         # --- VIEW MODES ---
@@ -7639,6 +7653,18 @@ class FrameWorker(threading.Thread):
         )
         swap = swap[0:3, top:bottom, left:right]
 
+        swap_opaque = v2.functional.pad(swap_opaque, (0, 0, pad_w, pad_h))
+        swap_opaque = v2.functional.affine(
+            swap_opaque,
+            tform.inverse.rotation * 57.2958,
+            (tform.inverse.translation[0], tform.inverse.translation[1]),
+            tform.inverse.scale,
+            0,
+            interpolation=self.interpolation_Untransform,
+            center=(0, 0),
+        )
+        swap_opaque = swap_opaque[0:3, top:bottom, left:right]
+
         swap_mask = v2.functional.pad(swap_mask, (0, 0, pad_w, pad_h))
         swap_mask = v2.functional.affine(
             swap_mask,
@@ -7654,11 +7680,52 @@ class FrameWorker(threading.Thread):
         swap_mask_minus = torch.sub(1, swap_mask)
 
         img_crop = img[0:3, top:bottom, left:right]
+        orig_roi_rgb = (
+            img_crop.detach().cpu().contiguous()
+            if parameters.get("PoissonRingEdgeEnableToggle", False)
+            and float(parameters.get("PoissonRingEdgeAmountSlider", 0)) > 0
+            else None
+        )
+
         img_crop = torch.mul(swap_mask_minus, img_crop)
 
         swap = torch.add(swap, img_crop)
         swap = swap.type(torch.uint8)
         swap = swap.clamp(0, 255)
+
+        if orig_roi_rgb is not None:
+            _pa = float(parameters.get("PoissonRingEdgeAmountSlider", 0)) / 100.0
+            if _pa > 0.0:
+                _mode_sel = str(
+                    parameters.get("PoissonRingEdgeModeSelection", "Mixed")
+                ).strip()
+                _cv_mode = (
+                    cv2.NORMAL_CLONE
+                    if _mode_sel == "Normal"
+                    else cv2.MIXED_CLONE
+                )
+                _so = swap_opaque.detach().cpu().contiguous()
+                if _so.dtype != torch.uint8:
+                    _so = _so.clamp(0, 255).to(torch.uint8)
+                _sm = swap_mask.detach().cpu().contiguous().squeeze(0).numpy()
+                _std = swap.detach().cpu().contiguous()
+                _orig = orig_roi_rgb
+                if _orig.dtype != torch.uint8:
+                    _orig = _orig.clamp(0, 255).to(torch.uint8)
+                _perm = lambda t: np.ascontiguousarray(
+                    t.permute(1, 2, 0).numpy(), dtype=np.uint8
+                )
+                _out_np = faceutil.poisson_ring_edge_blend_numpy(
+                    _perm(_orig),
+                    _perm(_std),
+                    _perm(_so),
+                    _sm,
+                    _pa,
+                    _cv_mode,
+                )
+                swap = torch.from_numpy(_out_np).permute(2, 0, 1).to(
+                    device=img.device, dtype=torch.uint8
+                )
 
         img[0:3, top:bottom, left:right] = swap
 

@@ -1,5 +1,6 @@
 import math
 from math import sin, cos, acos, degrees, floor, ceil
+from typing import Optional
 
 import numpy as np
 import cv2
@@ -1974,6 +1975,83 @@ def paste_back_kgm(img_crop, M_c2o, img_ori, mask_ori):
     img_back = torch.clip(mask_ori * img_back + (1 - mask_ori) * img_ori, 0, 255)
 
     return img_back.to(torch.uint8)
+
+
+def poisson_ring_edge_blend_numpy(
+    orig_roi_rgb: np.ndarray,
+    standard_roi_rgb: np.ndarray,
+    swap_opaque_roi_rgb: np.ndarray,
+    mask_hw: np.ndarray,
+    amount: float,
+    mode: Optional[int] = None,
+) -> np.ndarray:
+    """Blend OpenCV seamlessClone (gradient-domain) at the mask feather, keep interior standard.
+
+    Reduces halo at the face boundary vs pure alpha composite. ``mask_hw`` is soft 0–1
+    (same spatial size as ROI). Peaks influence where ``amount`` applies (feather band).
+
+    Args:
+        orig_roi_rgb: Original frame crop H×W×3 uint8 RGB.
+        standard_roi_rgb: Alpha-composited swap result H×W×3 uint8 RGB.
+        swap_opaque_roi_rgb: Warped swapped face (un-premultiplied) H×W×3 uint8 RGB.
+        mask_hw: H×W float or H×W×1 soft mask in ROI space.
+        amount: 0–1 scales how much seamless vs standard in the feather band.
+        mode: ``cv2.MIXED_CLONE`` (default) or ``cv2.NORMAL_CLONE``.
+
+    Returns:
+        H×W×3 uint8 RGB (copy); on failure returns ``standard_roi_rgb`` unchanged.
+    """
+    if amount <= 0.0:
+        return standard_roi_rgb
+    if mode is None:
+        mode = cv2.MIXED_CLONE
+    if (
+        orig_roi_rgb.shape != standard_roi_rgb.shape
+        or orig_roi_rgb.shape != swap_opaque_roi_rgb.shape
+    ):
+        return standard_roi_rgb
+    h, w = orig_roi_rgb.shape[:2]
+    if mask_hw.ndim == 3:
+        m = np.clip(mask_hw[:, :, 0], 0.0, 1.0)
+    else:
+        m = np.clip(mask_hw, 0.0, 1.0)
+    if m.shape[:2] != (h, w):
+        return standard_roi_rgb
+
+    mask_u8 = (m > 0.35).astype(np.uint8) * 255
+    if int(mask_u8.sum()) < 64:
+        return standard_roi_rgb
+
+    M = cv2.moments(mask_u8)
+    if M["m00"] < 1e-3:
+        return standard_roi_rgb
+    cx = int(round(M["m10"] / M["m00"]))
+    cy = int(round(M["m01"] / M["m00"]))
+    cx = int(np.clip(cx, 1, w - 2))
+    cy = int(np.clip(cy, 1, h - 2))
+
+    orig_bgr = cv2.cvtColor(orig_roi_rgb, cv2.COLOR_RGB2BGR)
+    src_bgr = cv2.cvtColor(swap_opaque_roi_rgb, cv2.COLOR_RGB2BGR)
+
+    try:
+        seam_bgr = cv2.seamlessClone(
+            src_bgr, orig_bgr.copy(), mask_u8, (cx, cy), int(mode)
+        )
+    except cv2.error:
+        return standard_roi_rgb
+
+    seam_rgb = cv2.cvtColor(seam_bgr, cv2.COLOR_BGR2RGB)
+    band = 4.0 * m * (1.0 - m)
+    bmax = float(band.max())
+    if bmax > 1e-6:
+        band = band / bmax
+    band3 = np.stack([band] * 3, axis=-1, dtype=np.float32)
+    mix = np.clip(band3 * float(amount), 0.0, 1.0)
+    out = (
+        seam_rgb.astype(np.float32) * mix
+        + standard_roi_rgb.astype(np.float32) * (1.0 - mix)
+    )
+    return np.clip(out, 0.0, 255.0).astype(np.uint8)
 
 
 def transform_img_kgm(
