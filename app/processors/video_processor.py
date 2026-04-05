@@ -2124,6 +2124,7 @@ class VideoProcessor(QObject):
                     }
                 raw_task = (
                     frame_num_to_process,
+                    frame_num_to_process,
                     frame_rgb,
                     local_params_for_worker,
                     local_control_for_worker,
