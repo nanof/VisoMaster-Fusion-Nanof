@@ -23,9 +23,14 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
                 "HyperSwap-v3",
                 "ReHiFace-S",
                 "CSCS",
+                "BlendSwap-256",
             ],
             "default": "Inswapper128",
-            "help": "Choose which swapper model to use for face swapping.",
+            "help": (
+                "Choose which swapper model to use for face swapping. "
+                "BlendSwap-256 (FaceFusion) needs an assigned input face with landmarks; "
+                "it downloads a large ONNX from Hugging Face (facefusion/models-3.0.0)."
+            ),
         },
         "SwapperResSelection": {
             "level": 2,

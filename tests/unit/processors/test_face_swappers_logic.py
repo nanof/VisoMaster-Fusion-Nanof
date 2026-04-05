@@ -81,6 +81,17 @@ def test_ghostface_models_is_frozenset():
 
 
 # ---------------------------------------------------------------------------
+# FS-05c: BLENDSWAP model name set (mirrors FrameWorker.BLENDSWAP_MODELS)
+# ---------------------------------------------------------------------------
+
+
+def test_blendswap_models_frozenset():
+    from app.processors.workers.frame_worker import FrameWorker
+
+    assert FrameWorker.BLENDSWAP_MODELS == frozenset({"BlendSwap-256"})
+
+
+# ---------------------------------------------------------------------------
 # FS-05b: HYPERSWAP model name set (mirrors FrameWorker.HYPERSWAP_MODELS)
 # ---------------------------------------------------------------------------
 

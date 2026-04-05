@@ -1683,6 +1683,9 @@ class ModelsProcessor(QtCore.QObject):
             images, embedding, output, swapper_model
         )
 
+    def run_blendswap(self, target_rgb_256, source_rgb_112, output):
+        self.face_swappers.run_blendswap(target_rgb_256, source_rgb_112, output)
+
     def calc_rehiface_source_latent(self, source_embedding):
         return self.face_swappers.calc_rehiface_source_latent(source_embedding)
 

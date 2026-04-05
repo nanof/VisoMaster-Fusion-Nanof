@@ -35,6 +35,7 @@ from app.helpers.miscellaneous import (
     is_detected_face_eligible_for_matching,
     keypoints_adjustments,
     get_grid_for_pasting,
+    read_image_file,
 )
 from app.helpers.cuda_timeline import nvtx_range
 from app.helpers.typing_helper import ParametersTypes
@@ -139,6 +140,7 @@ class FrameWorker(threading.Thread):
     # FW-QUAL-10: frozenset of GhostFace model names for cleaner membership tests
     GHOSTFACE_MODELS = frozenset({"GhostFace-v1", "GhostFace-v2", "GhostFace-v3"})
     HYPERSWAP_MODELS = frozenset({"HyperSwap-v1", "HyperSwap-v2", "HyperSwap-v3"})
+    BLENDSWAP_MODELS = frozenset({"BlendSwap-256"})
     REHIFACE_MODELS = frozenset({"ReHiFace-S"})
 
     # Q-IMP-01: interpolation mode constants for face alignment
@@ -1102,6 +1104,14 @@ class FrameWorker(threading.Thread):
                 target_face_button,
                 vr_crop_chw=perspective_crop_torch_rgb_uint8,  # already a focused face region
             )
+            _bs112_vr = None
+            if (
+                swap_button_is_checked_global
+                and parameters_for_face["SwapModelSelection"] in self.BLENDSWAP_MODELS
+            ):
+                _bs112_vr = self._compute_blendswap_source_rgb112(
+                    target_face=target_face_button
+                )
             try:
                 (
                     swapped_face_512_torch_rgb_uint8,
@@ -1119,6 +1129,7 @@ class FrameWorker(threading.Thread):
                     is_perspective_crop=True,
                     kv_map=kv_map_for_swap,
                     source_latent_cache=source_latent_cache,
+                    blendswap_source_rgb112=_bs112_vr,
                 )
             except Exception as e_swap_core:
                 print(
@@ -2494,6 +2505,7 @@ class FrameWorker(threading.Thread):
                         dfm_model_name=s0["parameters"]["DFMModelSelection"],
                         kv_map=s0["kv_map"],
                         source_latent_cache=source_latent_cache,
+                        blendswap_source_rgb112=s0.get("blendswap_src112"),
                     )
                 )
                 if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -2541,6 +2553,7 @@ class FrameWorker(threading.Thread):
                         dfm_model_name=sp["parameters"]["DFMModelSelection"],
                         kv_map=sp["kv_map"],
                         source_latent_cache=source_latent_cache,
+                        blendswap_source_rgb112=sp.get("blendswap_src112"),
                     )
                 )
                 if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -2572,6 +2585,7 @@ class FrameWorker(threading.Thread):
                             dfm_model_name=sp["parameters"]["DFMModelSelection"],
                             kv_map=sp["kv_map"],
                             source_latent_cache=source_latent_cache,
+                            blendswap_source_rgb112=sp.get("blendswap_src112"),
                         )
                     )
                     if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -2619,6 +2633,7 @@ class FrameWorker(threading.Thread):
                         dfm_model_name=sp["parameters"]["DFMModelSelection"],
                         kv_map=sp["kv_map"],
                         source_latent_cache=source_latent_cache,
+                        blendswap_source_rgb112=sp.get("blendswap_src112"),
                     )
                 )
                 if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -2669,6 +2684,7 @@ class FrameWorker(threading.Thread):
                 tform,
                 cached_source_latent_torch=_sl,
                 source_latent_out_cache=source_latent_cache,
+                blendswap_source_rgb112=s.get("blendswap_src112"),
             )
             if inp_f is None or dim != 1 or latent is None:
                 return _sequential_from_ordered()
@@ -2728,6 +2744,7 @@ class FrameWorker(threading.Thread):
                     source_latent_cache=source_latent_cache,
                     prefetched_swap_chw_uint8=pre,
                     alignment_img=batch_snap,
+                    blendswap_source_rgb112=s.get("blendswap_src112"),
                 )
             )
             if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -2773,6 +2790,7 @@ class FrameWorker(threading.Thread):
                         dfm_model_name=sp["parameters"]["DFMModelSelection"],
                         kv_map=sp["kv_map"],
                         source_latent_cache=source_latent_cache,
+                        blendswap_source_rgb112=sp.get("blendswap_src112"),
                     )
                 )
                 if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -2824,6 +2842,7 @@ class FrameWorker(threading.Thread):
                 tform,
                 cached_source_latent_torch=_sl,
                 source_latent_out_cache=source_latent_cache,
+                blendswap_source_rgb112=s.get("blendswap_src112"),
             )
             if inp_f is None or dim != 2 or latent is None:
                 return _sequential_from_ordered()
@@ -2890,6 +2909,7 @@ class FrameWorker(threading.Thread):
                     source_latent_cache=source_latent_cache,
                     prefetched_swap_chw_uint8=pre,
                     alignment_img=batch_snap,
+                    blendswap_source_rgb112=s.get("blendswap_src112"),
                 )
             )
             if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -3382,6 +3402,14 @@ class FrameWorker(threading.Thread):
                             target_face,
                             face_bbox=best_fface["bbox"],
                         )
+                        _bs112_best = None
+                        if (
+                            swap_button_is_checked_global
+                            and params["SwapModelSelection"] in self.BLENDSWAP_MODELS
+                        ):
+                            _bs112_best = self._compute_blendswap_source_rgb112(
+                                target_face=target_face
+                            )
                         try:
                             (
                                 img,
@@ -3399,6 +3427,7 @@ class FrameWorker(threading.Thread):
                                 dfm_model_name=params["DFMModelSelection"],
                                 kv_map=_reaging_kv,
                                 source_latent_cache=_source_latent_cache,
+                                blendswap_source_rgb112=_bs112_best,
                             )
                             if edit_button_is_checked_global and any(
                                 params[f]
@@ -3540,6 +3569,15 @@ class FrameWorker(threading.Thread):
                             swap_button_is_checked_global
                             or edit_button_is_checked_global
                         ):
+                            _bs112_rr = None
+                            if (
+                                swap_button_is_checked_global
+                                and params_rr["SwapModelSelection"]
+                                in self.BLENDSWAP_MODELS
+                            ):
+                                _bs112_rr = self._compute_blendswap_source_rgb112(
+                                    input_face=in_btn
+                                )
                             try:
                                 img, fface["original_face"], fface["swap_mask"] = (
                                     self.swap_core(
@@ -3553,6 +3591,7 @@ class FrameWorker(threading.Thread):
                                         dfm_model_name=params_rr["DFMModelSelection"],
                                         kv_map=_kv_rr,
                                         source_latent_cache=_source_latent_cache,
+                                        blendswap_source_rgb112=_bs112_rr,
                                     )
                                 )
                                 if edit_button_is_checked_global and any(
@@ -3653,6 +3692,14 @@ class FrameWorker(threading.Thread):
                             best_target,
                             face_bbox=fface["bbox"],
                         )
+                        _bs112_sa = None
+                        if (
+                            swap_button_is_checked_global
+                            and params["SwapModelSelection"] in self.BLENDSWAP_MODELS
+                        ):
+                            _bs112_sa = self._compute_blendswap_source_rgb112(
+                                target_face=best_target
+                            )
                         bk = self._plane_multi_face_batch_key(
                             cast(dict, _params_for_swap_b),
                             control,
@@ -3683,6 +3730,7 @@ class FrameWorker(threading.Thread):
                                     "parameters": _params_for_swap_b,
                                     "control": control,
                                     "kv_map": _reaging_kv,
+                                    "blendswap_src112": _bs112_sa,
                                 }
                             )
                             continue
@@ -3710,6 +3758,7 @@ class FrameWorker(threading.Thread):
                                     dfm_model_name=params["DFMModelSelection"],
                                     kv_map=_reaging_kv,
                                     source_latent_cache=_source_latent_cache,
+                                    blendswap_source_rgb112=_bs112_sa,
                                 )
                             )
                             if edit_button_is_checked_global and any(
@@ -4052,6 +4101,23 @@ class FrameWorker(threading.Thread):
                     raise ValueError(
                         "Similarity transform estimation failed for ReHiFace-S face"
                     )
+        elif swapper_model in ("CSCS", "BlendSwap-256"):
+            # FFHQ 512 template (FaceFusion ``ffhq_512``) for CSCS and BlendSwap target crop.
+            if hasattr(trans.SimilarityTransform, "from_estimate"):
+                tform = trans.SimilarityTransform.from_estimate(
+                    kps_5, self.models_processor.FFHQ_kps
+                )
+                if np.any(np.isnan(tform.params)) or np.any(np.isinf(tform.params)):
+                    raise ValueError(
+                        "Similarity transform estimation produced NaN/Inf (degenerate face geometry)"
+                    )
+            else:
+                tform = trans.SimilarityTransform()
+                # FW-ROBUST-11: check return value
+                if not tform.estimate(kps_5, self.models_processor.FFHQ_kps):
+                    raise ValueError(
+                        "Similarity transform estimation failed for FFHQ-aligned swapper face"
+                    )
         # FW-QUAL-10: use GHOSTFACE_MODELS frozenset instead of chained != comparisons
         elif swapper_model not in self.GHOSTFACE_MODELS and swapper_model != "CSCS":
             dst = faceutil.get_arcface_template(image_size=512, mode="arcface128")
@@ -4068,23 +4134,6 @@ class FrameWorker(threading.Thread):
                 # FW-ROBUST-11: check return value of tform.estimate()
                 if not tform.estimate(kps_5, dst):
                     raise ValueError("Similarity transform estimation failed for face")
-        elif swapper_model == "CSCS":
-            # Use instance initialization + .estimate() for older skimage versions
-            if hasattr(trans.SimilarityTransform, "from_estimate"):
-                tform = trans.SimilarityTransform.from_estimate(
-                    kps_5, self.models_processor.FFHQ_kps
-                )
-                if np.any(np.isnan(tform.params)) or np.any(np.isinf(tform.params)):
-                    raise ValueError(
-                        "Similarity transform estimation produced NaN/Inf (degenerate face geometry)"
-                    )
-            else:
-                tform = trans.SimilarityTransform()
-                # FW-ROBUST-11: check return value
-                if not tform.estimate(kps_5, self.models_processor.FFHQ_kps):
-                    raise ValueError(
-                        "Similarity transform estimation failed for CSCS face"
-                    )
         else:
             # FW-QUAL-10: swapper_model in GHOSTFACE_MODELS
             tform = trans.SimilarityTransform()
@@ -4257,6 +4306,7 @@ class FrameWorker(threading.Thread):
         *,
         cached_source_latent_torch: torch.Tensor | None = None,
         source_latent_out_cache: dict | None = None,
+        blendswap_source_rgb112: torch.Tensor | None = None,
     ):
         """
         Selects the correct input face resolution and computes the swapping latent vector
@@ -4542,6 +4592,29 @@ class FrameWorker(threading.Thread):
 
             latent = self._apply_likeness(latent_s, dst_latent, parameters)
 
+            dim = 2
+            input_face_affined = original_face_256
+
+        # --- BlendSwap-256 (FaceFusion blendswap_256: ArcFace-112 source image + FFHQ target) ---
+        elif swapper_model in self.BLENDSWAP_MODELS:
+            _device = self.models_processor.device
+            if cached_source_latent_torch is not None:
+                latent_s = cached_source_latent_torch
+            else:
+                if blendswap_source_rgb112 is None:
+                    print(
+                        "[ERROR] BlendSwap-256 requires a source face image with kps_5 "
+                        "(assign an input face card). Skipping swap."
+                    )
+                    return input_face_affined, dfm_model_instance, dim, latent
+                _bs = blendswap_source_rgb112
+                if _bs.dim() == 3:
+                    _bs = _bs.unsqueeze(0)
+                latent_s = _bs.float().to(_device).contiguous()
+                self._store_raw_source_latent_in_cache(
+                    latent_s, source_latent_out_cache, s_e, swapper_model
+                )
+            latent = latent_s
             dim = 2
             input_face_affined = original_face_256
 
@@ -5110,6 +5183,49 @@ class FrameWorker(threading.Thread):
                     output = swapper_output.clone()
                     output = torch.clamp(output, 0, 255)
 
+        elif swapper_model in self.BLENDSWAP_MODELS:
+            for k in range(itex):
+                prev_face = input_face_affined.clone()
+                t_rgb = (
+                    input_face_affined.permute(2, 0, 1)
+                    .unsqueeze(0)
+                    .float()
+                    .contiguous()
+                )
+                src_rgb = latent if latent.dim() == 4 else latent.unsqueeze(0)
+                src_rgb = src_rgb.contiguous()
+                swapper_output = torch.empty(
+                    (1, 3, 256, 256),
+                    dtype=torch.float32,
+                    device=self.models_processor.device,
+                ).contiguous()
+                self.models_processor.run_blendswap(t_rgb, src_rgb, swapper_output)
+                swapper_output = swapper_output[0]
+                if swapper_output.abs().mean() < 0.01:
+                    swapper_output = input_face_affined.permute(2, 0, 1)
+
+                if use_mode_2:
+                    swapper_output = swapper_output.clamp(0, 1)
+                    curr_chw = swapper_output.clone()
+                    if k == 0:
+                        first_pass_face = curr_chw.clone()
+                    else:
+                        prev_chw = prev_face.permute(2, 0, 1)
+                        curr_chw = self._fix_drift_and_texture(
+                            curr_chw, prev_chw, first_pass_face
+                        )
+                    temp_output = curr_chw.permute(1, 2, 0)
+                    prev_face = input_face_affined.clone()
+                    input_face_affined = temp_output.clone()
+                    output = torch.clamp(curr_chw.permute(1, 2, 0) * 255.0, 0, 255)
+                else:
+                    swapper_output = swapper_output.permute(1, 2, 0)
+                    prev_face = input_face_affined.clone()
+                    input_face_affined = swapper_output.clone()
+                    output = swapper_output.clone()
+                    output = torch.mul(output, 255)
+                    output = torch.clamp(output, 0, 255)
+
         elif swapper_model in self.REHIFACE_MODELS:
             for k in range(itex):
                 prev_face = input_face_affined.clone()
@@ -5615,6 +5731,60 @@ class FrameWorker(threading.Thread):
             return np.median(embs, axis=0)
         return np.mean(embs, axis=0)
 
+    def _compute_blendswap_source_rgb112(
+        self,
+        *,
+        target_face: "widget_components.TargetFaceCardButton | None" = None,
+        input_face: "widget_components.InputFaceCardButton | None" = None,
+    ) -> torch.Tensor | None:
+        """ArcFace-112 aligned source crop, RGB float NCHW ``(1, 3, 112, 112)`` in ``[0, 1]``."""
+        ib = input_face
+        if ib is None and target_face is not None and target_face.assigned_input_faces:
+            _fid = next(iter(target_face.assigned_input_faces.keys()))
+            ib = self.main_window.input_faces.get(_fid)
+        if ib is None:
+            return None
+        kps = ib.embedding_store.get("kps_5")
+        if (
+            kps is None
+            or not isinstance(kps, np.ndarray)
+            or kps.size < 10
+            or not ib.media_path
+            or not os.path.isfile(str(ib.media_path))
+        ):
+            return None
+        frame_bgr = read_image_file(ib.media_path)
+        if frame_bgr is None or frame_bgr.size == 0:
+            return None
+        dev = self.models_processor.device
+        chw_bgr = (
+            torch.from_numpy(np.ascontiguousarray(frame_bgr.transpose(2, 0, 1)))
+            .to(dev)
+            .float()
+        )
+        dst = np.squeeze(
+            faceutil.get_arcface_template(112, "arcface112"), axis=0
+        ).astype(np.float64)
+        tform = faceutil.similarity_transform_from_correspondences(
+            kps.astype(np.float64), dst
+        )
+        M = (
+            torch.from_numpy(tform.params[0:2])
+            .float()
+            .unsqueeze(0)
+            .to(dev)
+        )
+        warped = kgm.warp_affine(
+            chw_bgr.unsqueeze(0),
+            M,
+            dsize=(112, 112),
+            mode="bilinear",
+            align_corners=True,
+        ).squeeze(0)
+        warped_u8 = torch.clamp(warped, 0, 255).to(torch.uint8)
+        rgb = warped_u8[[2, 1, 0], :, :].float() / 255.0
+        return rgb.unsqueeze(0).contiguous()
+
     # ------------------------------------------------------------------
     # Auto-Mouth Expression helper
     # ------------------------------------------------------------------
@@ -5749,6 +5919,7 @@ class FrameWorker(threading.Thread):
         source_latent_cache: dict | None = None,
         alignment_img: torch.Tensor | None = None,
         prefetched_swap_chw_uint8: torch.Tensor | None = None,
+        blendswap_source_rgb112: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """
         Core function for face swapping. Handles:
@@ -5895,6 +6066,7 @@ class FrameWorker(threading.Thread):
                     tform,
                     cached_source_latent_torch=_sl_cached,
                     source_latent_out_cache=source_latent_cache,
+                    blendswap_source_rgb112=blendswap_source_rgb112,
                 )
             )
 

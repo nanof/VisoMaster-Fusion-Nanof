@@ -469,3 +469,6 @@ def test_ghostface_models_frozenset():
         assert isinstance(FrameWorker.HYPERSWAP_MODELS, frozenset)
 
         assert FrameWorker.REHIFACE_MODELS == frozenset({"ReHiFace-S"})
+
+        assert FrameWorker.BLENDSWAP_MODELS == frozenset({"BlendSwap-256"})
+        assert isinstance(FrameWorker.BLENDSWAP_MODELS, frozenset)

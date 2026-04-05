@@ -43,6 +43,7 @@ class FaceSwappers:
             "HyperSwapv3",
             "ReHiFaceS",
             "CSCS",
+            "BlendSwap256",
         ]
         # ONNX used only with ReHiFace-S (FaceFusion crossface_hififace); unload with swapper cleanup
         self._crossface_aux_model_names = ("CrossFaceHiFaceS", "CrossFaceSimSwap")
@@ -1042,6 +1043,50 @@ class FaceSwappers:
                 flush=True,
             )
             return False
+
+    def run_blendswap(self, target_rgb_256, source_rgb_112, output):
+        """FaceFusion blendswap_256: ``source`` = 112² RGB [0,1], ``target`` = 256² RGB [0,1]."""
+        model_name = "BlendSwap256"
+        model = self._load_swapper_model(model_name)
+        if not model:
+            print(f"[ERROR] {model_name} model not loaded.")
+            return
+
+        if not target_rgb_256.is_contiguous():
+            target_rgb_256 = target_rgb_256.contiguous()
+        if not source_rgb_112.is_contiguous():
+            source_rgb_112 = source_rgb_112.contiguous()
+        if not output.is_contiguous():
+            output = output.contiguous()
+
+        io_binding = model.io_binding()
+        io_binding.clear_binding_inputs()
+        io_binding.clear_binding_outputs()
+        io_binding.bind_input(
+            name="target",
+            device_type=self.models_processor.device,
+            device_id=0,
+            element_type=np.float32,
+            shape=(1, 3, 256, 256),
+            buffer_ptr=target_rgb_256.data_ptr(),
+        )
+        io_binding.bind_input(
+            name="source",
+            device_type=self.models_processor.device,
+            device_id=0,
+            element_type=np.float32,
+            shape=(1, 3, 112, 112),
+            buffer_ptr=source_rgb_112.data_ptr(),
+        )
+        io_binding.bind_output(
+            name="output",
+            device_type=self.models_processor.device,
+            device_id=0,
+            element_type=np.float32,
+            shape=(1, 3, 256, 256),
+            buffer_ptr=output.data_ptr(),
+        )
+        self._run_model_with_lazy_build_check(model_name, model, io_binding)
 
     def calc_rehiface_source_latent(self, source_embedding):
         """ReHiFace-S: ArcFace 512-D → crossface_hififace → L2-normalized (1, 512)."""
