@@ -2171,6 +2171,25 @@ class VideoProcessor(QObject):
                 f"[INFO] Skipped frame numbers: {sorted(list(self.skipped_frames)[:100])}{'...' if len(self.skipped_frames) > 100 else ''}"
             )
 
+    def _drain_raw_frame_queue_for_live(self) -> int:
+        """Drop tasks waiting in ``_raw_frame_queue`` (not yet consumed by detection).
+
+        For webcam/screen, preview and virtual cam already prefer the *latest* processed
+        frame; without draining, sequential detection would still run on stale captures
+        and waste GPU. Returns how many tasks were removed.
+        """
+        rq = self._raw_frame_queue
+        if rq is None:
+            return 0
+        dropped = 0
+        while True:
+            try:
+                rq.get_nowait()
+                dropped += 1
+            except queue.Empty:
+                break
+        return dropped
+
     def _feed_webcam(self):
         """Feeder logic for webcam streaming."""
         while self.processing:
@@ -2239,6 +2258,13 @@ class VideoProcessor(QObject):
                 wrq = self._raw_frame_queue
                 if wrq is None:
                     raise RuntimeError("_raw_frame_queue is not initialized")
+                _dropped_raw = self._drain_raw_frame_queue_for_live()
+                if _dropped_raw and _env_flag("VISIOMASTER_LIVE_DROP_LOG"):
+                    print(
+                        f"[INFO] Live feeder: dropped {_dropped_raw} stale raw frame(s) "
+                        "so detection tracks the newest capture.",
+                        flush=True,
+                    )
                 wrq.put(raw_live)
                 self.current_frame_number += 1
 

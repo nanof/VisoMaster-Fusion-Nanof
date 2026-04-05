@@ -897,7 +897,9 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "label": "Webcam FPS",
             "options": ["23", "30", "60"],
             "default": "30",
-            "help": "Set the maximum frames per second (FPS) for webcam input.",
+            "help": "Set the maximum frames per second (FPS) for webcam input. For live preview/virt cam, "
+            "stale frames waiting before face detection are dropped so the GPU works on the freshest capture "
+            "(set VISIOMASTER_LIVE_DROP_LOG=1 to log drops).",
         },
         "SendVirtCamFramesEnableToggle": {
             "level": 1,
