@@ -1,6 +1,6 @@
 import threading
 import math
-from typing import TYPE_CHECKING, Dict, Any, Optional
+from typing import TYPE_CHECKING, Dict, Any
 
 import torch
 from torchvision.transforms import v2
@@ -37,13 +37,6 @@ class FaceDetectors:
     helper methods for image preparation and filtering of detection results.
     """
 
-    # Class-level declarations so mypy knows these types before unload_models is processed
-    _custom_init_lock: threading.Lock
-    _det10g_torch: Optional[object]
-    _det10g_runner: Optional[object]
-    _yolo_torch: Optional[object]
-    _yolo_runner: Optional[object]
-
     def unload_models(self):
         """
         Unloads the currently active face detector model from memory.
@@ -51,12 +44,6 @@ class FaceDetectors:
         if self.current_detector_model:
             self.models_processor.unload_model(self.current_detector_model)
             self.current_detector_model = None
-        # Release Custom-kernel instances so they rebuild on next use.
-        with self._custom_init_lock:
-            self._det10g_torch = None
-            self._det10g_runner = None
-            self._yolo_torch = None
-            self._yolo_runner = None
 
     def __init__(self, models_processor: "ModelsProcessor"):
         """
@@ -69,16 +56,9 @@ class FaceDetectors:
         self.models_processor = models_processor
         self.center_cache: Dict[tuple, np.ndarray] = {}
         self.current_detector_model = None
-        self._det10g_torch: Optional[object] = None  # Det10gTorch
-        self._det10g_runner: Optional[object] = None  # Det10gGraphRunner
-        self._yolo_torch: Optional[object] = None  # YoloFace8nTorch
-        self._yolo_runner: Optional[object] = None  # _CapturedGraph or YoloFace8nTorch
-        self._custom_init_lock = threading.Lock()  # serialises Custom-kernel lazy inits
         self._ort_model_lock = (
             threading.Lock()
         )  # serialises ONNX model switch (unload→load)
-        self._custom_inference_lock = threading.Lock()
-        self._runner_locks: Dict[int, threading.Lock] = {}
 
         # Tracking State
         self.tracker = None
@@ -99,13 +79,6 @@ class FaceDetectors:
             "Yolov8": {"model_name": "YoloFace8n", "function": self.detect_yoloface},
             "Yunet": {"model_name": "YunetN", "function": self.detect_yunet},
         }
-
-    def _get_runner_lock(self, runner):
-        with self._custom_inference_lock:
-            r_id = id(runner)
-            if r_id not in self._runner_locks:
-                self._runner_locks[r_id] = threading.Lock()
-            return self._runner_locks[r_id]
 
     def _prepare_detection_image(
         self, img: torch.Tensor, input_size: tuple, normalization_mode: str
@@ -436,102 +409,6 @@ class FaceDetectors:
                     kpss_5[i] = landmark_kpss_5
             kpss = np.array(refined_kpss, dtype=object)
         return det, kpss_5, kpss, score_values
-
-    def _get_det10g_runner(self):
-        """Lazy-load the Det10gTorch Custom-kernel runner for RetinaFace."""
-        if self._det10g_runner is not None:
-            return self._det10g_runner
-        self.models_processor.show_build_dialog.emit(
-            "Finalizing Custom Provider",
-            "Compiling & capturing CUDA graph for RetinaFace (det10g)…\nFirst run only — future sessions load instantly from cache.",
-        )
-        try:
-            with self._custom_init_lock:
-                if self._det10g_runner is not None:
-                    return self._det10g_runner
-                if self._det10g_torch is None:
-                    try:
-                        import pathlib
-                        from custom_kernels.det_10g.det10g_torch import Det10gTorch
-
-                        onnx_path = str(
-                            pathlib.Path(__file__).parent.parent.parent
-                            / "model_assets"
-                            / "det_10g.onnx"
-                        )
-                        m = (
-                            Det10gTorch.from_onnx(onnx_path)
-                            .to(self.models_processor.device)
-                            .eval()
-                        )
-                        self._det10g_torch = m
-                    except Exception as e:
-                        print(f"[Custom] det_10g load failed: {e}")
-                        return None
-                try:
-                    from custom_kernels.det_10g.det10g_torch import (
-                        build_cuda_graph_runner,
-                    )
-
-                    with self.models_processor.cuda_graph_capture_lock:
-                        self._det10g_runner = build_cuda_graph_runner(
-                            self._det10g_torch, torch_compile=True
-                        )
-                except Exception as e:
-                    print(f"[Custom] det_10g graph runner failed, using eager: {e}")
-                    self._det10g_runner = self._det10g_torch
-        finally:
-            self.models_processor.hide_build_dialog.emit()
-        return self._det10g_runner
-
-    def _get_yolo_runner(self):
-        """Lazy-load the YoloFace8nTorch Custom-kernel runner for YOLOv8 face detector."""
-        if self._yolo_runner is not None:
-            return self._yolo_runner
-        self.models_processor.show_build_dialog.emit(
-            "Finalizing Custom Provider",
-            "Compiling & capturing CUDA graph for YOLOv8n face detector…\nFirst run only — future sessions load instantly from cache.",
-        )
-        try:
-            with self._custom_init_lock:
-                if self._yolo_runner is not None:
-                    return self._yolo_runner
-                if self._yolo_torch is None:
-                    try:
-                        import pathlib
-                        from custom_kernels.yoloface_8n.yoloface8n_torch import (
-                            YoloFace8nTorch,
-                        )
-
-                        onnx_path = str(
-                            pathlib.Path(__file__).parent.parent.parent
-                            / "model_assets"
-                            / "yoloface_8n.onnx"
-                        )
-                        m = (
-                            YoloFace8nTorch.from_onnx(onnx_path)
-                            .to(self.models_processor.device)
-                            .eval()
-                        )
-                        self._yolo_torch = m
-                    except Exception as e:
-                        print(f"[Custom] yoloface_8n load failed: {e}")
-                        return None
-                try:
-                    from custom_kernels.yoloface_8n.yoloface8n_torch import (
-                        build_cuda_graph_runner,
-                    )
-
-                    with self.models_processor.cuda_graph_capture_lock:
-                        self._yolo_runner = build_cuda_graph_runner(
-                            self._yolo_torch, torch_compile=True
-                        )
-                except Exception as e:
-                    print(f"[Custom] yoloface_8n graph runner failed, using eager: {e}")
-                    self._yolo_runner = self._yolo_torch
-        finally:
-            self.models_processor.hide_build_dialog.emit()
-        return self._yolo_runner
 
     def _run_model_with_lazy_build_check(
         self, model_name: str, ort_session, io_binding
@@ -1095,66 +972,31 @@ class FaceDetectors:
             else:
                 IM, aimg = None, torch.unsqueeze(det_img, 0).contiguous()
 
-            if self.models_processor.provider_name == "Custom":
-                runner = self._get_det10g_runner()
-                if runner is not None:
-                    with torch.no_grad():
-                        with self._get_runner_lock(runner):
-                            pt_outs = runner(aimg)
-                            if self.models_processor.device == "cuda":
-                                torch.cuda.current_stream().synchronize()
-                    net_outs = [t.cpu().numpy() for t in pt_outs]
-                else:
-                    io_binding = ort_session.io_binding()
-                    io_binding.bind_input(
-                        name="input.1",
-                        device_type=self.models_processor.device,
-                        device_id=0,
-                        element_type=np.float32,
-                        shape=aimg.size(),
-                        buffer_ptr=aimg.data_ptr(),
-                    )
-                    for i in [
-                        "448",
-                        "471",
-                        "494",
-                        "451",
-                        "474",
-                        "497",
-                        "454",
-                        "477",
-                        "500",
-                    ]:
-                        io_binding.bind_output(i, self.models_processor.device)
-                    net_outs = self._run_model_with_lazy_build_check(
-                        model_name, ort_session, io_binding
-                    )
-            else:
-                io_binding = ort_session.io_binding()
-                io_binding.bind_input(
-                    name="input.1",
-                    device_type=self.models_processor.device,
-                    device_id=0,
-                    element_type=np.float32,
-                    shape=aimg.size(),
-                    buffer_ptr=aimg.data_ptr(),
-                )
-                for i in [
-                    "448",
-                    "471",
-                    "494",
-                    "451",
-                    "474",
-                    "497",
-                    "454",
-                    "477",
-                    "500",
-                ]:
-                    io_binding.bind_output(i, self.models_processor.device)
-                # Run the model with lazy build handling
-                net_outs = self._run_model_with_lazy_build_check(
-                    model_name, ort_session, io_binding
-                )
+            io_binding = ort_session.io_binding()
+            io_binding.bind_input(
+                name="input.1",
+                device_type=self.models_processor.device,
+                device_id=0,
+                element_type=np.float32,
+                shape=aimg.size(),
+                buffer_ptr=aimg.data_ptr(),
+            )
+            for i in [
+                "448",
+                "471",
+                "494",
+                "451",
+                "474",
+                "497",
+                "454",
+                "477",
+                "500",
+            ]:
+                io_binding.bind_output(i, self.models_processor.device)
+            # Run the model with lazy build handling
+            net_outs = self._run_model_with_lazy_build_check(
+                model_name, ort_session, io_binding
+            )
 
             input_height, input_width = aimg.shape[2], aimg.shape[3]
             fmc = 3
@@ -1503,44 +1345,20 @@ class FaceDetectors:
                 aimg_prepared, 0
             ).contiguous()  # Add batch dim
 
-            if self.models_processor.provider_name == "Custom":
-                runner = self._get_yolo_runner()
-                if runner is not None:
-                    with torch.no_grad():
-                        with self._get_runner_lock(runner):
-                            _yolo_out = runner(aimg_prepared)
-                            if self.models_processor.device == "cuda":
-                                torch.cuda.current_stream().synchronize()
-                    net_outs = _yolo_out.cpu().numpy()
-                else:
-                    io_binding = ort_session.io_binding()
-                    io_binding.bind_input(
-                        name="images",
-                        device_type=self.models_processor.device,
-                        device_id=0,
-                        element_type=np.float32,
-                        shape=aimg_prepared.size(),
-                        buffer_ptr=aimg_prepared.data_ptr(),
-                    )
-                    io_binding.bind_output("output0", self.models_processor.device)
-                    net_outs = self._run_model_with_lazy_build_check(
-                        model_name, ort_session, io_binding
-                    )
-            else:
-                io_binding = ort_session.io_binding()
-                io_binding.bind_input(
-                    name="images",
-                    device_type=self.models_processor.device,
-                    device_id=0,
-                    element_type=np.float32,
-                    shape=aimg_prepared.size(),  # Use shape of prepared tensor
-                    buffer_ptr=aimg_prepared.data_ptr(),  # Use data_ptr of prepared tensor
-                )
-                io_binding.bind_output("output0", self.models_processor.device)
-                # Run the model with lazy build handling
-                net_outs = self._run_model_with_lazy_build_check(
-                    model_name, ort_session, io_binding
-                )
+            io_binding = ort_session.io_binding()
+            io_binding.bind_input(
+                name="images",
+                device_type=self.models_processor.device,
+                device_id=0,
+                element_type=np.float32,
+                shape=aimg_prepared.size(),  # Use shape of prepared tensor
+                buffer_ptr=aimg_prepared.data_ptr(),  # Use data_ptr of prepared tensor
+            )
+            io_binding.bind_output("output0", self.models_processor.device)
+            # Run the model with lazy build handling
+            net_outs = self._run_model_with_lazy_build_check(
+                model_name, ort_session, io_binding
+            )
 
             outputs = np.squeeze(net_outs).T
             bbox_raw, score_raw, kps_raw, *_ = np.split(outputs, [4, 5], axis=1)

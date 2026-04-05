@@ -32,4 +32,3 @@ einops
 lightning
 send2trash
 tensorflow
-triton-windows==3.4.0.post20

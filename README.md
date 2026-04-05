@@ -227,29 +227,6 @@ On Windows, either:
 
 ## Development
 
-### Custom Kernels (Provider: "Custom")
-
-The "Custom" inference provider delivers faster PyTorch FP16 + CUDA graph runners for all key models. It also uses a small set of hand-written CUDA kernels for fused ops (AdaIN, weight demodulation, cuBLASLt HGEMM) and Triton JIT kernels for everything else (GroupNorm+SiLU, pixel-shift, im2col-reflect, etc.).
-
-**Pre-built binaries** (committed to the repo under `model_assets/custom_kernels/`):
-
-| File | Purpose |
-|---|---|
-| `adain_fp16_ext.pyd` | Fused Adaptive Instance Normalisation (InSwapper, FP16) |
-| `gfpgan_demod_ext.pyd` | Fused weight demodulation (GFPGAN / GPEN) |
-| `style_block_ext.pyd` | cuBLASLt HGEMM + fused BIAS (InSwapper style blocks) |
-
-These are multi-arch fat binaries covering **sm_75 → sm_120** (RTX 2000 through RTX 5000). End users need no compiler — the binaries are loaded directly at runtime.
-
-**Rebuilding** (required when CUDA kernel sources change):
-
-```sh
-# Requires Visual Studio 2019/2022 (C++ workload) + CUDA Toolkit 12.8+
-python custom_kernels/build_kernels.py
-```
-
-Then commit the updated `.pyd` files. The Triton kernels in `triton_ops.py` do **not** need a manual build step — they JIT-compile at first use on the user's GPU and cache automatically under `model_assets/custom_kernels/triton_cache/`. The cache is versioned by Triton+CUDA+Python version and old entries are pruned automatically on startup.
-
 - Please use pre-commit before `git add` and commit, and fix any issues it reports.
 
 ```sh
@@ -282,11 +259,12 @@ uv pip install numpy scipy scikit-image opencv-python pillow pytest pytest-mock
 
 ```sh
 # Activate your venv first, then:
-python -m pytest                     # run the full suite (206 tests, ~2s)
+python -m pytest                     # run the full suite
 python -m pytest tests/unit/         # unit tests only
 python -m pytest tests/integration/  # integration tests only
 python -m pytest -k "vr"             # filter by keyword
 python -m pytest -v                  # verbose output
+python -m pytest -vv                  # verbose output - see each test
 ```
 
 **Test structure**

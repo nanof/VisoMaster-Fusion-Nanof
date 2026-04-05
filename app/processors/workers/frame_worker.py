@@ -1312,15 +1312,7 @@ class FrameWorker(threading.Thread):
             _vr_detection_interval <= 1
             or self.frame_number % _vr_detection_interval == 0
         )
-        # Custom provider serializes all CUDA graph runs through per-runner locks.
-        # 24 tiles × serial execution = unacceptable latency for VR recording.
-        # Skip tile detection for Custom provider entirely.
-        _skip_tile_det = self.models_processor.provider_name == "Custom"
-        if (
-            control.get("VR180TileDetectionToggle", False)
-            and _is_detection_keyframe
-            and not _skip_tile_det
-        ):
+        if control.get("VR180TileDetectionToggle", False) and _is_detection_keyframe:
             _tile_bboxes = self._detect_faces_vr_tiled(
                 equirect_converter,
                 control,
@@ -3206,7 +3198,7 @@ class FrameWorker(threading.Thread):
                 )  # save N-1 result before this pass
 
                 if _use_batched:
-                    # ------ BATCHED PATH (Custom provider, dim > 1) ------
+                    # ------ BATCHED PATH (dim > 1) ------
                     tiles_list = []
                     tile_coords = []
                     for j in range(dim):

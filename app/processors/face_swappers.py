@@ -5,7 +5,7 @@ from torchvision.transforms import v2
 from app.processors.utils import faceutil
 import numpy as np
 from numpy.linalg import norm as l2norm
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 import kornia.geometry.transform as kgm
 
 if TYPE_CHECKING:
@@ -19,14 +19,6 @@ class FaceSwappers:
         self.current_arcface_model = None
         self._session_io_name_cache: dict = {}  # FS-PERF-02: cache input/output names keyed by session id
         self._io_cache_lock = threading.Lock()
-        self._inswapper_init_lock = threading.Lock()
-        self._w600k_lock = threading.Lock()
-        self._inswapper_b1_lock = threading.Lock()
-        self._inswapper_batched_lock = threading.Lock()
-        self._inswapper_torch = None  # InSwapperTorch instance
-        self._inswapper_runner_b1: Optional[object] = None  # CUDA graph runner for B=1
-        self._w600k_torch: Optional[object] = None  # IResNet50Torch
-        self._w600k_runner: Optional[object] = None  # _CapturedGraph or eager model
         self.resize_112 = v2.Resize(
             (112, 112), interpolation=v2.InterpolationMode.BILINEAR, antialias=False
         )
@@ -55,11 +47,6 @@ class FaceSwappers:
                 self.models_processor.unload_model(model_name)
             for model_name in self.arcface_models:
                 self.models_processor.unload_model(model_name)
-        with self._inswapper_init_lock:
-            self._inswapper_torch = None
-            self._inswapper_runner_b1 = None
-            self._w600k_torch = None
-            self._w600k_runner = None
 
     def _manage_model(self, new_model_name):
         # FS-RACE-01: protect read-modify-write of current_swapper_model with lock
@@ -69,11 +56,6 @@ class FaceSwappers:
                 and self.current_swapper_model != new_model_name
             ):
                 self.models_processor.unload_model(self.current_swapper_model)
-                # Free InSwapperTorch when switching away from Inswapper128
-                if self.current_swapper_model == "Inswapper128":
-                    with self._inswapper_init_lock:
-                        self._inswapper_torch = None
-                        self._inswapper_runner_b1 = None
             # FS-BUG-07: current_swapper_model is committed only after load confirmation (see _load_swapper_model)
 
     def _load_swapper_model(self, model_name):
@@ -122,55 +104,6 @@ class FaceSwappers:
         finally:
             if is_lazy_build:
                 self.models_processor.hide_build_dialog.emit()
-
-    def _get_w600k_runner(self):
-        """Lazy-load IResNet50Torch + CUDA graph runner for Inswapper128ArcFace."""
-        if self._w600k_runner is not None:
-            return self._w600k_runner
-        self.models_processor.show_build_dialog.emit(
-            "Finalizing Custom Provider",
-            "Compiling & capturing CUDA graph for ArcFace (w600k)…\nFirst run only — future sessions load instantly from cache.",
-        )
-        try:
-            with self._inswapper_init_lock:
-                if self._w600k_runner is not None:
-                    return self._w600k_runner
-                if self._w600k_torch is None:
-                    try:
-                        import pathlib
-                        from custom_kernels.w600k_r50.w600k_r50_torch import (
-                            IResNet50Torch,
-                        )
-
-                        onnx_path = str(
-                            pathlib.Path(__file__).parent.parent.parent
-                            / "model_assets"
-                            / "w600k_r50.onnx"
-                        )
-                        m = (
-                            IResNet50Torch.from_onnx(onnx_path)
-                            .to(self.models_processor.device)
-                            .eval()
-                        )
-                        self._w600k_torch = m
-                    except Exception as e:
-                        print(f"[Custom] w600k_r50 load failed: {e}")
-                        return None
-                try:
-                    from custom_kernels.w600k_r50.w600k_r50_torch import (
-                        build_cuda_graph_runner,
-                    )
-
-                    with self.models_processor.cuda_graph_capture_lock:
-                        self._w600k_runner = build_cuda_graph_runner(
-                            self._w600k_torch, torch_compile=False
-                        )
-                except Exception as e:
-                    print(f"[Custom] w600k_r50 graph runner failed, using eager: {e}")
-                    self._w600k_runner = self._w600k_torch
-        finally:
-            self.models_processor.hide_build_dialog.emit()
-        return self._w600k_runner
 
     def run_recognize_direct(
         self, img, kps, similarity_type="Opal", arcface_model="Inswapper128ArcFace"
@@ -308,22 +241,6 @@ class FaceSwappers:
         # --- INFERENCE ---
         # Prepare data (N, C, H, W)
         img = torch.unsqueeze(img, 0).contiguous()
-
-        # Custom provider: use PyTorch IResNet50Torch for Inswapper128ArcFace
-        if (
-            self.models_processor.provider_name == "Custom"
-            and arcface_model == "Inswapper128ArcFace"
-        ):
-            runner = self._get_w600k_runner()
-            if runner is not None:
-                with torch.no_grad():
-                    with self._w600k_lock:
-                        embedding = runner(img)
-                        if self.models_processor.device == "cuda":
-                            torch.cuda.current_stream().synchronize()
-                    embedding_np = embedding.cpu().numpy().flatten()
-                return embedding_np, cropped_image
-            # runner unavailable — fall through to ORT
 
         # FS-PERF-02: cache input/output names by session id to avoid repeated ONNX introspection
         # Lock prevents 'dictionary changed size during iteration' crashes when multiple
@@ -547,13 +464,6 @@ class FaceSwappers:
             or not isinstance(self.models_processor.emap, np.ndarray)
             or self.models_processor.emap.size == 0
         ):
-            # Custom provider: extract emap directly from InSwapperTorch if loaded
-            if self.models_processor.provider_name == "Custom":
-                torch_model = self._get_inswapper_torch()
-                if torch_model is not None and torch_model.emap is not None:
-                    self.models_processor.emap = torch_model.emap
-                    return True
-
             self.models_processor.load_model("Inswapper128")
 
         return (
@@ -561,85 +471,6 @@ class FaceSwappers:
             and isinstance(self.models_processor.emap, np.ndarray)
             and self.models_processor.emap.size > 0
         )
-
-    def _get_inswapper_torch(self):
-        """Lazily load InSwapperTorch in GEMM/cuBLASLt mode (Custom provider)."""
-        if self._inswapper_torch is not None:
-            return self._inswapper_torch
-        with self._inswapper_init_lock:
-            if self._inswapper_torch is None:
-                from custom_kernels.inswapper_128.inswapper_torch import InSwapperTorch
-
-                onnx_path = self.models_processor.models_path["Inswapper128"]
-                print("[InSwapperTorch] Loading model...")
-                m = InSwapperTorch(onnx_path).cuda().eval()
-                m.to_gemm_mode()
-                print("[InSwapperTorch] GEMM mode enabled.")
-                try:
-                    m.to_cublaslt_mode()
-                    print("[InSwapperTorch] cuBLASLt mode enabled.")
-                except Exception as e:
-                    print(
-                        f"[InSwapperTorch] cuBLASLt unavailable ({e}); using torch.mm GEMM."
-                    )
-                self._inswapper_torch = m
-        return self._inswapper_torch
-
-    def _get_inswapper_runner_b1(self):
-        """Lazily build a CUDA graph runner for B=1 single-tile inference."""
-        if self._inswapper_runner_b1 is not None:
-            return self._inswapper_runner_b1
-        self.models_processor.show_build_dialog.emit(
-            "Finalizing Custom Provider",
-            "Capturing CUDA graph for Inswapper128 (Batch=1).\nThis only happens once and improves performance.",
-        )
-        try:
-            with self._inswapper_init_lock:
-                if self._inswapper_runner_b1 is not None:
-                    return self._inswapper_runner_b1
-                from custom_kernels.inswapper_128.inswapper_torch import (
-                    build_cuda_graph_runner,
-                )
-
-                if self._inswapper_torch is None:
-                    from custom_kernels.inswapper_128.inswapper_torch import (
-                        InSwapperTorch,
-                    )
-
-                    onnx_path = self.models_processor.models_path["Inswapper128"]
-                    print("[InSwapperTorch] Loading model...")
-                    m = InSwapperTorch(onnx_path).cuda().eval()
-                    m.to_gemm_mode()
-                    print("[InSwapperTorch] GEMM mode enabled.")
-                    try:
-                        m.to_cublaslt_mode()
-                        print("[InSwapperTorch] cuBLASLt mode enabled.")
-                    except Exception as e:
-                        print(
-                            f"[InSwapperTorch] cuBLASLt unavailable ({e}); using torch.mm GEMM."
-                        )
-                    self._inswapper_torch = m
-                model = self._inswapper_torch
-                target_ex = torch.zeros(
-                    1, 3, 128, 128, device="cuda", dtype=torch.float32
-                )
-                source_ex = torch.zeros(1, 512, device="cuda", dtype=torch.float32)
-                print("[InSwapperTorch] Capturing CUDA graph (B=1)...")
-                try:
-                    with self.models_processor.cuda_graph_capture_lock:
-                        self._inswapper_runner_b1 = build_cuda_graph_runner(
-                            model, target_ex, source_ex
-                        )
-                    print("[InSwapperTorch] CUDA graph ready.")
-                except Exception as e:
-                    print(
-                        f"[InSwapperTorch] CUDA graph failed ({e}); using eager model."
-                    )
-                    _m = model
-                    self._inswapper_runner_b1 = lambda t, s: _m(t, s)
-        finally:
-            self.models_processor.hide_build_dialog.emit()
-        return self._inswapper_runner_b1
 
     def calc_inswapper_latent(self, source_embedding):
         if not self._ensure_emap():
@@ -652,21 +483,7 @@ class FaceSwappers:
     def run_inswapper(self, image, embedding, output):
         model_name = "Inswapper128"
 
-        # ---- Custom provider: PyTorch-native inference with CUDA graph runner ----
-        if self.models_processor.provider_name == "Custom":
-            if not self._ensure_emap():
-                self._load_swapper_model(model_name)
-
-            runner = self._get_inswapper_runner_b1()
-            with torch.no_grad():
-                with self._inswapper_b1_lock:
-                    result = runner(image, embedding)  # [1, 3, 128, 128] float32
-                    output.copy_(result)
-                    if self.models_processor.device == "cuda":
-                        torch.cuda.current_stream().synchronize()
-            return
-
-        # ---- All other providers: ORT-based inference ----
+        # ORT-based inference
         model = self._load_swapper_model(model_name)
         if not model:
             print("[ERROR] Inswapper128 model not loaded.")
@@ -718,15 +535,52 @@ class FaceSwappers:
     def run_inswapper_batched(
         self, images: torch.Tensor, embedding: torch.Tensor, output: torch.Tensor
     ) -> None:
-        """Batched Custom-provider InSwapper inference for pixel-shift resolution mode."""
-        model_name = "Inswapper128"
-        if not self._ensure_emap():
-            self._load_swapper_model(model_name)
+        """Batched InSwapper inference for pixel-shift resolution mode.
 
-        torch_model = self._get_inswapper_torch()
-        with torch.no_grad():
-            result = torch_model(images, embedding)  # [B, 3, 128, 128] float32
-        output.copy_(result)
+        Processes each tile sequentially through the ORT session since the ONNX
+        model expects a batch size of 1.
+        """
+        model_name = "Inswapper128"
+        model = self._load_swapper_model(model_name)
+        if not model:
+            print("[ERROR] Inswapper128 model not loaded.")
+            return
+
+        batch_size = images.shape[0]
+        for idx in range(batch_size):
+            img = images[idx : idx + 1].contiguous()
+            out = output[idx : idx + 1].contiguous()
+            emb = embedding.contiguous()
+
+            io_binding = model.io_binding()
+            io_binding.clear_binding_inputs()
+            io_binding.clear_binding_outputs()
+            io_binding.bind_input(
+                name="target",
+                device_type=self.models_processor.device,
+                device_id=0,
+                element_type=np.float32,
+                shape=(1, 3, 128, 128),
+                buffer_ptr=img.data_ptr(),
+            )
+            io_binding.bind_input(
+                name="source",
+                device_type=self.models_processor.device,
+                device_id=0,
+                element_type=np.float32,
+                shape=(1, 512),
+                buffer_ptr=emb.data_ptr(),
+            )
+            io_binding.bind_output(
+                name="output",
+                device_type=self.models_processor.device,
+                device_id=0,
+                element_type=np.float32,
+                shape=(1, 3, 128, 128),
+                buffer_ptr=out.data_ptr(),
+            )
+            self._run_model_with_lazy_build_check(model_name, model, io_binding)
+            output[idx].copy_(out[0])
 
     def calc_swapper_latent_ghost(self, source_embedding):
         latent = source_embedding.reshape((1, -1))

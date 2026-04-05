@@ -463,7 +463,7 @@ class VideoProcessor(QObject):
         """
         # VR180 requires specialized spherical detection in the FrameWorker, skip sequential here.
         if local_control_for_worker.get("VR180ModeEnableToggle", False):
-            return None, None, None
+            return None, None, None, None
 
         import contextlib
 

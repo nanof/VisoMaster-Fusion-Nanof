@@ -2157,9 +2157,9 @@ def process_swap_faces(main_window: "MainWindow"):
     Runs synchronously so the processed result (including any required model loading
     or first-time CUDA graph builds) is applied to the currently displayed frame
     before control returns to the UI, matching the behaviour of the single-frame-step
-    advance button.  For the Custom provider, build-progress dialogs are shown via
-    show_build_dialog signals emitted before each CUDA graph capture; those signals
-    call processEvents() so the dialog paints even while the main thread is occupied.
+    advance button.  Build-progress dialogs are shown via show_build_dialog signals
+    emitted before each TensorRT build; those signals call processEvents() so the
+    dialog paints even while the main thread is occupied.
     """
     video_processor = main_window.video_processor
     video_processor.process_current_frame(synchronous=True)
