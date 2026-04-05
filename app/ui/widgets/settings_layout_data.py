@@ -75,6 +75,16 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "requiredToggleValue": True,
             "help": "Target height resolution (e.g. 720p). The aspect ratio is preserved.",
         },
+        "FrameWorkerDelayDecimalSlider": {
+            "level": 1,
+            "label": "Frame Worker Delay",
+            "min_value": "0.0",
+            "max_value": "3.0",
+            "default": "0.2",
+            "step": 0.1,
+            "decimals": 1,
+            "help": "Delay in seconds before AI processing when seeking in video. Prevents GPU overload and stuttering.",
+        },
     },
     "Output Settings": {
         "OutputToTargetLocationToggle": {

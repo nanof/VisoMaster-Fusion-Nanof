@@ -239,6 +239,15 @@ class VideoProcessor(QObject):
             queue.Queue()
         )  # Processed webcam frames
 
+        # Frame cache
+        self._last_requested_frame_num: int | None = None
+        self._cached_raw_frame_number: int | None = None
+        self._cached_raw_frame_target_height: int | None = None
+        self._cached_raw_frame_bgr: numpy.ndarray | None = None
+        self._cached_raw_image_path: str | None = None
+        self._cached_raw_image_target_height: int | None = None
+        self._cached_raw_image_bgr: numpy.ndarray | None = None
+
         # --- Signal Connections ---
         self.frame_processed_signal.connect(self.store_frame_to_display)
         self.webcam_frame_processed_signal.connect(self.store_webcam_frame_to_display)
@@ -1766,18 +1775,19 @@ class VideoProcessor(QObject):
             }
             if prev is not None and prev.is_alive():
                 prev.stop_event.set()
-                self._pending_single_frame_request = request
-                if not self._single_frame_handoff_timer.isActive():
-                    self._single_frame_handoff_timer.start()
-                return prev
 
-            self._pending_single_frame_request = None
-            self._current_single_frame_worker = None
-            return self._launch_async_single_frame_worker(
-                frame_number,
-                frame,
-                self._single_frame_request_generation,
+            self._pending_single_frame_request = request
+            frameworker_delay = max(
+                int(
+                    self.main_window.control.get("FrameWorkerDelayDecimalSlider", 0.3)
+                    * 1000
+                ),
+                15,
             )
+            self._single_frame_handoff_timer.setInterval(frameworker_delay)
+            self._single_frame_handoff_timer.start()
+
+            return prev
 
     def process_current_frame(
         self, synchronous: bool = False, fit_on_complete: bool = False
@@ -1791,9 +1801,7 @@ class VideoProcessor(QObject):
             if not self.stop_processing():
                 print("[WARN] Could not stop active processing cleanly.")
 
-        # Seed global PyTorch/CUDA RNG from the denoiser seed slider before every
-        # single-frame preview. This ensures the seed slider change visibly affects
-        # the denoised preview output.
+        # Seed global PyTorch/CUDA RNG...
         _denoiser_seed = int(
             self.main_window.control.get("DenoiserBaseSeedSlider", 220)
         )
@@ -1809,6 +1817,11 @@ class VideoProcessor(QObject):
 
         self.next_frame_to_display = self.current_frame_number
 
+        frame_changed = (
+            getattr(self, "_last_requested_frame_num", -1) != self.current_frame_number
+        )
+        self._last_requested_frame_num = self.current_frame_number
+
         frame_to_process = None
         read_successful = False
 
@@ -1817,34 +1830,44 @@ class VideoProcessor(QObject):
 
         # --- Read the frame based on file type ---
         if self.file_type == "video" and self.media_capture:
-            misc_helpers.seek_frame(self.media_capture, self.current_frame_number)
-
-            # Apply target_height for VIDEO
-            ret, frame_bgr = misc_helpers.read_frame(
-                self.media_capture,
-                self.media_rotation,
-                preview_target_height=target_height,
+            is_cached = (
+                self._cached_raw_frame_number == self.current_frame_number
+                and self._cached_raw_frame_target_height == target_height
+                and self._cached_raw_frame_bgr is not None
             )
 
-            if ret and frame_bgr is not None:
-                frame_to_process = numpy.ascontiguousarray(
-                    frame_bgr[..., ::-1]
-                )  # BGR to RGB
-                read_successful = True
+            if is_cached:
+                frame_bgr = self._cached_raw_frame_bgr
+                ret = True
+            else:
                 misc_helpers.seek_frame(self.media_capture, self.current_frame_number)
+                ret, frame_bgr = misc_helpers.read_frame(
+                    self.media_capture,
+                    self.media_rotation,
+                    preview_target_height=target_height,
+                )
+                if ret and frame_bgr is not None:
+                    self._cached_raw_frame_number = self.current_frame_number
+                    self._cached_raw_frame_target_height = target_height
+                    self._cached_raw_frame_bgr = frame_bgr.copy()
+                    misc_helpers.seek_frame(
+                        self.media_capture, self.current_frame_number
+                    )
+
+            if ret and frame_bgr is not None:
+                # BGR to RGB
+                frame_to_process = numpy.ascontiguousarray(frame_bgr[..., ::-1])
+                read_successful = True
             else:
                 fn = self.current_frame_number
                 max_fn = self.max_frame_number
                 # Fallback: use the raw frame cached during the last slider seek preview.
-                # OpenCV seeks near EOF are unreliable; the slider already read this
-                # frame successfully so we can reuse it to avoid a silent no-op.
                 if (
                     self._seek_cached_frame is not None
                     and self._seek_cached_frame[0] == fn
                     and self._seek_cached_frame[1] is not None
                 ):
                     cached_frame_bgr = self._seek_cached_frame[1]
-                    # Apply GlobalInputResize if needed (preview was read at native res)
                     if (
                         target_height is not None
                         and cached_frame_bgr.shape[0] > target_height
@@ -1875,9 +1898,22 @@ class VideoProcessor(QObject):
                     self.main_window.last_seek_read_failed = True
 
         elif self.file_type == "image":
-            frame_bgr = misc_helpers.read_image_file(self.media_path)
+            is_cached = (
+                self._cached_raw_image_path == self.media_path
+                and self._cached_raw_image_target_height == target_height
+                and self._cached_raw_image_bgr is not None
+            )
+
+            if is_cached:
+                frame_bgr = self._cached_raw_image_bgr
+            else:
+                frame_bgr = misc_helpers.read_image_file(self.media_path)
+                if frame_bgr is not None:
+                    self._cached_raw_image_path = self.media_path
+                    self._cached_raw_image_target_height = target_height
+                    self._cached_raw_image_bgr = frame_bgr.copy()
+
             if frame_bgr is not None:
-                # Apply target_height for IMAGE (Manual resize)
                 if target_height is not None and frame_bgr.shape[0] > target_height:
                     h, w = frame_bgr.shape[:2]
                     scale = target_height / h
@@ -1894,7 +1930,6 @@ class VideoProcessor(QObject):
                 print("[ERROR] Unable to read image file for processing.")
 
         elif self.file_type == "webcam" and self.media_capture:
-            # DO NOT apply target_height for WEBCAM (Use native resolution)
             ret, frame_bgr = misc_helpers.read_frame(
                 self.media_capture, 0, preview_target_height=None
             )
@@ -1908,6 +1943,15 @@ class VideoProcessor(QObject):
 
         # --- Process if read was successful ---
         if read_successful and frame_to_process is not None:
+            if frame_changed:
+                frame_bgr_preview = numpy.ascontiguousarray(frame_to_process[..., ::-1])
+                self.display_current_frame(
+                    generation=0,
+                    frame_number=self.current_frame_number,
+                    frame=frame_bgr_preview,
+                    preview_cache=None,
+                )
+
             return self.start_frame_worker(
                 self.current_frame_number,
                 frame_to_process,
@@ -2045,8 +2089,14 @@ class VideoProcessor(QObject):
         # returning, we ensure that on_change_video_seek_slider() (which calls
         # stop_processing() first) can still read a frame for the preview.
         if self.file_type == "video" and self.media_path:
-            current_slider_pos = self.main_window.videoSeekSlider.value()
+            last_processed = self.next_frame_to_display - 1
+            start_frame = getattr(self, "processing_start_frame", 0)
+            current_slider_pos = max(start_frame, last_processed)
+            current_slider_pos = min(current_slider_pos, self.max_frame_number)
             if self._reopen_video_capture(current_slider_pos):
+                self.main_window.videoSeekSlider.blockSignals(True)
+                self.main_window.videoSeekSlider.setValue(current_slider_pos)
+                self.main_window.videoSeekSlider.blockSignals(False)
                 print(
                     f"[INFO] Video capture re-opened and seeked to {current_slider_pos} after stop."
                 )
@@ -4132,7 +4182,11 @@ class VideoProcessor(QObject):
 
             # 8b. Reopen media capture AFTER FFmpeg audio merge.
             if self.file_type == "video" and self.media_path:
-                reset_frame = getattr(self, "processing_start_frame", 0)
+                last_processed = self.next_frame_to_display - 1
+                start_frame = getattr(self, "processing_start_frame", 0)
+                reset_frame = max(start_frame, last_processed)
+                reset_frame = min(reset_frame, self.max_frame_number)
+
                 if self._reopen_video_capture(reset_frame):
                     self.main_window.videoSeekSlider.blockSignals(True)
                     self.main_window.videoSeekSlider.setValue(reset_frame)
