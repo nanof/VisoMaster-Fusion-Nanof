@@ -1686,6 +1686,9 @@ class ModelsProcessor(QtCore.QObject):
     def run_blendswap(self, target_rgb_256, source_rgb_112, output):
         self.face_swappers.run_blendswap(target_rgb_256, source_rgb_112, output)
 
+    def run_uniface(self, target_norm_256, source_rgb_256, output):
+        self.face_swappers.run_uniface(target_norm_256, source_rgb_256, output)
+
     def calc_rehiface_source_latent(self, source_embedding):
         return self.face_swappers.calc_rehiface_source_latent(source_embedding)
 

@@ -472,3 +472,6 @@ def test_ghostface_models_frozenset():
 
         assert FrameWorker.BLENDSWAP_MODELS == frozenset({"BlendSwap-256"})
         assert isinstance(FrameWorker.BLENDSWAP_MODELS, frozenset)
+
+        assert FrameWorker.UNIFACE_MODELS == frozenset({"UniFace-256"})
+        assert isinstance(FrameWorker.UNIFACE_MODELS, frozenset)

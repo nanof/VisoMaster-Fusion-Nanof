@@ -37,6 +37,7 @@ arcface_mapping_model_dict = {
     "ReHiFace-S": "Inswapper128ArcFace",
     "CSCS": "CSCSArcFace",
     "BlendSwap-256": "Inswapper128ArcFace",
+    "UniFace-256": "Inswapper128ArcFace",
 }
 
 detection_model_mapping = {
@@ -196,6 +197,12 @@ models_list = [
         "local_path": f"{models_dir}/blendswap_256.onnx",
         "hash": "",
         "url": "https://huggingface.co/facefusion/models-3.0.0/resolve/main/blendswap_256.onnx",
+    },
+    {
+        "model_name": "UniFace256",
+        "local_path": f"{models_dir}/uniface_256.onnx",
+        "hash": "",
+        "url": "https://huggingface.co/facefusion/models-3.0.0/resolve/main/uniface_256.onnx",
     },
     {
         "model_name": "ReHiFaceS",

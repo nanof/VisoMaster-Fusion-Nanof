@@ -92,6 +92,17 @@ def test_blendswap_models_frozenset():
 
 
 # ---------------------------------------------------------------------------
+# FS-05d: UNIFACE model name set (mirrors FrameWorker.UNIFACE_MODELS)
+# ---------------------------------------------------------------------------
+
+
+def test_uniface_models_frozenset():
+    from app.processors.workers.frame_worker import FrameWorker
+
+    assert FrameWorker.UNIFACE_MODELS == frozenset({"UniFace-256"})
+
+
+# ---------------------------------------------------------------------------
 # FS-05b: HYPERSWAP model name set (mirrors FrameWorker.HYPERSWAP_MODELS)
 # ---------------------------------------------------------------------------
 
