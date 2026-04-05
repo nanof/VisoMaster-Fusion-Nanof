@@ -316,6 +316,12 @@ class VideoProcessor(QObject):
         self._audio_sync_rate: float = 1.0
         self._audio_sync_last_seek_monotonic: float = 0.0
 
+        # Playback benchmark: one decoded frame, pipeline repeated (preview only; no recording).
+        self._playback_benchmark_same_frame_active: bool = False
+        self._benchmark_same_frame_anchor_fn: int = 0
+        self._benchmark_same_frame_seq: int = 0
+        self._benchmark_same_frame_rgb_cache: numpy.ndarray | None = None
+
         # Adding Cuda Streams for thread safety
         self.feeder_stream = (
             None  # torch.cuda.Stream() if torch.cuda.is_available() else None
@@ -964,6 +970,7 @@ class VideoProcessor(QObject):
             and not self.recording
             and not self.is_processing_segments
             and target_fps <= 9000
+            and not self._playback_benchmark_same_frame_active
         )
 
         # Start utility timers and emit signal
@@ -1872,6 +1879,12 @@ class VideoProcessor(QObject):
                     self.consecutive_read_errors = 0
                     self._audio_sync_last_seek_monotonic = time.perf_counter()
                     self._clear_sequential_detection_feed_state()
+                    if self._playback_benchmark_same_frame_active:
+                        self._benchmark_same_frame_rgb_cache = None
+                        self._benchmark_same_frame_seq = int(pending_interactive_seek)
+                        self._benchmark_same_frame_anchor_fn = int(
+                            pending_interactive_seek
+                        )
 
                 # 1. Mode-specific stop logic
                 if is_segment_mode:
@@ -1916,6 +1929,7 @@ class VideoProcessor(QObject):
                     and self._wall_clock_use_audio_file_rate
                     and self._playback_use_wall_clock
                     and not self.is_av1_codec
+                    and not self._playback_benchmark_same_frame_active
                 ):
                     now_seek = time.perf_counter()
                     min_lag, slices, max_step, min_interval = (
@@ -1984,6 +1998,71 @@ class VideoProcessor(QObject):
                         )
                     )
                 )
+                _bench_same = (
+                    not is_segment_mode
+                    and not self.recording
+                    and self._playback_benchmark_same_frame_active
+                )
+
+                if _bench_same and self._benchmark_same_frame_rgb_cache is not None:
+                    self.consecutive_read_errors = 0
+                    frame_num_to_process = int(self.current_frame_number)
+                    marker_data = self.main_window.markers.get(frame_num_to_process)
+                    local_params_for_worker: FacesParametersTypes
+                    local_control_for_worker: ControlTypes
+                    with self.state_lock:
+                        if marker_data and marker_data != last_marker_data:
+                            print(
+                                f"[INFO] Frame {frame_num_to_process} is a marker. Updating feeder state."
+                            )
+                            self.feeder_parameters = copy.deepcopy(
+                                marker_data["parameters"]
+                            )
+                            self.feeder_control = {}
+                            for (
+                                widget_name,
+                                widget,
+                            ) in self.main_window.parameter_widgets.items():
+                                if widget_name in self.main_window.control:
+                                    self.feeder_control[widget_name] = widget.default_value
+                            if "control" in marker_data and isinstance(
+                                marker_data["control"], dict
+                            ):
+                                self.feeder_control.update(
+                                    cast(ControlTypes, marker_data["control"]).copy()
+                                )
+                            last_marker_data = marker_data
+                        local_params_for_worker = self.feeder_parameters.copy()
+                        local_control_for_worker = self.feeder_control.copy()
+                    _t_feed_before_rgb = time.perf_counter()
+                    frame_rgb = self._benchmark_same_frame_rgb_cache.copy()
+                    _t_feed_after_rgb = time.perf_counter()
+                    perf_pre = None
+                    if _perf_stages_feed:
+                        perf_pre = {
+                            "read_frame_ms": 0.0,
+                            "feeder_state_ms": 0.0,
+                            "rgb_pack_ms": (_t_feed_after_rgb - _t_feed_before_rgb)
+                            * 1000.0,
+                        }
+                    seq_fn = int(self._benchmark_same_frame_seq)
+                    self._benchmark_same_frame_seq = seq_fn + 1
+                    raw_task = (
+                        seq_fn,
+                        seq_fn,
+                        frame_rgb,
+                        local_params_for_worker,
+                        local_control_for_worker,
+                        perf_pre,
+                        bool(_perf_stages_feed),
+                        "video",
+                    )
+                    rq = self._raw_frame_queue
+                    if rq is None:
+                        raise RuntimeError("_raw_frame_queue is not initialized")
+                    rq.put(raw_task)
+                    continue
+
                 _t_feed_read0 = time.perf_counter()
                 ret, frame_bgr = misc_helpers.read_frame(
                     self.media_capture,
@@ -2122,10 +2201,22 @@ class VideoProcessor(QObject):
                         * 1000.0,
                         "rgb_pack_ms": (_t_feed_after_rgb - _t_feed_before_rgb) * 1000.0,
                     }
+                if _bench_same:
+                    if self._benchmark_same_frame_rgb_cache is None:
+                        self._benchmark_same_frame_rgb_cache = frame_rgb.copy()
+                    seq_fn = int(self._benchmark_same_frame_seq)
+                    self._benchmark_same_frame_seq = seq_fn + 1
+                    pipeline_rgb = self._benchmark_same_frame_rgb_cache.copy()
+                    task_logical = seq_fn
+                    task_display = seq_fn
+                else:
+                    pipeline_rgb = frame_rgb
+                    task_logical = frame_num_to_process
+                    task_display = frame_num_to_process
                 raw_task = (
-                    frame_num_to_process,
-                    frame_num_to_process,
-                    frame_rgb,
+                    task_logical,
+                    task_display,
+                    pipeline_rgb,
                     local_params_for_worker,
                     local_control_for_worker,
                     perf_pre,
@@ -2138,7 +2229,8 @@ class VideoProcessor(QObject):
                 rq.put(raw_task)
 
                 # DO NOT START A WORKER HERE
-                self.current_frame_number += 1
+                if not _bench_same:
+                    self.current_frame_number += 1
 
             except Exception as e:
                 print(
@@ -2385,7 +2477,10 @@ class VideoProcessor(QObject):
                     )
                     self.stop_current_segment()  # Segment logic handles its own stop
                     return
-            elif self.next_frame_to_display > self.max_frame_number:
+            elif (
+                self.next_frame_to_display > self.max_frame_number
+                and not self._playback_benchmark_same_frame_active
+            ):
                 # --- Default Playback/Recording Stop Logic ---
                 print("[INFO] End of media reached.")
                 if self.recording:
@@ -2642,6 +2737,10 @@ class VideoProcessor(QObject):
         # --- 7. Frame is ready: Process and Display ---
         self.current_frame = frame  # Update current frame state
 
+        _ui_timeline_fn = frame_number_to_display
+        if self._playback_benchmark_same_frame_active:
+            _ui_timeline_fn = int(self._benchmark_same_frame_anchor_fn)
+
         # Emit a signal every 500 frames to notify JobProcessor we are still alive
         if self.file_type not in LIVE_STREAM_FILE_TYPES and not preview_skip_increment:
             self.heartbeat_frame_counter += 1
@@ -2688,17 +2787,17 @@ class VideoProcessor(QObject):
         # Update UI
         if self.file_type not in LIVE_STREAM_FILE_TYPES and not preview_skip_increment:
             # This is the metronome tick.
-            if frame_number_to_display in self.main_window.markers:
+            if _ui_timeline_fn in self.main_window.markers:
                 # Acquire lock to safely modify parameters and controls
                 with self.main_window.models_processor.model_lock:
                     # 1. Load data from marker into main_window.parameters/control
                     video_control_actions.update_parameters_and_control_from_marker(
-                        self.main_window, frame_number_to_display
+                        self.main_window, _ui_timeline_fn
                     )
 
                     # 2. Update all UI widgets to reflect the new state
                     video_control_actions.update_widget_values_from_markers(
-                        self.main_window, frame_number_to_display
+                        self.main_window, _ui_timeline_fn
                     )
 
         # CREATE QPIXMAP JUST-IN-TIME (GUI Thread)
@@ -2731,20 +2830,20 @@ class VideoProcessor(QObject):
             graphics_view_actions.update_graphics_view(
                 self.main_window,
                 pixmap,
-                frame_number_to_display,
+                _ui_timeline_fn,
                 gpu_blend=gpu_blend_for_view,
             )
         else:
             pixmap = common_widget_actions.get_pixmap_from_frame(self.main_window, frame)
             graphics_view_actions.update_graphics_view(
-                self.main_window, pixmap, frame_number_to_display
+                self.main_window, pixmap, _ui_timeline_fn
             )
         graphics_view_actions.update_pipeline_profile_overlay(
             self.main_window, profile_for_overlay
         )
         if _perf_disp:
             print(
-                f"[PERF-DISPLAY] frame={frame_number_to_display} "
+                f"[PERF-DISPLAY] frame={frame_number_to_display} ui_timeline={_ui_timeline_fn} "
                 f"ui_ms={(time.perf_counter() - _t_disp0) * 1000.0:.2f}",
                 flush=True,
             )
@@ -2764,6 +2863,7 @@ class VideoProcessor(QObject):
             and self._playback_use_wall_clock
             and not self.recording
             and not self.is_av1_codec
+            and not self._playback_benchmark_same_frame_active
         ):
             tgt_follow = self._advance_past_skipped_for_display(
                 self._expected_frame_from_wall_clock()
@@ -3093,6 +3193,21 @@ class VideoProcessor(QObject):
         self.current_frame_number = (
             actual_start_frame  # Feeder reads this frame first when it starts
         )
+        self._playback_benchmark_same_frame_active = bool(
+            not self.recording
+            and self.main_window.control.get(
+                "VideoPlaybackBenchSameFrameToggle", False
+            )
+        )
+        self._benchmark_same_frame_anchor_fn = int(actual_start_frame)
+        self._benchmark_same_frame_seq = int(actual_start_frame)
+        self._benchmark_same_frame_rgb_cache = None
+        if self._playback_benchmark_same_frame_active:
+            print(
+                "[INFO] Benchmark mismo frame: una decodificación; el pipeline repite el "
+                f"frame {self._benchmark_same_frame_anchor_fn} hasta detener reproducción.",
+                flush=True,
+            )
         self._clear_sequential_detection_feed_state()
         self._audio_sync_last_seek_monotonic = 0.0
 
@@ -3672,6 +3787,8 @@ class VideoProcessor(QObject):
         self._audio_sync_last_seek_monotonic = 0.0
         self._interactive_playback_seek_pending = None
         self._feeder_deferred_seek_read = None
+        self._playback_benchmark_same_frame_active = False
+        self._benchmark_same_frame_rgb_cache = None
         self.active_output_folder = ""
         self._cancel_single_frame_preview_state()
         self._reset_preview_frame_generation_state()

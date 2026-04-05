@@ -209,6 +209,15 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "default": False,
             "help": "Auto start over when video playing to the end.(Not work for recording)",
         },
+        "VideoPlaybackBenchSameFrameToggle": {
+            "level": 1,
+            "label": "Benchmark: repeat same frame",
+            "default": False,
+            "help": "Preview only (not recording): decodes once at the current timeline position, then runs "
+            "detect+swap on copies of that frame forever until you stop. Timeline/slider stays on that frame; "
+            "internal frame indices advance for buffering. Use with Pipeline profile / VISIOMASTER_PERF_* for "
+            "stable GPU benchmarks.",
+        },
         "PreviewFrameGenEnableToggle": {
             "level": 1,
             "label": "Frame Interpolation",
