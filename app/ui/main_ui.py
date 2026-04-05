@@ -963,6 +963,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 fi_toggle = self.parameter_widgets.get("PreviewFrameGenEnableToggle")
                 if fi_toggle is not None and fi_toggle.isEnabled():
                     fi_toggle.click()
+            case QtCore.Qt.Key_Comma:
+                video_control_actions.adjust_sequential_input_rotate_offset(self, -1)
+            case QtCore.Qt.Key_Period:
+                video_control_actions.adjust_sequential_input_rotate_offset(self, 1)
 
     def closeEvent(self, event):
         print("[INFO] MainWindow: closeEvent called.")

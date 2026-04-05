@@ -1237,6 +1237,22 @@ def remove_all_markers(main_window: "MainWindow"):
         main_window.job_marker_pairs.clear()
 
 
+def adjust_sequential_input_rotate_offset(main_window: "MainWindow", delta: int) -> None:
+    """Adjust Swap settings → Input rotate start offset (only when the slider exists and is enabled)."""
+    key = "SequentialInputRotateOffsetSlider"
+    w = main_window.parameter_widgets.get(key)
+    if w is None or not w.isEnabled():
+        return
+    lo, hi = int(w.minimum()), int(w.maximum())
+    span = hi - lo + 1
+    cur = int(w.value())
+    newv = lo + (cur - lo + int(delta)) % span
+    w.blockSignals(True)
+    w.setValue(newv)
+    w.blockSignals(False)
+    common_widget_actions.update_control(main_window, key, newv)
+
+
 def advance_video_slider_by_n_frames(main_window: "MainWindow", n=None):
     """
     Advances the seek slider forward by *n* frames (clamped to the last frame).
