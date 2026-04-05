@@ -43,8 +43,7 @@ class Equirectangular:
 
         # VR-MEM-01: store uint8 (1/4 the size of float32) and convert on-the-fly in
         # GetPerspective.  With 6-8 FrameWorkers, storing a full-frame float32 tensor
-        # persistently per worker consumed 216 MiB × N workers, causing CUDA OOM when
-        # combined with CUDA-graph private pools (Custom provider).
+        # persistently per worker consumed 216 MiB × N workers, causing CUDA OOM.
         self._img_tensor_cxhxw_rgb_uint8 = img_tensor_cxhxw_rgb_uint8
         self.device = img_tensor_cxhxw_rgb_uint8.device
         self._channels, self._height, self._width = self._img_tensor_cxhxw_rgb_uint8.shape

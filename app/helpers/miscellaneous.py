@@ -205,6 +205,7 @@ class ThumbnailManager:
             max_width=THUMBNAIL_MAX_EDGE_PX,
         )
 
+        width, height = max(1, width), max(1, height)
         resized_frame = cv2.resize(
             frame, (width, height), interpolation=cv2.INTER_LANCZOS4
         )
@@ -669,10 +670,10 @@ def get_scaled_resolution(
         scaled_width = media_width * scale
         scaled_height = media_height * scale
 
-        return int(scaled_width), int(scaled_height)
+        return max(1, int(scaled_width)), max(1, int(scaled_height))
 
     # If the media is already within bounds, return its original dimensions.
-    return int(media_width), int(media_height)
+    return max(1, int(media_width)), max(1, int(media_height))
 
 
 def get_video_rotation(media_path: str) -> int:
@@ -1484,27 +1485,31 @@ def draw_bounding_boxes_on_detected_faces(
 
 def paint_landmarks_on_image(img: torch.Tensor, landmarks_data: list) -> torch.Tensor:
     """
-    OPTIMIZED: Replaced deeply nested loops and per-pixel tensor allocations
-    with tensor slicing and pre-allocated colors to eliminate CPU bottlenecks.
+    OPTIMIZED: Pre-allocates color tensor to avoid GPU memory overhead in the inner loop.
+    NOTE: This function expects the input tensor 'img' to be in (H, W, C) format.
     """
     img_out_hwc = img.clone()
     p = 2
+
+    # Extract dimensions correctly based on (H, W, C) format
+    h = img_out_hwc.shape[0]
+    w = img_out_hwc.shape[1]
 
     for item in landmarks_data:
         keypoints = item["kps"]
         kcolor = item["color"]
         if keypoints is not None:
-            # OPTIMIZATION: Allocate the color tensor ONCE per face, not per pixel
+            # Create color tensor once per face (shape: [3]).
+            # PyTorch will automatically broadcast this across the [y, x] slice in the (H, W, C) tensor.
             kcolor_tensor = torch.tensor(kcolor, device=img.device, dtype=img.dtype)
 
             for kpoint in keypoints:
                 kx, ky = int(kpoint[0]), int(kpoint[1])
 
-                # OPTIMIZATION: Use direct slicing instead of nested loops
                 y_min = max(0, ky - p // 2)
-                y_max = min(img_out_hwc.shape[0], ky + p // 2 + 1)
+                y_max = min(h, ky + p // 2 + 1)
                 x_min = max(0, kx - p // 2)
-                x_max = min(img_out_hwc.shape[1], kx + p // 2 + 1)
+                x_max = min(w, kx + p // 2 + 1)
 
                 if y_min < y_max and x_min < x_max:
                     img_out_hwc[y_min:y_max, x_min:x_max] = kcolor_tensor

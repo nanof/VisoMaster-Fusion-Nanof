@@ -946,26 +946,16 @@ class FrameEdits:
         Returns:
             torch.Tensor: Image with makeup applied.
         """
-        use_mean_eyes = parameters.get("LandmarkMeanEyesToggle", False)
-
         if (
             parameters["FaceMakeupEnableToggle"]
             or parameters["HairMakeupEnableToggle"]
             or parameters["EyeBrowsMakeupEnableToggle"]
             or parameters["LipsMakeupEnableToggle"]
         ):
-            if kps is not None and len(kps) > 5:
+            if kps is not None and len(kps) >= 5:
                 lmk_crop = kps
             else:
-                _, lmk_crop, _ = self.models_processor.run_detect_landmark(
-                    img,
-                    bbox=[],
-                    det_kpss=kps,
-                    detect_mode="203",
-                    score=0.5,
-                    from_points=False,
-                    use_mean_eyes=use_mean_eyes,
-                )
+                return img
 
             # Use the interpolation mode passed from FrameWorker, or default to BILINEAR
             interp_mode = (

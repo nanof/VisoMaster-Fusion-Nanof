@@ -32,7 +32,7 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
         "ProvidersPrioritySelection": {
             "level": 1,
             "label": "Providers Priority",
-            "options": ["CUDA", "TensorRT", "TensorRT-Engine", "Custom", "CPU"],
+            "options": ["CUDA", "TensorRT", "TensorRT-Engine", "CPU"],
             "default": "TensorRT",
             "help": "Execution providers: try TensorRT vs Custom and measure with VISIOMASTER_PERF_BUNDLE=1. FP16/mixed precision: profile with ORT or Nsight before changing builds. Engine cache: set VISIOMASTER_LOG_TRT_CACHE=1 on load to print cache-hit lines.",
             "exec_function": control_actions.change_execution_provider,
@@ -696,7 +696,7 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
         "KPSSmoothingEnableToggle": {
             "level": 1,
             "label": "Enable KPS Smoothing",
-            "default": True,  # Activé par défaut pour garder la stabilité
+            "default": False,
             "help": "Enable temporal smoothing for facial keypoints (KPS) to reduce jittering and stabilize the face.",
         },
         "KPSEmaAlphaSlider": {

@@ -320,6 +320,7 @@ class FrameWorker(threading.Thread):
         self.precomputed_bboxes: Optional[list] = None
         self.precomputed_kpss_5: Optional[list] = None
         self.precomputed_kpss: Optional[list] = None
+        self.precomputed_kpss_203: Optional[list] = None
         self.precomputed_track_ids: list[int] | None = None
         self._feeder_perf_from_task: dict[str, float] | None = None
         # CHW uint8 frame tensor from feeder sequential detect (avoids duplicate H2D)
@@ -472,7 +473,21 @@ class FrameWorker(threading.Thread):
                         # Stopped while waiting, discard task
                         break  # 'finally' will call task_done()
 
-                    if len(task) >= 10:
+                    if len(task) >= 11:
+                        (
+                            self.frame_number,
+                            self.frame,
+                            local_params_from_feeder,
+                            local_control_from_feeder,
+                            self.precomputed_bboxes,
+                            self.precomputed_kpss_5,
+                            self.precomputed_kpss,
+                            self.precomputed_kpss_203,
+                            _feeder_perf_task,
+                            self._feeder_chw_tensor,
+                            self.precomputed_track_ids,
+                        ) = task[:11]
+                    elif len(task) >= 10:
                         (
                             self.frame_number,
                             self.frame,
@@ -485,6 +500,7 @@ class FrameWorker(threading.Thread):
                             self._feeder_chw_tensor,
                             self.precomputed_track_ids,
                         ) = task[:10]
+                        self.precomputed_kpss_203 = None
                     elif len(task) >= 9:
                         (
                             self.frame_number,
@@ -497,6 +513,7 @@ class FrameWorker(threading.Thread):
                             _feeder_perf_task,
                             self._feeder_chw_tensor,
                         ) = task[:9]
+                        self.precomputed_kpss_203 = None
                         self.precomputed_track_ids = None
                     else:
                         (
@@ -509,6 +526,7 @@ class FrameWorker(threading.Thread):
                             self.precomputed_kpss,
                             _feeder_perf_task,
                         ) = task
+                        self.precomputed_kpss_203 = None
                         self._feeder_chw_tensor = None
                         self.precomputed_track_ids = None
                     self._feeder_perf_from_task: dict[str, float] | None = (
@@ -1638,12 +1656,8 @@ class FrameWorker(threading.Thread):
         from app.helpers.vr_utils import EquirectangularConverter, PerspectiveConverter
 
         # FW-RACE-02: read from snapshotted feeder state instead of live Qt button
-        swap_button_is_checked_global = self.local_control_state_from_feeder.get(
-            "swap_enabled", True
-        )
-        edit_button_is_checked_global = self.local_control_state_from_feeder.get(
-            "edit_enabled", True
-        )
+        swap_button_is_checked_global = self.main_window.swapfacesButton.isChecked()
+        edit_button_is_checked_global = self.main_window.editFacesButton.isChecked()
 
         # VR-08: cache the EquirectangularConverter instance at worker level.
         # When the frame size is unchanged (common for video), reuse the cached
@@ -1829,15 +1843,7 @@ class FrameWorker(threading.Thread):
             _vr_detection_interval <= 1
             or self.frame_number % _vr_detection_interval == 0
         )
-        # Custom provider serializes all CUDA graph runs through per-runner locks.
-        # 24 tiles × serial execution = unacceptable latency for VR recording.
-        # Skip tile detection for Custom provider entirely.
-        _skip_tile_det = self.models_processor.provider_name == "Custom"
-        if (
-            control.get("VR180TileDetectionToggle", False)
-            and _is_detection_keyframe
-            and not _skip_tile_det
-        ):
+        if control.get("VR180TileDetectionToggle", False) and _is_detection_keyframe:
             _tile_bboxes = self._detect_faces_vr_tiled(
                 equirect_converter,
                 control,
@@ -2914,12 +2920,8 @@ class FrameWorker(threading.Thread):
         - Overlays (BBox, Landmarks, Comparison)
         """
         # FW-RACE-02: read button state from snapshotted feeder dict, not live Qt buttons
-        swap_button_is_checked_global = self.local_control_state_from_feeder.get(
-            "swap_enabled", True
-        )
-        edit_button_is_checked_global = self.local_control_state_from_feeder.get(
-            "edit_enabled", True
-        )
+        swap_button_is_checked_global = self.main_window.swapfacesButton.isChecked()
+        edit_button_is_checked_global = self.main_window.editFacesButton.isChecked()
 
         # FW-RACE-01: snapshot target_faces under lock so the worker thread never
         # iterates the live dict while the UI thread may be modifying it.
@@ -3017,14 +3019,13 @@ class FrameWorker(threading.Thread):
             kpss_5 = self.precomputed_kpss_5
             kpss = self.precomputed_kpss
             std_detect_track_ids = getattr(self, "precomputed_track_ids", None)
+            kpss_203 = getattr(self, "precomputed_kpss_203", None)
         else:
             use_landmark, landmark_mode, from_points = (
                 control.get("LandmarkDetectToggle", True),
                 control.get("LandmarkDetectModelSelection", "203"),
                 control.get("DetectFromPointsToggle", False),
             )
-            if edit_button_is_checked_global:
-                use_landmark, landmark_mode, from_points = True, "203", True
 
             _local_out_track: list[int] | None = (
                 [] if _sequential_match_active else None
@@ -3033,6 +3034,38 @@ class FrameWorker(threading.Thread):
                 _sequential_match_active
                 and control.get("FaceTrackingEnableToggle", False)
             )
+            # Identify if 203 points are strictly required by an advanced feature
+            requires_203 = False
+            from collections.abc import Mapping
+
+            for face_params in self.parameters.values():
+                if isinstance(face_params, Mapping):
+                    is_face_editor_active = (
+                        edit_button_is_checked_global
+                        and face_params.get("FaceEditorEnableToggle", False)
+                    )
+                    is_expression_active = face_params.get(
+                        "FaceExpressionEnableBothToggle", False
+                    )
+                    is_auto_mouth_active = face_params.get(
+                        "AutoMouthExpressionEnableToggle", False
+                    )
+                    is_makeup_active = edit_button_is_checked_global and (
+                        face_params.get("FaceMakeupEnableToggle", False)
+                        or face_params.get("HairMakeupEnableToggle", False)
+                        or face_params.get("EyeBrowsMakeupEnableToggle", False)
+                        or face_params.get("LipsMakeupEnableToggle", False)
+                    )
+
+                    if (
+                        is_face_editor_active
+                        or is_expression_active
+                        or is_auto_mouth_active
+                        or is_makeup_active
+                    ):
+                        requires_203 = True
+                        break
+
             bboxes, kpss_5, kpss = self.models_processor.run_detect(
                 img,
                 control.get("DetectorModelSelection", "RetinaFace"),
@@ -3077,6 +3110,31 @@ class FrameWorker(threading.Thread):
                     else:
                         self._smoothed_kps[_i] = _raw.copy()
                     kpss_5[_i] = self._smoothed_kps[_i]
+
+            # STEP 2: Smart Double-Scan for 203 points (fallback path only)
+            kpss_203 = None
+            if requires_203:
+                if use_landmark and landmark_mode == "203":
+                    kpss_203 = kpss
+                else:
+                    _, _, kpss_203 = self.models_processor.run_detect(
+                        img,
+                        control.get("DetectorModelSelection", "RetinaFace"),
+                        max_num=control.get("MaxFacesToDetectSlider", 1),
+                        score=control.get("DetectorScoreSlider", 50) / 100.0,
+                        input_size=(512, 512),
+                        use_landmark_detection=True,
+                        landmark_detect_mode="203",
+                        landmark_score=control.get("LandmarkDetectScoreSlider", 50)
+                        / 100.0,
+                        from_points=from_points,
+                        rotation_angles=[0]
+                        if not control.get("AutoRotationToggle", False)
+                        else [0, 90, 180, 270],
+                        use_mean_eyes=control.get("LandmarkMeanEyesToggle", False),
+                        previous_detections=None,
+                        bypass_bytetrack=True,
+                    )
 
         if perf_stages is not None:
             perf_stages.mark("std_detect_feeder_or_fallback")
@@ -3128,12 +3186,18 @@ class FrameWorker(threading.Thread):
                     if _cached_emb is not None:
                         face_emb = _cached_emb
                 kps_all_i = kpss[i] if kpss is not None and i < len(kpss) else None
+                kps_203_i = (
+                    kpss_203[i]
+                    if kpss_203 is not None and i < len(kpss_203)
+                    else None
+                )
                 _work_faces.append(
                     {
                         "i": i,
                         "bbox": _bbox_i,
                         "kps_5": kpss_5[i],
                         "kps_all": kps_all_i,
+                        "kps_203": kps_203_i,
                         "embedding": face_emb,
                         "track_id": _row_tid,
                     }
@@ -3327,6 +3391,7 @@ class FrameWorker(threading.Thread):
                                 img,
                                 best_fface["kps_5"],
                                 best_fface["kps_all"],
+                                kps_203=best_fface.get("kps_203"),
                                 s_e=s_e,
                                 t_e=target_face.get_embedding(arcface_model),
                                 parameters=_params_for_swap_a,
@@ -3344,8 +3409,13 @@ class FrameWorker(threading.Thread):
                                     "LipsMakeupEnableToggle",
                                 )
                             ):
+                                kps_for_makeup_best = (
+                                    best_fface.get("kps_203")
+                                    if best_fface.get("kps_203") is not None
+                                    else best_fface.get("kps_5")
+                                )
                                 img = self.frame_edits.swap_edit_face_core_makeup(
-                                    img, best_fface["kps_all"], params.data, control
+                                    img, kps_for_makeup_best, params.data, control
                                 )
                         except Exception as e:
                             print(
@@ -3632,6 +3702,7 @@ class FrameWorker(threading.Thread):
                                     img,
                                     fface["kps_5"],
                                     fface["kps_all"],
+                                    kps_203=fface.get("kps_203"),
                                     s_e=s_e,
                                     t_e=best_target.get_embedding(arcface_model),
                                     parameters=_params_for_swap_b,
@@ -3650,8 +3721,13 @@ class FrameWorker(threading.Thread):
                                     "LipsMakeupEnableToggle",
                                 )
                             ):
+                                kps_for_makeup = (
+                                    fface.get("kps_203")
+                                    if fface.get("kps_203") is not None
+                                    else fface.get("kps_5")
+                                )
                                 img = self.frame_edits.swap_edit_face_core_makeup(
-                                    img, fface["kps_all"], params.data, control
+                                    img, kps_for_makeup, params.data, control
                                 )
                         except Exception as e:
                             print(
@@ -3754,7 +3830,7 @@ class FrameWorker(threading.Thread):
                 _face_id_1 = getattr(cached_tgt, "face_id", None)
                 face_specific: dict = cast(
                     dict,
-                    self.parameters.get(_face_id_1, {})  # type: ignore[arg-type]
+                    self.parameters.get(str(_face_id_1), {})  # type: ignore[arg-type]
                     if _face_id_1 is not None
                     else {},
                 )
@@ -3767,11 +3843,36 @@ class FrameWorker(threading.Thread):
                         fface_data["embedding"], control
                     )
             if matched_params:
-                use_adj = matched_params["LandmarksPositionAdjEnableToggle"]
-                keypoints = (
-                    fface_data.get("kps_5") if use_adj else fface_data.get("kps_all")
-                )
-                kcolor = (255, 0, 0) if use_adj else (0, 255, 255)
+                # Use .get() safely in case the key doesn't exist yet
+                use_adj = matched_params.get("LandmarksPositionAdjEnableToggle", False)
+
+                kps_203 = fface_data.get("kps_203")
+                kps_all = fface_data.get("kps_all")
+                kps_5 = fface_data.get("kps_5")
+
+                if use_adj:
+                    # Manual Adjustment Mode: always force 5 points
+                    keypoints = kps_5
+                    kcolor = (255, 0, 0)  # BGR: Blue
+                else:
+                    # Smart Cascade: From most detailed to least detailed
+                    if kps_all is not None and len(kps_all) > 5:
+                        keypoints = kps_all
+                        kcolor = (
+                            0,
+                            255,
+                            255,
+                        )  # BGR: Yellow (Standard dense model chosen in UI)
+                    elif kps_203 is not None and len(kps_203) == 203:
+                        keypoints = kps_203
+                        kcolor = (
+                            0,
+                            165,
+                            255,
+                        )  # BGR: Orange (Indicates advanced tools triggered the 203 points)
+                    else:
+                        keypoints = kps_5
+                        kcolor = (0, 255, 0)  # BGR: Green (Base 5 points model)
 
                 if keypoints is not None:
                     landmarks_to_draw.append({"kps": keypoints, "color": kcolor})
@@ -3805,7 +3906,7 @@ class FrameWorker(threading.Thread):
                 _face_id_2 = getattr(cached_tgt, "face_id", None)
                 face_specific: dict = cast(
                     dict,
-                    self.parameters.get(_face_id_2, {})  # type: ignore[arg-type]
+                    self.parameters.get(str(_face_id_2), {})  # type: ignore[arg-type]
                     if _face_id_2 is not None
                     else {},
                 )
@@ -4634,7 +4735,7 @@ class FrameWorker(threading.Thread):
                 )  # save N-1 result before this pass
 
                 if _use_batched:
-                    # ------ BATCHED PATH (Custom provider, dim > 1) ------
+                    # ------ BATCHED PATH (dim > 1) ------
                     tiles_list = []
                     tile_coords = []
                     for j in range(dim):
@@ -5637,6 +5738,7 @@ class FrameWorker(threading.Thread):
         img: torch.Tensor,
         kps_5: np.ndarray,
         kps: np.ndarray | None = None,  # FW-ROBUST-06: changed default False -> None
+        kps_203: np.ndarray | None = None,  # NEW: Dedicated 203 points
         s_e: np.ndarray | None = None,
         t_e: np.ndarray | None = None,
         parameters: dict | None = None,
@@ -5680,8 +5782,10 @@ class FrameWorker(threading.Thread):
 
         # OPTIMIZATION: Transform full-frame smoothed keypoints to the 512x512 crop space
         kps_all_crop = None
-        if kps is not None and len(kps) == 203:
-            raw_kps_crop = tform(kps)
+        if (
+            kps_203 is not None and len(kps_203) == 203
+        ):  # Use the dedicated 203 variable
+            raw_kps_crop = tform(kps_203)
             kps_all_crop = np.array(raw_kps_crop, dtype=np.float32)
 
         # STATE TRACKER: Suit si le tenseur 'swap' a subi une modification géométrique

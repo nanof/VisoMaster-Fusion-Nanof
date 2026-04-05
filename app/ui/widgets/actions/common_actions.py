@@ -453,6 +453,7 @@ def show_hide_related_widgets(
 
 # @misc_helpers.benchmark
 def get_pixmap_from_frame(main_window: "MainWindow", frame: np.ndarray):
+    frame = np.ascontiguousarray(frame)
     height, width, channel = frame.shape
     if channel == 2:
         # Frame in grayscale
@@ -571,6 +572,7 @@ def extract_frame_as_pixmap(
 
     # This helper function converts a numpy frame to a scaled QPixmap.
     def convert_frame_to_pixmap(frame):
+        frame = np.ascontiguousarray(frame)
         height, width, _ = frame.shape
         bytes_per_line = 3 * width
         q_img = QtGui.QImage(

@@ -122,6 +122,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self._rightFacesStripVisible = False
         self._theatre_normal_panel_states: dict[str, bool] | None = None
         self._theatre_mode_panel_states: dict[str, bool] | None = None
+        self._fullscreen_restore_was_maximized = False
+        self._fullscreen_restore_geometry = None
         self.panel_visibility_state: dict[str, bool] = {
             "target_media": True,
             "input_faces": True,
@@ -840,11 +842,40 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             scene_rect = pixmap_item.boundingRect()
             self.graphicsViewFrame.setSceneRect(scene_rect)
             graphics_view_actions.fit_image_to_view(self, pixmap_item, scene_rect)
+        self._sync_theatre_base_window_snapshot()
+
+    def moveEvent(self, event: QtGui.QMoveEvent):
+        super().moveEvent(event)
+        self._sync_theatre_base_window_snapshot()
 
     def changeEvent(self, event: QtCore.QEvent):
         super().changeEvent(event)
         if event.type() == QtCore.QEvent.Type.WindowStateChange:
             self.is_full_screen = self.isFullScreen()
+            self._sync_theatre_base_window_snapshot()
+
+    def _sync_theatre_base_window_snapshot(self):
+        if not getattr(self, "is_theatre_mode", False):
+            return
+
+        if self.isFullScreen():
+            restore_geometry = getattr(self, "_fullscreen_restore_geometry", None)
+            self._was_custom_fullscreen = True
+            self._was_maximized = False
+            self._was_normal_geometry = (
+                restore_geometry
+                if restore_geometry is not None
+                else self.normalGeometry()
+            )
+            return
+
+        self._was_custom_fullscreen = False
+        if self.isMaximized():
+            self._was_maximized = True
+            self._was_normal_geometry = self.normalGeometry()
+        else:
+            self._was_maximized = False
+            self._was_normal_geometry = self.geometry()
 
     def eventFilter(self, watched, event):
         viewport_widget = getattr(self, "mediaControlsViewportWidget", None)
@@ -877,10 +908,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
     def keyPressEvent(self, event):
         match event.key():
             case QtCore.Qt.Key_Escape:
-                if getattr(self, "is_theatre_mode", False):
-                    video_control_actions.toggle_theatre_mode(self)
-                elif self.isFullScreen():
+                if self.isFullScreen():
                     video_control_actions.view_fullscreen(self)
+                elif getattr(self, "is_theatre_mode", False):
+                    video_control_actions.toggle_theatre_mode(self)
             case QtCore.Qt.Key_F11:
                 video_control_actions.view_fullscreen(self)
             case QtCore.Qt.Key_T:
@@ -1421,8 +1452,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         return context_labels.get(value, self._mask_show_option_label(value))
 
     def _is_fullscreen_menu_active(self) -> bool:
-        if getattr(self, "is_theatre_mode", False):
-            return bool(getattr(self, "_was_custom_fullscreen", False))
         return self.isFullScreen()
 
     def _handle_viewer_mask_action(self, value: str, checked: bool):

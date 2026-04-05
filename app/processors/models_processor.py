@@ -55,7 +55,6 @@ from app.processors.models_data import (
     models_list,
     models_trt_list,
     arcface_mapping_model_dict,
-    models_dir,
     fp16_safe_models_list,
 )
 from app.helpers.miscellaneous import is_file_exists
@@ -205,11 +204,6 @@ class ModelsProcessor(QtCore.QObject):
         self.device = device
         self.model_lock = threading.RLock()  # Reentrant lock for model access
 
-        # MP-CUDA-01: Global serialisation lock for CUDA graph capture.
-        # Custom kernels use capture_error_mode="relaxed" so ops from other threads
-        # don't interfere, but we still serialise all captures so multiple concurrent
-        # captures don't compete for resources.  All _get_*_runner() lazy-builders
-        # MUST hold this lock while calling torch.cuda.graph() / build_cuda_graph_runner().
         self.cuda_graph_capture_lock = threading.Lock()
         # MP-CUDA-02: Serialize ORT GPU inference across threads. Concurrent TRT/CUDA EP
         # runs (e.g. RIFE preview + face landmarks on different threads) can trigger
@@ -1080,9 +1074,8 @@ class ModelsProcessor(QtCore.QObject):
             str: The resolved provider name (may differ from the input when TensorRT
                  is downgraded due to a version constraint).
         """
-        # Release existing Custom-kernel CUDA graph runners and ORT sessions
-        # whenever the provider is changed so that GPU memory from the old
-        # provider is freed before new sessions / runners are allocated.
+        # Release existing ORT sessions whenever the provider is changed so that
+        # GPU memory from the old provider is freed before new sessions are allocated.
         self.face_detectors.unload_models()
         self.face_masks.unload_models()
         self.face_swappers.unload_models()
@@ -1108,41 +1101,6 @@ class ModelsProcessor(QtCore.QObject):
                         "[WARN] TensorRT-Engine provider cannot be used when TensorRT version is lower than 10.2.0."
                     )
                     provider_name = "TensorRT"
-
-            case "Custom":
-                # Custom provider: primary inference uses PyTorch custom CUDA
-                # kernels (bypassing ONNX Runtime).  For any model that falls
-                # back to an ONNX session (e.g. runner build failure), TRT EP
-                # is used when available — fastest after the custom kernels.
-                # The normal TRT probe / engine-build dialog runs for these
-                # fallback sessions exactly as it does for the TensorRT provider.
-                self._ensure_triton_build_dialog_registered()
-                self._ensure_compile_callbacks_registered()
-
-                # Set up torch.compile environment + persistent kernel cache.
-                # Must be called before any build_cuda_graph_runner() invocation.
-                try:
-                    from custom_kernels.compile_utils import (
-                        setup_compile_env as _setup_compile_env,
-                    )
-
-                    _compile_cache_dir = str(models_dir / "torch_compile_cache")
-                    _setup_compile_env(cache_dir=_compile_cache_dir)
-                except Exception as _e:
-                    print(f"[Custom] torch.compile env setup failed (non-fatal): {_e}")
-
-                if TENSORRT_AVAILABLE and trt is not None:
-                    providers = [
-                        ("TensorrtExecutionProvider", self.trt_ep_options),
-                        ("CUDAExecutionProvider"),
-                        ("CPUExecutionProvider"),
-                    ]
-                else:
-                    providers = [
-                        ("CUDAExecutionProvider"),
-                        ("CPUExecutionProvider"),
-                    ]
-                self.device = "cuda"
 
             case "CPU":
                 providers = [("CPUExecutionProvider")]
@@ -1350,11 +1308,6 @@ class ModelsProcessor(QtCore.QObject):
     def ensure_denoiser_models_loaded(self):
         """Loads the UNet and VAE models if they are not already loaded."""
         with self.model_lock:
-            # Custom provider uses PyTorch kernel runners for RefLDM (loaded lazily
-            # on first use). Loading the ONNX sessions too would waste VRAM.
-            if self.provider_name == "Custom":
-                return
-
             unet_model_name = self.main_window.fixed_unet_model_name
             vae_encoder_name = "RefLDMVAEEncoder"
             vae_decoder_name = "RefLDMVAEDecoder"
@@ -2005,19 +1958,13 @@ class ModelsProcessor(QtCore.QObject):
             )
 
         with self.model_lock:
-            if self.provider_name == "Custom":
-                # Custom provider uses PyTorch runners loaded lazily inside
-                # run_vae_encoder / run_vae_decoder / run_ref_ldm_unet.
-                # There are no ORT sessions to check — proceed directly.
-                pass
-            else:
-                self.ensure_denoiser_models_loaded()
-                unet_session = self.models.get(unet_model_name)
-                vae_enc_session = self.models.get(vae_encoder_name)
-                vae_dec_session = self.models.get(vae_decoder_name)
+            self.ensure_denoiser_models_loaded()
+            unet_session = self.models.get(unet_model_name)
+            vae_enc_session = self.models.get(vae_encoder_name)
+            vae_dec_session = self.models.get(vae_decoder_name)
 
-                if not (unet_session and vae_enc_session and vae_dec_session):
-                    return image_cxhxw_uint8
+            if not (unet_session and vae_enc_session and vae_dec_session):
+                return image_cxhxw_uint8
 
         kv_tensor_map_for_this_run: Dict[str, Dict[str, torch.Tensor]] | None = None
         if reference_kv_map:

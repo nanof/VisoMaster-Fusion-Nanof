@@ -45,7 +45,6 @@ class FaceMasks:
         self.clip_model_loaded = False
         self.active_models: set[str] = set()
 
-        # Custom-kernel instances (lazy-loaded on first use)
         self._faceparser_torch: Optional[object] = None
         self._faceparser_runner: Optional[object] = None
         self._xseg_torch: Optional[object] = None
@@ -68,7 +67,6 @@ class FaceMasks:
             for model_name in list(self.active_models):
                 self.models_processor.unload_model(model_name)
             self.active_models.clear()
-        # Release Custom-kernel instances so they rebuild on next use.
         with self._faceparser_init_lock:
             self._faceparser_torch = None
             self._faceparser_runner = None
@@ -1305,19 +1303,6 @@ class FaceMasks:
         return outpred
 
     def run_occluder(self, image, output):
-        # Custom provider: use PyTorch OccluderTorch
-        if self.models_processor.provider_name == "Custom":
-            runner = self._get_occluder_runner()
-            if runner is not None:
-                with torch.no_grad():
-                    with self._get_runner_lock(runner):
-                        result = runner(image)
-                        output.copy_(result.squeeze())
-                        if self.models_processor.device == "cuda":
-                            torch.cuda.current_stream().synchronize()
-                return
-            # runner unavailable — fall through to ORT
-
         model_name = "Occluder"
         ort_session = self.models_processor.models.get(model_name)
 
@@ -1536,19 +1521,6 @@ class FaceMasks:
         return outpred, outpred_calc, outpred_calc_dill, outpred_noFP
 
     def run_dfl_xseg(self, image, output):
-        # Custom provider: use PyTorch XSegTorch
-        if self.models_processor.provider_name == "Custom":
-            runner = self._get_xseg_runner()
-            if runner is not None:
-                with torch.no_grad():
-                    with self._get_runner_lock(runner):
-                        result = runner(image)
-                        output.copy_(result.view(256, 256))
-                        if self.models_processor.device == "cuda":
-                            torch.cuda.current_stream().synchronize()
-                return
-            # runner unavailable — fall through to ORT
-
         model_name = "XSeg"
         ort_session = self.models_processor.models.get(model_name)
         if not ort_session:
@@ -1973,28 +1945,11 @@ class FaceMasks:
         swapped = preprocess(swapped_face)
         original = preprocess(original_face)
 
-        if (
-            self.models_processor.provider_name == "Custom"
-            and feature_layer == "combo_relu3_3_relu3_1"
-        ):
-            vgg_runner = self._get_vgg_combo_runner()
-            if vgg_runner is not None:
-                with torch.no_grad():
-                    with self._get_runner_lock(vgg_runner):
-                        swapped_feat = vgg_runner(swapped)
-                        original_feat = vgg_runner(original)
-            else:
-                shape = feature_shapes[feature_layer]
-                outpred = torch.empty(shape, dtype=torch.float32, device=swapped.device)
-                outpred2 = torch.empty_like(outpred)
-                swapped_feat = self.run_onnx(swapped, outpred, model_key)
-                original_feat = self.run_onnx(original, outpred2, model_key)
-        else:
-            shape = feature_shapes[feature_layer]
-            outpred = torch.empty(shape, dtype=torch.float32, device=swapped.device)
-            outpred2 = torch.empty_like(outpred)
-            swapped_feat = self.run_onnx(swapped, outpred, model_key)
-            original_feat = self.run_onnx(original, outpred2, model_key)
+        shape = feature_shapes[feature_layer]
+        outpred = torch.empty(shape, dtype=torch.float32, device=swapped.device)
+        outpred2 = torch.empty_like(outpred)
+        swapped_feat = self.run_onnx(swapped, outpred, model_key)
+        original_feat = self.run_onnx(original, outpred2, model_key)
 
         diff_map = torch.abs(swapped_feat - original_feat).mean(dim=1)[0]
         diff_map = diff_map * swap_mask.squeeze(0)

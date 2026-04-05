@@ -20,6 +20,21 @@ import torch
 # Stub heavyweight imports that FrameWorker pulls at module level
 # ---------------------------------------------------------------------------
 
+# Pre-import real PySide6 before the stub loop so the "if not in sys.modules"
+# guard below skips PySide6 entirely.  Without this, PySide6 would be stubbed
+# as a MagicMock for the rest of the test session; any later test file that
+# imports a class inheriting from QObject or QThread (e.g. VideoProcessor,
+# IssueScanWorker) would receive a MagicMock instance instead of a real class,
+# causing AttributeError and TypeError failures in those test files.
+# frame_worker.py itself never imports PySide6 directly — it only imports
+# widget_components (stubbed below), so real PySide6 does not affect these
+# VR tests.
+for _pyside_mod in ("PySide6", "PySide6.QtCore", "PySide6.QtWidgets", "PySide6.QtGui"):
+    try:
+        __import__(_pyside_mod)
+    except ImportError:
+        pass  # Not installed — will be stubbed below
+
 
 def _stub(name: str) -> MagicMock:
     # Do NOT use spec= — a spec-limited mock restricts attribute access, which breaks

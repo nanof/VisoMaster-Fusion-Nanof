@@ -1,3 +1,4 @@
+import os
 import threading
 from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
@@ -78,13 +79,6 @@ class FaceRestorers:
             "VQFR-v2": "VQFRv2",
         }
 
-    def _get_runner_lock(self, runner):
-        with self._custom_inference_lock:
-            r_id = id(runner)
-            if r_id not in self._runner_locks:
-                self._runner_locks[r_id] = threading.Lock()
-            return self._runner_locks[r_id]
-
     def unload_models(self):
         """Unloads the restorer models held in both slots and resets state."""
         if self.active_model_slot1:
@@ -93,24 +87,6 @@ class FaceRestorers:
         if self.active_model_slot2:
             self.models_processor.unload_model(self.active_model_slot2)
             self.active_model_slot2 = None
-        with self._custom_init_lock:
-            self._gfpgan_torch = None
-            self._gfpgan1024_torch = None
-            self._gfpgan_runner = None
-            self._gfpgan1024_runner = None
-            self._gpen_torch = {}
-            self._gpen_runner = {}
-            self._ref_ldm_encoder_torch = None
-            self._ref_ldm_encoder_runner = None
-            self._ref_ldm_decoder_torch = None
-            self._ref_ldm_decoder_runner = None
-            self._ref_ldm_unet_torch = None
-            self._ref_ldm_unet_runner = {}
-            self._codeformer_torch = None
-            self._codeformer_runner = None
-            self._codeformer_runner_w = None
-            self._restoreformer_torch = None
-            self._restoreformer_runner = None
 
     def _get_model_session(self, model_name: str):
         """
@@ -547,12 +523,17 @@ class FaceRestorers:
         """
         Runs the ONNX session with IOBinding, handling TensorRT lazy build dialogs.
         This centralizes the try/finally logic for showing/hiding the build progress dialog
-        and includes the critical synchronization step for CUDA or other devices.
+        and synchronizes CUDA before inference so PyTorch-prepared input buffers are
+        visible to ORT. Set ``VISIOMASTER_ORT_IOBINDING_POST_SYNC=1`` to restore the
+        old post-sync if needed.
 
         Args:
             model_name (str): The name of the model being run.
             ort_session: The ONNX Runtime session instance.
             io_binding: The pre-configured IOBinding object.
+
+        Returns:
+            list: The network outputs from copy_outputs_to_cpu().
         """
         is_lazy_build = self.models_processor.check_and_clear_pending_build(model_name)
         if is_lazy_build:
@@ -561,21 +542,33 @@ class FaceRestorers:
                 f"Performing first-run inference for:\n{model_name}\n\nThis may take several minutes.",
             )
 
+        net_outs: list = []
         try:
-            # ⚠️ This is a critical synchronization point.
-            # PRE-INFERENCE SYNC
             if self.models_processor.device == "cuda":
                 torch.cuda.current_stream().synchronize()
             elif self.models_processor.device != "cpu":
-                # This handles synchronization for other execution providers (e.g., DirectML)
-                # by synchronizing with a placeholder vector.
                 self.models_processor.syncvec.cpu()
 
             self.models_processor.run_session_with_iobinding(ort_session, io_binding)
 
+            if os.environ.get("VISIOMASTER_ORT_IOBINDING_POST_SYNC", "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            ):
+                if self.models_processor.device == "cuda":
+                    torch.cuda.current_stream().synchronize()
+                elif self.models_processor.device != "cpu":
+                    self.models_processor.syncvec.cpu()
+
+            net_outs = io_binding.copy_outputs_to_cpu()
+
         finally:
             if is_lazy_build:
                 self.models_processor.hide_build_dialog.emit()
+
+        return net_outs
 
     def apply_facerestorer(
         self,
@@ -807,26 +800,11 @@ class FaceRestorers:
         image_input_tensor: Batch x 3 x Height x Width, float32, normalized to [-1, 1]
         output_latent_tensor: Placeholder for Batch x 8 x LatentH x LatentW, float32
         """
-        if self.models_processor.provider_name == "Custom":
-            runner = self._get_ref_ldm_encoder_runner()
-            if runner is not None:
-                with torch.no_grad():
-                    with self._get_runner_lock(runner):
-                        result = runner(image_input_tensor)
-                output_latent_tensor.copy_(result)
-                return
-            # Custom runner failed to build — skip silently (denoiser not applied)
-            print(
-                "[WARN] run_vae_encoder: Custom runner unavailable, skipping encoder."
-            )
-            return
-
         model_name = "RefLDMVAEEncoder"
         # FR-BUG-04: use .get() to avoid KeyError when model is not yet loaded
         ort_session = self.models_processor.models.get(model_name)
         if ort_session is None:
-            # Lazy reload in case clear_gpu_memory() cleared the session after a
-            # provider switch (e.g. TRT→Custom→TRT without a UI toggle change).
+            # Lazy reload in case clear_gpu_memory() cleared the session after a provider switch.
             self.models_processor.ensure_denoiser_models_loaded()
             ort_session = self.models_processor.models.get(model_name)
         if ort_session is None:
@@ -874,26 +852,11 @@ class FaceRestorers:
         latent_input_tensor: Batch x 8 x LatentH x LatentW, float32
         output_image_tensor: Placeholder for Batch x 3 x H x W, float32, normalized to [-1, 1]
         """
-        if self.models_processor.provider_name == "Custom":
-            runner = self._get_ref_ldm_decoder_runner()
-            if runner is not None:
-                with torch.no_grad():
-                    with self._get_runner_lock(runner):
-                        result = runner(latent_input_tensor)
-                output_image_tensor.copy_(result)
-                return
-            # Custom runner failed to build — skip silently (denoiser not applied)
-            print(
-                "[WARN] run_vae_decoder: Custom runner unavailable, skipping decoder."
-            )
-            return
-
         model_name = "RefLDMVAEDecoder"
         # FR-BUG-04: use .get() to avoid KeyError when model is not yet loaded
         ort_session = self.models_processor.models.get(model_name)
         if ort_session is None:
-            # Lazy reload in case clear_gpu_memory() cleared the session after a
-            # provider switch (e.g. TRT→Custom→TRT without a UI toggle change).
+            # Lazy reload in case clear_gpu_memory() cleared the session after a provider switch.
             self.models_processor.ensure_denoiser_models_loaded()
             ort_session = self.models_processor.models.get(model_name)
         if ort_session is None:
@@ -945,79 +908,6 @@ class FaceRestorers:
         """
         Runs the UNet denoiser model with external K/V inputs.
         """
-        if self.models_processor.provider_name == "Custom":
-            unet = self._get_ref_ldm_unet_torch()
-            if unet is not None:
-                use_exclusive = bool(
-                    use_reference_exclusive_path_globally_tensor.item()
-                )
-                # Lazily build a UNetCUDAGraphRunner on the first call that
-                # has a real kv_map (K/V shapes are fixed by architecture so
-                # the template only needs to be captured once per use_exclusive value).
-                runner = self._ref_ldm_unet_runner.get(use_exclusive)
-                if runner is None and kv_tensor_map is not None:
-                    try:
-                        from custom_kernels.ref_ldm.ref_ldm_torch import (
-                            build_unet_cuda_graph_runner,
-                        )
-
-                        self.models_processor.show_build_dialog.emit(
-                            "Finalizing Custom Provider",
-                            f"Compiling & capturing CUDA graph for RefLDM UNet "
-                            f"(use_exclusive={use_exclusive})…\n"
-                            f"First run only — future sessions load instantly from cache.",
-                        )
-                        try:
-                            with self.models_processor.cuda_graph_capture_lock:
-                                runner = build_unet_cuda_graph_runner(
-                                    unet,
-                                    x_shape=tuple(x_noisy_plus_lq_latent.shape),
-                                    ts_example=timesteps_tensor.clone(),
-                                    kv_map_template=kv_tensor_map,
-                                    use_exclusive=use_exclusive,
-                                    torch_compile=False,
-                                )
-                            self._ref_ldm_unet_runner[use_exclusive] = runner
-                            print(
-                                f"[RefLDMTorch] UNet CUDA graph captured "
-                                f"(use_exclusive={use_exclusive})."
-                            )
-                        finally:
-                            self.models_processor.hide_build_dialog.emit()
-                    except Exception as e:
-                        print(
-                            f"[RefLDMTorch] UNet CUDA graph build failed "
-                            f"(use_exclusive={use_exclusive}): {e} — "
-                            "falling back to eager mode."
-                        )
-                        self._ref_ldm_unet_runner[use_exclusive] = None
-
-                if runner is not None:
-                    with torch.no_grad():
-                        with self._get_runner_lock(runner):
-                            result = runner(
-                                x_noisy_plus_lq_latent,
-                                timesteps_tensor,
-                                kv_tensor_map,
-                                use_exclusive,
-                            )
-                    output_unet_tensor.copy_(result)
-                    return
-                # Fallback: eager mode (no kv_map yet, or CUDA graph build failed)
-                with torch.no_grad():
-                    with self._get_runner_lock(unet):
-                        result = unet(
-                            x_noisy_plus_lq_latent,
-                            timesteps_tensor,
-                            kv_map=kv_tensor_map,
-                            use_exclusive=use_exclusive,
-                        )
-                output_unet_tensor.copy_(result)
-                return
-            # Custom runner failed to build — skip silently (denoiser not applied)
-            print("[WARN] run_ref_ldm_unet: Custom runner unavailable, skipping unet.")
-            return
-
         model_name = self.models_processor.main_window.fixed_unet_model_name
         ort_session = self.models_processor.models.get(model_name)
 
@@ -1150,15 +1040,6 @@ class FaceRestorers:
     def run_GFPGAN(self, image, output):
         model_name = "GFPGANv1.4"
 
-        if self.models_processor.provider_name == "Custom":
-            runner = self._get_gfpgan_runner(is_1024=False)
-            if runner is not None:
-                with torch.no_grad():
-                    with self._get_runner_lock(runner):
-                        result = runner(image)
-                output.copy_(result)
-                return
-
         ort_session = self._get_model_session(model_name)
         if not ort_session:
             return  # Silently skip if model failed to load
@@ -1186,15 +1067,6 @@ class FaceRestorers:
 
     def run_GFPGAN1024(self, image, output):
         model_name = "GFPGAN1024"
-
-        if self.models_processor.provider_name == "Custom":
-            runner = self._get_gfpgan_runner(is_1024=True)
-            if runner is not None:
-                with torch.no_grad():
-                    with self._get_runner_lock(runner):
-                        result = runner(image)
-                output.copy_(result)
-                return
 
         ort_session = self._get_model_session(model_name)
         if not ort_session:
@@ -1518,15 +1390,6 @@ class FaceRestorers:
         output_fp32_nchw.copy_(out16.float())
 
     def run_RestoreFormerPlusPlus(self, image, output):
-        if self.models_processor.provider_name == "Custom":
-            runner = self._get_restoreformer_runner()
-            if runner is not None:
-                with torch.no_grad():
-                    with self._get_runner_lock(runner):
-                        result = runner(image)
-                output.copy_(result)
-                return
-
         model_name = "RestoreFormerPlusPlus"
         ort_session = self._get_model_session(model_name)
         if not ort_session:

@@ -1,7 +1,7 @@
 numpy
 opencv-python
 pillow
-scikit-image
+scikit-image==0.26.0
 onnx
 protobuf
 psutil
@@ -32,3 +32,4 @@ einops
 lightning
 send2trash
 mss
+tensorflow

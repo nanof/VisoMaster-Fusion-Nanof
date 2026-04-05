@@ -256,6 +256,7 @@ class VideoProcessor(QObject):
         self.last_detected_faces: list[dict] = []
         self._smoothed_kps: dict[int, numpy.ndarray] = {}
         self._smoothed_dense_kps: dict[int, numpy.ndarray] = {}
+        self._smoothed_dense_kps_203: dict[int, numpy.ndarray] = {}
 
         # --- Processing State Flags ---
         self.processing = False  # MASTER flag: True if playback, recording, or webcam stream is active
@@ -1260,7 +1261,7 @@ class VideoProcessor(QObject):
         """
         # VR180 requires specialized spherical detection in the FrameWorker, skip sequential here.
         if local_control_for_worker.get("VR180ModeEnableToggle", False):
-            return None, None, None, None, None
+            return None, None, None, None, None, None
 
         if not force_detection and not self._sequential_detection_required(
             local_control_for_worker, local_params_for_worker
@@ -1270,6 +1271,7 @@ class VideoProcessor(QObject):
                 numpy.empty((0, 4), dtype=numpy.float32),
                 numpy.empty((0, 5, 2), dtype=numpy.float32),
                 numpy.empty((0, 68, 2), dtype=numpy.float32),
+                numpy.empty((0, 203, 2), dtype=numpy.float32),
                 None,
                 None,
             )
@@ -1300,42 +1302,41 @@ class VideoProcessor(QObject):
             )
             from_points = local_control_for_worker.get("DetectFromPointsToggle", False)
 
-            # Check if LivePortrait or Makeup features are enabled (they strictly require 203 landmarks)
+            # Check if LivePortrait features are enabled (they strictly require 203 landmarks)
+            master_edit_button = self.main_window.editFacesButton.isChecked()
+
             requires_203 = False
+            if local_params_for_worker:
+                from collections.abc import Mapping
 
-            # 1. Check global control fallback
-            if local_control_for_worker.get(
-                "FaceEditorEnableToggle", False
-            ) or local_control_for_worker.get("FaceExpressionEnableBothToggle", False):
-                requires_203 = True
-
-            # 2. Check per-face parameters (where these settings actually live)
-            if not requires_203 and local_params_for_worker:
                 for face_id, face_params in local_params_for_worker.items():
-                    if isinstance(face_params, dict):
-                        if (
-                            face_params.get("FaceEditorEnableToggle", False)
-                            or face_params.get("FaceExpressionEnableBothToggle", False)
-                            or face_params.get("AutoMouthExpressionEnableToggle", False)
-                            or face_params.get("FaceMakeupEnableToggle", False)
+                    if isinstance(face_params, Mapping):
+                        is_face_editor_active = master_edit_button and face_params.get(
+                            "FaceEditorEnableToggle", False
+                        )
+                        is_expression_active = face_params.get(
+                            "FaceExpressionEnableBothToggle", False
+                        )
+                        is_auto_mouth_active = face_params.get(
+                            "AutoMouthExpressionEnableToggle", False
+                        )
+                        is_makeup_active = master_edit_button and (
+                            face_params.get("FaceMakeupEnableToggle", False)
                             or face_params.get("HairMakeupEnableToggle", False)
                             or face_params.get("EyeBrowsMakeupEnableToggle", False)
                             or face_params.get("LipsMakeupEnableToggle", False)
+                        )
+
+                        if (
+                            is_face_editor_active
+                            or is_expression_active
+                            or is_auto_mouth_active
+                            or is_makeup_active
                         ):
                             requires_203 = True
                             break
 
-            if requires_203:
-                # Force 203 and from_points to ensure LivePortrait does not crash
-                use_landmark = True
-                landmark_mode = "203"
-                from_points = True
-            elif local_control_for_worker.get(
-                "edit_enabled", True
-            ) or local_control_for_worker.get("swap_enabled", True):
-                # Standard swap/edit still needs landmarks for basic face alignment,
-                # but we respect the user's choice for the landmark model and from_points.
-                use_landmark = True
+            # DO NOT override user choice! We preserve use_landmark and landmark_mode.
 
             detection_interval = int(
                 local_control_for_worker.get("FaceDetectionIntervalSlider", 1)
@@ -1351,14 +1352,13 @@ class VideoProcessor(QObject):
 
             owns_frame_tensor = frame_tensor is None
             if frame_tensor is None:
-                # OPTIMISATION PCIe : non_blocking=True frees CPU immediately
                 frame_tensor = (
                     torch.from_numpy(frame_rgb)
                     .to(device, non_blocking=True)
                     .permute(2, 0, 1)  # Convert [H, W, C] -> [C, H, W]
                 )
 
-            # 1. Run Detection
+            # 1. Primary Detection (respecting User's UI choice)
             bboxes, kpss_5, kpss = self.main_window.models_processor.run_detect(
                 frame_tensor,
                 local_control_for_worker.get("DetectorModelSelection", "RetinaFace"),
@@ -1389,6 +1389,46 @@ class VideoProcessor(QObject):
                 frame_tensor if owns_frame_tensor else None
             )
 
+            # 2. Smart Double-Scan for 203 points
+            kpss_203 = None
+            if requires_203:
+                if use_landmark and landmark_mode == "203":
+                    # OPTIMIZATION: User already selected 203. Duplicate reference. Zero CUDA cost.
+                    kpss_203 = kpss
+                else:
+                    # Execute second pass specifically for advanced features
+                    _, _, kpss_203 = self.main_window.models_processor.run_detect(
+                        frame_tensor,
+                        local_control_for_worker.get(
+                            "DetectorModelSelection", "RetinaFace"
+                        ),
+                        max_num=int(
+                            local_control_for_worker.get("MaxFacesToDetectSlider", 20)
+                        ),
+                        score=local_control_for_worker.get("DetectorScoreSlider", 50)
+                        / 100.0,
+                        input_size=(512, 512),
+                        use_landmark_detection=True,
+                        landmark_detect_mode="203",
+                        landmark_score=local_control_for_worker.get(
+                            "LandmarkDetectScoreSlider", 50
+                        )
+                        / 100.0,
+                        from_points=True,  # Force from_points for feature stability
+                        rotation_angles=[0]
+                        if not local_control_for_worker.get("AutoRotationToggle", False)
+                        else [0, 90, 180, 270],
+                        use_mean_eyes=local_control_for_worker.get(
+                            "LandmarkMeanEyesToggle", False
+                        ),
+                        previous_detections=previous_faces_arg,
+                        bypass_bytetrack=True,  # Prevent double-incrementing the object tracker
+                    )
+
+            # Free up VRAM immediately since the tensor is no longer needed in this thread
+            if owns_frame_tensor:
+                del frame_tensor
+
             # ORT/TensorRT + copy_outputs_to_cpu() already finish GPU work before numpy exists.
             # An extra stream sync here blocks the feeder every frame (~0.5–3ms) and limits
             # overlap with workers. Enable only for debugging: VISIOMASTER_FEEDER_POST_DETECT_SYNC=1
@@ -1409,6 +1449,9 @@ class VideoProcessor(QObject):
             kpss_5 = kpss_5.copy()
         if isinstance(kpss, numpy.ndarray):
             kpss = kpss.copy()
+        if isinstance(kpss_203, numpy.ndarray):
+            kpss_203 = kpss_203.copy()
+
         # Ensure 'bboxes' and keypoints are strictly valid float32 arrays and not 'object'.
         if isinstance(bboxes, numpy.ndarray):
             if bboxes.dtype == object:
@@ -1441,6 +1484,11 @@ class VideoProcessor(QObject):
                             for i in range(int(valid_mask.shape[0]))
                             if bool(valid_mask[i])
                         ]
+                    # Safely align dense kpss_203 if dimensions match
+                    if isinstance(kpss_203, numpy.ndarray) and kpss_203.shape[0] == len(
+                        valid_mask
+                    ):
+                        kpss_203 = kpss_203[valid_mask]
             else:
                 bboxes = numpy.empty((0, 4), dtype=numpy.float32)
         else:
@@ -1453,7 +1501,9 @@ class VideoProcessor(QObject):
             if isinstance(kpss_5, numpy.ndarray):
                 kpss_5 = numpy.empty((0, 5, 2), dtype=numpy.float32)
             if isinstance(kpss, numpy.ndarray):
-                kpss = numpy.empty((0, 68, 2), dtype=numpy.float32)
+                kpss = numpy.empty((0, 68, 2), dtype=numpy.float32)  # Fallback shape
+            if isinstance(kpss_203, numpy.ndarray):
+                kpss_203 = numpy.empty((0, 203, 2), dtype=numpy.float32)
 
         # 2. Update tracking state for the next sequential frame
         detected_for_state = []
@@ -1477,10 +1527,22 @@ class VideoProcessor(QObject):
                 n_faces = kpss_5.shape[0]
                 new_smoothed_kps = {}
                 new_smoothed_dense_kps = {}
+                new_smoothed_dense_kps_203 = {}
+
+                valid_kpss = cast(numpy.ndarray, kpss)
+                valid_kpss_203 = cast(numpy.ndarray, kpss_203)
 
                 has_dense_kps = isinstance(kpss, numpy.ndarray) and kpss.shape[0] > 0
                 if has_dense_kps:
-                    kpss = kpss.copy()
+                    valid_kpss = valid_kpss.copy()
+                    kpss = valid_kpss
+
+                has_dense_kps_203 = (
+                    isinstance(kpss_203, numpy.ndarray) and kpss_203.shape[0] > 0
+                )
+                if has_dense_kps_203:
+                    valid_kpss_203 = valid_kpss_203.copy()
+                    kpss_203 = valid_kpss_203
 
                 for _i in range(n_faces):
                     _raw = kpss_5[_i]
@@ -1536,30 +1598,57 @@ class VideoProcessor(QObject):
                         if has_dense_kps:
                             if _best_match_key in self._smoothed_dense_kps:
                                 new_smoothed_dense_kps[_i] = (
-                                    dynamic_alpha * kpss[_i]
+                                    dynamic_alpha * valid_kpss[_i]
                                     + (1.0 - dynamic_alpha)
                                     * self._smoothed_dense_kps[_best_match_key]
                                 )
                                 del self._smoothed_dense_kps[_best_match_key]
                             else:
-                                new_smoothed_dense_kps[_i] = kpss[_i].copy()
+                                new_smoothed_dense_kps[_i] = valid_kpss[_i].copy()
+
+                        # Smoothing on Dense KPS 203
+                        if has_dense_kps_203:
+                            if _best_match_key in self._smoothed_dense_kps_203:
+                                new_smoothed_dense_kps_203[_i] = (
+                                    dynamic_alpha * valid_kpss_203[_i]
+                                    + (1.0 - dynamic_alpha)
+                                    * self._smoothed_dense_kps_203[_best_match_key]
+                                )
+                                del self._smoothed_dense_kps_203[_best_match_key]
+                            else:
+                                new_smoothed_dense_kps_203[_i] = valid_kpss_203[
+                                    _i
+                                ].copy()
                     else:
                         new_smoothed_kps[_i] = _raw.copy()
                         if has_dense_kps:
-                            new_smoothed_dense_kps[_i] = kpss[_i].copy()
+                            new_smoothed_dense_kps[_i] = valid_kpss[_i].copy()
+                        if has_dense_kps_203:
+                            new_smoothed_dense_kps_203[_i] = valid_kpss_203[_i].copy()
 
                     kpss_5[_i] = new_smoothed_kps[_i]
                     if has_dense_kps:
-                        kpss[_i] = new_smoothed_dense_kps[_i]
+                        valid_kpss[_i] = new_smoothed_dense_kps[_i]
+                    if has_dense_kps_203:
+                        valid_kpss_203[_i] = new_smoothed_dense_kps_203[_i]
 
                 self._smoothed_kps = new_smoothed_kps
                 self._smoothed_dense_kps = new_smoothed_dense_kps
+                self._smoothed_dense_kps_203 = new_smoothed_dense_kps_203
         else:
             # Safe Clear if disabled
             self._smoothed_kps.clear()
             self._smoothed_dense_kps.clear()
+            self._smoothed_dense_kps_203.clear()
 
-        return bboxes, kpss_5, kpss, feeder_chw_uint8_for_worker, detect_track_ids
+        return (
+            bboxes,
+            kpss_5,
+            kpss,
+            kpss_203,
+            feeder_chw_uint8_for_worker,
+            detect_track_ids,
+        )
 
     def _clear_frame_and_raw_queues(self) -> None:
         """Drop pending decode and worker tasks (used on seek / pipeline reset)."""
@@ -1657,6 +1746,7 @@ class VideoProcessor(QObject):
                 bboxes,
                 kpss_5,
                 kpss,
+                kpss_203,
                 feeder_chw_uint8,
                 detect_track_ids,
             ) = self._run_sequential_detection(
@@ -1704,6 +1794,7 @@ class VideoProcessor(QObject):
                 bboxes,
                 kpss_5,
                 kpss,
+                kpss_203,
                 feeder_perf,
                 feeder_chw_uint8,
                 detect_track_ids,
@@ -2032,7 +2123,6 @@ class VideoProcessor(QObject):
                         "rgb_pack_ms": (_t_feed_after_rgb - _t_feed_before_rgb) * 1000.0,
                     }
                 raw_task = (
-                    frame_num_to_process,
                     frame_num_to_process,
                     frame_rgb,
                     local_params_for_worker,
@@ -4469,6 +4559,7 @@ class VideoProcessor(QObject):
         self.last_detected_faces = []
         self._smoothed_kps = {}
         self._smoothed_dense_kps = {}
+        self._smoothed_dense_kps_203 = {}
 
     def _prepare_issue_scan_match_context(
         self,
@@ -4790,7 +4881,7 @@ class VideoProcessor(QObject):
                         .permute(2, 0, 1)
                     )
                     self.current_frame_number = frame_number
-                    bboxes, kpss_5, _, _, _ = self._run_sequential_detection(
+                    bboxes, kpss_5, _, _, _, _ = self._run_sequential_detection(
                         frame_rgb,
                         local_control,
                         local_params,
