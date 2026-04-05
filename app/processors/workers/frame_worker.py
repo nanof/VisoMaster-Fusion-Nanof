@@ -7576,6 +7576,9 @@ class FrameWorker(threading.Thread):
             one_liner = ", ".join(f"{key}={value}" for key, value in debug_info.items())
             print(f"[DEBUG] {one_liner}")
 
+        if parameters.get("SwapLightTouchEnableToggle", False):
+            swap = faceutil.swap_light_touch_chw_uint8(swap, parameters)
+
         if is_perspective_crop:
             if _swap_core_perf is not None:
                 _swap_core_perf.mark("sc_perspective_out")

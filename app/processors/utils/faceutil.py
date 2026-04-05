@@ -1321,6 +1321,80 @@ def sharpen(img):
     return img_out.to(torch.uint8)
 
 
+def swap_light_touch_chw_uint8(swap_chw: torch.Tensor, parameters: dict) -> torch.Tensor:
+    """Lightweight post-swap enhancement (no neural net): optional USM + CLAHE on L (Kornia).
+
+    Expects ``swap_chw`` as ``uint8`` ``[C,H,W]`` (typically 3×512×512). Returns same dtype/device.
+    """
+    if swap_chw.dim() != 3 or swap_chw.shape[0] != 3:
+        return swap_chw
+    try:
+        usm = float(parameters.get("SwapLightTouchUSMAmountDecimalSlider", 0) or 0)
+    except (TypeError, ValueError):
+        usm = 0.0
+    clahe_on = bool(parameters.get("SwapLightTouchClaheEnableToggle", False))
+    try:
+        clahe_clip = (
+            float(parameters.get("SwapLightTouchClaheClipDecimalSlider", 1.5) or 0)
+            if clahe_on
+            else 0.0
+        )
+    except (TypeError, ValueError):
+        clahe_clip = 0.0
+    try:
+        clahe_blend = float(parameters.get("SwapLightTouchClaheBlendDecimalSlider", 0.3))
+    except (TypeError, ValueError):
+        clahe_blend = 0.3
+    clahe_blend = max(0.0, min(1.0, clahe_blend))
+    try:
+        usm_sigma = float(parameters.get("SwapLightTouchUSMSigmaDecimalSlider", 1.0))
+    except (TypeError, ValueError):
+        usm_sigma = 1.0
+    usm_sigma = max(0.1, min(3.0, usm_sigma))
+    if usm <= 0 and clahe_clip <= 0:
+        return swap_chw
+
+    dev = swap_chw.device
+    orig_dtype = swap_chw.dtype
+    x = swap_chw.float()
+    if orig_dtype == torch.uint8:
+        x = x / 255.0
+    else:
+        x = x.clamp(0, 255) / 255.0
+
+    with torch.no_grad():
+        if clahe_clip > 0:
+            try:
+                import kornia.color as _kc
+                import kornia.enhance as _ke
+            except ImportError:
+                pass
+            else:
+                im = x.unsqueeze(0).clamp(0, 1)
+                lab = _kc.rgb_to_lab(im)
+                L = lab[:, 0:1, :, :] / 100.0
+                Leq = _ke.equalize_clahe(
+                    L,
+                    clip_limit=clahe_clip,
+                    grid_size=(4, 4),
+                    slow_and_differentiable=False,
+                ).clamp(0, 1)
+                Lb = clahe_blend * Leq + (1.0 - clahe_blend) * L
+                lab2 = torch.cat([Lb * 100.0, lab[:, 1:, :, :]], dim=1)
+                x = _kc.lab_to_rgb(lab2).squeeze(0).clamp(0, 1)
+
+        if usm > 0:
+            blur = v2.functional.gaussian_blur(
+                x.unsqueeze(0), kernel_size=[5, 5], sigma=[usm_sigma, usm_sigma]
+            ).squeeze(0)
+            x = (x + usm * (x - blur)).clamp(0, 1)
+
+    out = (x * 255.0).clamp(0, 255)
+    if orig_dtype == torch.uint8:
+        return out.to(torch.uint8).to(device=dev)
+    return out.to(device=dev, dtype=orig_dtype)
+
+
 def get_gaussian_kernel(sigma, kernel_size=5):
     """Create a 2D Gaussian kernel for convolution."""
     coords = torch.arange(kernel_size, dtype=torch.float32)
