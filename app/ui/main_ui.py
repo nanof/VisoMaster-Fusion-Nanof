@@ -941,6 +941,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 video_control_actions.move_slider_to_nearest_marker(self, "previous")
             case QtCore.Qt.Key_S:
                 self.swapfacesButton.click()
+            case QtCore.Qt.Key_F5:
+                pp_toggle = self.parameter_widgets.get(
+                    "PipelineProfileOverlayEnableToggle"
+                )
+                if pp_toggle is not None and pp_toggle.isEnabled():
+                    pp_toggle.click()
+            case QtCore.Qt.Key_F7:
+                fi_toggle = self.parameter_widgets.get("PreviewFrameGenEnableToggle")
+                if fi_toggle is not None and fi_toggle.isEnabled():
+                    fi_toggle.click()
 
     def closeEvent(self, event):
         print("[INFO] MainWindow: closeEvent called.")

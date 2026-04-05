@@ -730,6 +730,8 @@ def show_shortcuts(main_window: "MainWindow"):
         "<b>Space</b> : Play/Stop<br>"
         "<b>R</b> : Record start/stop<br>"
         "<b>S</b> : Swap face<br>"
+        "<b>F5</b> : Pipeline profile overlay on/off<br>"
+        "<b>F7</b> : Frame interpolation on/off<br>"
         "<br>"
         "<b><u>Seeking:</u></b><br>"
         "<b>V</b> : Advance 1 frame<br>"
