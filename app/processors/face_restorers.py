@@ -75,6 +75,8 @@ class FaceRestorers:
             "CodeFormer": "CodeFormer",
             "GPEN-256": "GPENBFR256",
             "GPEN-256 FP16 (HF)": "GPENBFR256FP16",
+            "GPEN-256 Fast (128→256)": "GPENBFR256",
+            "GPEN-256 Fast FP16 (128→256)": "GPENBFR256FP16",
             "GPEN-512": "GPENBFR512",
             "GPEN-1024": "GPENBFR1024",
             "GPEN-2048": "GPENBFR2048",
@@ -789,7 +791,14 @@ class FaceRestorers:
             temp, (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True
         )
 
-        if restorer_type in ("GPEN-256", "GPEN-256 FP16 (HF)"):
+        if restorer_type in (
+            "GPEN-256 Fast (128→256)",
+            "GPEN-256 Fast FP16 (128→256)",
+        ):
+            # Low-res bottleneck before the fixed 256×256 GPEN ONNX (preview / small-face path).
+            temp = v2.functional.resize(temp, [128, 128], antialias=True)
+            temp = v2.functional.resize(temp, [256, 256], antialias=True)
+        elif restorer_type in ("GPEN-256", "GPEN-256 FP16 (HF)"):
             temp = v2.functional.resize(temp, [256, 256], antialias=False)
 
         temp = torch.unsqueeze(temp, 0).contiguous()
@@ -831,6 +840,24 @@ class FaceRestorers:
             self.run_GPEN_256(temp, outpred)
 
         elif restorer_type == "GPEN-256 FP16 (HF)":
+            outpred = torch.empty(
+                (1, 3, 256, 256),
+                dtype=torch.float32,
+                device=self.models_processor.device,
+            ).contiguous()
+            self.run_GPEN_256(
+                temp, outpred, model_name="GPENBFR256FP16", gpen_variant="fp16hf"
+            )
+
+        elif restorer_type == "GPEN-256 Fast (128→256)":
+            outpred = torch.empty(
+                (1, 3, 256, 256),
+                dtype=torch.float32,
+                device=self.models_processor.device,
+            ).contiguous()
+            self.run_GPEN_256(temp, outpred)
+
+        elif restorer_type == "GPEN-256 Fast FP16 (128→256)":
             outpred = torch.empty(
                 (1, 3, 256, 256),
                 dtype=torch.float32,
@@ -923,6 +950,8 @@ class FaceRestorers:
         if restorer_type in [
             "GPEN-256",
             "GPEN-256 FP16 (HF)",
+            "GPEN-256 Fast (128→256)",
+            "GPEN-256 Fast FP16 (128→256)",
             "GPEN-1024",
             "GPEN-2048",
             "GFPGAN-1024",

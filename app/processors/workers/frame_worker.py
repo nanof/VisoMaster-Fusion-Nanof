@@ -5664,6 +5664,52 @@ class FrameWorker(threading.Thread):
             thr = 2.0
         return s >= thr
 
+    def _is_live_stream_face_input(self) -> bool:
+        try:
+            return self.video_processor.file_type in ("webcam", "screen")
+        except Exception:
+            return False
+
+    @staticmethod
+    def _face_restorer_effective_type(
+        parameters: dict,
+        base_type: str,
+        tform_scale: float,
+        *,
+        is_live_stream: bool,
+    ) -> str:
+        """Optionally replace restorer with GPEN-256 Fast* for live/small-face (item 3 path)."""
+        if not parameters.get("FaceRestorerUltraLightOnnxToggle", False):
+            return base_type
+        if base_type in (
+            "GPEN-256 Fast (128→256)",
+            "GPEN-256 Fast FP16 (128→256)",
+        ):
+            return base_type
+        prefer_fp16 = parameters.get("FaceRestorerUltraLightPreferFp16Toggle", True)
+        fast = (
+            "GPEN-256 Fast FP16 (128→256)"
+            if prefer_fp16
+            else "GPEN-256 Fast (128→256)"
+        )
+        on_live = bool(parameters.get("FaceRestorerUltraLightOnLiveToggle", True))
+        on_small = bool(parameters.get("FaceRestorerUltraLightOnSmallFaceToggle", False))
+        try:
+            thr = float(parameters.get("FaceRestorerUltraLightScaleGeDecimalSlider", 2.0))
+        except (TypeError, ValueError):
+            thr = 2.0
+        try:
+            s = float(tform_scale)
+        except (TypeError, ValueError):
+            s = float("nan")
+        small_hit = (
+            on_small and math.isfinite(s) and s >= thr
+        )
+        live_hit = on_live and is_live_stream
+        if live_hit or small_hit:
+            return fast
+        return base_type
+
     def _apply_restorer_with_auto(
         self,
         swap: torch.Tensor,
@@ -6531,10 +6577,16 @@ class FrameWorker(threading.Thread):
             if self._face_restorer_skip_for_small_face(parameters, float(tform.scale)):
                 swap_restorecalc = swap_original
             else:
+                _rt1 = self._face_restorer_effective_type(
+                    parameters,
+                    parameters["FaceRestorerTypeSelection"],
+                    float(tform.scale),
+                    is_live_stream=self._is_live_stream_face_input(),
+                )
                 swap_restorecalc = self.models_processor.apply_facerestorer(
                     swap,
                     parameters["FaceRestorerDetTypeSelection"],
-                    parameters["FaceRestorerTypeSelection"],
+                    _rt1,
                     parameters["FaceRestorerBlendSlider"],
                     parameters["FaceFidelityWeightDecimalSlider"],
                     control["DetectorScoreSlider"],
@@ -6906,10 +6958,16 @@ class FrameWorker(threading.Thread):
             if self._face_restorer_skip_for_small_face(parameters, float(tform.scale)):
                 swap2 = swap_original2
             else:
+                _rt2 = self._face_restorer_effective_type(
+                    parameters,
+                    parameters["FaceRestorerType2Selection"],
+                    float(tform.scale),
+                    is_live_stream=self._is_live_stream_face_input(),
+                )
                 swap2 = self.models_processor.apply_facerestorer(
                     swap,
                     parameters["FaceRestorerDetType2Selection"],
-                    parameters["FaceRestorerType2Selection"],
+                    _rt2,
                     parameters["FaceRestorerBlend2Slider"],
                     parameters["FaceFidelityWeight2DecimalSlider"],
                     control["DetectorScoreSlider"],
@@ -7384,10 +7442,16 @@ class FrameWorker(threading.Thread):
             if self._face_restorer_skip_for_small_face(parameters, float(tform.scale)):
                 swap2 = swap_original2
             else:
+                _rt2e = self._face_restorer_effective_type(
+                    parameters,
+                    parameters["FaceRestorerType2Selection"],
+                    float(tform.scale),
+                    is_live_stream=self._is_live_stream_face_input(),
+                )
                 swap2 = self.models_processor.apply_facerestorer(
                     swap,
                     parameters["FaceRestorerDetType2Selection"],
-                    parameters["FaceRestorerType2Selection"],
+                    _rt2e,
                     parameters["FaceRestorerBlend2Slider"],
                     parameters["FaceFidelityWeight2DecimalSlider"],
                     control["DetectorScoreSlider"],
