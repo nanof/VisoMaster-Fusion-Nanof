@@ -380,11 +380,11 @@ class TargetMediaCardButton(CardButton):
                 # Windows - use full path to explorer.exe to avoid PATH issues
                 try:
                     # Method 1: Using subprocess without shell (more secure and reliable)
-                    subprocess.Popen(["explorer", f"/select,{normalized_path}"])
+                    subprocess.Popen(f'explorer /select,"{normalized_path}"')
                 except FileNotFoundError:
                     # Fallback: Use full path to explorer.exe
                     subprocess.Popen(
-                        [r"C:\Windows\explorer.exe", f"/select,{normalized_path}"]
+                        f'C:\\Windows\\explorer.exe /select,"{normalized_path}"'
                     )
             elif sys.platform == "darwin":
                 # macOS
@@ -1126,11 +1126,11 @@ class InputFaceCardButton(CardButton):
                 # Windows - use full path to explorer.exe to avoid PATH issues
                 try:
                     # Method 1: Using subprocess without shell (more secure and reliable)
-                    subprocess.Popen(["explorer", f"/select,{normalized_path}"])
+                    subprocess.Popen(f'explorer /select,"{normalized_path}"')
                 except FileNotFoundError:
                     # Fallback: Use full path to explorer.exe
                     subprocess.Popen(
-                        [r"C:\Windows\explorer.exe", f"/select,{normalized_path}"]
+                        f'C:\\Windows\\explorer.exe /select,"{normalized_path}"'
                     )
             elif sys.platform == "darwin":
                 # macOS
