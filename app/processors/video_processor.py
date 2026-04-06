@@ -3179,9 +3179,16 @@ class VideoProcessor(QObject):
                 IssueScanTargetSnapshot,
                 dict(target_faces_snapshot),
             )
-        previous_last_detected_faces = copy.deepcopy(self.last_detected_faces)
-        previous_smoothed_kps = copy.deepcopy(self._smoothed_kps)
-        previous_smoothed_dense_kps = copy.deepcopy(self._smoothed_dense_kps)
+        previous_last_detected_faces = copy.deepcopy(
+            getattr(self, "last_detected_faces", [])
+        )
+        previous_smoothed_kps = copy.deepcopy(getattr(self, "_smoothed_kps", {}))
+        previous_smoothed_dense_kps = copy.deepcopy(
+            getattr(self, "_smoothed_dense_kps", {})
+        )
+        previous_smoothed_dense_kps_203 = copy.deepcopy(
+            getattr(self, "_smoothed_dense_kps_203", {})
+        )
         total_frames_scanned = 0
         tracking_enabled = False
         issue_frames_by_face: dict[str, set[int]] = {
@@ -3354,6 +3361,7 @@ class VideoProcessor(QObject):
             self.last_detected_faces = previous_last_detected_faces
             self._smoothed_kps = previous_smoothed_kps
             self._smoothed_dense_kps = previous_smoothed_dense_kps
+            self._smoothed_dense_kps_203 = previous_smoothed_dense_kps_203
             if tracking_enabled:
                 self.main_window.models_processor.face_detectors.reset_tracker()
             self.current_frame_number = (

@@ -23,6 +23,15 @@ class _DummyTargetFace:
         return self._embeddings.get(recognition_model)
 
 
+def _empty_scan_detection_result():
+    return (
+        np.empty((0, 4), dtype=np.float32),
+        np.empty((0, 5, 2), dtype=np.float32),
+        np.empty((0, 68, 2), dtype=np.float32),
+        np.empty((0, 203, 2), dtype=np.float32),
+    )
+
+
 def _make_target_snapshot(face_id, embeddings_by_model=None):
     return {
         str(face_id): {
@@ -41,6 +50,7 @@ def test_scan_issue_frames_restores_dense_smoothing_state():
     processor.last_detected_faces = [{"id": 1}]
     processor._smoothed_kps = {1: np.array([[1.0, 2.0]], dtype=np.float32)}
     processor._smoothed_dense_kps = {1: np.array([[3.0, 4.0]], dtype=np.float32)}
+    processor._smoothed_dense_kps_203 = {1: np.array([[5.0, 6.0]], dtype=np.float32)}
     processor.last_detected_faces = [{"id": 1}]
     processor.main_window = SimpleNamespace(
         control={},
@@ -78,6 +88,10 @@ def test_scan_issue_frames_restores_dense_smoothing_state():
     )
     np.testing.assert_array_equal(
         processor._smoothed_kps[1], np.array([[1.0, 2.0]], dtype=np.float32)
+    )
+    np.testing.assert_array_equal(
+        processor._smoothed_dense_kps_203[1],
+        np.array([[5.0, 6.0]], dtype=np.float32),
     )
     assert processor.last_detected_faces == [{"id": 1}]
     assert processor.current_frame_number == 3
@@ -365,12 +379,7 @@ def test_scan_issue_frames_reports_progress_per_frame_and_skips_dropped_runs():
         patch.object(
             processor,
             "_run_sequential_detection",
-            return_value=(
-                np.empty((0, 4), dtype=np.float32),
-                np.empty((0, 5, 2), dtype=np.float32),
-                np.empty((0, 68, 2), dtype=np.float32),
-                None,
-            ),
+            return_value=_empty_scan_detection_result(),
         ),
     ):
         result = processor.scan_issue_frames(
@@ -469,12 +478,7 @@ def test_scan_issue_frames_emits_incremental_issue_callback():
         patch.object(
             processor,
             "_run_sequential_detection",
-            return_value=(
-                np.empty((0, 4), dtype=np.float32),
-                np.empty((0, 5, 2), dtype=np.float32),
-                np.empty((0, 68, 2), dtype=np.float32),
-                None,
-            ),
+            return_value=_empty_scan_detection_result(),
         ),
     ):
         result = processor.scan_issue_frames(
@@ -553,12 +557,7 @@ def test_scan_issue_frames_returns_partial_results_on_cancel():
         patch.object(
             processor,
             "_run_sequential_detection",
-            return_value=(
-                np.empty((0, 4), dtype=np.float32),
-                np.empty((0, 5, 2), dtype=np.float32),
-                np.empty((0, 68, 2), dtype=np.float32),
-                None,
-            ),
+            return_value=_empty_scan_detection_result(),
         ),
     ):
         result = processor.scan_issue_frames(
@@ -680,6 +679,7 @@ def test_scan_issue_frames_resets_tracker_when_marker_segment_enables_tracking()
         target_faces={},
         dropped_frames=set(),
         markers={},
+        editFacesButton=SimpleNamespace(isChecked=lambda: False),
         videoSeekSlider=SimpleNamespace(value=lambda: 0),
         default_parameters=SimpleNamespace(data={"SimilarityThresholdSlider": 50}),
         models_processor=SimpleNamespace(
@@ -722,12 +722,7 @@ def test_scan_issue_frames_resets_tracker_when_marker_segment_enables_tracking()
         patch.object(
             processor,
             "_run_sequential_detection",
-            return_value=(
-                np.empty((0, 4), dtype=np.float32),
-                np.empty((0, 5, 2), dtype=np.float32),
-                np.empty((0, 68, 2), dtype=np.float32),
-                None,
-            ),
+            return_value=_empty_scan_detection_result(),
         ),
     ):
         result = processor.scan_issue_frames(
@@ -765,6 +760,7 @@ def test_scan_issue_frames_resets_tracker_when_tracking_re_enters_after_disabled
         target_faces={},
         dropped_frames=set(),
         markers={},
+        editFacesButton=SimpleNamespace(isChecked=lambda: False),
         videoSeekSlider=SimpleNamespace(value=lambda: 0),
         default_parameters=SimpleNamespace(data={"SimilarityThresholdSlider": 50}),
         models_processor=SimpleNamespace(
@@ -808,12 +804,7 @@ def test_scan_issue_frames_resets_tracker_when_tracking_re_enters_after_disabled
         patch.object(
             processor,
             "_run_sequential_detection",
-            return_value=(
-                np.empty((0, 4), dtype=np.float32),
-                np.empty((0, 5, 2), dtype=np.float32),
-                np.empty((0, 68, 2), dtype=np.float32),
-                None,
-            ),
+            return_value=_empty_scan_detection_result(),
         ),
     ):
         result = processor.scan_issue_frames(
@@ -842,6 +833,7 @@ def test_scan_issue_frames_clears_sequential_state_when_tracking_re_enters():
     processor.last_detected_faces = [{"persisted": True}]
     processor._smoothed_kps = {1: np.array([[1.0, 2.0]], dtype=np.float32)}
     processor._smoothed_dense_kps = {1: np.array([[3.0, 4.0]], dtype=np.float32)}
+    processor._smoothed_dense_kps_203 = {1: np.array([[5.0, 6.0]], dtype=np.float32)}
     reset_state_snapshots = []
     frame = np.zeros((4, 4, 3), dtype=np.uint8)
 
@@ -851,6 +843,7 @@ def test_scan_issue_frames_clears_sequential_state_when_tracking_re_enters():
         target_faces={},
         dropped_frames=set(),
         markers={},
+        editFacesButton=SimpleNamespace(isChecked=lambda: False),
         videoSeekSlider=SimpleNamespace(value=lambda: 0),
         default_parameters=SimpleNamespace(data={"SimilarityThresholdSlider": 50}),
         models_processor=SimpleNamespace(
@@ -873,6 +866,7 @@ def test_scan_issue_frames_clears_sequential_state_when_tracking_re_enters():
                 list(processor.last_detected_faces),
                 dict(processor._smoothed_kps),
                 dict(processor._smoothed_dense_kps),
+                dict(processor._smoothed_dense_kps_203),
             )
         )
         processor.last_detected_faces = [
@@ -884,12 +878,10 @@ def test_scan_issue_frames_clears_sequential_state_when_tracking_re_enters():
         processor._smoothed_dense_kps = {
             processor.current_frame_number: np.array([[8.0, 8.0]], dtype=np.float32)
         }
-        return (
-            np.empty((0, 4), dtype=np.float32),
-            np.empty((0, 5, 2), dtype=np.float32),
-            np.empty((0, 68, 2), dtype=np.float32),
-            None,
-        )
+        processor._smoothed_dense_kps_203 = {
+            processor.current_frame_number: np.array([[7.0, 7.0]], dtype=np.float32)
+        }
+        return _empty_scan_detection_result()
 
     with (
         patch(
@@ -936,5 +928,9 @@ def test_scan_issue_frames_clears_sequential_state_when_tracking_re_enters():
         "faces_with_issues": 0,
         "cancelled": False,
     }
-    assert reset_state_snapshots[0] == ([], {}, {})
-    assert reset_state_snapshots[2] == ([], {}, {})
+    assert reset_state_snapshots[0] == ([], {}, {}, {})
+    assert reset_state_snapshots[2] == ([], {}, {}, {})
+    np.testing.assert_array_equal(
+        processor._smoothed_dense_kps_203[1],
+        np.array([[5.0, 6.0]], dtype=np.float32),
+    )

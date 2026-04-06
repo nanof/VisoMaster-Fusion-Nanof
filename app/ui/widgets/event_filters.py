@@ -34,6 +34,8 @@ class videoSeekSliderLineEditEventFilter(QtCore.QObject):
         if event.type() == QtCore.QEvent.KeyPress:
             # Check if the pressed key is Enter/Return
             if event.key() in (QtCore.Qt.Key_Enter, QtCore.Qt.Key_Return):
+                if video_control_actions.is_issue_scan_active(self.main_window):
+                    return True
                 new_value = line_edit.text()
                 # Reset the line edit value to the slider value if the user input an empty text
                 if new_value == "":
@@ -119,6 +121,11 @@ class ListWidgetEventFilter(QtCore.QObject):
             # Handle the drop event
             elif event.type() == QtCore.QEvent.Type.Drop:
                 if event.mimeData().hasUrls():
+                    if video_control_actions.block_if_issue_scan_active(
+                        self.main_window, "change target media"
+                    ):
+                        event.ignore()
+                        return True
                     # Extract file paths
                     file_paths = []
                     for url in event.mimeData().urls():
@@ -171,6 +178,11 @@ class ListWidgetEventFilter(QtCore.QObject):
             # Handle the drop event
             elif event.type() == QtCore.QEvent.Type.Drop:
                 if event.mimeData().hasUrls():
+                    if video_control_actions.block_if_issue_scan_active(
+                        self.main_window, "load input faces"
+                    ):
+                        event.ignore()
+                        return True
                     # Extract file paths
                     file_paths = []
                     for url in event.mimeData().urls():

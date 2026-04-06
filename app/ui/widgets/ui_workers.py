@@ -202,6 +202,14 @@ class IssueScanWorker(qtc.QThread):
 
     def run(self):
         try:
+            if self._cancel_event.is_set():
+                self.cancelled.emit()
+                return
+
+            if self._cancel_event.is_set():
+                self.cancelled.emit()
+                return
+
             start_time = time.monotonic()
 
             def progress_with_fps(

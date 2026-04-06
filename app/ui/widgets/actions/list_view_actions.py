@@ -270,6 +270,13 @@ def clear_stop_loading_target_media(main_window: "MainWindow"):
 def select_target_medias(
     main_window: "MainWindow", source_type="folder", folder_name=False, files_list=None
 ):
+    from app.ui.widgets.actions import video_control_actions
+
+    if video_control_actions.block_if_issue_scan_active(
+        main_window, "change target media"
+    ):
+        return
+
     files_list = files_list or []
     if source_type == "folder":
         folder_name = QtWidgets.QFileDialog.getExistingDirectory(
@@ -315,6 +322,11 @@ def select_target_medias(
 
 @QtCore.Slot()
 def filter_target_videos(main_window):
+    from app.ui.widgets.actions import video_control_actions
+
+    if video_control_actions.is_issue_scan_active(main_window):
+        video_control_actions._mark_pending_target_media_refresh(main_window)
+        return
     filter_actions.filter_target_videos(main_window)
     load_target_webcams(main_window)
 
@@ -323,6 +335,11 @@ def filter_target_videos(main_window):
 def load_target_webcams(
     main_window: "MainWindow",
 ):
+    from app.ui.widgets.actions import video_control_actions
+
+    if video_control_actions.is_issue_scan_active(main_window):
+        video_control_actions._mark_pending_target_media_refresh(main_window)
+        return
     if main_window.filterWebcamsCheckBox.isChecked():
         main_window.video_loader_worker = ui_workers.TargetMediaLoaderWorker(
             main_window=main_window, webcam_mode=True
@@ -360,6 +377,13 @@ def clear_stop_loading_input_media(main_window: "MainWindow"):
 def select_input_face_images(
     main_window: "MainWindow", source_type="folder", folder_name=False, files_list=None
 ):
+    from app.ui.widgets.actions import video_control_actions
+
+    if video_control_actions.block_if_issue_scan_active(
+        main_window, "load input faces"
+    ):
+        return
+
     files_list = files_list or []
     if source_type == "folder":
         folder_name = QtWidgets.QFileDialog.getExistingDirectory(

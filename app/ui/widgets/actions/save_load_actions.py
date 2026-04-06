@@ -140,6 +140,9 @@ def _apply_workspace_window_state(
 
 
 def open_embeddings_from_file(main_window: "MainWindow"):
+    if video_control_actions.block_if_issue_scan_active(main_window, "load embeddings"):
+        return
+
     embedding_filename, _ = QtWidgets.QFileDialog.getOpenFileName(
         main_window,
         filter="JSON (*.json)",
@@ -290,6 +293,12 @@ def save_current_parameters_and_control(main_window: "MainWindow", face_id):
 def load_parameters_and_settings(
     main_window: "MainWindow", face_id, load_settings=False
 ):
+    if video_control_actions.block_if_issue_scan_active(
+        main_window,
+        "load parameters and settings" if load_settings else "load parameters",
+    ):
+        return
+
     data_filename, _ = QtWidgets.QFileDialog.getOpenFileName(
         main_window, filter="JSON (*.json)"
     )
@@ -332,6 +341,11 @@ def get_auto_load_workspace_toggle(
 def load_saved_workspace(
     main_window: "MainWindow", data_filename: Union[str, bool] = False
 ):
+    if video_control_actions.block_if_issue_scan_active(
+        main_window, "load a workspace"
+    ):
+        return
+
     if not data_filename:
         data_filename, _ = QtWidgets.QFileDialog.getOpenFileName(
             main_window, filter="JSON (*.json)"
