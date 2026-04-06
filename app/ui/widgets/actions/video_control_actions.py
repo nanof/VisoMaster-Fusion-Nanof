@@ -943,24 +943,6 @@ def _get_issue_scan_ui_state(main_window: "MainWindow") -> dict:
     return state
 
 
-def _copy_issue_frames_by_face(frames_by_face) -> dict[str, set[int]]:
-    """Return a detached copy of the per-face issue-frame mapping."""
-    return {
-        str(face_id): {int(frame) for frame in frames}
-        for face_id, frames in (frames_by_face or {}).items()
-    }
-
-
-def _restore_previous_issue_scan_results(main_window: "MainWindow") -> int:
-    """Restore the pre-scan findings snapshot and return its total frame count."""
-    state = _get_issue_scan_ui_state(main_window)
-    previous_results = _copy_issue_frames_by_face(
-        state.get("previous_issue_frames_by_face", {})
-    )
-    set_issue_frames_by_face(main_window, previous_results)
-    return sum(len(frames) for frames in previous_results.values())
-
-
 def _restore_issue_scan_display(main_window: "MainWindow") -> None:
     video_processor = getattr(main_window, "video_processor", None)
     process_current_frame = getattr(video_processor, "process_current_frame", None)
@@ -988,6 +970,24 @@ def block_if_issue_scan_active(
         style_type="warning",
     )
     return True
+
+
+def _mark_pending_target_media_refresh(main_window: "MainWindow") -> None:
+    _get_issue_scan_ui_state(main_window)["pending_target_media_refresh"] = True
+
+
+def _replay_pending_target_media_refresh(main_window: "MainWindow") -> None:
+    state = _get_issue_scan_ui_state(main_window)
+    if not state.get("pending_target_media_refresh", False):
+        return
+
+    from app.ui.widgets.actions import filter_actions
+
+    state["pending_target_media_refresh"] = False
+    filter_actions.filter_target_videos(main_window)
+    from app.ui.widgets.actions import list_view_actions
+
+    list_view_actions.load_target_webcams(main_window)
 
 
 def _get_ui_object_enabled_state(widget) -> bool:
@@ -1023,6 +1023,7 @@ def _get_issue_scan_mutation_lock_targets(main_window: "MainWindow") -> list:
         "addMarkerButton",
         "removeMarkerButton",
         "videoSeekSlider",
+        "videoSeekLineEdit",
         "frameAdvanceButton",
         "frameRewindButton",
         "nextMarkerButton",
@@ -1106,7 +1107,6 @@ def _start_issue_scan_ui(
     main_window: "MainWindow",
     worker,
     scope_text: str,
-    previous_issue_frames_by_face: dict[str, set[int]] | None = None,
 ) -> None:
     state = _get_issue_scan_ui_state(main_window)
     state.clear()
@@ -1116,13 +1116,7 @@ def _start_issue_scan_ui(
             "start_frame": int(main_window.videoSeekSlider.value()),
             "scope_text": scope_text,
             "keep_controls": bool(main_window.control.get("KeepControlsToggle", False)),
-            "previous_issue_frames_by_face": _copy_issue_frames_by_face(
-                previous_issue_frames_by_face
-                if previous_issue_frames_by_face is not None
-                else getattr(main_window, "issue_frames_by_face", {})
-            ),
             "frames_scanned": 0,
-            "has_partial_results": False,
         }
     )
 
@@ -1137,7 +1131,7 @@ def _start_issue_scan_ui(
     if run_button is not None:
         run_button.setText("Abort Scan")
         run_button.setToolTip(
-            f"{scope_text}\nAbort the active issue scan and keep the issue frames found so far."
+            f"{scope_text}\nAbort the active issue scan and keep only issue frames found during this scan attempt."
         )
 
     play_button = getattr(main_window, "buttonMediaPlay", None)
@@ -1191,6 +1185,10 @@ def _restore_issue_scan_ui(main_window: "MainWindow") -> None:
         toggle_button.setEnabled(True)
 
     _set_issue_scan_mutation_lock_state(main_window, False)
+    # Mark the scan inactive before replaying deferred refreshes so the
+    # refresh path does not treat teardown as an active scan.
+    state["active"] = False
+    _replay_pending_target_media_refresh(main_window)
     state.clear()
     _set_issue_scan_tool_button_state(main_window, False)
     update_scan_review_button_states(main_window)
@@ -1226,7 +1224,6 @@ def _handle_issue_scan_progress(
 def _handle_issue_scan_issue_found(
     main_window: "MainWindow", face_id: str, frame_number: int
 ) -> None:
-    _get_issue_scan_ui_state(main_window)["has_partial_results"] = True
     add_issue_frame_for_face(main_window, face_id, frame_number)
 
 
@@ -1247,43 +1244,21 @@ def _handle_issue_scan_completed(
     elapsed_seconds: float,
     cancelled: bool = False,
 ):
-    state = _get_issue_scan_ui_state(main_window)
-    frames_scanned_recorded = int(state.get("frames_scanned", 0))
-    scan_made_progress = max(frames_scanned_recorded, int(frames_scanned)) > 0
-    partial_results_visible = bool(state.get("has_partial_results", False))
-    partial_results_visible = partial_results_visible or any(
-        bool(frames) for frames in issue_frames_by_face.values()
-    )
-    restored_previous_results = False
-    restored_issue_frames = 0
-
-    if cancelled and not scan_made_progress:
-        restored_previous_results = True
-        restored_issue_frames = _restore_previous_issue_scan_results(main_window)
-    else:
-        set_issue_frames_by_face(main_window, issue_frames_by_face)
-
-    _restore_issue_scan_ui(main_window)
+    set_issue_frames_by_face(main_window, issue_frames_by_face)
     _cleanup_issue_scan_worker(main_window)
-    total_issue_frames = (
-        restored_issue_frames
-        if restored_previous_results
-        else sum(len(set(frames)) for frames in issue_frames_by_face.values())
+    _restore_issue_scan_ui(main_window)
+    total_issue_frames = sum(
+        len(set(frames)) for frames in issue_frames_by_face.values()
     )
     scan_fps = (frames_scanned / elapsed_seconds) if elapsed_seconds > 0 else 0.0
     print(
         f"[INFO] Scan: Scope: {scope_text.removeprefix('Scanning ')} | Frames: {frames_scanned} | Time: {elapsed_seconds:.1f}s | FPS: {scan_fps:.1f} | Issues: {total_issue_frames} | Faces with issues: {faces_with_issues} | Cancelled: {cancelled}"
     )
     if cancelled:
-        cancelled_message = (
-            f"Stopped after {frames_scanned} scanned frames. Restored the previous {total_issue_frames} issue frames."
-            if restored_previous_results
-            else f"Stopped after {frames_scanned} scanned frames. Kept {total_issue_frames} issue frames found so far."
-        )
         common_widget_actions.create_and_show_toast_message(
             main_window,
             "Scan Aborted",
-            cancelled_message,
+            f"Stopped after {frames_scanned} scanned frames. Kept {total_issue_frames} issue frames from this scan attempt.",
             style_type="warning",
         )
     elif total_issue_frames:
@@ -1301,35 +1276,36 @@ def _handle_issue_scan_completed(
 
 
 def _handle_issue_scan_cancelled(main_window: "MainWindow"):
-    state = _get_issue_scan_ui_state(main_window)
-    restored_previous_results = False
-    if int(state.get("frames_scanned", 0)) <= 0:
-        _restore_previous_issue_scan_results(main_window)
-        restored_previous_results = True
-    _restore_issue_scan_ui(main_window)
     _cleanup_issue_scan_worker(main_window)
+    _restore_issue_scan_ui(main_window)
+    current_issue_frames = sum(
+        len(set(frames))
+        for frames in getattr(main_window, "issue_frames_by_face", {}).values()
+    )
     common_widget_actions.create_and_show_toast_message(
         main_window,
         "Scan Cancelled",
-        (
-            "Issue scan aborted before finalizing. Restored the previous issue findings."
-            if restored_previous_results
-            else "Issue scan aborted before finalizing. Kept any issue frames found so far."
-        ),
+        f"Issue scan aborted before finalizing. Kept {current_issue_frames} issue frames from this scan attempt.",
         style_type="warning",
     )
 
 
 def _handle_issue_scan_failed(main_window: "MainWindow", error_message: str):
     state = _get_issue_scan_ui_state(main_window)
-    if int(state.get("frames_scanned", 0)) <= 0:
-        _restore_previous_issue_scan_results(main_window)
-    _restore_issue_scan_ui(main_window)
+    active_scan = bool(state.get("active", False))
     _cleanup_issue_scan_worker(main_window)
+    _restore_issue_scan_ui(main_window)
+    message = error_message
+    if active_scan:
+        message = (
+            f"{error_message}\n\n"
+            "Any previous issue findings were cleared when this scan started. "
+            "Only findings from the current scan attempt remain visible."
+        )
     common_widget_actions.create_and_show_messagebox(
         main_window,
         "Scan Failed",
-        error_message,
+        message,
         main_window.runScanButton,
     )
 
@@ -1367,14 +1343,15 @@ def run_issue_scan(main_window: "MainWindow"):
     if was_processing:
         print("[INFO] Stopped active processing before running issue scan.")
 
-    worker = ui_workers.IssueScanWorker(main_window)
+    try:
+        worker = ui_workers.IssueScanWorker(main_window)
+    except Exception as exc:
+        _handle_issue_scan_failed(main_window, str(exc))
+        return
     main_window.scan_issue_worker = worker
     scope_text = worker._scan_scope_text
-    previous_issue_frames_by_face = _copy_issue_frames_by_face(
-        getattr(main_window, "issue_frames_by_face", {})
-    )
     set_issue_frames_by_face(main_window, {})
-    _start_issue_scan_ui(main_window, worker, scope_text, previous_issue_frames_by_face)
+    _start_issue_scan_ui(main_window, worker, scope_text)
     worker.progress.connect(
         lambda processed, total, frame_number, scan_fps: _handle_issue_scan_progress(
             main_window, scope_text, processed, total, frame_number, scan_fps

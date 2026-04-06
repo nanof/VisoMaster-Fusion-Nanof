@@ -34,6 +34,8 @@ class videoSeekSliderLineEditEventFilter(QtCore.QObject):
         if event.type() == QtCore.QEvent.KeyPress:
             # Check if the pressed key is Enter/Return
             if event.key() in (QtCore.Qt.Key_Enter, QtCore.Qt.Key_Return):
+                if video_control_actions.is_issue_scan_active(self.main_window):
+                    return True
                 new_value = line_edit.text()
                 # Reset the line edit value to the slider value if the user input an empty text
                 if new_value == "":
