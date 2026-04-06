@@ -1091,12 +1091,16 @@ class VideoProcessor(QObject):
             self.preroll_timer.stop()
             return
 
-        # Check if the buffer is filled
-        if len(self.frames_to_display) >= self.preroll_target:
+        is_feeder_done = (
+            not self.feeder_thread.is_alive() if self.feeder_thread else False
+        )
+
+        # Buffer filled enough, or feeder ended (short clip / EOF) — start playback
+        if len(self.frames_to_display) >= self.preroll_target or is_feeder_done:
             self.preroll_timer.stop()
             self.playback_started = True
             print(
-                f"[INFO] Preroll buffer filled ({len(self.frames_to_display)} frames). Starting playback components..."
+                f"[INFO] Preroll buffer ready ({len(self.frames_to_display)} frames). Starting playback components..."
             )
 
             # Call the dedicated playback start function
@@ -3256,11 +3260,13 @@ class VideoProcessor(QObject):
         self.feeder_thread.start()
 
         if self.recording:
+            self.max_frames_to_display_size = 8
             # Recording: start the display metronome immediately
             print("[INFO] Recording mode: Starting metronome immediately.")
             self._start_metronome(9999.0, is_first_start=True)
         else:
             if self.main_window.control.get("VideoPlaybackBufferingToggle", False):
+                self.max_frames_to_display_size = self.preroll_target + 10
                 # Playback: start the preroll monitor
                 print(
                     f"[INFO] Playback mode: Waiting for preroll buffer (target: {self.preroll_target} frames)..."
@@ -3279,6 +3285,7 @@ class VideoProcessor(QObject):
                 )
                 self.preroll_timer.start(100)
             else:
+                self.max_frames_to_display_size = 8
                 # Recording: start the display metronome immediately
                 print("[INFO] Playback mode.")
                 self._start_synchronized_playback()
@@ -3398,8 +3405,19 @@ class VideoProcessor(QObject):
             if prev is not None and prev.is_alive():
                 prev.stop_event.set()
                 self._pending_single_frame_request = request
-                if not self._single_frame_handoff_timer.isActive():
-                    self._single_frame_handoff_timer.start()
+                frameworker_delay = max(
+                    int(
+                        float(
+                            self.main_window.control.get(
+                                "FrameWorkerDelayDecimalSlider", 0.2
+                            )
+                        )
+                        * 1000
+                    ),
+                    15,
+                )
+                self._single_frame_handoff_timer.setInterval(frameworker_delay)
+                self._single_frame_handoff_timer.start()
                 return prev
 
             self._pending_single_frame_request = None
@@ -3566,6 +3584,9 @@ class VideoProcessor(QObject):
             "was_recording_default_style": was_recording_default_style,
             "was_processing_segments": was_processing_segments,
             "video_seek_frame": int(self.main_window.videoSeekSlider.value()),
+            "next_frame_to_display": int(self.next_frame_to_display),
+            "max_frame_number": int(self.max_frame_number),
+            "processing_start_frame": int(getattr(self, "processing_start_frame", 0)),
             "webcam_index": int(self.main_window.control.get("WebcamDeviceSelection", 0)),
             "screen_control": copy.deepcopy(self.main_window.control),
         }
@@ -3657,9 +3678,17 @@ class VideoProcessor(QObject):
         self._smoothed_kps.clear()
 
         if self.file_type == "video" and self.media_path:
-            if self._reopen_video_capture(video_seek_frame):
+            last_processed = int(ctx.get("next_frame_to_display", video_seek_frame)) - 1
+            start_frame = int(ctx.get("processing_start_frame", 0))
+            max_fn = int(ctx.get("max_frame_number", last_processed))
+            current_slider_pos = max(start_frame, last_processed)
+            current_slider_pos = min(current_slider_pos, max_fn)
+            if self._reopen_video_capture(current_slider_pos):
+                self.main_window.videoSeekSlider.blockSignals(True)
+                self.main_window.videoSeekSlider.setValue(current_slider_pos)
+                self.main_window.videoSeekSlider.blockSignals(False)
                 print(
-                    f"[INFO] Video capture re-opened and seeked to {video_seek_frame} after stop."
+                    f"[INFO] Video capture re-opened and seeked to {current_slider_pos} after stop."
                 )
             else:
                 print("[WARN] Failed to re-open media capture after active stop.")
@@ -4932,9 +4961,16 @@ class VideoProcessor(QObject):
                 IssueScanTargetSnapshot,
                 dict(target_faces_snapshot),
             )
-        previous_last_detected_faces = copy.deepcopy(self.last_detected_faces)
-        previous_smoothed_kps = copy.deepcopy(self._smoothed_kps)
-        previous_smoothed_dense_kps = copy.deepcopy(self._smoothed_dense_kps)
+        previous_last_detected_faces = copy.deepcopy(
+            getattr(self, "last_detected_faces", [])
+        )
+        previous_smoothed_kps = copy.deepcopy(getattr(self, "_smoothed_kps", {}))
+        previous_smoothed_dense_kps = copy.deepcopy(
+            getattr(self, "_smoothed_dense_kps", {})
+        )
+        previous_smoothed_dense_kps_203 = copy.deepcopy(
+            getattr(self, "_smoothed_dense_kps_203", {})
+        )
         total_frames_scanned = 0
         tracking_enabled = False
         issue_frames_by_face: dict[str, set[int]] = {
@@ -5109,6 +5145,7 @@ class VideoProcessor(QObject):
             self.last_detected_faces = previous_last_detected_faces
             self._smoothed_kps = previous_smoothed_kps
             self._smoothed_dense_kps = previous_smoothed_dense_kps
+            self._smoothed_dense_kps_203 = previous_smoothed_dense_kps_203
             if tracking_enabled:
                 self.main_window.models_processor.face_detectors.reset_tracker()
             self.current_frame_number = (
@@ -6138,7 +6175,10 @@ class VideoProcessor(QObject):
 
             # 8b. Reopen media capture AFTER FFmpeg audio merge.
             if self.file_type == "video" and self.media_path:
-                reset_frame = getattr(self, "processing_start_frame", 0)
+                last_processed = self.next_frame_to_display - 1
+                start_frame = getattr(self, "processing_start_frame", 0)
+                reset_frame = max(start_frame, last_processed)
+                reset_frame = min(reset_frame, self.max_frame_number)
                 if self._reopen_video_capture(reset_frame):
                     self.main_window.videoSeekSlider.blockSignals(True)
                     self.main_window.videoSeekSlider.setValue(reset_frame)
@@ -6879,8 +6919,14 @@ class VideoProcessor(QObject):
 
             # Reset media capture
             if self.file_type == "video" and self.media_path:
-                current_slider_pos = self.main_window.videoSeekSlider.value()
+                last_processed = self.next_frame_to_display - 1
+                start_frame = getattr(self, "processing_start_frame", 0)
+                current_slider_pos = max(start_frame, last_processed)
+                current_slider_pos = min(current_slider_pos, self.max_frame_number)
                 if self._reopen_video_capture(current_slider_pos):
+                    self.main_window.videoSeekSlider.blockSignals(True)
+                    self.main_window.videoSeekSlider.setValue(current_slider_pos)
+                    self.main_window.videoSeekSlider.blockSignals(False)
                     print("[INFO] Video capture re-opened and seeked.")
                 else:
                     print("[WARN] Failed to re-open media capture after segments.")

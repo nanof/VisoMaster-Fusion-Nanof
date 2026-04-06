@@ -39,6 +39,11 @@ class CardButton(QPushButton):
         self.list_item = None
         self.list_widget: QtWidgets.QListWidget = None
 
+    def _restore_pre_click_checked_state(self):
+        self.blockSignals(True)
+        self.setChecked(not self.isChecked())
+        self.blockSignals(False)
+
     def get_item_position(self):
         for i in range(self.list_widget.count() - 1, -1, -1):
             list_item = self.list_widget.item(i)
@@ -184,6 +189,12 @@ class TargetMediaCardButton(CardButton):
 
     def load_media(self):
         main_window = self.main_window
+        if video_control_actions.block_if_issue_scan_active(
+            main_window, "change target media"
+        ):
+            self._restore_pre_click_checked_state()
+            return
+
         # Deselect the currently selected video
         if main_window.selected_video_button:
             main_window.selected_video_button.toggle()  # Deselect the previous video
@@ -339,6 +350,11 @@ class TargetMediaCardButton(CardButton):
         # list_view_actions.find_target_faces(main_window)
 
     def deselect_currently_selected_video(self, main_window):
+        if video_control_actions.block_if_issue_scan_active(
+            main_window, "deselect the current media"
+        ):
+            return
+
         # Deselect the currently selected video
         if main_window.selected_video_button == self:
             self.reset_media_state()
@@ -394,11 +410,19 @@ class TargetMediaCardButton(CardButton):
 
     def remove_target_media_from_list(self):
         main_window = self.main_window
+        if video_control_actions.block_if_issue_scan_active(
+            main_window, "remove target media"
+        ):
+            return
         self.deselect_currently_selected_video(main_window)
         self.deleteLater()
 
     def delete_target_media_to_trash(self):
         main_window = self.main_window
+        if video_control_actions.block_if_issue_scan_active(
+            main_window, "delete target media"
+        ):
+            return
         self.deselect_currently_selected_video(main_window)
 
         # Send the file to the trash
@@ -445,20 +469,23 @@ class TargetMediaCardButton(CardButton):
             self.popMenu.addAction(convert_action)
             self.popMenu.addSeparator()
 
-        remove_action = QtGui.QAction("Remove from list", self)
-        remove_action.triggered.connect(self.remove_target_media_from_list)
-        self.popMenu.addAction(remove_action)
+        self.remove_action = QtGui.QAction("Remove from list", self)
+        self.remove_action.triggered.connect(self.remove_target_media_from_list)
+        self.popMenu.addAction(self.remove_action)
 
-        delete_action = QtGui.QAction("Delete file to recycle bin", self)
-        delete_action.triggered.connect(self.delete_target_media_to_trash)
-        self.popMenu.addAction(delete_action)
+        self.delete_action = QtGui.QAction("Delete file to recycle bin", self)
+        self.delete_action.triggered.connect(self.delete_target_media_to_trash)
+        self.popMenu.addAction(self.delete_action)
 
-        open_path_action = QtGui.QAction("Open file location", self)
-        open_path_action.triggered.connect(self.open_target_path_by_explorer)
-        self.popMenu.addAction(open_path_action)
+        self.open_path_action = QtGui.QAction("Open file location", self)
+        self.open_path_action.triggered.connect(self.open_target_path_by_explorer)
+        self.popMenu.addAction(self.open_path_action)
 
     def on_context_menu(self, point):
         # show context menu
+        scan_active = video_control_actions.is_issue_scan_active(self.main_window)
+        self.remove_action.setEnabled(not scan_active)
+        self.delete_action.setEnabled(not scan_active)
         self.popMenu.exec_(self.mapToGlobal(point))
 
 
@@ -800,32 +827,32 @@ class TargetFaceCardButton(CardButton):
     def create_context_menu(self):
         # create context menu
         self.popMenu = QtWidgets.QMenu(self)
-        parameters_copy_action = QtGui.QAction("Copy Parameters", self)
-        parameters_copy_action.triggered.connect(self.copy_parameters)
-        parameters_paste_action = QtGui.QAction("Apply Copied Parameters", self)
-        parameters_paste_action.triggered.connect(self.paste_and_apply_parameters)
-        save_parameters_action = QtGui.QAction(
+        self.parameters_copy_action = QtGui.QAction("Copy Parameters", self)
+        self.parameters_copy_action.triggered.connect(self.copy_parameters)
+        self.parameters_paste_action = QtGui.QAction("Apply Copied Parameters", self)
+        self.parameters_paste_action.triggered.connect(self.paste_and_apply_parameters)
+        self.save_parameters_action = QtGui.QAction(
             "Save Current Parameters and Settings", self
         )
-        save_parameters_action.triggered.connect(
+        self.save_parameters_action.triggered.connect(
             partial(
                 save_load_actions.save_current_parameters_and_control,
                 self.main_window,
                 self.face_id,
             )
         )
-        load_parameters_action = QtGui.QAction("Load Parameters", self)
-        load_parameters_action.triggered.connect(
+        self.load_parameters_action = QtGui.QAction("Load Parameters", self)
+        self.load_parameters_action.triggered.connect(
             partial(
                 save_load_actions.load_parameters_and_settings,
                 self.main_window,
                 self.face_id,
             )
         )
-        load_parameters_and_settings_action = QtGui.QAction(
+        self.load_parameters_and_settings_action = QtGui.QAction(
             "Load Parameters and Settings", self
         )
-        load_parameters_and_settings_action.triggered.connect(
+        self.load_parameters_and_settings_action.triggered.connect(
             partial(
                 save_load_actions.load_parameters_and_settings,
                 self.main_window,
@@ -833,21 +860,30 @@ class TargetFaceCardButton(CardButton):
                 True,
             )
         )
-        remove_action = QtGui.QAction("Remove from List", self)
-        remove_action.triggered.connect(self.remove_target_face_from_list)
-        self.popMenu.addAction(parameters_copy_action)
-        self.popMenu.addAction(parameters_paste_action)
-        self.popMenu.addAction(save_parameters_action)
-        self.popMenu.addAction(load_parameters_action)
-        self.popMenu.addAction(load_parameters_and_settings_action)
-        self.popMenu.addAction(remove_action)
+        self.remove_action = QtGui.QAction("Remove from List", self)
+        self.remove_action.triggered.connect(self.remove_target_face_from_list)
+        self.popMenu.addAction(self.parameters_copy_action)
+        self.popMenu.addAction(self.parameters_paste_action)
+        self.popMenu.addAction(self.save_parameters_action)
+        self.popMenu.addAction(self.load_parameters_action)
+        self.popMenu.addAction(self.load_parameters_and_settings_action)
+        self.popMenu.addAction(self.remove_action)
 
     def on_context_menu(self, point):
         # show context menu
+        scan_active = video_control_actions.is_issue_scan_active(self.main_window)
+        self.parameters_paste_action.setEnabled(not scan_active)
+        self.load_parameters_action.setEnabled(not scan_active)
+        self.load_parameters_and_settings_action.setEnabled(not scan_active)
+        self.remove_action.setEnabled(not scan_active)
         self.popMenu.exec_(self.mapToGlobal(point))
 
     def remove_target_face_from_list(self):
         main_window = self.main_window
+        if video_control_actions.block_if_issue_scan_active(
+            main_window, "remove a target face"
+        ):
+            return
 
         if main_window.video_processor.processing:
             main_window.video_processor.stop_processing()
@@ -966,6 +1002,11 @@ class InputFaceCardButton(CardButton):
 
     def load_input_face(self):
         main_window = self.main_window
+        if video_control_actions.block_if_issue_scan_active(
+            main_window, "change input-face assignments"
+        ):
+            self._restore_pre_click_checked_state()
+            return
 
         if main_window.cur_selected_target_face_button:
             cur_selected_target_face_button = (
@@ -1095,6 +1136,10 @@ class InputFaceCardButton(CardButton):
 
     def remove_input_face_from_list(self):
         main_window = self.main_window
+        if video_control_actions.block_if_issue_scan_active(
+            main_window, "remove input faces"
+        ):
+            return
         faces_to_remove = [
             face_button
             for _, face_button in main_window.input_faces.items()
@@ -1120,6 +1165,10 @@ class InputFaceCardButton(CardButton):
 
     def delete_input_face_to_trash(self):
         main_window = self.main_window
+        if video_control_actions.block_if_issue_scan_active(
+            main_window, "delete input faces"
+        ):
+            return
         self.remove_kv_data_file()
         self._remove_face_from_lists()
 
@@ -1162,11 +1211,13 @@ class InputFaceCardButton(CardButton):
     def create_context_menu(self):
         # create context menu
         self.popMenu = QtWidgets.QMenu(self)
-        create_embed_action = QtGui.QAction(
+        self.create_embed_action = QtGui.QAction(
             "Create embedding from selected faces", self
         )
-        create_embed_action.triggered.connect(self.create_embedding_from_selected_faces)
-        self.popMenu.addAction(create_embed_action)
+        self.create_embed_action.triggered.connect(
+            self.create_embedding_from_selected_faces
+        )
+        self.popMenu.addAction(self.create_embed_action)
 
         main_window = self.main_window
         fav_list = getattr(main_window, "inputFacesFavoritesList", None)
@@ -1186,21 +1237,26 @@ class InputFaceCardButton(CardButton):
             if fav_list is not None and self.list_widget is main_window.inputFacesFavoritesList
             else "Remove from list"
         )
-        remove_action = QtGui.QAction(remove_label, self)
-        remove_action.triggered.connect(self.remove_input_face_from_list)
-        self.popMenu.addAction(remove_action)
+        self.remove_action = QtGui.QAction(remove_label, self)
+        self.remove_action.triggered.connect(self.remove_input_face_from_list)
+        self.popMenu.addAction(self.remove_action)
 
         if not self.is_favorite_clip:
-            delete_action = QtGui.QAction("Delete file to recycle bin", self)
-            delete_action.triggered.connect(self.delete_input_face_to_trash)
-            self.popMenu.addAction(delete_action)
+            self.delete_action = QtGui.QAction("Delete file to recycle bin", self)
+            self.delete_action.triggered.connect(self.delete_input_face_to_trash)
+            self.popMenu.addAction(self.delete_action)
 
-            open_path_action = QtGui.QAction("Open file location", self)
-            open_path_action.triggered.connect(self.open_target_path_by_explorer)
-            self.popMenu.addAction(open_path_action)
+            self.open_path_action = QtGui.QAction("Open file location", self)
+            self.open_path_action.triggered.connect(self.open_target_path_by_explorer)
+            self.popMenu.addAction(self.open_path_action)
 
     def on_context_menu(self, point):
         # show context menu
+        scan_active = video_control_actions.is_issue_scan_active(self.main_window)
+        self.create_embed_action.setEnabled(not scan_active)
+        self.remove_action.setEnabled(not scan_active)
+        if hasattr(self, "delete_action"):
+            self.delete_action.setEnabled(not scan_active)
         self.popMenu.exec_(self.mapToGlobal(point))
 
     def add_input_faces_selection_to_favorites(self):
@@ -1211,6 +1267,11 @@ class InputFaceCardButton(CardButton):
         )
 
     def create_embedding_from_selected_faces(self):
+        if video_control_actions.block_if_issue_scan_active(
+            self.main_window, "create embeddings"
+        ):
+            return
+
         # Raccogli l'intero embedding_store dalle facce selezionate
         selected_faces_embeddings_store = [
             input_face.embedding_store
@@ -1269,6 +1330,12 @@ class EmbeddingCardButton(CardButton):
 
     def load_embedding(self):
         main_window = self.main_window
+        if video_control_actions.block_if_issue_scan_active(
+            main_window, "change merged-embedding assignments"
+        ):
+            self._restore_pre_click_checked_state()
+            return
+
         if main_window.cur_selected_target_face_button:
             cur_selected_target_face_button = (
                 main_window.cur_selected_target_face_button
@@ -1309,15 +1376,23 @@ class EmbeddingCardButton(CardButton):
     def create_context_menu(self):
         # create context menu
         self.popMenu = QtWidgets.QMenu(self)
-        remove_action = QtGui.QAction("Remove Embedding", self)
-        remove_action.triggered.connect(self.remove_embedding_from_list)
-        self.popMenu.addAction(remove_action)
+        self.remove_action = QtGui.QAction("Remove Embedding", self)
+        self.remove_action.triggered.connect(self.remove_embedding_from_list)
+        self.popMenu.addAction(self.remove_action)
 
     def on_context_menu(self, point):
         # show context menu
+        self.remove_action.setEnabled(
+            not video_control_actions.is_issue_scan_active(self.main_window)
+        )
         self.popMenu.exec_(self.mapToGlobal(point))
 
     def remove_embedding_from_list(self):
+        if video_control_actions.block_if_issue_scan_active(
+            self.main_window, "remove embeddings"
+        ):
+            return
+
         main_window = self.main_window
         for i in range(main_window.inputEmbeddingsList.count() - 1, -1, -1):
             list_item = main_window.inputEmbeddingsList.item(i)

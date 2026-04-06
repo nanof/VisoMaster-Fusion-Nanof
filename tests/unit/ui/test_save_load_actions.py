@@ -11,6 +11,7 @@ All PySide6, widget, and UI imports are stubbed so this runs without Qt.
 
 from __future__ import annotations
 
+import importlib
 import sys
 import json
 import copy
@@ -51,27 +52,56 @@ _STUBS = [
     "app.ui.widgets.actions.layout_actions",
     "app.ui.widgets.actions.filter_actions",
 ]
-for _s in _STUBS:
-    if _s not in sys.modules:
-        sys.modules[_s] = _stub(_s)
 
-widget_components_stub = sys.modules["app.ui.widgets.widget_components"]
-setattr(
-    widget_components_stub,
-    "TargetMediaCardButton",
-    type("TargetMediaCardButton", (), {}),
-)
+
+def _load_save_load_actions_module():
+    original_modules = {stub_name: sys.modules.get(stub_name) for stub_name in _STUBS}
+    original_save_load_actions = sys.modules.pop(
+        "app.ui.widgets.actions.save_load_actions", None
+    )
+    try:
+        for stub_name in _STUBS:
+            sys.modules[stub_name] = _stub(stub_name)
+
+        widget_components_stub = sys.modules["app.ui.widgets.widget_components"]
+        setattr(
+            widget_components_stub,
+            "TargetMediaCardButton",
+            type("TargetMediaCardButton", (), {}),
+        )
+
+        module = importlib.import_module("app.ui.widgets.actions.save_load_actions")
+    finally:
+        for stub_name, original_module in original_modules.items():
+            if original_module is None:
+                sys.modules.pop(stub_name, None)
+            else:
+                sys.modules[stub_name] = original_module
+
+        if original_save_load_actions is not None:
+            sys.modules["app.ui.widgets.actions.save_load_actions"] = (
+                original_save_load_actions
+            )
+        else:
+            sys.modules.pop("app.ui.widgets.actions.save_load_actions", None)
+
+    # These tests validate serialization/window-state behavior, not Qt UI display.
+    module.common_widget_actions.create_and_show_toast_message = MagicMock()
+    module.common_widget_actions.create_and_show_messagebox = MagicMock()
+    return module
+
 
 # Provide the real ParametersDict through misc_helpers
 from app.helpers.miscellaneous import ParametersDict  # noqa: E402
 
 # Now import the module under test
-from app.ui.widgets.actions.save_load_actions import (  # noqa: E402
-    _apply_workspace_window_state,
-    convert_parameters_to_supported_type,
-    convert_markers_to_supported_type,
-    save_current_workspace,
+save_load_actions = _load_save_load_actions_module()
+_apply_workspace_window_state = save_load_actions._apply_workspace_window_state
+convert_parameters_to_supported_type = (
+    save_load_actions.convert_parameters_to_supported_type
 )
+convert_markers_to_supported_type = save_load_actions.convert_markers_to_supported_type
+save_current_workspace = save_load_actions.save_current_workspace
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +129,22 @@ def sample_params_dict(default_params_data) -> ParametersDict:
 @pytest.fixture
 def sample_plain_dict() -> dict:
     return {"brightness": 1.5, "contrast": 0.9}
+
+
+def test_load_save_actions_module_restores_stubbed_sys_modules():
+    sentinel = object()
+    original_common_actions = sys.modules.get("app.ui.widgets.actions.common_actions")
+    sys.modules["app.ui.widgets.actions.common_actions"] = sentinel
+    try:
+        _load_save_load_actions_module()
+        assert sys.modules["app.ui.widgets.actions.common_actions"] is sentinel
+    finally:
+        if original_common_actions is None:
+            sys.modules.pop("app.ui.widgets.actions.common_actions", None)
+        else:
+            sys.modules["app.ui.widgets.actions.common_actions"] = (
+                original_common_actions
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -609,7 +655,8 @@ def test_apply_workspace_window_state_fullscreen_seeds_restore_geometry(monkeypa
     )
 
     monkeypatch.setattr(
-        "app.ui.widgets.actions.save_load_actions._get_clamped_window_geometry",
+        save_load_actions,
+        "_get_clamped_window_geometry",
         lambda *_args, **_kwargs: restored_rect,
     )
 
@@ -657,7 +704,8 @@ def test_apply_workspace_window_state_normal_clears_fullscreen_restore_state(
     )
 
     monkeypatch.setattr(
-        "app.ui.widgets.actions.save_load_actions._get_clamped_window_geometry",
+        save_load_actions,
+        "_get_clamped_window_geometry",
         lambda *_args, **_kwargs: restored_rect,
     )
 

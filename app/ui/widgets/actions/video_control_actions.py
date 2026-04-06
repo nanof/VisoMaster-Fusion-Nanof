@@ -267,6 +267,9 @@ def add_video_slider_marker(main_window: "MainWindow"):
     Shows an error message box if either precondition is not met, or if a marker
     already exists at that position.
     """
+    if block_if_issue_scan_active(main_window, "add a marker"):
+        return
+
     if (
         not isinstance(
             main_window.selected_video_button, widget_components.TargetMediaCardButton
@@ -307,6 +310,9 @@ def add_video_slider_marker(main_window: "MainWindow"):
 
 def show_add_marker_menu(main_window: "MainWindow"):
     """Shows a context menu for adding different types of markers."""
+    if block_if_issue_scan_active(main_window, "edit scan markers"):
+        return
+
     if (
         not isinstance(
             main_window.selected_video_button, widget_components.TargetMediaCardButton
@@ -355,6 +361,9 @@ def show_add_marker_menu(main_window: "MainWindow"):
 
 def set_job_start_frame(main_window: "MainWindow"):
     """Adds a new job marker pair starting at the current slider position."""
+    if block_if_issue_scan_active(main_window, "add a record start marker"):
+        return
+
     current_pos = int(main_window.videoSeekSlider.value())
 
     # Basic validation: Ensure we are not adding a start if the last pair is incomplete
@@ -376,6 +385,9 @@ def set_job_start_frame(main_window: "MainWindow"):
 
 def set_job_end_frame(main_window: "MainWindow"):
     """Sets the job end frame marker for the last incomplete pair."""
+    if block_if_issue_scan_active(main_window, "add a record end marker"):
+        return
+
     current_pos = int(main_window.videoSeekSlider.value())
 
     # Validation: Check if there's an incomplete pair to add an end to
@@ -417,6 +429,9 @@ def remove_video_slider_marker(main_window: "MainWindow"):
     If the position belongs to a job marker pair, the entire pair is removed.
     If no marker exists at the position, an error message box is shown.
     """
+    if block_if_issue_scan_active(main_window, "remove a marker"):
+        return
+
     if (
         not isinstance(
             main_window.selected_video_button, widget_components.TargetMediaCardButton
@@ -742,10 +757,11 @@ def update_scan_review_button_states(main_window: "MainWindow"):
     has_selected_face = (
         getattr(main_window, "selected_target_face_id", None) is not None
     )
+    scan_active = is_issue_scan_active(main_window)
 
     scan_button = getattr(main_window, "runScanButton", None)
     if scan_button is not None:
-        scan_button.setEnabled(has_target_faces)
+        scan_button.setEnabled(True if scan_active else has_target_faces)
 
     for button_name in (
         "runScanButton",
@@ -757,7 +773,7 @@ def update_scan_review_button_states(main_window: "MainWindow"):
         if button is not None:
             if button_name == "runScanButton":
                 continue
-            button.setEnabled(has_selected_face)
+            button.setEnabled(has_selected_face and not scan_active)
 
 
 def _set_slider_marker_values(
@@ -937,6 +953,137 @@ def _restore_issue_scan_display(main_window: "MainWindow") -> None:
         process_current_frame()
 
 
+def is_issue_scan_active(main_window: "MainWindow") -> bool:
+    return bool(
+        getattr(main_window, "scan_issue_worker", None) is not None
+        or _get_issue_scan_ui_state(main_window).get("active", False)
+    )
+
+
+def block_if_issue_scan_active(
+    main_window: "MainWindow", action_name: str, parent=None
+) -> bool:
+    if not is_issue_scan_active(main_window):
+        return False
+
+    common_widget_actions.create_and_show_toast_message(
+        main_window,
+        "Scan In Progress",
+        f"Cannot {action_name} while an issue scan is running.\nAbort the scan first, then retry the action.",
+        style_type="warning",
+    )
+    return True
+
+
+def _mark_pending_target_media_refresh(main_window: "MainWindow") -> None:
+    _get_issue_scan_ui_state(main_window)["pending_target_media_refresh"] = True
+
+
+def _replay_pending_target_media_refresh(main_window: "MainWindow") -> None:
+    state = _get_issue_scan_ui_state(main_window)
+    if not state.get("pending_target_media_refresh", False):
+        return
+
+    from app.ui.widgets.actions import filter_actions
+
+    state["pending_target_media_refresh"] = False
+    filter_actions.filter_target_videos(main_window)
+    from app.ui.widgets.actions import list_view_actions
+
+    list_view_actions.load_target_webcams(main_window)
+
+
+def _get_ui_object_enabled_state(widget) -> bool:
+    if widget is None:
+        return False
+    if hasattr(widget, "isEnabled") and callable(widget.isEnabled):
+        return bool(widget.isEnabled())
+    return bool(getattr(widget, "enabled", True))
+
+
+def _set_ui_object_enabled_state(widget, enabled: bool) -> None:
+    if widget is None:
+        return
+    if hasattr(widget, "setEnabled") and callable(widget.setEnabled):
+        widget.setEnabled(bool(enabled))
+        return
+    if hasattr(widget, "setDisabled") and callable(widget.setDisabled):
+        widget.setDisabled(not bool(enabled))
+        return
+    if hasattr(widget, "enabled"):
+        widget.enabled = bool(enabled)
+
+
+def _get_issue_scan_mutation_lock_targets(main_window: "MainWindow") -> list:
+    targets = []
+    for attr_name in (
+        "findTargetFacesButton",
+        "clearTargetFacesButton",
+        "buttonTargetVideosPath",
+        "buttonInputFacesPath",
+        "filterWebcamsCheckBox",
+        "openEmbeddingButton",
+        "addMarkerButton",
+        "removeMarkerButton",
+        "videoSeekSlider",
+        "videoSeekLineEdit",
+        "frameAdvanceButton",
+        "frameRewindButton",
+        "nextMarkerButton",
+        "previousMarkerButton",
+        "swapfacesButton",
+        "editFacesButton",
+        "targetVideosList",
+        "inputFacesList",
+        "inputEmbeddingsList",
+        "jobQueueList",
+        "loadJobButton",
+        "buttonProcessAll",
+        "buttonProcessSelected",
+        "actionLoad_SavedWorkspace",
+        "actionOpen_Videos_Folder",
+        "actionOpen_Video_Files",
+        "actionLoad_Source_Image_Files",
+        "actionLoad_Source_Images_Folder",
+        "actionLoad_Embeddings",
+    ):
+        widget = getattr(main_window, attr_name, None)
+        if widget is not None:
+            targets.append(widget)
+
+    for collection_name in ("target_videos", "input_faces", "merged_embeddings"):
+        targets.extend(getattr(main_window, collection_name, {}).values())
+
+    unique_targets = []
+    seen_ids = set()
+    for target in targets:
+        if target is None:
+            continue
+        target_id = id(target)
+        if target_id in seen_ids:
+            continue
+        seen_ids.add(target_id)
+        unique_targets.append(target)
+    return unique_targets
+
+
+def _set_issue_scan_mutation_lock_state(
+    main_window: "MainWindow", scan_active: bool
+) -> None:
+    state = _get_issue_scan_ui_state(main_window)
+    if scan_active:
+        lock_targets = _get_issue_scan_mutation_lock_targets(main_window)
+        state["mutation_lock_enabled_states"] = [
+            (target, _get_ui_object_enabled_state(target)) for target in lock_targets
+        ]
+        for target in lock_targets:
+            _set_ui_object_enabled_state(target, False)
+        return
+
+    for target, was_enabled in state.pop("mutation_lock_enabled_states", []):
+        _set_ui_object_enabled_state(target, was_enabled)
+
+
 def _set_issue_scan_tool_button_state(
     main_window: "MainWindow", scan_active: bool
 ) -> None:
@@ -959,7 +1106,11 @@ def _set_issue_scan_tool_button_state(
             button.setEnabled(not scan_active)
 
 
-def _start_issue_scan_ui(main_window: "MainWindow", worker, scope_text: str) -> None:
+def _start_issue_scan_ui(
+    main_window: "MainWindow",
+    worker,
+    scope_text: str,
+) -> None:
     state = _get_issue_scan_ui_state(main_window)
     state.clear()
     state.update(
@@ -968,8 +1119,11 @@ def _start_issue_scan_ui(main_window: "MainWindow", worker, scope_text: str) -> 
             "start_frame": int(main_window.videoSeekSlider.value()),
             "scope_text": scope_text,
             "keep_controls": bool(main_window.control.get("KeepControlsToggle", False)),
+            "frames_scanned": 0,
         }
     )
+
+    _set_issue_scan_mutation_lock_state(main_window, True)
 
     if not state["keep_controls"]:
         layout_actions.disable_all_parameters_and_control_widget(main_window)
@@ -980,7 +1134,7 @@ def _start_issue_scan_ui(main_window: "MainWindow", worker, scope_text: str) -> 
     if run_button is not None:
         run_button.setText("Abort Scan")
         run_button.setToolTip(
-            f"{scope_text}\nAbort the active issue scan and keep the issue frames found so far."
+            f"{scope_text}\nAbort the active issue scan and keep only issue frames found during this scan attempt."
         )
 
     play_button = getattr(main_window, "buttonMediaPlay", None)
@@ -1033,6 +1187,11 @@ def _restore_issue_scan_ui(main_window: "MainWindow") -> None:
     if toggle_button is not None:
         toggle_button.setEnabled(True)
 
+    _set_issue_scan_mutation_lock_state(main_window, False)
+    # Mark the scan inactive before replaying deferred refreshes so the
+    # refresh path does not treat teardown as an active scan.
+    state["active"] = False
+    _replay_pending_target_media_refresh(main_window)
     state.clear()
     _set_issue_scan_tool_button_state(main_window, False)
     update_scan_review_button_states(main_window)
@@ -1057,6 +1216,7 @@ def _handle_issue_scan_progress(
     frame_number: int,
     scan_fps: float,
 ):
+    _get_issue_scan_ui_state(main_window)["frames_scanned"] = int(processed)
     _set_slider_frame_without_side_effects(main_window, frame_number)
     run_button = getattr(main_window, "runScanButton", None)
     if run_button is not None:
@@ -1075,6 +1235,7 @@ def _cleanup_issue_scan_worker(main_window: "MainWindow"):
     if worker is not None:
         worker.deleteLater()
         main_window.scan_issue_worker = None
+    update_scan_review_button_states(main_window)
 
 
 def _handle_issue_scan_completed(
@@ -1087,8 +1248,8 @@ def _handle_issue_scan_completed(
     cancelled: bool = False,
 ):
     set_issue_frames_by_face(main_window, issue_frames_by_face)
-    _restore_issue_scan_ui(main_window)
     _cleanup_issue_scan_worker(main_window)
+    _restore_issue_scan_ui(main_window)
     total_issue_frames = sum(
         len(set(frames)) for frames in issue_frames_by_face.values()
     )
@@ -1100,7 +1261,7 @@ def _handle_issue_scan_completed(
         common_widget_actions.create_and_show_toast_message(
             main_window,
             "Scan Aborted",
-            f"Stopped after {frames_scanned} scanned frames. Kept {total_issue_frames} issue frames found so far.",
+            f"Stopped after {frames_scanned} scanned frames. Kept {total_issue_frames} issue frames from this scan attempt.",
             style_type="warning",
         )
     elif total_issue_frames:
@@ -1118,23 +1279,36 @@ def _handle_issue_scan_completed(
 
 
 def _handle_issue_scan_cancelled(main_window: "MainWindow"):
-    _restore_issue_scan_ui(main_window)
     _cleanup_issue_scan_worker(main_window)
+    _restore_issue_scan_ui(main_window)
+    current_issue_frames = sum(
+        len(set(frames))
+        for frames in getattr(main_window, "issue_frames_by_face", {}).values()
+    )
     common_widget_actions.create_and_show_toast_message(
         main_window,
         "Scan Cancelled",
-        "Issue scan aborted before finalizing. Kept any issue frames found so far.",
+        f"Issue scan aborted before finalizing. Kept {current_issue_frames} issue frames from this scan attempt.",
         style_type="warning",
     )
 
 
 def _handle_issue_scan_failed(main_window: "MainWindow", error_message: str):
-    _restore_issue_scan_ui(main_window)
+    state = _get_issue_scan_ui_state(main_window)
+    active_scan = bool(state.get("active", False))
     _cleanup_issue_scan_worker(main_window)
+    _restore_issue_scan_ui(main_window)
+    message = error_message
+    if active_scan:
+        message = (
+            f"{error_message}\n\n"
+            "Any previous issue findings were cleared when this scan started. "
+            "Only findings from the current scan attempt remain visible."
+        )
     common_widget_actions.create_and_show_messagebox(
         main_window,
         "Scan Failed",
-        error_message,
+        message,
         main_window.runScanButton,
     )
 
@@ -1172,7 +1346,11 @@ def run_issue_scan(main_window: "MainWindow"):
     if was_processing:
         print("[INFO] Stopped active processing before running issue scan.")
 
-    worker = ui_workers.IssueScanWorker(main_window)
+    try:
+        worker = ui_workers.IssueScanWorker(main_window)
+    except Exception as exc:
+        _handle_issue_scan_failed(main_window, str(exc))
+        return
     main_window.scan_issue_worker = worker
     scope_text = worker._scan_scope_text
     set_issue_frames_by_face(main_window, {})
@@ -1226,6 +1404,9 @@ def remove_face_parameters_and_control_from_markers(main_window: "MainWindow", f
 
 def remove_all_markers(main_window: "MainWindow"):
     """Removes all standard, issue, and dropped-frame markers plus job pairs."""
+    if block_if_issue_scan_active(main_window, "clear markers"):
+        return
+
     standard_markers_positions = list(main_window.markers.keys())
     for marker_position in standard_markers_positions:
         remove_marker(main_window, marker_position)

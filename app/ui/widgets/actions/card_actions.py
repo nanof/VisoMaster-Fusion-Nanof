@@ -20,6 +20,13 @@ _DEFAULT_RECOGNITION_MODEL = "Inswapper128ArcFace"
 
 
 def clear_target_faces(main_window: "MainWindow", refresh_frame=True):
+    from app.ui.widgets.actions import video_control_actions
+
+    if video_control_actions.block_if_issue_scan_active(
+        main_window, "clear target faces"
+    ):
+        return
+
     if main_window.video_processor.processing:
         main_window.video_processor.stop_processing()
     main_window.targetFacesList.clear()
@@ -42,14 +49,19 @@ def clear_target_faces(main_window: "MainWindow", refresh_frame=True):
     common_widget_actions.set_widgets_values_using_face_id_parameters(
         main_window=main_window, face_id=None
     )
-    from app.ui.widgets.actions import video_control_actions
-
     video_control_actions.update_scan_review_button_states(main_window)
     if refresh_frame:
         common_widget_actions.refresh_frame(main_window=main_window)
 
 
 def clear_input_faces(main_window: "MainWindow"):
+    from app.ui.widgets.actions import video_control_actions
+
+    if video_control_actions.block_if_issue_scan_active(
+        main_window, "clear input faces"
+    ):
+        return
+
     main_window.inputFacesList.clear()
     main_window.inputFacesFavoritesList.clear()
 
@@ -66,6 +78,13 @@ def clear_input_faces(main_window: "MainWindow"):
 
 
 def clear_merged_embeddings(main_window: "MainWindow"):
+    from app.ui.widgets.actions import video_control_actions
+
+    if video_control_actions.block_if_issue_scan_active(
+        main_window, "clear merged embeddings"
+    ):
+        return
+
     main_window.inputEmbeddingsList.clear()
 
     for embed_button in list(main_window.merged_embeddings.values()):
@@ -90,6 +109,11 @@ def uncheck_all_merged_embeddings(main_window: "MainWindow"):
 
 
 def find_target_faces(main_window: "MainWindow"):
+    from app.ui.widgets.actions import video_control_actions
+
+    if video_control_actions.block_if_issue_scan_active(main_window, "find faces"):
+        return
+
     control = main_window.control.copy()
     video_processor = main_window.video_processor
     if video_processor.media_path:
@@ -255,8 +279,6 @@ def find_target_faces(main_window: "MainWindow"):
     if main_window.video_processor.processing:
         main_window.video_processor.stop_processing()
     common_widget_actions.refresh_frame(main_window)
-    from app.ui.widgets.actions import video_control_actions
-
     video_control_actions.update_scan_review_button_states(main_window)
 
     common_widget_actions.update_gpu_memory_progressbar(main_window)

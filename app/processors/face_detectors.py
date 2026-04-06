@@ -619,101 +619,6 @@ class FaceDetectors:
 
         return net_outs
 
-    def track_faces(self, img, previous_detections, **kwargs):
-        """
-        Attempts to track faces based on their previous positions using landmark detection directly.
-        Returns: (det, kpss, scores) or (None, None, None) if tracking failed for any face.
-        """
-        if not previous_detections:
-            return None, None, None
-
-        tracked_det = []
-        tracked_kpss = []
-        tracked_scores = []
-
-        img_height, img_width = img.shape[1], img.shape[2]
-
-        # Parameters for tracking
-        landmark_score_threshold = kwargs.get("landmark_score", 0.5)
-        detect_mode = kwargs.get("landmark_detect_mode", "203")
-        use_mean_eyes = kwargs.get("use_mean_eyes", False)
-
-        for prev_face in previous_detections:
-            # Previous bounding box
-            bbox = prev_face["bbox"]
-
-            # Expand the box slightly to account for movement
-            expansion_factor = 0.2  # 20% expansion
-            w = bbox[2] - bbox[0]
-            h = bbox[3] - bbox[1]
-
-            expanded_bbox = np.array(
-                [
-                    max(0, bbox[0] - w * expansion_factor),
-                    max(0, bbox[1] - h * expansion_factor),
-                    min(img_width, bbox[2] + w * expansion_factor),
-                    min(img_height, bbox[3] + h * expansion_factor),
-                ]
-            )
-
-            # Run landmark detection directly on the expanded previous area
-            # We assume kpss_5 is enough to verify presence
-            kpss_5, kpss_all, scores = self.models_processor.run_detect_landmark(
-                img,
-                expanded_bbox,
-                None,  # No initial keypoints known for this frame yet
-                detect_mode=detect_mode,
-                score=landmark_score_threshold,
-                from_points=False,  # Must be False here as we only have a box
-                use_mean_eyes=use_mean_eyes,
-            )
-
-            # Verification: If no landmarks found, tracking failed -> Full Redetect needed
-            if len(kpss_5) == 0:
-                return None, None, None
-
-            # Determine which keypoints to use for bbox recalculation
-            # Use dense landmarks if available (more precise), otherwise 5 points
-            current_kpss = (
-                kpss_all if (kpss_all is not None and len(kpss_all) > 0) else kpss_5
-            )
-
-            # Recalculate Bounding Box from the new landmarks
-            # This allows the box to "move" and follow the face
-            if current_kpss is not None and len(current_kpss) > 0:
-                min_x, min_y = np.min(current_kpss, axis=0)
-                max_x, max_y = np.max(current_kpss, axis=0)
-
-                # Add a little padding to the new box so it doesn't shrink over time
-                pad_w = (max_x - min_x) * 0.1
-                pad_h = (max_y - min_y) * 0.1
-
-                new_bbox = np.array(
-                    [
-                        max(0, min_x - pad_w),
-                        max(0, min_y - pad_h),
-                        min(img_width, max_x + pad_w),
-                        min(img_height, max_y + pad_h),
-                    ]
-                )
-
-                # Append results
-                tracked_det.append(new_bbox)
-                tracked_kpss.append(
-                    kpss_5
-                )  # We keep the 5-points format for consistency
-                # BT-14: use a conservative fallback score (0.5) rather than 0.99,
-                # so secondary landmark models can improve the result when confidence is uncertain
-                tracked_scores.append(prev_face.get("score", 0.5))
-            else:
-                return None, None, None
-
-        return (
-            np.array(tracked_det, dtype=np.float32),
-            np.array(tracked_kpss, dtype=np.float32),
-            np.array(tracked_scores, dtype=np.float32),
-        )
-
     def run_detect(
         self,
         img,
@@ -726,7 +631,6 @@ class FaceDetectors:
         landmark_score=0.5,
         from_points=False,
         rotation_angles=None,
-        previous_detections=None,
         bypass_bytetrack=False,
         out_track_ids: list[int] | None = None,
         **kwargs,
@@ -746,7 +650,6 @@ class FaceDetectors:
         # upside-down face crop that landmark detectors cannot handle, which corrupts
         # kpss_5 and causes wrong embeddings / ghost-face artifacts.
         if use_multi_rotation:
-            previous_detections = None
             from_points = True
 
         control = self.models_processor.main_window.control
@@ -845,7 +748,6 @@ class FaceDetectors:
                 return t_det, t_kpss, t_kpss
 
         # FULL DETECTION FALLBACK
-        # If no previous detections or tracking failed, run the heavy model
         detector = self.detector_map.get(detect_mode)
         if not detector:
             _det_empty = np.empty((0, 4), dtype=np.float32)

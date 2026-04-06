@@ -7,6 +7,7 @@ decision logic without loading any ML models or requiring a GPU.
 
 from __future__ import annotations
 
+import importlib
 import sys
 import threading
 from unittest.mock import MagicMock, patch
@@ -74,13 +75,65 @@ _STUBS = [
     # paths (empty detections) that never call get_scaling_transforms etc., so no
     # module-level patches to that module are required.
 ]
-for _s in _STUBS:
-    if _s not in sys.modules:
-        sys.modules[_s] = _stub(_s)
 
-# Stub FrameEnhancers / FrameEdits constructors
-sys.modules["app.processors.frame_enhancers"].FrameEnhancers = MagicMock  # type: ignore[attr-defined]
-sys.modules["app.processors.frame_edits"].FrameEdits = MagicMock  # type: ignore[attr-defined]
+
+def _load_frame_worker_module():
+    saved_modules = {name: sys.modules.get(name) for name in _STUBS}
+    saved_modules["app.processors.workers.frame_worker"] = sys.modules.pop(
+        "app.processors.workers.frame_worker", None
+    )
+    saved_package_attrs: dict[tuple[str, str], tuple[bool, object | None]] = {}
+
+    for module_name in [*_STUBS, "app.processors.workers.frame_worker"]:
+        parent_name, _, attr_name = module_name.rpartition(".")
+        if not parent_name:
+            continue
+        parent_module = sys.modules.get(parent_name)
+        had_attr = parent_module is not None and hasattr(parent_module, attr_name)
+        saved_package_attrs[(parent_name, attr_name)] = (
+            had_attr,
+            getattr(parent_module, attr_name) if had_attr else None,
+        )
+
+    try:
+        for stub_name in _STUBS:
+            sys.modules[stub_name] = _stub(stub_name)
+
+        for module_name in _STUBS:
+            parent_name, _, attr_name = module_name.rpartition(".")
+            parent_module = sys.modules.get(parent_name)
+            if parent_module is not None and attr_name:
+                setattr(parent_module, attr_name, sys.modules[module_name])
+
+        # Stub FrameEnhancers / FrameEdits constructors before importing the worker.
+        sys.modules["app.processors.frame_enhancers"].FrameEnhancers = MagicMock()  # type: ignore[attr-defined]
+        sys.modules["app.processors.frame_edits"].FrameEdits = MagicMock()  # type: ignore[attr-defined]
+
+        module = importlib.import_module("app.processors.workers.frame_worker")
+    finally:
+        for name, original_module in saved_modules.items():
+            if original_module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original_module
+
+        for (parent_name, attr_name), (
+            had_attr,
+            original_value,
+        ) in saved_package_attrs.items():
+            parent_module = sys.modules.get(parent_name)
+            if parent_module is None:
+                continue
+            if had_attr:
+                setattr(parent_module, attr_name, original_value)
+            elif hasattr(parent_module, attr_name):
+                delattr(parent_module, attr_name)
+
+    return module
+
+
+frame_worker_module = _load_frame_worker_module()
+FrameWorker = frame_worker_module.FrameWorker
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -128,8 +181,6 @@ def _make_worker(main_window):
         patch("app.helpers.vr_utils.E2P_Equirectangular", MagicMock()),
         patch("app.helpers.vr_utils.P2E_Perspective", MagicMock()),
     ):
-        from app.processors.workers.frame_worker import FrameWorker
-
         worker = FrameWorker.__new__(FrameWorker)
         # Must call Thread.__init__ so the .name property setter works
         threading.Thread.__init__(worker)
@@ -308,8 +359,9 @@ def test_empty_bboxes_returns_original(mock_main_window, small_equirect):
         mock_ec.height = small_equirect.shape[0]
         mock_ec.width = small_equirect.shape[1]
 
-        with patch(
-            "app.processors.workers.frame_worker.EquirectangularConverter",
+        with patch.object(
+            frame_worker_module,
+            "EquirectangularConverter",
             return_value=mock_ec,
         ):
             result = worker._process_frame_vr180(
@@ -358,13 +410,12 @@ def test_no_crops_skips_perspective_converter(mock_main_window, small_equirect):
         worker = _make_worker(mock_main_window)
 
         with (
-            patch(
-                "app.processors.workers.frame_worker.EquirectangularConverter",
+            patch.object(
+                frame_worker_module,
+                "EquirectangularConverter",
                 return_value=mock_ec,
             ),
-            patch(
-                "app.processors.workers.frame_worker.PerspectiveConverter"
-            ) as mock_pc_cls,
+            patch.object(frame_worker_module, "PerspectiveConverter") as mock_pc_cls,
         ):
             worker._process_frame_vr180(
                 img_numpy_rgb_uint8=small_equirect,
@@ -458,8 +509,6 @@ def test_ghostface_models_frozenset():
         patch("app.helpers.vr_utils.E2P_Equirectangular", MagicMock()),
         patch("app.helpers.vr_utils.P2E_Perspective", MagicMock()),
     ):
-        from app.processors.workers.frame_worker import FrameWorker
-
         expected = {"GhostFace-v1", "GhostFace-v2", "GhostFace-v3"}
         assert FrameWorker.GHOSTFACE_MODELS == expected
         assert isinstance(FrameWorker.GHOSTFACE_MODELS, frozenset)
@@ -475,3 +524,9 @@ def test_ghostface_models_frozenset():
 
         assert FrameWorker.UNIFACE_MODELS == frozenset({"UniFace-256"})
         assert isinstance(FrameWorker.UNIFACE_MODELS, frozenset)
+
+
+def test_frame_worker_import_restores_stubbed_sys_modules():
+    assert not isinstance(
+        sys.modules.get("app.ui.widgets.actions.common_actions"), MagicMock
+    )
