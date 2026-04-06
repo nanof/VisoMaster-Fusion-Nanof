@@ -1185,19 +1185,6 @@ class FrameWorker(threading.Thread):
             self.set_scaling_transforms(control)
             self._last_vr_scaling_control = _vr_scaling_keys
 
-        # Detection interval / previous-detections setup (mirrors standard-mode logic).
-        _vr_detection_interval = int(control.get("FaceDetectionIntervalSlider", 1))
-        _previous_faces_vr: list | None = None
-        with self.lock:
-            _last_detected_vr = self.last_detected_faces_vr
-            _last_frame_no_vr = self.last_processed_frame_number_vr
-        if (
-            len(_last_detected_vr) > 0
-            and self.frame_number % _vr_detection_interval != 0
-            and self.frame_number == _last_frame_no_vr + 1
-        ):
-            _previous_faces_vr = _last_detected_vr
-
         # Improvement D: in Both-Eyes mode, detect on each eye-half separately.
         # A standard VR180 SBS equirect is 2:1 (W=2H), so each half is square (H×H).
         # Detecting on each 1:1 half gives the detector 4× more pixels per face vs
@@ -1217,7 +1204,7 @@ class FrameWorker(threading.Thread):
         _lm_score = control["LandmarkDetectScoreSlider"] / 100.0
         _use_mean_eyes = control.get("LandmarkMeanEyesToggle", False)
 
-        def _run_det(tensor, prev_dets=None, bypass_bytetrack=False):
+        def _run_det(tensor, bypass_bytetrack=False):
             return self.models_processor.run_detect(
                 tensor,
                 _det_mode,
@@ -1229,7 +1216,6 @@ class FrameWorker(threading.Thread):
                 from_points=False,
                 rotation_angles=vr_rotation_angles,
                 use_mean_eyes=_use_mean_eyes,
-                previous_detections=prev_dets,
                 bypass_bytetrack=bypass_bytetrack,
             )
 
@@ -1245,37 +1231,13 @@ class FrameWorker(threading.Thread):
             _left_tensor = original_equirect_tensor_for_vr[:, :, :_half_w]
             _right_tensor = original_equirect_tensor_for_vr[:, :, _half_w:]
 
-            # Split previous_detections into per-eye coordinate spaces
-            _prev_left: list | None = None
-            _prev_right: list | None = None
-            if _previous_faces_vr is not None:
-                _prev_left = [
-                    f
-                    for f in _previous_faces_vr
-                    if (f["bbox"][0] + f["bbox"][2]) / 2.0 < _half_w
-                ]
-                _prev_right = [
-                    {
-                        "bbox": [
-                            f["bbox"][0] - _half_w,
-                            f["bbox"][1],
-                            f["bbox"][2] - _half_w,
-                            f["bbox"][3],
-                        ],
-                        "score": f.get("score", 1.0),
-                    }
-                    for f in _previous_faces_vr
-                    if (f["bbox"][0] + f["bbox"][2]) / 2.0 >= _half_w
-                ]
-
             # bypass_bytetrack=True: per-eye detection uses half-width coordinate spaces,
             # which would corrupt the tracker's Kalman state if ByteTrack ran on both halves.
-            # Simple fallback tracking (via previous_detections) handles the interval skip.
             _bboxes_left = _norm_bboxes(
-                _run_det(_left_tensor, _prev_left, bypass_bytetrack=True)[0]
+                _run_det(_left_tensor, bypass_bytetrack=True)[0]
             )
             _bboxes_right = _norm_bboxes(
-                _run_det(_right_tensor, _prev_right, bypass_bytetrack=True)[0]
+                _run_det(_right_tensor, bypass_bytetrack=True)[0]
             )
 
             # Offset right-half x-coordinates into full-equirect space
@@ -1293,9 +1255,7 @@ class FrameWorker(threading.Thread):
         else:
             # Single Eye or non-2:1 equirect — detect on the full frame as before.
             # Use the standard (512, 512) input size — TRT engines are compiled for this shape.
-            bboxes_eq_np = _norm_bboxes(
-                _run_det(original_equirect_tensor_for_vr, _previous_faces_vr)[0]
-            )
+            bboxes_eq_np = _norm_bboxes(_run_det(original_equirect_tensor_for_vr)[0])
 
         if not isinstance(bboxes_eq_np, np.ndarray):
             bboxes_eq_np = np.array(bboxes_eq_np)
@@ -1305,14 +1265,7 @@ class FrameWorker(threading.Thread):
             bboxes_eq_np = bboxes_eq_np.reshape(1, -1)
 
         # Improvement A: tiled perspective detection — catch faces missed by equirect
-        # detection (distorted at high elevation, near ±180° seam, or large near-camera faces).
-        # Guard: only run on detection keyframes (same interval as equirect detection) to avoid
-        # running 24 full inference passes every frame, which causes major slowdowns.
-        _is_detection_keyframe = (
-            _vr_detection_interval <= 1
-            or self.frame_number % _vr_detection_interval == 0
-        )
-        if control.get("VR180TileDetectionToggle", False) and _is_detection_keyframe:
+        if control.get("VR180TileDetectionToggle", False):
             _tile_bboxes = self._detect_faces_vr_tiled(
                 equirect_converter,
                 control,
