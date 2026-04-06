@@ -459,101 +459,6 @@ class FaceDetectors:
 
         return net_outs
 
-    def track_faces(self, img, previous_detections, **kwargs):
-        """
-        Attempts to track faces based on their previous positions using landmark detection directly.
-        Returns: (det, kpss, scores) or (None, None, None) if tracking failed for any face.
-        """
-        if not previous_detections:
-            return None, None, None
-
-        tracked_det = []
-        tracked_kpss = []
-        tracked_scores = []
-
-        img_height, img_width = img.shape[1], img.shape[2]
-
-        # Parameters for tracking
-        landmark_score_threshold = kwargs.get("landmark_score", 0.5)
-        detect_mode = kwargs.get("landmark_detect_mode", "203")
-        use_mean_eyes = kwargs.get("use_mean_eyes", False)
-
-        for prev_face in previous_detections:
-            # Previous bounding box
-            bbox = prev_face["bbox"]
-
-            # Expand the box slightly to account for movement
-            expansion_factor = 0.2  # 20% expansion
-            w = bbox[2] - bbox[0]
-            h = bbox[3] - bbox[1]
-
-            expanded_bbox = np.array(
-                [
-                    max(0, bbox[0] - w * expansion_factor),
-                    max(0, bbox[1] - h * expansion_factor),
-                    min(img_width, bbox[2] + w * expansion_factor),
-                    min(img_height, bbox[3] + h * expansion_factor),
-                ]
-            )
-
-            # Run landmark detection directly on the expanded previous area
-            # We assume kpss_5 is enough to verify presence
-            kpss_5, kpss_all, scores = self.models_processor.run_detect_landmark(
-                img,
-                expanded_bbox,
-                None,  # No initial keypoints known for this frame yet
-                detect_mode=detect_mode,
-                score=landmark_score_threshold,
-                from_points=False,  # Must be False here as we only have a box
-                use_mean_eyes=use_mean_eyes,
-            )
-
-            # Verification: If no landmarks found, tracking failed -> Full Redetect needed
-            if len(kpss_5) == 0:
-                return None, None, None
-
-            # Determine which keypoints to use for bbox recalculation
-            # Use dense landmarks if available (more precise), otherwise 5 points
-            current_kpss = (
-                kpss_all if (kpss_all is not None and len(kpss_all) > 0) else kpss_5
-            )
-
-            # Recalculate Bounding Box from the new landmarks
-            # This allows the box to "move" and follow the face
-            if current_kpss is not None and len(current_kpss) > 0:
-                min_x, min_y = np.min(current_kpss, axis=0)
-                max_x, max_y = np.max(current_kpss, axis=0)
-
-                # Add a little padding to the new box so it doesn't shrink over time
-                pad_w = (max_x - min_x) * 0.1
-                pad_h = (max_y - min_y) * 0.1
-
-                new_bbox = np.array(
-                    [
-                        max(0, min_x - pad_w),
-                        max(0, min_y - pad_h),
-                        min(img_width, max_x + pad_w),
-                        min(img_height, max_y + pad_h),
-                    ]
-                )
-
-                # Append results
-                tracked_det.append(new_bbox)
-                tracked_kpss.append(
-                    kpss_5
-                )  # We keep the 5-points format for consistency
-                # BT-14: use a conservative fallback score (0.5) rather than 0.99,
-                # so secondary landmark models can improve the result when confidence is uncertain
-                tracked_scores.append(prev_face.get("score", 0.5))
-            else:
-                return None, None, None
-
-        return (
-            np.array(tracked_det, dtype=np.float32),
-            np.array(tracked_kpss, dtype=np.float32),
-            np.array(tracked_scores, dtype=np.float32),
-        )
-
     def run_detect(
         self,
         img,
@@ -566,7 +471,6 @@ class FaceDetectors:
         landmark_score=0.5,
         from_points=False,
         rotation_angles=None,
-        previous_detections=None,
         bypass_bytetrack=False,
         **kwargs,
     ):
@@ -585,7 +489,6 @@ class FaceDetectors:
         # upside-down face crop that landmark detectors cannot handle, which corrupts
         # kpss_5 and causes wrong embeddings / ghost-face artifacts.
         if use_multi_rotation:
-            previous_detections = None
             from_points = True
 
         control = self.models_processor.main_window.control
@@ -595,92 +498,7 @@ class FaceDetectors:
         if bypass_bytetrack:
             use_bytetrack = False
 
-        # ByteTrack skip-frame shortcut: when ByteTrack is active, the tracker has been
-        # initialised, AND this is a detection-interval skip frame (indicated by non-empty
-        # previous_detections), advance the Kalman filter with empty detections rather than
-        # running the full detector.  This makes FaceDetectionIntervalSlider effective even
-        # when ByteTrack is enabled (previously the slider was silently ignored).
-        if (
-            use_bytetrack
-            and BYTETracker is not None
-            and previous_detections is not None
-            and len(previous_detections) > 0
-        ):
-            with self._tracker_lock:
-                if self.tracker is not None:
-                    img_hw = (int(img.shape[1]), int(img.shape[2]))
-                    online_targets = self.tracker.update(
-                        np.empty((0, 5)), img_hw, img_hw
-                    )
-                else:
-                    online_targets = []
-
-            # Build return arrays from coasted tracks (Kalman-predicted positions
-            # with last known landmarks) — same logic as the main ByteTrack path below
-            tracked_det: list = []
-            tracked_kpss_5: list = []
-            tracked_kpss_all: list = []
-            tracked_scores: list = []
-            for t in online_targets:
-                tlwh = t.tlwh
-                tid = t.track_id
-                t_bbox = np.array(
-                    [tlwh[0], tlwh[1], tlwh[0] + tlwh[2], tlwh[1] + tlwh[3]]
-                )
-                with self._track_history_lock:
-                    hist = self.track_history.get(tid)
-                if hist is not None and hist.get("kps") is not None:
-                    tracked_det.append(t_bbox)
-                    tracked_kpss_5.append(hist["kps"])
-                    tracked_kpss_all.append(hist["kps"])
-                    tracked_scores.append(hist["cum_score"])
-
-            if tracked_det:
-                return (
-                    np.array(tracked_det, dtype=np.float32),
-                    np.array(tracked_kpss_5, dtype=np.float32),
-                    np.array(tracked_kpss_all, dtype=object),
-                )
-            # Tracker had no active tracks (e.g. first ever frame) → fall through to full detection
-            # so the user sees faces immediately rather than waiting one extra frame.
-
-        # TRACKING ATTEMPT (Simple Fallback)
-        # If we have previous faces and tracking is requested (via implicit logic or kwargs)
-        # We skip this if ByteTrack is enabled to prioritize the advanced tracker
-        if (
-            not use_bytetrack
-            and previous_detections is not None
-            and len(previous_detections) > 0
-        ):
-            # Try to track
-            t_det, t_kpss, t_scores = self.track_faces(
-                img,
-                previous_detections,
-                landmark_score=landmark_score,
-                landmark_detect_mode=landmark_detect_mode,
-                **kwargs,
-            )
-
-            # If tracking succeeded (returns are not None), skip heavy detection
-            if t_det is not None:
-                # Optionally refine landmarks (if the user wants detailed landmarks)
-                if use_landmark_detection:
-                    det_r, kpss_5_r, kpss_r, _ = self._refine_landmarks(
-                        img,
-                        t_det,
-                        t_kpss,
-                        t_scores,
-                        use_landmark_detection,
-                        landmark_detect_mode,
-                        landmark_score,
-                        from_points,
-                        **kwargs,
-                    )
-                    return det_r, kpss_5_r, kpss_r
-                return t_det, t_kpss, t_kpss
-
         # FULL DETECTION FALLBACK
-        # If no previous detections or tracking failed, run the heavy model
         detector = self.detector_map.get(detect_mode)
         if not detector:
             return np.empty((0, 4)), np.empty((0, 5, 2)), np.empty((0, 5, 2))

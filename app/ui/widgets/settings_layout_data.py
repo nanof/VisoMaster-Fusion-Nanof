@@ -359,15 +359,6 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "step": 1,
             "help": "Set the confidence score threshold for face detection. Higher values ensure more confident detections but may miss some faces.",
         },
-        "FaceDetectionIntervalSlider": {
-            "level": 1,
-            "label": "Detection Interval (Frames)",
-            "min_value": "1",
-            "max_value": "30",
-            "default": "1",
-            "step": 1,
-            "help": "How often to run the full face detector. Higher values improve FPS but may lose fast-moving faces. 1 = Detect every frame (Slowest).",
-        },
         "MaxFacesToDetectSlider": {
             "level": 1,
             "label": "Max No of Faces to Detect",

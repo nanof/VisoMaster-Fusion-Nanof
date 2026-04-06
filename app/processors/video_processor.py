@@ -532,19 +532,7 @@ class VideoProcessor(QObject):
                             break
 
             # DO NOT override user choice! We preserve use_landmark and landmark_mode.
-
-            detection_interval = int(
-                local_control_for_worker.get("FaceDetectionIntervalSlider", 1)
-            )
-            previous_faces_arg = None
-
-            if (
-                len(self.last_detected_faces) > 0
-                and self.current_frame_number % detection_interval != 0
-            ):
-                previous_faces_arg = self.last_detected_faces
             device = self.main_window.models_processor.device
-
             owns_frame_tensor = frame_tensor is None
             if frame_tensor is None:
                 frame_tensor = (
@@ -573,7 +561,6 @@ class VideoProcessor(QObject):
                 use_mean_eyes=local_control_for_worker.get(
                     "LandmarkMeanEyesToggle", False
                 ),
-                previous_detections=previous_faces_arg,
             )
 
             # 2. Smart Double-Scan for 203 points
@@ -608,7 +595,6 @@ class VideoProcessor(QObject):
                         use_mean_eyes=local_control_for_worker.get(
                             "LandmarkMeanEyesToggle", False
                         ),
-                        previous_detections=previous_faces_arg,
                         bypass_bytetrack=True,  # Prevent double-incrementing the object tracker
                     )
 
