@@ -118,6 +118,23 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "step": 1,
             "help": "Set the similarity threshold to control how similar the detected face should be to the reference (target) face.",
         },
+        "SequentialTargetMatchEnableToggle": {
+            "level": 1,
+            "label": "Swap all by index",
+            "default": False,
+            "help": "No Find Faces required. Uses only checked Input Faces in list order: detection 0 gets input 0, detection 1 gets input 1, and if there are more detections than inputs, wraps to input 0 again (round-robin). Cosine similarity is not used. Assignments are stabilized across frames (IoU vs previous bboxes; with Face Tracking enabled, ByteTrack IDs are used when available) so brief dropouts do not reshuffle which input maps to which face. Swap/restorer/mask settings use the same parameter set as normal swap: the selected Find Faces card if any, otherwise the current face-parameter panel (current_widget_parameters). Recognition uses the active swapper's ArcFace model for the target embedding. Ignored when 'Swap Input Face only once' is enabled (Settings → Swap settings). Use 'Input rotate start offset' (or window keys comma / full stop) to shift which checked input is treated as index 0 for the first detection.",
+        },
+        "SequentialInputRotateOffsetSlider": {
+            "level": 2,
+            "label": "Input rotate start offset",
+            "min_value": "0",
+            "max_value": "31",
+            "default": "0",
+            "step": 1,
+            "parentToggle": "SequentialTargetMatchEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Adds a circular shift to input assignment: effective input index is (assignment + offset) modulo number of checked inputs. Example with 3 inputs: offset 1 maps the first detection (by stabilized order) to the second checked face. Window keys , (comma) and . (full stop) decrease/increase this value with wraparound — same physical keys on ES and US layouts; they do nothing if this slider is hidden or disabled.",
+        },
         "PreSwapSharpnessDecimalSlider": {
             "level": 1,
             "label": "Pre Swap Sharpness (1.0)",

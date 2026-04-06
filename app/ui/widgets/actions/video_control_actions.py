@@ -1419,7 +1419,7 @@ def remove_all_markers(main_window: "MainWindow"):
 
 
 def adjust_sequential_input_rotate_offset(main_window: "MainWindow", delta: int) -> None:
-    """Adjust Swap settings → Input rotate start offset (only when the slider exists and is enabled)."""
+    """Adjust Face Swap → Input rotate start offset (only when the slider exists and is enabled)."""
     key = "SequentialInputRotateOffsetSlider"
     w = main_window.parameter_widgets.get(key)
     if w is None or not w.isEnabled():

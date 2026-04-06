@@ -330,7 +330,7 @@ class FrameWorker(threading.Thread):
         # CHW uint8 frame tensor from feeder sequential detect (avoids duplicate H2D)
         self._feeder_chw_tensor: Optional[torch.Tensor] = None
 
-        # RR-TEMP: temporal coherence for "Rotate checked Input Faces on detections"
+        # RR-TEMP: temporal coherence for "Swap all by index"
         self._rr_prev_slots: list[tuple[np.ndarray, int]] = []
         self._rr_track_to_input: dict[int, int] = {}
         self._rr_stabilize_last_fn: int = -999999

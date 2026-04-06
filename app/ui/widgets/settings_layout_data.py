@@ -510,23 +510,6 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "default": False,
             "help": "only swap highest face match per face (not every match above treshold)",
         },
-        "SequentialTargetMatchEnableToggle": {
-            "level": 1,
-            "label": "Rotate checked Input Faces on detections",
-            "default": False,
-            "help": "No Find Faces required. Uses only checked Input Faces in list order: detection 0 gets input 0, detection 1 gets input 1, and if there are more detections than inputs, wraps to input 0 again (round-robin). Cosine similarity is not used. Assignments are stabilized across frames (IoU vs previous bboxes; with Face Tracking enabled, ByteTrack IDs are used when available) so brief dropouts do not reshuffle which input maps to which face. Swap/restorer/mask settings use the same parameter set as normal swap: the selected Find Faces card if any, otherwise the current face-parameter panel (current_widget_parameters). Recognition uses the active swapper's ArcFace model for the target embedding. Ignored when 'Swap Input Face only once' is enabled. Use 'Input rotate start offset' (or window keys comma / full stop) to shift which checked input is treated as index 0 for the first detection.",
-        },
-        "SequentialInputRotateOffsetSlider": {
-            "level": 2,
-            "label": "Input rotate start offset",
-            "min_value": "0",
-            "max_value": "31",
-            "default": "0",
-            "step": 1,
-            "parentToggle": "SequentialTargetMatchEnableToggle",
-            "requiredToggleValue": True,
-            "help": "Adds a circular shift to input assignment: effective input index is (assignment + offset) modulo number of checked inputs. Example with 3 inputs: offset 1 maps the first detection (by stabilized order) to the second checked face. Window keys , (comma) and . (full stop) decrease/increase this value with wraparound — same physical keys on ES and US layouts; they do nothing if this slider is hidden or disabled.",
-        },
         "VR180ModeEnableToggle": {
             "level": 1,
             "label": "Enable VR180 Mode",
