@@ -755,10 +755,11 @@ def update_scan_review_button_states(main_window: "MainWindow"):
     has_selected_face = (
         getattr(main_window, "selected_target_face_id", None) is not None
     )
+    scan_active = is_issue_scan_active(main_window)
 
     scan_button = getattr(main_window, "runScanButton", None)
     if scan_button is not None:
-        scan_button.setEnabled(has_target_faces)
+        scan_button.setEnabled(True if scan_active else has_target_faces)
 
     for button_name in (
         "runScanButton",
@@ -770,7 +771,7 @@ def update_scan_review_button_states(main_window: "MainWindow"):
         if button is not None:
             if button_name == "runScanButton":
                 continue
-            button.setEnabled(has_selected_face)
+            button.setEnabled(has_selected_face and not scan_active)
 
 
 def _set_slider_marker_values(
@@ -1120,6 +1121,7 @@ def _start_issue_scan_ui(
                 if previous_issue_frames_by_face is not None
                 else getattr(main_window, "issue_frames_by_face", {})
             ),
+            "frames_scanned": 0,
             "has_partial_results": False,
         }
     )
@@ -1213,6 +1215,7 @@ def _handle_issue_scan_progress(
     frame_number: int,
     scan_fps: float,
 ):
+    _get_issue_scan_ui_state(main_window)["frames_scanned"] = int(processed)
     _set_slider_frame_without_side_effects(main_window, frame_number)
     run_button = getattr(main_window, "runScanButton", None)
     if run_button is not None:
@@ -1232,6 +1235,7 @@ def _cleanup_issue_scan_worker(main_window: "MainWindow"):
     if worker is not None:
         worker.deleteLater()
         main_window.scan_issue_worker = None
+    update_scan_review_button_states(main_window)
 
 
 def _handle_issue_scan_completed(
@@ -1244,6 +1248,8 @@ def _handle_issue_scan_completed(
     cancelled: bool = False,
 ):
     state = _get_issue_scan_ui_state(main_window)
+    frames_scanned_recorded = int(state.get("frames_scanned", 0))
+    scan_made_progress = max(frames_scanned_recorded, int(frames_scanned)) > 0
     partial_results_visible = bool(state.get("has_partial_results", False))
     partial_results_visible = partial_results_visible or any(
         bool(frames) for frames in issue_frames_by_face.values()
@@ -1251,7 +1257,7 @@ def _handle_issue_scan_completed(
     restored_previous_results = False
     restored_issue_frames = 0
 
-    if cancelled and not partial_results_visible:
+    if cancelled and not scan_made_progress:
         restored_previous_results = True
         restored_issue_frames = _restore_previous_issue_scan_results(main_window)
     else:
@@ -1297,7 +1303,7 @@ def _handle_issue_scan_completed(
 def _handle_issue_scan_cancelled(main_window: "MainWindow"):
     state = _get_issue_scan_ui_state(main_window)
     restored_previous_results = False
-    if not state.get("has_partial_results", False):
+    if int(state.get("frames_scanned", 0)) <= 0:
         _restore_previous_issue_scan_results(main_window)
         restored_previous_results = True
     _restore_issue_scan_ui(main_window)
@@ -1316,7 +1322,7 @@ def _handle_issue_scan_cancelled(main_window: "MainWindow"):
 
 def _handle_issue_scan_failed(main_window: "MainWindow", error_message: str):
     state = _get_issue_scan_ui_state(main_window)
-    if not state.get("has_partial_results", False):
+    if int(state.get("frames_scanned", 0)) <= 0:
         _restore_previous_issue_scan_results(main_window)
     _restore_issue_scan_ui(main_window)
     _cleanup_issue_scan_worker(main_window)

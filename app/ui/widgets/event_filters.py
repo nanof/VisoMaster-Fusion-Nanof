@@ -119,6 +119,11 @@ class ListWidgetEventFilter(QtCore.QObject):
             # Handle the drop event
             elif event.type() == QtCore.QEvent.Type.Drop:
                 if event.mimeData().hasUrls():
+                    if video_control_actions.block_if_issue_scan_active(
+                        self.main_window, "change target media"
+                    ):
+                        event.ignore()
+                        return True
                     # Extract file paths
                     file_paths = []
                     for url in event.mimeData().urls():
@@ -171,6 +176,11 @@ class ListWidgetEventFilter(QtCore.QObject):
             # Handle the drop event
             elif event.type() == QtCore.QEvent.Type.Drop:
                 if event.mimeData().hasUrls():
+                    if video_control_actions.block_if_issue_scan_active(
+                        self.main_window, "load input faces"
+                    ):
+                        event.ignore()
+                        return True
                     # Extract file paths
                     file_paths = []
                     for url in event.mimeData().urls():

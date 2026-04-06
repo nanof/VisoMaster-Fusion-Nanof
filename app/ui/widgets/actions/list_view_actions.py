@@ -270,6 +270,13 @@ def clear_stop_loading_target_media(main_window: "MainWindow"):
 def select_target_medias(
     main_window: "MainWindow", source_type="folder", folder_name=False, files_list=None
 ):
+    from app.ui.widgets.actions import video_control_actions
+
+    if video_control_actions.block_if_issue_scan_active(
+        main_window, "change target media"
+    ):
+        return
+
     files_list = files_list or []
     if source_type == "folder":
         folder_name = QtWidgets.QFileDialog.getExistingDirectory(
@@ -360,6 +367,13 @@ def clear_stop_loading_input_media(main_window: "MainWindow"):
 def select_input_face_images(
     main_window: "MainWindow", source_type="folder", folder_name=False, files_list=None
 ):
+    from app.ui.widgets.actions import video_control_actions
+
+    if video_control_actions.block_if_issue_scan_active(
+        main_window, "load input faces"
+    ):
+        return
+
     files_list = files_list or []
     if source_type == "folder":
         folder_name = QtWidgets.QFileDialog.getExistingDirectory(

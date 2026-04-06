@@ -245,6 +245,13 @@ def copy_selected_face_parameters(
 def paste_selected_face_parameters(
     main_window: "MainWindow", face_id: str | None = None
 ) -> bool:
+    from app.ui.widgets.actions import video_control_actions
+
+    if video_control_actions.block_if_issue_scan_active(
+        main_window, "apply copied parameters"
+    ):
+        return False
+
     face_id = _resolve_target_face_id(main_window, face_id)
     if not face_id:
         _show_target_face_parameter_message(

@@ -223,6 +223,9 @@ def load_job(main_window: "MainWindow"):
 
     This performs a FULL, HEAVY load of the workspace.
     """
+    if video_control_actions.block_if_issue_scan_active(main_window, "load a job"):
+        return
+
     selected_jobs = get_selected_jobs(main_window)
     if not selected_jobs:
         QMessageBox.warning(
@@ -1631,6 +1634,11 @@ def handle_batch_completion(main_window: "MainWindow"):
 
 def process_selected_job(main_window: "MainWindow"):
     """Starts a JobProcessor thread for only the selected jobs."""
+    if video_control_actions.block_if_issue_scan_active(
+        main_window, "start selected jobs"
+    ):
+        return
+
     selected_jobs = get_selected_jobs(main_window)
     if not selected_jobs:
         QMessageBox.warning(
@@ -1644,6 +1652,11 @@ def process_selected_job(main_window: "MainWindow"):
 
 def start_processing_all_jobs(main_window: "MainWindow"):
     """Starts a JobProcessor thread for all jobs in the list."""
+    if video_control_actions.block_if_issue_scan_active(
+        main_window, "start job processing"
+    ):
+        return
+
     print("[INFO] Processing all jobs...")
     start_job_processor(main_window, jobs_to_process=None)  # None means all jobs
 
