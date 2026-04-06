@@ -755,6 +755,8 @@ def show_shortcuts(main_window: "MainWindow"):
         "<b>R</b> : Record start/stop<br>"
         "<b>S</b> : Swap face<br>"
         "<b>F5</b> : Pipeline profile overlay on/off<br>"
+        "<b>F6</b> : Face restorer 1 on/off<br>"
+        "<b>Shift+F6</b> : Face restorer 2 on/off<br>"
         "<b>F7</b> : Frame interpolation on/off<br>"
         "<br>"
         "<b><u>Seeking:</u></b><br>"

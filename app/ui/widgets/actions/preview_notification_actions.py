@@ -67,3 +67,15 @@ def show_frame_interpolation_state(main_window: "MainWindow", enabled: bool) -> 
         main_window,
         "Frame interpolation on" if enabled else "Frame interpolation off",
     )
+
+
+def show_face_restorer_slot_state(
+    main_window: "MainWindow", slot: int, enabled: bool
+) -> None:
+    """slot 1 = restorer principal, 2 = restorer 2."""
+    n = 1 if slot == 1 else 2
+    state = "on" if enabled else "off"
+    show_preview_notification(
+        main_window,
+        f"Face restorer {n} {state}",
+    )

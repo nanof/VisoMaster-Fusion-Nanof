@@ -633,6 +633,7 @@ class FaceDetectors:
         rotation_angles=None,
         bypass_bytetrack=False,
         out_track_ids: list[int] | None = None,
+        previous_detections=None,
         **kwargs,
     ):
         """

@@ -58,6 +58,19 @@ landmark_model_mapping = {
     "478": "FaceLandmark478",
 }
 
+# Restauradores (nombre en la UI) → ajustes globales (main_window.control) que deben cumplirse.
+# Se aplican al elegir el tipo o al activar el restorer si ya estaba seleccionado.
+RESTORER_REQUIRED_CONTROL_SETTINGS = {
+    "DMDNet": {
+        "LandmarkDetectToggle": True,
+        "LandmarkDetectModelSelection": "106",
+    },
+    "DMDNet FP16": {
+        "LandmarkDetectToggle": True,
+        "LandmarkDetectModelSelection": "106",
+    },
+}
+
 # Modelos TensorRT nativos (.engine); mismos campos que en models_list cuando haya entradas.
 models_trt_list: list = []
 

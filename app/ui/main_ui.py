@@ -17,6 +17,7 @@ from app.ui.widgets.actions import video_control_actions
 from app.ui.widgets.actions import filter_actions
 from app.ui.widgets.actions import save_load_actions
 from app.ui.widgets.actions import list_view_actions
+from app.ui.widgets.actions import preview_notification_actions
 from app.ui.widgets.actions import transcode_actions
 from app.ui.widgets.actions import graphics_view_actions
 from app.ui.widgets.actions import job_manager_actions
@@ -975,6 +976,21 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 fi_toggle = self.parameter_widgets.get("PreviewFrameGenEnableToggle")
                 if fi_toggle is not None and fi_toggle.isEnabled():
                     fi_toggle.click()
+            case QtCore.Qt.Key_F6:
+                shift = bool(
+                    event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier
+                )
+                fr_key = (
+                    "FaceRestorerEnable2Toggle"
+                    if shift
+                    else "FaceRestorerEnableToggle"
+                )
+                fr_toggle = self.parameter_widgets.get(fr_key)
+                if fr_toggle is not None and fr_toggle.isEnabled():
+                    fr_toggle.click()
+                    preview_notification_actions.show_face_restorer_slot_state(
+                        self, 2 if shift else 1, fr_toggle.isChecked()
+                    )
             case QtCore.Qt.Key_Comma:
                 video_control_actions.adjust_sequential_input_rotate_offset(self, -1)
             case QtCore.Qt.Key_Period:

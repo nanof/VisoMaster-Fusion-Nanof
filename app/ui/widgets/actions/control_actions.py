@@ -13,6 +13,7 @@ import qdarktheme
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
 import app.helpers.miscellaneous as misc_helpers
+import app.ui.widgets.widget_components as widget_components
 from app.ui.widgets.actions import common_actions as common_widget_actions
 
 #'''
@@ -371,6 +372,82 @@ def handle_face_mask_state_change(
         mp.unload_model(model_to_change)
 
 
+def apply_restorer_required_global_settings(
+    main_window: "MainWindow", restorer_display_name: str
+) -> None:
+    """Aplica ajustes globales (p. ej. landmarks) exigidos por un tipo de restorer; registra en log si cambia algo."""
+    from app.processors.models_data import RESTORER_REQUIRED_CONTROL_SETTINGS
+    from app.ui.widgets.settings_layout_data import SETTINGS_LAYOUT_DATA
+
+    required = RESTORER_REQUIRED_CONTROL_SETTINGS.get(restorer_display_name)
+    if not required:
+        return
+
+    def _lookup_exec(control_name: str):
+        for widgets in SETTINGS_LAYOUT_DATA.values():
+            meta = widgets.get(control_name)
+            if meta:
+                return meta.get("exec_function"), list(
+                    meta.get("exec_function_args", [])
+                )
+        return None, []
+
+    priority = (
+        "LandmarkDetectToggle",
+        "LandmarkDetectModelSelection",
+    )
+    ordered_keys = [k for k in priority if k in required]
+    ordered_keys.extend(k for k in required if k not in ordered_keys)
+
+    applied_parts: list[str] = []
+    for control_name in ordered_keys:
+        want = required[control_name]
+        cur = main_window.control.get(control_name)
+        if cur == want:
+            continue
+
+        widget = main_window.parameter_widgets.get(control_name)
+        if widget is not None:
+            widget.blockSignals(True)
+            try:
+                if isinstance(widget, widget_components.ToggleButton):
+                    widget.set_value(bool(want))
+                elif isinstance(widget, widget_components.SelectionBox):
+                    widget.set_value(str(want))
+                else:
+                    widget.set_value(want)
+            finally:
+                widget.blockSignals(False)
+            if isinstance(widget, widget_components.ToggleButton):
+                common_widget_actions.show_hide_related_widgets(
+                    main_window, widget, control_name, None, None
+                )
+
+        ef, eargs = _lookup_exec(control_name)
+        common_widget_actions.update_control(
+            main_window,
+            control_name,
+            want,
+            exec_function=ef,
+            exec_function_args=eargs,
+        )
+        applied_parts.append(f"{control_name}={want!r}")
+
+    if applied_parts:
+        summary = ", ".join(applied_parts)
+        print(
+            f"[INFO] Restorer «{restorer_display_name}» requiere ajustes globales; "
+            f"aplicado: {summary}"
+        )
+        from app.ui.widgets.actions import preview_notification_actions as _preview_notify
+
+        _preview_notify.show_preview_notification(
+            main_window,
+            f"Auto-set for {restorer_display_name}: {summary}",
+            duration_ms=3200,
+        )
+
+
 def handle_restorer_state_change(
     main_window: "MainWindow", new_value: bool, control_name: str
 ):
@@ -436,6 +513,9 @@ def handle_restorer_state_change(
             if active_model_attr:
                 setattr(face_restorers_manager, active_model_attr, None)
 
+    if new_value and model_type:
+        apply_restorer_required_global_settings(main_window, str(model_type))
+
 
 def handle_model_selection_change(
     main_window: "MainWindow", new_model_type: str, control_name: str
@@ -495,6 +575,8 @@ def handle_model_selection_change(
             )
     elif active_model_attr:
         setattr(face_restorers_manager, active_model_attr, None)
+
+    apply_restorer_required_global_settings(main_window, str(new_model_type))
 
 
 def handle_landmark_state_change(
