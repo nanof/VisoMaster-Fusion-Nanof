@@ -94,7 +94,7 @@ if not defined BRANCH (
         set "BRANCH=dev"
         echo 'dev' argument found. Setting branch to dev.
     ) else (
-        set "BRANCH=main"
+        set "BRANCH=dev"
         echo No argument provided. Defaulting to main branch.
     )
     (echo BRANCH=!BRANCH!)>> "%CONFIG_FILE%"
