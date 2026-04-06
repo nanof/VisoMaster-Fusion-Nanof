@@ -571,32 +571,83 @@ class VideoProcessor(QObject):
                     kpss_203 = kpss
                 else:
                     # Execute second pass specifically for advanced features
-                    _, _, kpss_203 = self.main_window.models_processor.run_detect(
-                        frame_tensor,
-                        local_control_for_worker.get(
-                            "DetectorModelSelection", "RetinaFace"
-                        ),
-                        max_num=int(
-                            local_control_for_worker.get("MaxFacesToDetectSlider", 20)
-                        ),
-                        score=local_control_for_worker.get("DetectorScoreSlider", 50)
-                        / 100.0,
-                        input_size=(512, 512),
-                        use_landmark_detection=True,
-                        landmark_detect_mode="203",
-                        landmark_score=local_control_for_worker.get(
-                            "LandmarkDetectScoreSlider", 50
+                    bboxes_203, _, raw_kpss_203 = (
+                        self.main_window.models_processor.run_detect(
+                            frame_tensor,
+                            local_control_for_worker.get(
+                                "DetectorModelSelection", "RetinaFace"
+                            ),
+                            max_num=int(
+                                local_control_for_worker.get(
+                                    "MaxFacesToDetectSlider", 20
+                                )
+                            ),
+                            score=local_control_for_worker.get(
+                                "DetectorScoreSlider", 50
+                            )
+                            / 100.0,
+                            input_size=(512, 512),
+                            use_landmark_detection=True,
+                            landmark_detect_mode="203",
+                            landmark_score=local_control_for_worker.get(
+                                "LandmarkDetectScoreSlider", 50
+                            )
+                            / 100.0,
+                            from_points=True,  # Force from_points for feature stability
+                            rotation_angles=[0]
+                            if not local_control_for_worker.get(
+                                "AutoRotationToggle", False
+                            )
+                            else [0, 90, 180, 270],
+                            use_mean_eyes=local_control_for_worker.get(
+                                "LandmarkMeanEyesToggle", False
+                            ),
+                            bypass_bytetrack=True,  # Prevent double-incrementing the object tracker
                         )
-                        / 100.0,
-                        from_points=True,  # Force from_points for feature stability
-                        rotation_angles=[0]
-                        if not local_control_for_worker.get("AutoRotationToggle", False)
-                        else [0, 90, 180, 270],
-                        use_mean_eyes=local_control_for_worker.get(
-                            "LandmarkMeanEyesToggle", False
-                        ),
-                        bypass_bytetrack=True,  # Prevent double-incrementing the object tracker
                     )
+
+                    # ByteTrack (Pass 1) sorts/filters bboxes by temporal ID.
+                    # Pass 2 (bypass_bytetrack=True) returns unsorted detections.
+                    # We must align them spatially to prevent mixing up faces.
+                    if isinstance(bboxes, numpy.ndarray) and bboxes.shape[0] > 0:
+                        aligned_kpss_203 = numpy.zeros(
+                            (bboxes.shape[0], 203, 2), dtype=numpy.float32
+                        )
+
+                        if (
+                            isinstance(bboxes_203, numpy.ndarray)
+                            and bboxes_203.shape[0] > 0
+                            and isinstance(raw_kpss_203, numpy.ndarray)
+                        ):
+                            # Calculate centroids for Pass 2 faces
+                            c2_x = (bboxes_203[:, 0] + bboxes_203[:, 2]) / 2.0
+                            c2_y = (bboxes_203[:, 1] + bboxes_203[:, 3]) / 2.0
+
+                            for i, box in enumerate(bboxes):
+                                # Centroid for Pass 1 face
+                                c_x = (box[0] + box[2]) / 2.0
+                                c_y = (box[1] + box[3]) / 2.0
+
+                                # Dimensions of the current face
+                                face_width = box[2] - box[0]
+                                face_height = box[3] - box[1]
+
+                                # Dynamic tolerance: 30% of the face's largest dimension
+                                dynamic_tolerance = 0.3 * max(face_width, face_height)
+
+                                # Find closest matching face from Pass 2
+                                dists = numpy.sqrt(
+                                    (c2_x - c_x) ** 2 + (c2_y - c_y) ** 2
+                                )
+                                best_idx = numpy.argmin(dists)
+
+                                # Validation based on dynamic scale rather than static 100px
+                                if dists[best_idx] < dynamic_tolerance:
+                                    aligned_kpss_203[i] = raw_kpss_203[best_idx]
+
+                        kpss_203 = aligned_kpss_203
+                    else:
+                        kpss_203 = numpy.empty((0, 203, 2), dtype=numpy.float32)
 
             # Free up VRAM immediately since the tensor is no longer needed in this thread
             if owns_frame_tensor:
