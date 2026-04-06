@@ -2205,14 +2205,13 @@ class FrameWorker(threading.Thread):
                             _fd["kps_on_crop"], _fd["kps_all_on_crop"] = _ckps
                             break
 
-        # Phase 2: recognition and target matching for all faces with valid landmarks.
+        # Phase 2: recognition and target matching (batched ArcFace when possible).
+        _vr_recognize_rows: list[dict[str, Any]] = []
         for _fd in _crop_landmark_results:
             if stop_event.is_set():
                 break
 
             if _fd["kps_on_crop"] is None:
-                # Improvement H: log faces that are detected but cannot be swapped
-                # (landmark detection failed even after retry and stereo fallback).
                 print(
                     f"[VR] Skipping face at theta={_fd['theta']:.1f}° phi={_fd['phi']:.1f}° "
                     f"({_fd['original_eye_side']}) — landmark detection failed."
@@ -2220,6 +2219,47 @@ class FrameWorker(threading.Thread):
                 del _fd["face_crop_tensor"]
                 continue
 
+            _vr_recognize_rows.append(_fd)
+
+        _rec_sim_vr = control["SimilarityTypeSelection"]
+        _rec_model_vr = str(control["RecognitionModelSelection"])
+        _arcface_batch_vr = control.get("ArcFaceBatchInferenceToggle", True)
+        _emb_by_idx: list[np.ndarray | None] = [None] * len(_vr_recognize_rows)
+
+        if _vr_recognize_rows:
+            _batch_ok_vr = False
+            if _arcface_batch_vr:
+                _imgs_vr = [r["face_crop_tensor"] for r in _vr_recognize_rows]
+                _kps_vr = [r["kps_on_crop"] for r in _vr_recognize_rows]
+                with nvtx_range("VisoMaster/worker/vr_arcface_batch"):
+                    _batched_vr = self.models_processor.run_recognize_direct_batch(
+                        _imgs_vr,
+                        _kps_vr,
+                        _rec_sim_vr,
+                        _rec_model_vr,
+                    )
+                if _batched_vr is not None and len(_batched_vr) == len(_vr_recognize_rows):
+                    _batch_ok_vr = all(x is not None for x in _batched_vr)
+                    if _batch_ok_vr:
+                        _emb_by_idx = list(_batched_vr)
+            if not _batch_ok_vr:
+                for _i, _fd in enumerate(_vr_recognize_rows):
+                    if stop_event.is_set():
+                        break
+                    if _emb_by_idx[_i] is not None:
+                        continue
+                    _e, _ = self.models_processor.run_recognize_direct(
+                        _fd["face_crop_tensor"],
+                        _fd["kps_on_crop"],
+                        _rec_sim_vr,
+                        _rec_model_vr,
+                    )
+                    _emb_by_idx[_i] = _e
+
+        for _i, _fd in enumerate(_vr_recognize_rows):
+            if stop_event.is_set():
+                break
+            face_emb_crop = _emb_by_idx[_i]
             kps_on_crop = _fd["kps_on_crop"]
             kps_all_on_crop = _fd["kps_all_on_crop"]
             face_crop_tensor = _fd["face_crop_tensor"]
@@ -2228,18 +2268,11 @@ class FrameWorker(threading.Thread):
             original_eye_side = _fd["original_eye_side"]
             dynamic_fov_for_crop = _fd["fov_used_for_crop"]
 
-            face_emb_crop, _ = self.models_processor.run_recognize_direct(
-                face_crop_tensor,
-                kps_on_crop,
-                control["SimilarityTypeSelection"],
-                control["RecognitionModelSelection"],
-            )
-
             best_target_button_vr, best_params_for_target_vr, _ = (
                 self._find_best_target_match(
                     face_emb_crop,
                     control,
-                    target_recognition_model=str(control["RecognitionModelSelection"]),
+                    target_recognition_model=_rec_model_vr,
                 )
             )
 
@@ -2255,9 +2288,7 @@ class FrameWorker(threading.Thread):
                     and best_target_button_vr.assigned_input_faces
                 ):
                     with self.models_processor.model_lock:
-                        if (
-                            best_target_button_vr.assigned_kv_map is None
-                        ):  # Double Check inside lock
+                        if best_target_button_vr.assigned_kv_map is None:
                             best_target_button_vr.calculate_assigned_input_embedding()
 
                 analyzed_faces_for_vr.append(
@@ -2275,7 +2306,6 @@ class FrameWorker(threading.Thread):
                 )
             else:
                 if compare_mode_vr_early:
-                    # No target match — save the raw crop for compare display (shown as-is)
                     unmatched_compare_crops.append(face_crop_tensor)
                 else:
                     del face_crop_tensor
@@ -3254,7 +3284,7 @@ class FrameWorker(threading.Thread):
             _need_emb = [w for w in _work_faces if w["embedding"] is None]
             if _need_emb:
                 _batch_ok = False
-                if _arcface_batch_on and len(_need_emb) >= 2:
+                if _arcface_batch_on and len(_need_emb) >= 1:
                     _kpsl = [w["kps_5"] for w in _need_emb]
                     with nvtx_range("VisoMaster/worker/arcface_batch"):
                         _batched = self.models_processor.run_recognize_direct_batch(
@@ -4878,47 +4908,48 @@ class FrameWorker(threading.Thread):
         use_mode_2 = parameters.get("StrengthMode2EnableToggle", False)
 
         if swapper_model == "Inswapper128":
-            # Custom provider: one batched forward for all pixel-shift tiles (dim>1).
-            # ORT/TRT stay per-tile — IOBinding is fixed batch 1.
-            _use_batched = (
-                self.models_processor.provider_name == "Custom" and dim > 1
-            )
-
+            # Custom: torch batched forward for dim>1. ORT/TRT: optional single batched
+            # IOBinding (VISIOMASTER_INSWAPPER_ORT_BATCH=1) or per-tile fallback.
             for k in range(itex):
                 prev_face = (
                     input_face_affined.clone()
                 )  # save N-1 result before this pass
 
-                if _use_batched:
-                    # ------ BATCHED PATH (dim > 1) ------
-                    tiles_list = []
-                    tile_coords = []
-                    for j in range(dim):
-                        for i in range(dim):
-                            tiles_list.append(
-                                input_face_affined[j::dim, i::dim]
-                                .permute(2, 0, 1)
-                                .contiguous()
-                            )
-                            tile_coords.append((j, i))
-                    batch_input = torch.stack(tiles_list, dim=0)  # [B, 3, 128, 128]
-                    batch_output = torch.empty(
-                        batch_input.shape,
-                        dtype=torch.float32,
-                        device=batch_input.device,
-                    )
+                tile_coords: list[tuple[int, int]] = []
+                tiles_list: list[torch.Tensor] = []
+                for j in range(dim):
+                    for i in range(dim):
+                        tiles_list.append(
+                            input_face_affined[j::dim, i::dim]
+                            .permute(2, 0, 1)
+                            .contiguous()
+                        )
+                        tile_coords.append((j, i))
+                n_tiles = len(tiles_list)
+                batch_input = (
+                    torch.stack(tiles_list, dim=0)
+                    if n_tiles > 1
+                    else tiles_list[0].unsqueeze(0)
+                )
+                batch_output = torch.empty_like(batch_input)
 
+                used_batch_merge = False
+                if self.models_processor.provider_name == "Custom" and dim > 1:
                     self.models_processor.run_inswapper_batched(
                         batch_input, latent, batch_output
                     )
+                    used_batch_merge = True
+                elif dim > 1 and self.models_processor.provider_name != "Custom":
+                    used_batch_merge = self.models_processor.run_inswapper_ort_batched(
+                        batch_input, latent, batch_output
+                    )
 
-                    # Replace any near-zero output tile with the input tile
+                if used_batch_merge:
                     tile_sums = batch_output.abs().sum(dim=(1, 2, 3))
                     zero_mask = tile_sums < 1.0
                     if zero_mask.any():
                         batch_output[zero_mask] = batch_input[zero_mask]
 
-                    # --- MODE 2 ---
                     if use_mode_2:
                         temp_output = input_face_affined.clone()
                         for idx, (j, i) in enumerate(tile_coords):
@@ -4939,8 +4970,6 @@ class FrameWorker(threading.Thread):
                         prev_face = input_face_affined.clone()
                         input_face_affined = temp_output.clone()
                         output = torch.clamp(temp_output * 255.0, 0, 255)
-
-                    # --- NORMAL MODE ---
                     else:
                         for idx, (j, i) in enumerate(tile_coords):
                             output[j::dim, i::dim] = batch_output[idx].permute(1, 2, 0)
@@ -4949,39 +4978,27 @@ class FrameWorker(threading.Thread):
                         input_face_affined = output.clone()
                         output = torch.mul(output, 255)
                         output = torch.clamp(output, 0, 255)
-
                 else:
-                    # ------ SEQUENTIAL PATH (ORT providers or dim==1) ------
-                    # Lists to hold independent memory buffers for this iteration
                     tile_inputs = []
                     tile_outputs = []
-                    tile_coords = []
-
-                    for j in range(dim):
-                        for i in range(dim):
-                            tile = input_face_affined[j::dim, i::dim]
-                            t_in = tile.permute(2, 0, 1).contiguous().unsqueeze(0)
-                            t_out = torch.empty_like(t_in)
-
-                            tile_inputs.append(t_in)
-                            tile_outputs.append(t_out)
-                            tile_coords.append((j, i))
+                    for idx in range(n_tiles):
+                        t_in = tiles_list[idx].unsqueeze(0)
+                        t_out = torch.empty_like(t_in)
+                        tile_inputs.append(t_in)
+                        tile_outputs.append(t_out)
 
                     with torch.no_grad():
-                        for idx in range(len(tile_inputs)):
+                        for idx in range(n_tiles):
                             self.models_processor.run_inswapper(
                                 tile_inputs[idx], latent, tile_outputs[idx]
                             )
 
-                    # Custom: run_inswapper already syncs after each tile (B=1 lock path).
-                    # ORT/TRT: need one barrier before .sum() / CPU reads of tile outputs.
                     if (
                         self.models_processor.device == "cuda"
                         and self.models_processor.provider_name != "Custom"
                     ):
                         torch.cuda.current_stream().synchronize()
 
-                    # --- MODE 2 ---
                     if use_mode_2:
                         temp_output = input_face_affined.clone()
                         for idx, (j, i) in enumerate(tile_coords):
@@ -5007,8 +5024,6 @@ class FrameWorker(threading.Thread):
                         prev_face = input_face_affined.clone()
                         input_face_affined = temp_output.clone()
                         output = torch.clamp(temp_output * 255.0, 0, 255)
-
-                    # --- NORMAL MODE ---
                     else:
                         for idx, (j, i) in enumerate(tile_coords):
                             if tile_outputs[idx].sum() < 1.0:

@@ -1,6 +1,7 @@
 import torch
 import onnxruntime
 import numpy as np
+from typing import Any, Callable, Optional
 
 from app.processors.utils import faceutil
 
@@ -31,11 +32,20 @@ def _load_model_bytes_with_shape_inference(model_path: str) -> bytes:
 
 
 class DFMModel:
-    def __init__(self, model_path: str, providers, device="cuda", ort_cuda_run_lock=None):
+    def __init__(
+        self,
+        model_path: str,
+        providers,
+        device="cuda",
+        ort_cuda_run_lock=None,
+        ort_run_with_iobinding: Optional[Callable[[Any, Any], None]] = None,
+    ):
         self._model_path = model_path
         self.providers = providers
         self.device = device
         self._ort_cuda_run_lock = ort_cuda_run_lock
+        # When set, routes ORT through ModelsProcessor (metrics + per-session lock policy).
+        self._ort_run_with_iobinding = ort_run_with_iobinding
         self.syncvec = torch.empty((1, 1), dtype=torch.float32, device=device)
 
         # Run ONNX shape inference before session creation so TensorRT can
@@ -202,7 +212,9 @@ class DFMModel:
 
         if self.device == "cuda":
             torch.cuda.current_stream().synchronize()
-        if self.device == "cuda" and self._ort_cuda_run_lock is not None:
+        if self._ort_run_with_iobinding is not None:
+            self._ort_run_with_iobinding(self._sess, io_binding)
+        elif self.device == "cuda" and self._ort_cuda_run_lock is not None:
             with self._ort_cuda_run_lock:
                 self._sess.run_with_iobinding(io_binding)
         else:

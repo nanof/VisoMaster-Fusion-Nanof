@@ -1,4 +1,5 @@
 import threading
+import weakref
 import os
 import subprocess as sp
 import gc
@@ -156,6 +157,10 @@ def gamma_decode_srgb_to_linear_rgb(srgb: torch.Tensor, gamma=SRGB_GAMMA):
 ONNX_MODELS_SKIP_TENSORRT_EP = frozenset({"RvmPortraitMatting"})
 
 
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _providers_without_tensorrt_execution_provider(providers_for_model):
     """Drop TensorrtExecutionProvider entries for ORT fallback (CUDA EP still fast on Windows)."""
     out = []
@@ -222,6 +227,18 @@ class ModelsProcessor(QtCore.QObject):
         # runs (e.g. RIFE preview + face landmarks on different threads) can trigger
         # CUDA error 906 (legacy stream sync vs. peer graph capture).
         self.ort_cuda_inference_lock = threading.Lock()
+        # Optional: one lock per InferenceSession when VISIOMASTER_ORT_PER_SESSION_LOCK=1
+        # (experimental — may improve overlap across workers; test for CUDA instability).
+        self._ort_session_inference_locks: "weakref.WeakKeyDictionary" = (
+            weakref.WeakKeyDictionary()
+        )
+        self._ort_session_inference_locks_mutex = threading.Lock()
+        self._ort_per_session_lock_warned = False
+        # MP-PIPELINE-METRICS: lock wait vs held under run_session_with_iobinding
+        self._ort_metrics_lock = threading.Lock()
+        self._ort_lock_wait_s_accum = 0.0
+        self._ort_lock_held_s_accum = 0.0
+        self._ort_inference_calls = 0
         self._triton_dialog_hooks_registered = False
         self._compile_callbacks_registered = False
 
@@ -955,6 +972,7 @@ class ModelsProcessor(QtCore.QObject):
                     dfm_providers,
                     self.device,
                     ort_cuda_run_lock=self.ort_cuda_inference_lock,
+                    ort_run_with_iobinding=self.run_session_with_iobinding,
                 )
             except Exception:
                 print(f"[ERROR] Failed to load DFM model {dfm_model}.")
@@ -1177,13 +1195,89 @@ class ModelsProcessor(QtCore.QObject):
 
         return self.provider_name
 
+    def _get_ort_cuda_lock_for_session(self, session) -> threading.Lock:
+        """Global ORT lock (default) or per-InferenceSession lock (experimental)."""
+        if not _env_truthy("VISIOMASTER_ORT_PER_SESSION_LOCK"):
+            return self.ort_cuda_inference_lock
+        if not self._ort_per_session_lock_warned:
+            self._ort_per_session_lock_warned = True
+            print(
+                "[WARN] VISIOMASTER_ORT_PER_SESSION_LOCK=1: different ORT sessions may "
+                "run CUDA concurrently; validate stability (CUDA 906 / graph capture).",
+                flush=True,
+            )
+        with self._ort_session_inference_locks_mutex:
+            lk = self._ort_session_inference_locks.get(session)
+            if lk is None:
+                lk = threading.Lock()
+                self._ort_session_inference_locks[session] = lk
+            return lk
+
+    def _log_ort_pipeline_metrics(self) -> None:
+        with self._ort_metrics_lock:
+            c = self._ort_inference_calls
+            wait = self._ort_lock_wait_s_accum
+            held = self._ort_lock_held_s_accum
+        if c <= 0:
+            return
+        print(
+            f"[PIPELINE-METRICS] ort_iobinding_calls={c} "
+            f"avg_lock_wait_ms={(wait / c) * 1000.0:.4f} "
+            f"avg_ort_held_ms={(held / c) * 1000.0:.4f}",
+            flush=True,
+        )
+
+    def get_ort_pipeline_metrics_snapshot(self) -> Dict[str, float]:
+        """Cumulative averages since last reset (for VISIOMASTER_PIPELINE_METRICS)."""
+        with self._ort_metrics_lock:
+            c = float(self._ort_inference_calls)
+            if c <= 0.0:
+                return {"calls": 0.0, "avg_lock_wait_ms": 0.0, "avg_ort_held_ms": 0.0}
+            return {
+                "calls": c,
+                "avg_lock_wait_ms": (self._ort_lock_wait_s_accum / c) * 1000.0,
+                "avg_ort_held_ms": (self._ort_lock_held_s_accum / c) * 1000.0,
+            }
+
+    def reset_ort_pipeline_metrics(self) -> None:
+        with self._ort_metrics_lock:
+            self._ort_lock_wait_s_accum = 0.0
+            self._ort_lock_held_s_accum = 0.0
+            self._ort_inference_calls = 0
+
     def run_session_with_iobinding(self, session, io_binding) -> None:
-        """Run ORT with IO binding; serialized on CUDA to avoid cross-thread capture races."""
-        if self.device == "cuda":
-            with self.ort_cuda_inference_lock:
-                session.run_with_iobinding(io_binding)
-        else:
+        """Run ORT with IO binding; serialized on CUDA (global or per-session)."""
+        if self.device != "cuda":
             session.run_with_iobinding(io_binding)
+            return
+        metrics_on = _env_truthy("VISIOMASTER_PIPELINE_METRICS")
+        try:
+            interval = max(
+                1, int(os.environ.get("VISIOMASTER_PIPELINE_METRICS_INTERVAL", "200"))
+            )
+        except ValueError:
+            interval = 200
+        lock = self._get_ort_cuda_lock_for_session(session)
+        t0 = time.perf_counter()
+        lock.acquire()
+        t1 = time.perf_counter()
+        if metrics_on:
+            with self._ort_metrics_lock:
+                self._ort_lock_wait_s_accum += t1 - t0
+        try:
+            session.run_with_iobinding(io_binding)
+        finally:
+            t2 = time.perf_counter()
+            if metrics_on:
+                with self._ort_metrics_lock:
+                    self._ort_lock_held_s_accum += t2 - t1
+                    self._ort_inference_calls += 1
+                    n = self._ort_inference_calls
+            else:
+                n = 0
+            lock.release()
+            if metrics_on and n > 0 and n % interval == 0:
+                self._log_ort_pipeline_metrics()
 
     def set_number_of_threads(self, value):
         """Sets the ONNX thread count. TRT engine reloading is no longer needed here."""
@@ -1683,6 +1777,10 @@ class ModelsProcessor(QtCore.QObject):
 
     def run_inswapper(self, image, embedding, output):
         self.face_swappers.run_inswapper(image, embedding, output)
+
+    def run_inswapper_ort_batched(self, images, embedding, output) -> bool:
+        """See ``FaceSwappers.run_inswapper_ort_batched``."""
+        return self.face_swappers.run_inswapper_ort_batched(images, embedding, output)
 
     def run_inswapper_batched(self, images, embedding, output):
         self.face_swappers.run_inswapper_batched(images, embedding, output)

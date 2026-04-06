@@ -94,7 +94,13 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "default": False,
             "help": "Show per-stage timings (feeder + worker) on the preview. On stop, prints a session summary "
             "to the console ([PIPELINE-PROFILE-SESSION]). Optional: VISIOMASTER_PIPELINE_PROFILE_CSV=file.csv "
-            "appends rows while playing; VISIOMASTER_PERF_STAGES=1 logs per frame separately.",
+            "appends rows while playing; VISIOMASTER_PERF_STAGES=1 logs per frame separately. "
+            "VISIOMASTER_PIPELINE_METRICS=1 logs raw/frame queue depth and ORT lock wait vs held (~every 500 frames "
+            "and every VISIOMASTER_PIPELINE_METRICS_INTERVAL ORT calls, default 200). "
+            "VISIOMASTER_ORT_PER_SESSION_LOCK=1 (experimental) uses one CUDA mutex per ONNX session instead of a "
+            "global ORT lock — test for CUDA instability before relying on it. "
+            "VISIOMASTER_INSWAPPER_ORT_BATCH=0 disables batched Inswapper128 ORT for multi-tile (pixel-shift) mode "
+            "if your TensorRT engine is fixed batch-1.",
             "exec_function": graphics_view_actions.on_pipeline_profile_overlay_toggle,
             "exec_function_args": [],
         },

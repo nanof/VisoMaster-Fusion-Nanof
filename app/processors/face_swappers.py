@@ -1,10 +1,11 @@
+import os
 import torch
 import threading
 from torchvision.transforms import v2
 from app.processors.utils import faceutil
 import numpy as np
 from numpy.linalg import norm as l2norm
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, List, Optional, Union
 import kornia.geometry.transform as kgm
 
 if TYPE_CHECKING:
@@ -21,6 +22,7 @@ class FaceSwappers:
         self._inswapper_init_lock = threading.Lock()
         self._w600k_lock = threading.Lock()
         self._inswapper_b1_lock = threading.Lock()
+        self._inswapper_ort_batch_fail_logged = False
         self._inswapper_torch = None  # InSwapperTorch instance
         self._inswapper_runner_b1: Optional[object] = None  # CUDA graph runner for B=1
         self._w600k_torch: Optional[object] = None  # IResNet50Torch
@@ -192,16 +194,18 @@ class FaceSwappers:
 
     def run_recognize_direct_batch(
         self,
-        img: torch.Tensor,
+        img: Union[torch.Tensor, List[torch.Tensor]],
         kps_list: List[np.ndarray],
         similarity_type: str,
         arcface_model: str,
     ) -> Optional[List[Optional[np.ndarray]]]:
         """
-        One ORT inference for B>1 faces (Inswapper128ArcFace + Opal/Pearl, non-Custom).
+        One ORT inference for B>=1 faces (Inswapper128ArcFace + Opal/Pearl, non-Custom).
+        Pass a single CHW frame tensor plus multiple kps (same image), or a list of CHW
+        crops with one kps per crop (e.g. VR180 per-face crops).
         Returns None to fall back to per-face run_recognize_direct.
         """
-        if len(kps_list) < 2:
+        if len(kps_list) < 1:
             return None
         if arcface_model != "Inswapper128ArcFace":
             return None
@@ -225,10 +229,18 @@ class FaceSwappers:
             return None
 
         try:
-            crops = [
-                self._chw112_for_inswapper_arcface(img, kps, similarity_type)
-                for kps in kps_list
-            ]
+            if isinstance(img, torch.Tensor):
+                crops = [
+                    self._chw112_for_inswapper_arcface(img, kps, similarity_type)
+                    for kps in kps_list
+                ]
+            else:
+                if len(img) != len(kps_list):
+                    return None
+                crops = [
+                    self._chw112_for_inswapper_arcface(img[i], kps_list[i], similarity_type)
+                    for i in range(len(kps_list))
+                ]
             batch = torch.stack(crops, dim=0).float().clone()
             if batch.max() <= 1.0:
                 batch = batch * 255.0
@@ -663,6 +675,95 @@ class FaceSwappers:
 
         # Run the model with lazy build handling
         self._run_model_with_lazy_build_check(model_name, model, io_binding)
+
+    def run_inswapper_ort_batched(
+        self, images: torch.Tensor, embedding: torch.Tensor, output: torch.Tensor
+    ) -> bool:
+        """
+        Single ORT/TRT Inswapper128 forward for B>1 tiles (pixel-shift dim>1).
+
+        Returns False if disabled, B<2, or the session rejects the batched shape
+        (e.g. TensorRT engine fixed at batch 1) — caller falls back per-tile.
+        """
+        model_name = "Inswapper128"
+        if self.models_processor.provider_name == "Custom":
+            return False
+        v = os.environ.get("VISIOMASTER_INSWAPPER_ORT_BATCH", "1").strip().lower()
+        if v in ("0", "false", "no", "off"):
+            return False
+
+        if images.dim() != 4 or images.shape[1] != 3:
+            return False
+        B = int(images.shape[0])
+        if B < 2:
+            return False
+        if tuple(images.shape[2:]) != (128, 128):
+            return False
+        if output.shape != images.shape:
+            return False
+
+        model = self._load_swapper_model(model_name)
+        if not model:
+            return False
+
+        inp = images if images.is_contiguous() else images.contiguous()
+        out = output if output.is_contiguous() else output.contiguous()
+
+        emb = embedding
+        if emb.dtype != torch.float32:
+            emb = emb.float()
+        if emb.dim() == 1:
+            emb = emb.unsqueeze(0)
+        if emb.shape[-1] != 512:
+            return False
+        if emb.shape[0] == 1:
+            emb_b = emb.repeat(B, 1).contiguous()
+        elif emb.shape[0] == B:
+            emb_b = emb.contiguous()
+        else:
+            return False
+
+        try:
+            io_binding = model.io_binding()
+            io_binding.clear_binding_inputs()
+            io_binding.clear_binding_outputs()
+
+            io_binding.bind_input(
+                name="target",
+                device_type=self.models_processor.device,
+                device_id=0,
+                element_type=np.float32,
+                shape=tuple(inp.shape),
+                buffer_ptr=inp.data_ptr(),
+            )
+            io_binding.bind_input(
+                name="source",
+                device_type=self.models_processor.device,
+                device_id=0,
+                element_type=np.float32,
+                shape=tuple(emb_b.shape),
+                buffer_ptr=emb_b.data_ptr(),
+            )
+            io_binding.bind_output(
+                name="output",
+                device_type=self.models_processor.device,
+                device_id=0,
+                element_type=np.float32,
+                shape=tuple(out.shape),
+                buffer_ptr=out.data_ptr(),
+            )
+            self._run_model_with_lazy_build_check(model_name, model, io_binding)
+            return True
+        except Exception as e:
+            if not self._inswapper_ort_batch_fail_logged:
+                self._inswapper_ort_batch_fail_logged = True
+                print(
+                    f"[WARN] Inswapper128 ORT/TRT batched inference failed (B={B}); "
+                    f"using per-tile for this session. First error: {e}. "
+                    f"Disable batch with VISIOMASTER_INSWAPPER_ORT_BATCH=0.",
+                    flush=True,
+                )
+            return False
 
     def run_inswapper_batched(
         self, images: torch.Tensor, embedding: torch.Tensor, output: torch.Tensor

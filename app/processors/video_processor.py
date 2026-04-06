@@ -196,9 +196,9 @@ class VideoProcessor(QObject):
 
         # --- Worker Thread Management ---
         self.num_threads = num_threads
-        self.preroll_target = max(
-            20, self.num_threads * 2
-        )  # Target number of frames before playback starts
+        # Deeper preroll vs num_threads*2: keeps decode → detect → N workers pipelined
+        # under load (see VISIOMASTER_PIPELINE_METRICS for queue / ORT lock stats).
+        self.preroll_target = max(24, self.num_threads * 3)
         self.max_display_buffer_size = (
             self.preroll_target * 4
         )  # Max frames allowed "in flight" (queued + being displayed)
@@ -792,6 +792,25 @@ class VideoProcessor(QObject):
         self.frames_pipeline_profile.clear()
         self._reset_enhancer_temporal_smooth_state()
         self._reset_preview_frame_generation_state()
+
+    def _maybe_log_pipeline_metrics(self) -> None:
+        """Console snapshot when VISIOMASTER_PIPELINE_METRICS=1 (queue depth + ORT lock stats)."""
+        v = os.environ.get("VISIOMASTER_PIPELINE_METRICS", "").strip().lower()
+        if v not in ("1", "true", "yes", "on"):
+            return
+        rq = self._raw_frame_queue
+        rq_sz = rq.qsize() if rq is not None else -1
+        fq_sz = self.frame_queue.qsize()
+        fq_max = self.frame_queue.maxsize
+        snap = self.main_window.models_processor.get_ort_pipeline_metrics_snapshot()
+        print(
+            f"[PIPELINE-METRICS] raw_q={rq_sz} frame_q={fq_sz}/{fq_max} "
+            f"ort_window_calls={int(snap['calls'])} "
+            f"ort_avg_lock_wait_ms={snap['avg_lock_wait_ms']:.4f} "
+            f"ort_avg_held_ms={snap['avg_ort_held_ms']:.4f}",
+            flush=True,
+        )
+        self.main_window.models_processor.reset_ort_pipeline_metrics()
 
     def _apply_frame_enhancer_temporal_smooth(
         self,
@@ -2746,6 +2765,7 @@ class VideoProcessor(QObject):
             self.heartbeat_frame_counter += 1
             if self.heartbeat_frame_counter >= 500:
                 self.heartbeat_frame_counter = 0
+                self._maybe_log_pipeline_metrics()
                 self.processing_heartbeat_signal.emit()
 
         # Send to Virtual Cam
