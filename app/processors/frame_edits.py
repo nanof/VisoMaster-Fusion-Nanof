@@ -153,7 +153,7 @@ class FrameEdits:
             neutral_factor = parameters.get("FaceExpressionNeutralDecimalSlider", 1.0)
 
             # --- DRIVING FACE PROCESSING ---
-            if driving_kps is not None:
+            if driving_kps is not None and not np.all(driving_kps == 0):
                 driving_lmk_crop = driving_kps
             else:
                 _, driving_lmk_crop, _ = self.models_processor.run_detect_landmark(
@@ -164,6 +164,9 @@ class FrameEdits:
                     score=0.5,
                     from_points=False,
                     use_mean_eyes=use_mean_eyes,
+                )
+                print(
+                    "[WARN] Could not get kps_203, running separate detection on driving face."
                 )
 
             if driving_lmk_crop is None or (
@@ -203,7 +206,7 @@ class FrameEdits:
             # --- TARGET FACE ---
             target = target.clamp(0, 255).type(torch.uint8)
 
-            if target_kps is not None:
+            if target_kps is not None and not np.all(target_kps == 0):
                 source_lmk = target_kps
             else:
                 _, source_lmk, _ = self.models_processor.run_detect_landmark(
@@ -214,6 +217,9 @@ class FrameEdits:
                     score=0.5,
                     from_points=False,
                     use_mean_eyes=use_mean_eyes,
+                )
+                print(
+                    "[WARN] Could not get kps_203, running separate detection on target face."
                 )
 
             if source_lmk is None or (

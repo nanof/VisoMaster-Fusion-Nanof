@@ -920,8 +920,8 @@ def read_frame(
     seek_keypoint_fps: float = 0.0,
 ) -> Tuple[bool, Optional[np.ndarray]]:
     """
-    Reads a single frame from the video capture object in a thread-safe manner
-    and applies rotation.
+    Reads a single frame from the video capture object in a thread-safe manner,
+    applies rotation, and dynamically scales the image if necessary.
 
     The 'lock' (Point 5) is critical as 'capture_obj' is a shared resource.
     It prevents race conditions between the feeder thread and seek operations.
@@ -966,8 +966,9 @@ def read_frame(
     if _read_detail:
         _cap_ms = (time.perf_counter() - _t_cap0) * 1000.0
 
-    if not ret:
-        return False, None  # Return immediately if read fails
+    # OpenCV can return ret=True but None at end-of-stream
+    if not ret or frame is None:
+        return False, None
 
     # 1. Apply rotation (if necessary)
     if media_rotation != 0:
@@ -978,34 +979,37 @@ def read_frame(
             _rot_ms = (time.perf_counter() - _t_rot0) * 1000.0
 
     # 2. Apply resizing (if necessary)
-    # This is done *after* the lock to avoid holding it during resizing.
-    if ret and preview_target_height is not None:
+    # Done *after* the lock to avoid holding it during CPU-intensive resizing.
+    if preview_target_height is not None:
         try:
             original_height, original_width = frame.shape[:2]
             if original_height == 0:
-                return ret, frame  # Avoid division by zero
+                return True, frame  # Avoid division by zero
 
-            # Use the specified target height
             target_height = preview_target_height
-            aspect_ratio = original_width / original_height
-            target_width = int(target_height * aspect_ratio)
 
-            # Ensure width is even (good practice for some video operations)
-            if target_width % 2 != 0:
-                target_width += 1
+            if target_height != original_height:
+                aspect_ratio = original_width / original_height
+                target_width = int(target_height * aspect_ratio)
 
-            # cv2.INTER_AREA is generally the fastest and best for downscaling
-            if _read_detail:
-                _t_rsz0 = time.perf_counter()
-            frame = cv2.resize(
-                frame, (target_width, target_height), interpolation=cv2.INTER_AREA
-            )
-            if _read_detail:
-                _rsz_ms = (time.perf_counter() - _t_rsz0) * 1000.0
+                if target_width % 2 != 0:
+                    target_width += 1
+
+                if target_height > original_height:
+                    inter_method = cv2.INTER_LANCZOS4
+                else:
+                    inter_method = cv2.INTER_AREA
+
+                if _read_detail:
+                    _t_rsz0 = time.perf_counter()
+                frame = cv2.resize(
+                    frame, (target_width, target_height), interpolation=inter_method
+                )
+                if _read_detail:
+                    _rsz_ms = (time.perf_counter() - _t_rsz0) * 1000.0
         except Exception as e:
             print(f"[ERROR] Failed to resize frame in preview_mode: {e}")
-            # Fallback: return the original (rotated) frame if resize fails
-            return ret, frame
+            return True, frame
 
     if _read_detail:
         print(
@@ -1014,8 +1018,7 @@ def read_frame(
             flush=True,
         )
 
-    # Return the (potentially rotated and resized) frame
-    return ret, frame
+    return True, frame
 
 
 # OpenCV-reported FOURCC tags for AV1 in MP4/MKV (used for lighter scrub heuristics).

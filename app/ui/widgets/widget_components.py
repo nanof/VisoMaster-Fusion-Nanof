@@ -725,32 +725,26 @@ class TargetFaceCardButton(CardButton):
                 all_embedding_swap_models.update(embedding_store.keys())
                 all_input_embeddings.append(embedding_store)  # Aggiungi l'intero store
 
-        # Calcolo degli embedding se presenti
         if len(all_input_embeddings) > 0:
-            if control["EmbMergeMethodSelection"] == "Mean":
-                self.assigned_input_embedding = {
-                    model: np.mean(
-                        [
-                            store[model]
-                            for store in all_input_embeddings
-                            if model in store
-                        ],
-                        axis=0,
-                    )
-                    for model in all_embedding_swap_models
-                }
-            elif control["EmbMergeMethodSelection"] == "Median":
-                self.assigned_input_embedding = {
-                    model: np.median(
-                        [
-                            store[model]
-                            for store in all_input_embeddings
-                            if model in store
-                        ],
-                        axis=0,
-                    )
-                    for model in all_embedding_swap_models
-                }
+            self.assigned_input_embedding = {}
+            for model in all_embedding_swap_models:
+                embeddings_to_merge = [
+                    store[model] for store in all_input_embeddings if model in store
+                ]
+                if not embeddings_to_merge:
+                    continue
+                if control["EmbMergeMethodSelection"] == "Mean":
+                    merged_emb = np.mean(embeddings_to_merge, axis=0)
+                elif control["EmbMergeMethodSelection"] == "Median":
+                    merged_emb = np.median(embeddings_to_merge, axis=0)
+                else:
+                    merged_emb = np.mean(embeddings_to_merge, axis=0)
+
+                norm = np.linalg.norm(merged_emb)
+                if norm > 0:
+                    merged_emb = merged_emb / norm
+
+                self.assigned_input_embedding[model] = merged_emb
 
         else:
             self.assigned_input_embedding = {}
@@ -1472,9 +1466,17 @@ class CreateEmbeddingDialog(QtWidgets.QDialog):
             final_embedding_store = {}
             for swap_model, embeddings in merged_embedding_store.items():
                 if self.merge_type == "Mean":
-                    final_embedding_store[swap_model] = np.mean(embeddings, axis=0)
+                    merged_emb = np.mean(embeddings, axis=0)
                 elif self.merge_type == "Median":
-                    final_embedding_store[swap_model] = np.median(embeddings, axis=0)
+                    merged_emb = np.median(embeddings, axis=0)
+                else:
+                    merged_emb = np.mean(embeddings, axis=0)
+
+                norm = np.linalg.norm(merged_emb)
+                if norm > 0:
+                    merged_emb = merged_emb / norm
+
+                final_embedding_store[swap_model] = merged_emb
 
             # Crea e aggiungi il nuovo embedding_store con tutti i modelli di swap
             from app.ui.widgets.actions import list_view_actions
