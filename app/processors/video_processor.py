@@ -1493,6 +1493,23 @@ class VideoProcessor(QObject):
                     else:
                         kpss_203 = numpy.empty((0, 203, 2), dtype=numpy.float32)
 
+            # When no feature set requires_203, the feeder skipped filling kpss_203 even if the
+            # primary run_detect already returned 203 landmarks (LandmarkDetectModelSelection).
+            # Workers need kpss_203 for swap_core kps_all_crop / LivePortrait; without it they
+            # fall back to extra landmark runs and spam warnings.
+            if (
+                kpss_203 is None
+                and use_landmark
+                and str(landmark_mode) == "203"
+                and isinstance(kpss, numpy.ndarray)
+                and kpss.ndim == 3
+                and kpss.shape[0] > 0
+                and kpss.shape[1] == 203
+                and isinstance(bboxes, numpy.ndarray)
+                and bboxes.shape[0] == kpss.shape[0]
+            ):
+                kpss_203 = kpss
+
             # Free up VRAM immediately since the tensor is no longer needed in this thread
             if owns_frame_tensor:
                 del frame_tensor

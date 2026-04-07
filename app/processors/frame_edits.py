@@ -1,4 +1,5 @@
 from typing import TYPE_CHECKING
+import logging
 
 import torch
 import numpy as np
@@ -9,6 +10,8 @@ from app.processors.utils import faceutil
 
 if TYPE_CHECKING:
     from app.processors.models_processor import ModelsProcessor
+
+_logger = logging.getLogger(__name__)
 
 
 class FrameEdits:
@@ -165,8 +168,8 @@ class FrameEdits:
                     from_points=False,
                     use_mean_eyes=use_mean_eyes,
                 )
-                print(
-                    "[WARN] Could not get kps_203, running separate detection on driving face."
+                _logger.debug(
+                    "Could not get kps_203, running separate detection on driving face."
                 )
 
             if driving_lmk_crop is None or (
@@ -218,8 +221,8 @@ class FrameEdits:
                     from_points=False,
                     use_mean_eyes=use_mean_eyes,
                 )
-                print(
-                    "[WARN] Could not get kps_203, running separate detection on target face."
+                _logger.debug(
+                    "Could not get kps_203, running separate detection on target face."
                 )
 
             if source_lmk is None or (

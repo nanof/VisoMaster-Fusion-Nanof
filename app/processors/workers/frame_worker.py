@@ -3340,6 +3340,21 @@ class FrameWorker(threading.Thread):
                         bypass_bytetrack=True,
                     )
 
+            # Match feeder: duplicate primary 203 landmarks into kpss_203 when requires_203
+            # was false (e.g. only Auto Mouth on a face card not visible to feeder snapshot).
+            if (
+                kpss_203 is None
+                and use_landmark
+                and str(landmark_mode) == "203"
+                and isinstance(kpss, np.ndarray)
+                and kpss.ndim == 3
+                and kpss.shape[0] > 0
+                and kpss.shape[1] == 203
+                and isinstance(bboxes, np.ndarray)
+                and bboxes.shape[0] == kpss.shape[0]
+            ):
+                kpss_203 = kpss
+
         if perf_stages is not None:
             perf_stages.mark("std_detect_feeder_or_fallback")
 
@@ -6271,17 +6286,11 @@ class FrameWorker(threading.Thread):
             _p["FaceExpressionEyesToggle"] = False
             _p["FaceExpressionBrowsToggle"] = False
             _p["FaceExpressionGeneralToggle"] = False
-            # Face-parser mouth/lip override — reads configurable values from the
-            # AutoMouth UI section and forces them onto the per-face params, overriding
-            # whatever the user has set in the Face Swap tab for these three sliders.
-            _mouth_val = int(params.get("AutoMouthMouthParserSlider", 1))
-            _upper_val = int(params.get("AutoMouthUpperLipParserSlider", 3))
-            _lower_val = int(params.get("AutoMouthLowerLipParserSlider", 17))
-            if _mouth_val > 0 or _upper_val > 0 or _lower_val > 0:
-                _p["FaceParserEnableToggle"] = True
-            _p["MouthParserSlider"] = _mouth_val
-            _p["UpperLipParserSlider"] = _upper_val
-            _p["LowerLipParserSlider"] = _lower_val
+            # Do not force FaceParser / mouth dilations here: FaceParser_mask reduces
+            # swap strength inside mouth/lip regions (see face_masks.py), which made
+            # the original target mouth show through ("hole") while auto-mouth runs.
+            # Users who want parser-based mouth tuning can enable Face Parser on the
+            # Face Swap tab; Auto Mouth * sliders remain in the UI for manual presets.
             return _p
 
         return params

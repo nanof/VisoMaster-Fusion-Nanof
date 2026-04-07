@@ -738,8 +738,9 @@ COMMON_LAYOUT_DATA: Any = {
             "exec_function": control_actions.handle_auto_mouth_toggle,
             "exec_function_args": [],
             "help": (
-                "Automatically activates lip-transfer expression and face-parser mouth "
-                "regions when mouth action is detected in the scene. "
+                "Automatically activates lip-transfer expression when mouth action is "
+                "detected. Face Parser is not forced on (that would punch through the "
+                "swap in the mouth area); enable Face Parser manually in Face Swap if needed."
             ),
         },
         "AutoMouthOpenThresholdDecimalSlider": {
@@ -826,8 +827,9 @@ COMMON_LAYOUT_DATA: Any = {
             "requiredToggleValue": True,
             "enable_refresh_frame": False,
             "help": (
-                "Dilation amount for the inner-mouth face-parser mask when auto-mouth "
-                "is active. Overrides the Mouth slider in the Face Swap tab."
+                "Reserved: auto-mouth no longer forces Face Parser (avoids showing the "
+                "target mouth through the swap). Adjust Mouth in Face Swap if you use "
+                "Face Parser manually."
             ),
         },
         "AutoMouthUpperLipParserSlider": {
@@ -841,8 +843,8 @@ COMMON_LAYOUT_DATA: Any = {
             "requiredToggleValue": True,
             "enable_refresh_frame": False,
             "help": (
-                "Dilation amount for the upper-lip face-parser mask when auto-mouth "
-                "is active. Overrides the Upper Lip slider in the Face Swap tab."
+                "Reserved: see Auto Mouth — Mouth Parser. Use Face Swap → Upper Lip when "
+                "Face Parser is enabled."
             ),
         },
         "AutoMouthLowerLipParserSlider": {
@@ -856,8 +858,8 @@ COMMON_LAYOUT_DATA: Any = {
             "requiredToggleValue": True,
             "enable_refresh_frame": False,
             "help": (
-                "Dilation amount for the lower-lip face-parser mask when auto-mouth "
-                "is active. Overrides the Lower Lip slider in the Face Swap tab."
+                "Reserved: see Auto Mouth — Mouth Parser. Use Face Swap → Lower Lip when "
+                "Face Parser is enabled."
             ),
         },
     },

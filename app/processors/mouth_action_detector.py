@@ -118,8 +118,12 @@ class MouthActionDetector:
             with graph.as_default():
                 tf.compat.v1.import_graph_def(graph_def, name="")
 
+            # Run inference on CPU only. A GPU session here competes with PyTorch/CUDA
+            # (fragmentation + allow_growth) and users report VRAM climbing while Auto
+            # Mouth Expression is enabled. The model input is only 320×320 — CPU cost is small.
             cfg = tf.compat.v1.ConfigProto()
-            cfg.gpu_options.allow_growth = True
+            # Protobuf map: assign per key (whole-dict assignment raises on TF 2.x).
+            cfg.device_count["GPU"] = 0
             session = tf.compat.v1.Session(graph=graph, config=cfg)
 
             self._graph = graph
