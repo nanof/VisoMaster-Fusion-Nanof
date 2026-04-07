@@ -597,6 +597,8 @@ class FaceSwappers:
     def _calc_emap_latent(self, source_embedding):
         """FS-PERF-05: shared emap-based latent computation extracted from
         calc_inswapper_latent and calc_swapper_latent_iss."""
+        if source_embedding is None:
+            return None
         n_e = source_embedding / l2norm(source_embedding)
         latent = n_e.reshape((1, -1))
         latent = np.dot(latent, self.models_processor.emap)
@@ -619,6 +621,8 @@ class FaceSwappers:
         )
 
     def calc_inswapper_latent(self, source_embedding):
+        if source_embedding is None:
+            return None
         if not self._ensure_emap():
             print("[ERROR] Emap could not be loaded for latent calculation.")
             # FS-ROBUST-01: return None so callers can detect and handle the failure
@@ -810,6 +814,8 @@ class FaceSwappers:
         return latent
 
     def calc_swapper_latent_iss(self, source_embedding, version="A"):
+        if source_embedding is None:
+            return None
         # FS-PERF-05: reuse shared _ensure_emap / _calc_emap_latent helpers
         if not self._ensure_emap():
             print("[ERROR] Emap could not be loaded for latent calculation.")

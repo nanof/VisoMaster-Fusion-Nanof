@@ -400,6 +400,8 @@ class VideoProcessor(QObject):
         # ByteTrack id → last ArcFace row (survives face-index reordering in det arrays).
         self._recognition_track_last: "OrderedDict[int, dict[str, Any]]" = OrderedDict()
         self._recognition_track_max: int = 128
+        # track_id → frame of last *fresh* ArcFace (lazy reuse does not advance this).
+        self._recognition_last_arcface_frame: dict[int, int] = {}
         self.webcam_frames_to_display: queue.Queue[
             Tuple[numpy.ndarray, Any]
         ] = queue.Queue()  # (processed BGR frame, pipeline profile or None)
@@ -1193,6 +1195,7 @@ class VideoProcessor(QObject):
         with self._recognition_cache_lock:
             self._recognition_cache_by_frame.clear()
             self._recognition_track_last.clear()
+            self._recognition_last_arcface_frame.clear()
 
     def try_reuse_recognition_embedding(
         self,
@@ -1245,6 +1248,53 @@ class VideoProcessor(QObject):
                                 return cast(numpy.ndarray, tr["emb"])
         return None
 
+    def try_lazy_arcface_track_embedding(
+        self,
+        frame_num: int,
+        track_id: int,
+        model: str,
+        sim_type: str,
+        min_interval_frames: int,
+    ) -> numpy.ndarray | None:
+        """
+        When geometry-based cache missed but ByteTrack id is stable, reuse the last
+        embedding without running ArcFace until ``min_interval_frames`` have passed
+        since the last *fresh* ArcFace for this track.
+        """
+        if frame_num <= 0 or track_id < 0 or min_interval_frames <= 1:
+            return None
+        with self._recognition_cache_lock:
+            tr = self._recognition_track_last.get(track_id)
+            if tr is None or tr["model"] != model or tr["sim"] != sim_type:
+                return None
+            last_f = self._recognition_last_arcface_frame.get(track_id)
+            # No fresh-ArcFace anchor yet (e.g. only geometry-cache copies with
+            # counted_as_fresh_arcface=False): still reuse track embedding for swap.
+            if last_f is None:
+                return numpy.asarray(tr["emb"], dtype=numpy.float32).copy()
+            if frame_num - int(last_f) < int(min_interval_frames):
+                return numpy.asarray(tr["emb"], dtype=numpy.float32).copy()
+        return None
+
+    def get_track_last_embedding_if_any(
+        self,
+        track_id: int,
+        model: str,
+        sim_type: str,
+    ) -> numpy.ndarray | None:
+        """Last embedding for a ByteTrack id (matching model/sim), ignoring lazy interval.
+
+        Used when the per-frame ArcFace cap skipped this face but the track already
+        has a stored embedding — better stale identity than no swap.
+        """
+        if track_id < 0:
+            return None
+        with self._recognition_cache_lock:
+            tr = self._recognition_track_last.get(track_id)
+            if tr is None or tr["model"] != model or tr["sim"] != sim_type:
+                return None
+            return numpy.asarray(tr["emb"], dtype=numpy.float32).copy()
+
     def store_recognition_embedding(
         self,
         frame_num: int,
@@ -1255,6 +1305,8 @@ class VideoProcessor(QObject):
         model: str,
         sim_type: str,
         track_id: int = -1,
+        *,
+        counted_as_fresh_arcface: bool = True,
     ) -> None:
         if frame_num <= 0:
             return
@@ -1285,6 +1337,8 @@ class VideoProcessor(QObject):
                 self._recognition_track_last.move_to_end(track_id)
                 while len(self._recognition_track_last) > self._recognition_track_max:
                     self._recognition_track_last.popitem(last=False)
+                if counted_as_fresh_arcface:
+                    self._recognition_last_arcface_frame[track_id] = int(frame_num)
 
     def _clear_sequential_detection_feed_state(self) -> None:
         """Drop ByteTrack / EMA state after a timeline jump or new playback anchor.

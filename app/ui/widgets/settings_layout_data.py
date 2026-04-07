@@ -676,9 +676,23 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "max_value": "16",
             "default": "0",
             "step": 1,
-            "help": "After embedding cache reuse, at most this many faces get a new ArcFace "
-            "this frame (largest bounding boxes first). 0 = no limit. Smaller faces may get "
-            "no embedding and will not match swap targets — useful for single-main-face scenes.",
+            "help": "After geometry cache and lazy track reuse, at most this many faces still "
+            "missing an embedding get a new ArcFace this frame (largest boxes first). 0 = no limit. "
+            "If a face is skipped but ByteTrack has a prior embedding, that stale embedding is "
+            "reused so swap can still run.",
+        },
+        "PerformanceRecognitionLazyArcFaceIntervalSlider": {
+            "level": 1,
+            "label": "Performance: min frames between real ArcFace (track), 1=off",
+            "min_value": "1",
+            "max_value": "15",
+            "default": "1",
+            "step": 1,
+            "help": "When >1 and ByteTrack IDs exist, after geometry cache misses reuse the last "
+            "embedding for the same track without running ArcFace until this many frames have "
+            "passed since the last *new* ArcFace for that track. Saves GPU when faces move enough "
+            "to miss IoU/kps thresholds; risk of wrong target match on fast cuts or identity "
+            "changes. Without tracking (no ids), this path does not apply.",
         },
         "AutoRotationToggle": {
             "level": 1,

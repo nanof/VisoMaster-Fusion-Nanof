@@ -3421,6 +3421,7 @@ class FrameWorker(threading.Thread):
                             _recognition_arc_model,
                             _rec_sim,
                             track_id=_row_tid,
+                            counted_as_fresh_arcface=False,
                         )
                 kps_all_i = kpss[i] if kpss is not None and i < len(kpss) else None
                 kps_203_i = (
@@ -3441,6 +3442,44 @@ class FrameWorker(threading.Thread):
                 )
 
             _need_emb = [w for w in _work_faces if w["embedding"] is None]
+            # Lazy track reuse must run on *all* faces still missing an embedding before
+            # applying the per-frame ArcFace cap; otherwise capped-out faces never get
+            # lazy reuse and reach swap with embedding=None (Inswapper needs t_e).
+            _lazy_iv = int(
+                control.get("PerformanceRecognitionLazyArcFaceIntervalSlider", 1) or 1
+            )
+            if _lazy_iv > 1 and _need_emb:
+                _still_need = []
+                for w in _need_emb:
+                    _tid = int(w.get("track_id", -1))
+                    if _tid >= 0:
+                        _lazy_e = (
+                            self.video_processor.try_lazy_arcface_track_embedding(
+                                self.frame_number,
+                                _tid,
+                                _recognition_arc_model,
+                                _rec_sim,
+                                _lazy_iv,
+                            )
+                        )
+                        if _lazy_e is not None:
+                            w["embedding"] = _lazy_e
+                            if _use_recognition_cache:
+                                self.video_processor.store_recognition_embedding(
+                                    self.frame_number,
+                                    int(w["i"]),
+                                    w["bbox"],
+                                    w["kps_5"],
+                                    _lazy_e,
+                                    _recognition_arc_model,
+                                    _rec_sim,
+                                    track_id=_tid,
+                                    counted_as_fresh_arcface=False,
+                                )
+                            continue
+                    _still_need.append(w)
+                _need_emb = _still_need
+
             _arcface_cap = int(
                 control.get("PerformanceRecognitionMaxArcFacePerFrameSlider", 0) or 0
             )
@@ -3503,6 +3542,32 @@ class FrameWorker(threading.Thread):
                                 _rec_sim,
                                 track_id=int(_w.get("track_id", -1)),
                             )
+
+            for _w in _work_faces:
+                if _w["embedding"] is not None:
+                    continue
+                _ftid = int(_w.get("track_id", -1))
+                if _ftid < 0:
+                    continue
+                _stale = self.video_processor.get_track_last_embedding_if_any(
+                    _ftid,
+                    _recognition_arc_model,
+                    _rec_sim,
+                )
+                if _stale is not None:
+                    _w["embedding"] = _stale
+                    if _use_recognition_cache:
+                        self.video_processor.store_recognition_embedding(
+                            self.frame_number,
+                            int(_w["i"]),
+                            _w["bbox"],
+                            _w["kps_5"],
+                            _stale,
+                            _recognition_arc_model,
+                            _rec_sim,
+                            track_id=_ftid,
+                            counted_as_fresh_arcface=False,
+                        )
 
             for _w in _work_faces:
                 det_faces_data_for_display.append(
@@ -4616,7 +4681,8 @@ class FrameWorker(threading.Thread):
                 _s_latent_np = self.models_processor.calc_inswapper_latent(s_e)
                 if _s_latent_np is None:
                     print(
-                        "[ERROR] calc_inswapper_latent returned None (emap unavailable). Skipping swap."
+                        "[ERROR] calc_inswapper_latent returned None "
+                        "(missing source embedding or emap unavailable). Skipping swap."
                     )
                     return input_face_affined, dfm_model_instance, dim, latent
                 latent_s = torch.from_numpy(_s_latent_np).float().to(_device)
@@ -4626,7 +4692,8 @@ class FrameWorker(threading.Thread):
             _t_latent_np = self.models_processor.calc_inswapper_latent(t_e)
             if _t_latent_np is None:
                 print(
-                    "[ERROR] calc_inswapper_latent returned None (emap unavailable). Skipping swap."
+                    "[ERROR] calc_inswapper_latent returned None "
+                    "(missing target embedding or emap unavailable). Skipping swap."
                 )
                 return input_face_affined, dfm_model_instance, dim, latent
             dst_latent = torch.from_numpy(_t_latent_np).float().to(_device)
@@ -4672,23 +4739,25 @@ class FrameWorker(threading.Thread):
             if cached_source_latent_torch is not None:
                 latent_s = cached_source_latent_torch
             else:
-                latent_s = (
-                    torch.from_numpy(
-                        self.models_processor.calc_swapper_latent_iss(s_e, version)
+                _s_iss = self.models_processor.calc_swapper_latent_iss(s_e, version)
+                if _s_iss is None:
+                    print(
+                        "[ERROR] calc_swapper_latent_iss returned None "
+                        "(missing source embedding or emap). Skipping swap."
                     )
-                    .float()
-                    .to(_device)
-                )
+                    return input_face_affined, dfm_model_instance, dim, latent
+                latent_s = torch.from_numpy(_s_iss).float().to(_device)
                 self._store_raw_source_latent_in_cache(
                     latent_s, source_latent_out_cache, s_e, swapper_model
                 )
-            dst_latent = (
-                torch.from_numpy(
-                    self.models_processor.calc_swapper_latent_iss(t_e, version)
+            _t_iss = self.models_processor.calc_swapper_latent_iss(t_e, version)
+            if _t_iss is None:
+                print(
+                    "[ERROR] calc_swapper_latent_iss returned None "
+                    "(missing target embedding or emap). Skipping swap."
                 )
-                .float()
-                .to(_device)
-            )
+                return input_face_affined, dfm_model_instance, dim, latent
+            dst_latent = torch.from_numpy(_t_iss).float().to(_device)
 
             latent = self._apply_likeness(latent_s, dst_latent, parameters)
 
