@@ -102,6 +102,10 @@ class FaceDetectors:
             OrderedDict()
         )
         self._DET_PREP_RESIZE_CACHE_MAX = 32
+        # Dedupe warnings when UI asks for a letterbox size the compiled ONNX/TRT model cannot use.
+        self._detector_input_size_warned: set[tuple[str, int, int]] = set()
+        # model_name -> fixed square side if ONNX declares H==W ints; None if dynamic/unknown
+        self._declared_input_side_cache: dict[str, int | None] = {}
 
         # This map links a detector name (from the UI) to its model file and processing function.
         self.detector_map: Dict[str, Dict[str, Any]] = {
@@ -236,6 +240,47 @@ class FaceDetectors:
         except Exception:
             return None
 
+        return None
+
+    def clear_declared_input_side_cache(self) -> None:
+        """Call after provider switch / engine rebuild so fixed-size probe is re-run."""
+        self._declared_input_side_cache.clear()
+
+    def get_declared_fixed_input_side(self, detect_mode: str) -> int | None:
+        """
+        Return the single square side if this detector always uses a fixed input:
+        Yolo/Yunet use 640 in code; RetinaFace/SCRFD read declared ONNX input when H==W are ints.
+        Returns None when the export is dynamic (UI may offer multiple sizes).
+        """
+        if detect_mode in ("Yolov8", "Yunet", "Yunet-2023"):
+            return 640
+        detector = self.detector_map.get(detect_mode)
+        if not detector:
+            return None
+        model_name = detector["model_name"]
+        c = self._declared_input_side_cache
+        if model_name in c:
+            return c[model_name]
+        ort_session = self.models_processor.load_model(model_name)
+        if not ort_session:
+            c[model_name] = None
+            return None
+        try:
+            inputs = ort_session.get_inputs()
+            if not inputs:
+                c[model_name] = None
+                return None
+            shape = inputs[0].shape
+            if not shape or len(shape) < 4:
+                c[model_name] = None
+                return None
+            h, w = shape[2], shape[3]
+            if isinstance(h, int) and isinstance(w, int) and h > 0 and h == w:
+                c[model_name] = h
+                return h
+        except Exception:
+            pass
+        c[model_name] = None
         return None
 
     def _resolve_detector_input_size(
@@ -881,8 +926,21 @@ class FaceDetectors:
         }
         args.update(kwargs)
 
-        if detect_mode in ["RetinaFace", "SCRFD"]:
-            args["input_size"] = input_size
+        if detect_mode in ("RetinaFace", "SCRFD"):
+            effective_input_size = self._resolve_detector_input_size(
+                detect_mode, input_size, ort_session
+            )
+            if effective_input_size != input_size:
+                wkey = (model_name, int(input_size[0]), int(effective_input_size[0]))
+                if wkey not in self._detector_input_size_warned:
+                    self._detector_input_size_warned.add(wkey)
+                    print(
+                        f"[WARN] {model_name}: UI detector size {input_size[0]}×{input_size[1]} "
+                        f"does not match this export ({effective_input_size[0]}×{effective_input_size[1]}). "
+                        f"Using the model size — mismatched IOBinding sizes can freeze TensorRT/CUDA.",
+                        flush=True,
+                    )
+            args["input_size"] = effective_input_size
 
         # Run the detector — returns (det, kpss_5, kpss, det_scores)
         det, kpss_5, kpss, det_scores = detection_function(**args)

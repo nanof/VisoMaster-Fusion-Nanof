@@ -89,13 +89,16 @@ def detector_input_size_from_control(control: Mapping[str, Any]) -> Tuple[int, i
     """
     Square letterbox side for `run_detect` (UI: Detector internal size).
     Lower values improve FPS; very low sizes miss small faces.
+    RetinaFace/SCRFD: ``run_detect`` snaps to the exported model's fixed input
+    when it differs from the UI value (binding a smaller tensor than the TRT/ONNX
+    engine expects can hang playback).
     """
     raw = control.get("DetectorInternalSizeSelection", 512)
     try:
         side = int(str(raw).strip())
     except (TypeError, ValueError):
         side = 512
-    side = max(256, min(640, side))
+    side = max(128, min(640, side))
     return (side, side)
 
 

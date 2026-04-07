@@ -605,6 +605,8 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "options": ["RetinaFace", "Yolov8", "SCRFD", "Yunet", "Yunet-2023"],
             "default": "RetinaFace",
             "help": "Select the face detection model. To benchmark alternatives, use the same video and VISIOMASTER_PERF_BUNDLE=1; keep RecognitionModel matched to the swapper (e.g. Inswapper128ArcFace with Inswapper128).",
+            "exec_function": control_actions.on_detector_model_selection_change,
+            "exec_function_args": [],
         },
         "DetectorScoreSlider": {
             "level": 1,
@@ -627,9 +629,19 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
         "DetectorInternalSizeSelection": {
             "level": 1,
             "label": "Detector internal size",
-            "options": ["512", "416", "384", "320", "256"],
+            "options": [
+                "512",
+                "416",
+                "384",
+                "320",
+                "256",
+                "224",
+                "192",
+                "160",
+                "128",
+            ],
             "default": "512",
-            "help": "Letterbox side length for the detector (smaller = faster, more false negatives on small faces). Layer D / quality trade-off.",
+            "help": "Shown only when the selected detector accepts a variable letterbox (dynamic ONNX). Yolo/Yunet use 640×640 in code; fixed-shape RetinaFace/SCRFD use the model’s compiled side — the control is hidden and the value is set automatically.",
         },
         "MaxFacesToDetectSlider": {
             "level": 1,

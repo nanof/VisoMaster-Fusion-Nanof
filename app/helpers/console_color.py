@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Callable
 from typing import Any, TextIO
 
 _RESET = "\033[0m"
@@ -102,6 +103,70 @@ class _AnsiLogColorStream:
 
     def fileno(self) -> int:
         return self._stream.fileno()
+
+
+class _ToastTapStream:
+    """Wrap a text stream; on complete lines, invoke callback for [WARN]/[ERROR] prefixes."""
+
+    def __init__(
+        self, stream: TextIO, on_tagged_line: Callable[[str, str], None] | None
+    ) -> None:
+        self._stream = stream
+        self._buffer = ""
+        self._on_tagged_line = on_tagged_line
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
+
+    def write(self, s: str) -> int:
+        if not s:
+            return 0
+        self._buffer += s
+        cb = self._on_tagged_line
+        while True:
+            n = self._buffer.find("\n")
+            if n == -1:
+                break
+            line = self._buffer[: n + 1]
+            self._buffer = self._buffer[n + 1 :]
+            if cb is not None:
+                tag = _line_prefix_tag(line)
+                if tag in ("warn", "error"):
+                    cb(tag, line.rstrip("\r\n"))
+        return self._stream.write(s)
+
+    def flush(self) -> None:
+        self._stream.flush()
+
+    def isatty(self) -> bool:
+        return self._stream.isatty()
+
+    @property
+    def encoding(self) -> str:
+        enc = getattr(self._stream, "encoding", None)
+        return enc if isinstance(enc, str) else "utf-8"
+
+    def fileno(self) -> int:
+        return self._stream.fileno()
+
+
+def install_console_toast_tap(
+    on_tagged_line: Callable[[str, str], None] | None,
+) -> None:
+    """
+    Wrap sys.stdout / sys.stderr so lines starting with [WARN] or [ERROR] trigger a callback.
+
+    Safe to call once after install_colored_console_streams(). Pass None to disable.
+    """
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None:
+            continue
+        if isinstance(stream, _ToastTapStream):
+            inner = stream._stream
+            stream._on_tagged_line = on_tagged_line
+            continue
+        setattr(sys, name, _ToastTapStream(stream, on_tagged_line))
 
 
 def install_colored_console_streams() -> None:

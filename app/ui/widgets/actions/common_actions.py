@@ -968,6 +968,12 @@ def set_control_widgets_values(main_window: "MainWindow", enable_exec_func=True)
 
                 # Re-enable frame refresh
                 widget.enable_refresh_frame = True
+        try:
+            from app.helpers import detector_internal_size_ui
+
+            detector_internal_size_ui.sync_detector_internal_size_combo(main_window)
+        except Exception:
+            pass
     finally:
         setattr(main_window, "_preview_notifications_suppressed", False)
 

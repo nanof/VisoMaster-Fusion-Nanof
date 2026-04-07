@@ -42,6 +42,7 @@ from app.ui.widgets.face_editor_layout_data import FACE_EDITOR_LAYOUT_DATA
 from app.helpers.app_metadata import get_app_display_metadata
 from app.helpers import input_face_favorites_storage
 from app.helpers.miscellaneous import DFMModelManager, ParametersDict, ThumbnailManager
+from app.helpers import detector_internal_size_ui
 from app.helpers.typing_helper import (
     FacesParametersTypes,
     ParametersTypes,
@@ -339,6 +340,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
         )
         self.previewNotificationLabel.setVisible(False)
+        preview_notification_actions.setup_console_and_warning_toasts(self)
 
         self.previewActiveSettingsLabel = QtWidgets.QLabel("", self.graphicsViewFrame)
         self.previewActiveSettingsLabel.setStyleSheet(
@@ -563,6 +565,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             LAYOUT_DATA=SETTINGS_LAYOUT_DATA,
             layoutWidget=self.settingsWidgetsLayout,
             data_type="control",
+        )
+        QtCore.QTimer.singleShot(
+            0,
+            partial(detector_internal_size_ui.sync_detector_internal_size_combo, self),
         )
         layout_actions.add_widgets_to_tab_layout(
             self,

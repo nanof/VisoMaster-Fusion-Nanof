@@ -13,6 +13,7 @@ import qdarktheme
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
 import app.helpers.miscellaneous as misc_helpers
+from app.helpers import detector_internal_size_ui
 import app.ui.widgets.widget_components as widget_components
 from app.ui.widgets.actions import common_actions as common_widget_actions
 
@@ -20,6 +21,11 @@ from app.ui.widgets.actions import common_actions as common_widget_actions
 #    Define functions here that has to be executed when value of a control widget (In the settings tab) is changed.
 #    The first two parameters should be the MainWindow object and the new value of the control
 #'''
+
+
+def on_detector_model_selection_change(main_window: "MainWindow", new_model: str):
+    """Show/hide detector letterbox combo and fill supported sizes for the selected model."""
+    detector_internal_size_ui.sync_detector_internal_size_combo(main_window, new_model)
 
 
 def handle_face_detector_tracking_reset(main_window: "MainWindow", value):
@@ -44,6 +50,8 @@ def change_execution_provider(main_window: "MainWindow", new_provider):
     main_window.video_processor.stop_processing()
     main_window.models_processor.switch_providers_priority(new_provider)
     main_window.models_processor.clear_gpu_memory()
+    main_window.models_processor.face_detectors.clear_declared_input_side_cache()
+    detector_internal_size_ui.sync_detector_internal_size_combo(main_window)
     common_widget_actions.update_gpu_memory_progressbar(main_window)
 
 
@@ -65,6 +73,9 @@ def apply_saved_execution_provider(main_window: "MainWindow") -> None:
         main_window.models_processor.switch_providers_priority(desired)
     except (RuntimeError, ValueError) as e:
         print(f"[WARN] Could not apply saved execution provider '{desired}': {e}")
+    else:
+        main_window.models_processor.face_detectors.clear_declared_input_side_cache()
+        detector_internal_size_ui.sync_detector_internal_size_combo(main_window)
     common_widget_actions.update_gpu_memory_progressbar(main_window)
     # Custom provider uses lazy initialisation: each CUDA graph runner is built
     # on first use and a build-progress dialog is shown at that point.  Do NOT
