@@ -712,7 +712,7 @@ class FrameWorker(threading.Thread):
 
             # Check stop event again
             if self.stop_event.is_set():
-                print(f"[WARN] {self.name} cancelled during process_frame.")
+                print(f"[INFO] {self.name} cancelled during process_frame.")
                 return
 
             # Emit Signals directly with numpy.ndarray (JIT QPixmap creation is now handled by the GUI Thread)
