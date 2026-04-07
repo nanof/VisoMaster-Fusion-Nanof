@@ -1,6 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <ui version="4.0">
  <class>MainWindow</class>
+ <customwidgets>
+  <customwidget>
+   <class>VramPeakProgressBar</class>
+   <extends>QProgressBar</extends>
+   <header>app.ui.widgets.vram_progress_bar</header>
+  </customwidget>
+ </customwidgets>
  <widget class="QMainWindow" name="MainWindow">
   <property name="geometry">
    <rect>
@@ -1463,7 +1470,7 @@
      <item row="0" column="0">
       <layout class="QHBoxLayout" name="horizontalLayout_2">
        <item>
-        <widget class="QProgressBar" name="vramProgressBar">
+        <widget class="VramPeakProgressBar" name="vramProgressBar">
          <property name="value">
           <number>24</number>
          </property>

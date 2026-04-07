@@ -17,10 +17,13 @@ from PySide6.QtGui import (QAction, QBrush, QColor, QConicalGradient,
 from PySide6.QtWidgets import (QApplication, QCheckBox, QDockWidget, QGraphicsView,
     QGridLayout, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QListView, QListWidget, QListWidgetItem,
-    QMainWindow, QMenu, QMenuBar, QProgressBar,
+    QMainWindow, QMenu, QMenuBar,
     QPushButton, QSizePolicy, QSlider, QSpacerItem,
     QTabWidget, QVBoxLayout, QWidget)
 from app.ui.core import media_rc
+from app.ui.widgets.vram_progress_bar import VramPeakProgressBar
+
+
 class Ui_MainWindow(object):
     def setupUi(self, MainWindow):
         if not MainWindow.objectName():
@@ -684,7 +687,7 @@ class Ui_MainWindow(object):
         self.gridLayout_5.addWidget(self.tabWidget, 1, 0, 1, 1)
         self.horizontalLayout_2 = QHBoxLayout()
         self.horizontalLayout_2.setObjectName(u"horizontalLayout_2")
-        self.vramProgressBar = QProgressBar(self.dockWidgetContents_2)
+        self.vramProgressBar = VramPeakProgressBar(self.dockWidgetContents_2)
         self.vramProgressBar.setObjectName(u"vramProgressBar")
         self.vramProgressBar.setValue(24)
         self.horizontalLayout_2.addWidget(self.vramProgressBar)

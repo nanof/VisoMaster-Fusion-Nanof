@@ -508,6 +508,7 @@ def set_gpu_memory_progressbar_value(
 ):
     main_window.vramProgressBar.setMaximum(memory_total)
     main_window.vramProgressBar.setValue(memory_used)
+    main_window.vramProgressBar.note_used_mb(memory_used)
     main_window.vramProgressBar.setFormat(
         f"{round(memory_used / 1024, 2)} GB / {round(memory_total / 1024, 2)} GB (%p%)"
     )
@@ -557,6 +558,7 @@ def set_gpu_memory_progressbar_value(
 def clear_gpu_memory(main_window: "MainWindow"):
     main_window.video_processor.stop_processing()
     main_window.models_processor.clear_gpu_memory()
+    main_window.vramProgressBar.reset_peak()
     main_window.swapfacesButton.setChecked(False)
     main_window.editFacesButton.setChecked(False)
     from app.ui.widgets.actions import preview_notification_actions as _preview_notify
