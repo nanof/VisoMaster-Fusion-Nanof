@@ -396,6 +396,35 @@ class _FakeTabWidget:
         return self._tabs[index]
 
 
+class _FakeGraphicsTransform:
+    def m11(self):
+        return 1.0
+
+    def m12(self):
+        return 0.0
+
+    def m13(self):
+        return 0.0
+
+    def m21(self):
+        return 0.0
+
+    def m22(self):
+        return 1.0
+
+    def m23(self):
+        return 0.0
+
+    def m31(self):
+        return 0.0
+
+    def m32(self):
+        return 0.0
+
+    def m33(self):
+        return 1.0
+
+
 def _make_workspace_main_window(
     tmp_path: Path,
     *,
@@ -454,6 +483,11 @@ def _make_workspace_main_window(
     mw.normalGeometry = lambda: normal_geometry
     mw.isMaximized = lambda: is_maximized
     mw.saveState = lambda: _FakeByteArray("live-window-state")
+    mw.graphicsViewFrame = SimpleNamespace(transform=lambda: _FakeGraphicsTransform())
+    mw.target_videos_thumbnail_zoom = 1.0
+    mw.input_faces_thumbnail_zoom = 1.0
+    mw.inputFacesTabWidget = SimpleNamespace(currentIndex=lambda: 0)
+    mw._preview_faces_splitter = None
     return mw
 
 

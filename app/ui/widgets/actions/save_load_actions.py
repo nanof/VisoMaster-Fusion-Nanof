@@ -6,7 +6,7 @@ import copy
 from functools import partial
 from typing import TYPE_CHECKING, Dict, Union, cast
 
-from PySide6 import QtWidgets, QtCore
+from PySide6 import QtWidgets, QtCore, QtGui
 import numpy as np
 import torch
 
@@ -26,6 +26,152 @@ if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
 
 
+def _graphics_transform_to_dict(t: QtGui.QTransform) -> dict[str, float]:
+    return {
+        "m11": float(t.m11()),
+        "m12": float(t.m12()),
+        "m13": float(t.m13()),
+        "m21": float(t.m21()),
+        "m22": float(t.m22()),
+        "m23": float(t.m23()),
+        "m31": float(t.m31()),
+        "m32": float(t.m32()),
+        "m33": float(t.m33()),
+    }
+
+
+def _dict_to_graphics_transform(d: object) -> QtGui.QTransform | None:
+    if not isinstance(d, dict) or not d:
+        return None
+    try:
+        return QtGui.QTransform(
+            float(d["m11"]),
+            float(d["m12"]),
+            float(d["m13"]),
+            float(d["m21"]),
+            float(d["m22"]),
+            float(d["m23"]),
+            float(d["m31"]),
+            float(d["m32"]),
+            float(d["m33"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _clamp_saved_thumbnail_zoom(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        z = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.5, min(3.0, z))
+
+
+def _apply_workspace_splitter_sizes_deferred(
+    main_window: "MainWindow", window_state: dict
+) -> None:
+    sizes = window_state.get("preview_faces_splitter_sizes")
+    splitter = getattr(main_window, "_preview_faces_splitter", None)
+    if splitter is None or not isinstance(sizes, list) or len(sizes) < 2:
+        return
+    try:
+        a, b = int(sizes[0]), int(sizes[1])
+        if a < 1 or b < 1:
+            return
+    except (TypeError, ValueError):
+        return
+
+    def _apply() -> None:
+        sp = getattr(main_window, "_preview_faces_splitter", None)
+        if sp is not None:
+            sp.setSizes([a, b])
+
+    QtCore.QTimer.singleShot(0, _apply)
+
+
+def _restore_input_faces_tab_index(main_window: "MainWindow", window_state: dict) -> None:
+    idx = window_state.get("input_faces_tab_index")
+    tab_w = getattr(main_window, "inputFacesTabWidget", None)
+    if tab_w is None or idx is None:
+        return
+    try:
+        i = int(idx)
+        if 0 <= i < tab_w.count():
+            tab_w.setCurrentIndex(i)
+    except (TypeError, ValueError):
+        pass
+
+
+def _schedule_workspace_preview_transform_restore(main_window: "MainWindow") -> None:
+    tf = getattr(main_window, "_workspace_saved_preview_transform", None)
+    if tf is None:
+        return
+
+    def _apply() -> None:
+        pending = getattr(main_window, "_workspace_saved_preview_transform", None)
+        if pending is None:
+            return
+        gv = main_window.graphicsViewFrame
+        gv.setTransform(pending, combine=False)
+        det = pending.m11() * pending.m22() - pending.m12() * pending.m21()
+        scale = abs(det) ** 0.5 if det else 1.0
+        gv.last_scale_factor = max(1e-6, float(scale))
+        gv.zoom_value = 0
+        main_window._graphics_view_keep_transform_on_resize = True
+        main_window._workspace_saved_preview_transform = None
+
+    QtCore.QTimer.singleShot(0, _apply)
+
+
+def _refresh_lists_after_thumbnail_zoom_restore(main_window: "MainWindow") -> None:
+    if main_window.target_videos:
+        list_view_actions.refresh_thumbnail_sizes_for_list(
+            main_window, main_window.targetVideosList
+        )
+    if main_window.input_faces:
+        list_view_actions.refresh_thumbnail_sizes_for_list(
+            main_window, main_window.inputFacesList
+        )
+        list_view_actions.refresh_thumbnail_sizes_for_list(
+            main_window, main_window.inputFacesFavoritesList
+        )
+
+
+def _sync_input_and_embedding_checkboxes_from_target_face(
+    main_window: "MainWindow",
+    target_button: "widget_components.TargetFaceCardButton",
+) -> None:
+    """
+    Match input-face and merged-embedding checkboxes to this target's assignments.
+
+    Required before restoring the selected target with .click(): when KeepInput /
+    AutoSwap / batch are on, load_target_face rebuilds assigned_* from checkbox
+    state and would otherwise drop workspace-loaded assignments.
+    """
+    for _, input_face_button in main_window.input_faces.items():
+        input_face_button.blockSignals(True)
+        input_face_button.setChecked(False)
+        input_face_button.blockSignals(False)
+    for _, embed_button in main_window.merged_embeddings.items():
+        embed_button.blockSignals(True)
+        embed_button.setChecked(False)
+        embed_button.blockSignals(False)
+    for input_face_id in target_button.assigned_input_faces.keys():
+        ib = main_window.input_faces.get(input_face_id)
+        if ib is not None:
+            ib.blockSignals(True)
+            ib.setChecked(True)
+            ib.blockSignals(False)
+    for embed_id in target_button.assigned_merged_embeddings.keys():
+        eb = main_window.merged_embeddings.get(embed_id)
+        if eb is not None:
+            eb.blockSignals(True)
+            eb.setChecked(True)
+            eb.blockSignals(False)
+
+
 def _click_target_face_for_workspace_restore(main_window: "MainWindow", data: dict) -> None:
     """Apply Face Swap / Restorer panel from the same target face that was active when saving."""
     if not main_window.target_faces:
@@ -43,6 +189,7 @@ def _click_target_face_for_workspace_restore(main_window: "MainWindow", data: di
                     break
     if button is None:
         button = next(iter(main_window.target_faces.values()))
+    _sync_input_and_embedding_checkboxes_from_target_face(main_window, button)
     button.click()
 
 
@@ -396,6 +543,25 @@ def load_saved_workspace(
             # Match provider before thumbnails / refresh_frame load the wrong stack
             control_actions.apply_saved_execution_provider(main_window)
 
+            ws_preview = data.get("window_state_data") or {}
+            tz_tv = _clamp_saved_thumbnail_zoom(
+                ws_preview.get("target_videos_thumbnail_zoom")
+            )
+            if tz_tv is not None:
+                main_window.target_videos_thumbnail_zoom = tz_tv
+            tz_if = _clamp_saved_thumbnail_zoom(
+                ws_preview.get("input_faces_thumbnail_zoom")
+            )
+            if tz_if is not None:
+                main_window.input_faces_thumbnail_zoom = tz_if
+            pt_raw = ws_preview.get("preview_graphics_transform")
+            main_window._workspace_saved_preview_transform = (
+                _dict_to_graphics_transform(pt_raw)
+                if isinstance(pt_raw, dict)
+                else None
+            )
+            list_view_actions.initialize_media_list_widgets(main_window)
+
             # Add target medias
             target_medias_data = data.get("target_medias_data", [])
             target_medias_files_list = []
@@ -651,7 +817,8 @@ def load_saved_workspace(
                         tab_state["current_tab_index"]
                     )
 
-            layout_actions.fit_image_to_view_onchange(main_window)
+            if getattr(main_window, "_workspace_saved_preview_transform", None) is None:
+                layout_actions.fit_image_to_view_onchange(main_window)
 
             if main_window.target_faces:
                 _click_target_face_for_workspace_restore(main_window, data)
@@ -733,19 +900,28 @@ def load_saved_workspace(
                 except Exception as e:
                     print(f"[WARN] Failed to restore dock layout: {e}")
 
+            _restore_input_faces_tab_index(main_window, window_state)
+            _apply_workspace_splitter_sizes_deferred(main_window, window_state)
+            _refresh_lists_after_thumbnail_zoom_restore(main_window)
+
             if needs_post_restore_frame_clamp:
                 QtCore.QTimer.singleShot(
                     0,
                     partial(_clamp_window_frame_to_available_geometry, main_window),
                 )
         except (json.JSONDecodeError, KeyError, TypeError) as e:
+            main_window._workspace_saved_preview_transform = None
             QtWidgets.QMessageBox.critical(
                 main_window, "Error", f"Failed to load workspace: {e}"
             )
             return
         finally:
             main_window._loading_workspace = False
-        common_widget_actions.refresh_frame(main_window)
+        pending_tf = getattr(main_window, "_workspace_saved_preview_transform", None)
+        common_widget_actions.refresh_frame(
+            main_window, synchronous=pending_tf is not None
+        )
+        _schedule_workspace_preview_transform_restore(main_window)
 
 
 def save_current_workspace(
@@ -808,6 +984,32 @@ def save_current_workspace(
         "scan_tools_expanded": getattr(main_window, "scan_tools_expanded", False),
         "dock_state": dock_state_data,
     }
+
+    try:
+        window_state_data["preview_graphics_transform"] = _graphics_transform_to_dict(
+            main_window.graphicsViewFrame.transform()
+        )
+    except Exception:
+        window_state_data["preview_graphics_transform"] = {}
+
+    window_state_data["target_videos_thumbnail_zoom"] = getattr(
+        main_window, "target_videos_thumbnail_zoom", 1.0
+    )
+    window_state_data["input_faces_thumbnail_zoom"] = getattr(
+        main_window, "input_faces_thumbnail_zoom", 1.0
+    )
+    splitter = getattr(main_window, "_preview_faces_splitter", None)
+    if splitter is not None:
+        try:
+            window_state_data["preview_faces_splitter_sizes"] = splitter.sizes()
+        except Exception:
+            pass
+    try:
+        window_state_data["input_faces_tab_index"] = (
+            main_window.inputFacesTabWidget.currentIndex()
+        )
+    except Exception:
+        pass
 
     # --- Check if Denoiser is enabled ---
     control = main_window.control

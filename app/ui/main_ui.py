@@ -177,6 +177,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.project_root_path = Path(__file__).resolve().parent.parent.parent
         self.actual_models_dir_path = self.project_root_path / global_models_dir
         self.loading_new_media = False
+        self._graphics_view_keep_transform_on_resize = False
+        self._workspace_saved_preview_transform = None
 
         self.gpu_memory_update_signal.connect(
             partial(common_widget_actions.set_gpu_memory_progressbar_value, self)
@@ -338,6 +340,25 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         )
         self.previewNotificationLabel.setVisible(False)
 
+        self.previewActiveSettingsLabel = QtWidgets.QLabel("", self.graphicsViewFrame)
+        self.previewActiveSettingsLabel.setStyleSheet(
+            "QLabel { background-color: rgba(0, 0, 0, 140); color: #e8e8e8; "
+            "padding: 4px 8px; border-radius: 4px; font-size: 11px; "
+            "font-family: 'Segoe UI', 'Segoe UI Historic', sans-serif; }"
+        )
+        self.previewActiveSettingsLabel.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop
+        )
+        self.previewActiveSettingsLabel.setWordWrap(False)
+        self.previewActiveSettingsLabel.setMaximumWidth(380)
+        self.previewActiveSettingsLabel.setToolTip(
+            "One line per enabled option: pipeline, playback, and preview-related toggles."
+        )
+        self.previewActiveSettingsLabel.setAttribute(
+            QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+        )
+        self.previewActiveSettingsLabel.setVisible(False)
+
         graphics_view_actions.position_preview_overlay_labels(self)
 
         self._preview_fps_stale_timer = QtCore.QTimer(self)
@@ -354,6 +375,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             partial(graphics_view_actions.on_preview_fps_second_tick, self)
         )
         self._preview_fps_sec_timer.start()
+
+        self._preview_active_settings_timer = QtCore.QTimer(self)
+        self._preview_active_settings_timer.setInterval(400)
+        self._preview_active_settings_timer.timeout.connect(
+            partial(
+                graphics_view_actions.update_preview_active_settings_overlay, self
+            )
+        )
+        self._preview_active_settings_timer.start()
+        graphics_view_actions.update_preview_active_settings_overlay(self)
 
         video_control_actions.enable_zoom_and_pan(self, self.graphicsViewFrame)
 
@@ -494,6 +525,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         )
         self._install_view_panel_toggle_actions()
         self._install_view_navigation_actions()
+        self._install_preview_faces_splitter()
         self._install_media_controls_layout()
         self._install_compare_mask_toggle_buttons()
         self._install_media_controls_separator()
@@ -866,7 +898,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             # Set the scene rectangle to the bounding rectangle of the pixmap
             scene_rect = pixmap_item.boundingRect()
             self.graphicsViewFrame.setSceneRect(scene_rect)
-            graphics_view_actions.fit_image_to_view(self, pixmap_item, scene_rect)
+            if not getattr(self, "_graphics_view_keep_transform_on_resize", False):
+                graphics_view_actions.fit_image_to_view(self, pixmap_item, scene_rect)
         self._sync_theatre_base_window_snapshot()
 
     def moveEvent(self, event: QtGui.QMoveEvent):
@@ -1141,6 +1174,55 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         if hasattr(self, "mediaControlsMainLayout"):
             self.mediaControlsMainLayout.setSpacing(12)
         self._sync_media_controls_balance()
+
+    def _install_preview_faces_splitter(self):
+        """Resizable split between preview+controls and faces strip; sizes persist in workspace."""
+        if getattr(self, "_preview_faces_splitter", None) is not None:
+            return
+
+        vl = self.verticalLayout
+        if vl.count() < 5:
+            return
+
+        item_gv = vl.takeAt(1)
+        item_media = vl.takeAt(1)
+        item_spacer = vl.takeAt(1)
+        item_faces = vl.takeAt(1)
+        gvf = item_gv.widget() if item_gv is not None else None
+        media_l = item_media.layout() if item_media is not None else None
+        spacer_it = item_spacer.spacerItem() if item_spacer is not None else None
+        faces = item_faces.widget() if item_faces is not None else None
+        if gvf is None or media_l is None or faces is None:
+            if item_gv is not None:
+                vl.insertItem(1, item_gv)
+            if item_media is not None:
+                vl.insertItem(2, item_media)
+            if item_spacer is not None:
+                vl.insertItem(3, item_spacer)
+            if item_faces is not None:
+                vl.insertItem(4, item_faces)
+            return
+
+        top_w = QtWidgets.QWidget(self.mediaLayout)
+        top_vl = QtWidgets.QVBoxLayout(top_w)
+        top_vl.setContentsMargins(0, 0, 0, 0)
+        top_vl.setSpacing(vl.spacing())
+        top_vl.addWidget(gvf)
+        top_vl.addLayout(media_l)
+        if spacer_it is not None:
+            top_vl.addItem(spacer_it)
+
+        splitter = QtWidgets.QSplitter(
+            QtCore.Qt.Orientation.Vertical, self.mediaLayout
+        )
+        splitter.setObjectName("previewFacesSplitter")
+        splitter.setChildrenCollapsible(False)
+        splitter.addWidget(top_w)
+        splitter.addWidget(faces)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        vl.insertWidget(1, splitter)
+        self._preview_faces_splitter = splitter
 
     def _install_media_controls_layout(self):
         """Center the media controls in a single simple row."""

@@ -160,6 +160,12 @@ class FrameWorker(threading.Thread):
 
     # Q-IMP-04: minimum face bounding-box side length (pixels) to process
     _MIN_FACE_PIXELS: int = 20
+    # Swap all by index: remember assignments when a face briefly leaves frame (position + TTL).
+    _RR_SLOT_TTL_FRAMES: int = 90
+    _RR_SEEK_GAP_RESET_FRAMES: int = 150
+    _RR_MEMORY_MAX_SLOTS: int = 24
+    _RR_CENTROID_DIST_FRAC: float = 0.22
+    _RR_CENTROID_DIST_MIN_PX: float = 96.0
     # FW-PERF-11: Auto Restore sharpness search uses this max side (area resize) — ~4× fewer
     # pixels than 512² per score call; final blend still uses full-res tensors.
     _AUTO_RESTORE_SCORE_MAX_SIDE: int = 256
@@ -331,8 +337,9 @@ class FrameWorker(threading.Thread):
         self._feeder_chw_tensor: Optional[torch.Tensor] = None
 
         # RR-TEMP: temporal coherence for "Swap all by index"
-        self._rr_prev_slots: list[tuple[np.ndarray, int]] = []
+        self._rr_memory_slots: list[tuple[np.ndarray, int, int]] = []
         self._rr_track_to_input: dict[int, int] = {}
+        self._rr_track_last_seen: dict[int, int] = {}
         self._rr_stabilize_last_fn: int = -999999
         self._rr_stabilize_last_n_inputs: int = -1
 
@@ -876,8 +883,9 @@ class FrameWorker(threading.Thread):
         )
 
     def _reset_sequential_rotate_stabilizer(self) -> None:
-        self._rr_prev_slots.clear()
+        self._rr_memory_slots.clear()
         self._rr_track_to_input.clear()
+        self._rr_track_last_seen.clear()
         self._rr_stabilize_last_fn = -999999
         self._rr_stabilize_last_n_inputs = -1
 
@@ -885,36 +893,178 @@ class FrameWorker(threading.Thread):
     def _bbox_center_x(bbox: np.ndarray) -> float:
         return float((float(bbox[0]) + float(bbox[2])) * 0.5)
 
+    @staticmethod
+    def _rr_bbox_center_xy(bbox: np.ndarray) -> tuple[float, float]:
+        bb = np.asarray(bbox, dtype=np.float64)
+        return (
+            float((bb[0] + bb[2]) * 0.5),
+            float((bb[1] + bb[3]) * 0.5),
+        )
+
+    @classmethod
+    def _rr_centroid_distance(cls, box_a: np.ndarray, box_b: np.ndarray) -> float:
+        ax, ay = cls._rr_bbox_center_xy(box_a)
+        bx, by = cls._rr_bbox_center_xy(box_b)
+        return float(math.hypot(ax - bx, ay - by))
+
     def _rr_calculate_iou(self, box_a: np.ndarray, box_b: np.ndarray) -> float:
         return float(
             self.models_processor.face_detectors._calculate_iou(box_a, box_b)
         )
+
+    def _rr_prune_expired_memory(self, frame_number: int) -> None:
+        ttl = self._RR_SLOT_TTL_FRAMES
+        self._rr_memory_slots = [
+            (bb, ix, ls)
+            for bb, ix, ls in self._rr_memory_slots
+            if frame_number - int(ls) <= ttl
+        ]
+
+    def _rr_prune_stale_tracks(self, frame_number: int) -> None:
+        ttl = self._RR_SLOT_TTL_FRAMES
+        stale = [
+            t
+            for t, ls in self._rr_track_last_seen.items()
+            if frame_number - int(ls) > ttl
+        ]
+        for t in stale:
+            self._rr_track_last_seen.pop(t, None)
+            self._rr_track_to_input.pop(t, None)
+
+    def _rr_cap_memory_slots(
+        self, slots: list[tuple[np.ndarray, int, int]]
+    ) -> list[tuple[np.ndarray, int, int]]:
+        cap = self._RR_MEMORY_MAX_SLOTS
+        if len(slots) <= cap:
+            return slots
+        return sorted(slots, key=lambda s: -int(s[2]))[:cap]
+
+    def _rr_merge_ghost_memory(
+        self,
+        curr_boxes: list[np.ndarray],
+        frame_number: int,
+        fresh: list[tuple[np.ndarray, int, int]],
+    ) -> list[tuple[np.ndarray, int, int]]:
+        ttl = self._RR_SLOT_TTL_FRAMES
+        overlap_cap = 0.15
+        merged = list(fresh)
+        for bb, ix, ls in self._rr_memory_slots:
+            if frame_number - int(ls) > ttl:
+                continue
+            bba = np.asarray(bb, dtype=np.float64)
+            if any(self._rr_calculate_iou(bba, cb) > overlap_cap for cb in curr_boxes):
+                continue
+            merged.append(
+                (np.asarray(bb, dtype=np.float32).copy(), int(ix), int(ls))
+            )
+        return self._rr_cap_memory_slots(merged)
+
+    def _rr_greedy_assign_from_memory(
+        self,
+        curr_boxes: list[np.ndarray],
+        mem: list[tuple[np.ndarray, int, int]],
+        n_in: int,
+        centroid_max: float,
+    ) -> tuple[list[int], list[bool]]:
+        """Greedy IoU then centroid match vs memory slots. Second list marks spatial matches."""
+        prev_boxes = [np.asarray(pb, dtype=np.float64).copy() for pb, _, _ in mem]
+        prev_inp = [int(ix) for _, ix, _ in mem]
+        n_curr = len(curr_boxes)
+        curr_assign: list[int | None] = [None] * n_curr
+        spatially_matched = [False] * n_curr
+        iou_floor = 0.08
+        scored: list[tuple[int, float, int, int]] = []
+        for ci in range(n_curr):
+            cb = curr_boxes[ci]
+            for mj in range(len(mem)):
+                mb = prev_boxes[mj]
+                iou_v = self._rr_calculate_iou(cb, mb)
+                if iou_v >= iou_floor:
+                    scored.append((0, -iou_v, ci, mj))
+                else:
+                    dist_v = self._rr_centroid_distance(cb, mb)
+                    if dist_v <= centroid_max:
+                        scored.append((1, dist_v, ci, mj))
+
+        scored.sort(key=lambda t: (t[0], t[1]))
+        assigned_c: set[int] = set()
+        assigned_m: set[int] = set()
+        for _tier, _sec, ci, mj in scored:
+            if ci in assigned_c or mj in assigned_m:
+                continue
+            assigned_c.add(ci)
+            assigned_m.add(mj)
+            curr_assign[ci] = prev_inp[mj]
+            spatially_matched[ci] = True
+
+        used_inp_rr: set[int] = set()
+        for ci in range(n_curr):
+            if curr_assign[ci] is not None:
+                used_inp_rr.add(int(curr_assign[ci]) % n_in)
+        for ci in range(n_curr):
+            if curr_assign[ci] is not None:
+                continue
+            cand = next((j for j in range(n_in) if j not in used_inp_rr), None)
+            if cand is None:
+                cand = ci % n_in
+            curr_assign[ci] = cand
+            used_inp_rr.add(int(cand) % n_in)
+
+        out = [int(curr_assign[ci]) % n_in for ci in range(n_curr)]
+        return out, spatially_matched
 
     def _apply_sequential_rotate_temporal_alignment(
         self,
         det_faces: list[dict],
         checked_inputs_ordered: list,
         frame_number: int,
+        frame_wh: tuple[int, int],
     ) -> None:
-        """Assign stable _rr_input_idx per detection (ByteTrack id or IoU vs previous frame).
+        """Assign stable _rr_input_idx per detection (ByteTrack, IoU, or screen position + TTL).
 
         Indices are canonical 0..n-1; UI offset is applied when selecting the input button.
+        Memory slots keep (bbox, input_idx, last_seen_frame) so brief dropouts or frames
+        with no detections do not reshuffle remaining faces; large seeks reset state.
+        When ByteTrack IDs are present, assignment still uses the same memory-based match
+        first: new track IDs are seeded from that (not round-robin), and if a track's
+        mapped input disagrees with a spatial memory match, memory wins to avoid one-frame
+        identity flips when track state toggles.
         """
         n_in = len(checked_inputs_ordered)
-        if n_in == 0 or not det_faces:
+        if n_in == 0:
             return
 
         if frame_number < 0:
             self._reset_sequential_rotate_stabilizer()
+            return
 
-        gap_ok = (
-            self._rr_stabilize_last_fn < 0
-            or (frame_number - self._rr_stabilize_last_fn) <= 2
-        )
-        if (not gap_ok) or (n_in != self._rr_stabilize_last_n_inputs):
+        last_fn = self._rr_stabilize_last_fn
+        if last_fn >= 0:
+            if frame_number + 1 < last_fn:
+                self._reset_sequential_rotate_stabilizer()
+            elif frame_number - last_fn > self._RR_SEEK_GAP_RESET_FRAMES:
+                self._reset_sequential_rotate_stabilizer()
+
+        if (
+            self._rr_stabilize_last_n_inputs >= 0
+            and n_in != self._rr_stabilize_last_n_inputs
+        ):
             self._reset_sequential_rotate_stabilizer()
+
         self._rr_stabilize_last_fn = frame_number
         self._rr_stabilize_last_n_inputs = n_in
+
+        self._rr_prune_expired_memory(frame_number)
+        self._rr_prune_stale_tracks(frame_number)
+
+        if not det_faces:
+            return
+
+        img_w, img_h = int(frame_wh[0]), int(frame_wh[1])
+        centroid_max = max(
+            self._RR_CENTROID_DIST_MIN_PX,
+            self._RR_CENTROID_DIST_FRAC * float(min(img_w, img_h)),
+        )
 
         def _sort_key(fi: int) -> tuple[float, float]:
             bb = det_faces[fi]["bbox"]
@@ -931,77 +1081,53 @@ class FrameWorker(threading.Thread):
             if tid < 0:
                 all_tracks_ok = False
 
-        if (
+        curr_boxes = [
+            np.asarray(det_faces[fi]["bbox"], dtype=np.float64).copy() for fi in order
+        ]
+
+        mem = self._rr_memory_slots
+        base_assign, spatially_matched = self._rr_greedy_assign_from_memory(
+            curr_boxes, mem, n_in, centroid_max
+        )
+
+        use_tracks = (
             all_tracks_ok
             and ordered_tids
             and len(set(ordered_tids)) == len(ordered_tids)
-        ):
-            used_inp: set[int] = set()
-            for pos, fi in enumerate(order):
-                tid = int(det_faces[fi]["track_id"])
-                if tid in self._rr_track_to_input:
-                    inp = self._rr_track_to_input[tid]
-                else:
-                    cand = next((j for j in range(n_in) if j not in used_inp), None)
-                    if cand is None:
-                        cand = pos % n_in
-                    inp = cand
-                    self._rr_track_to_input[tid] = inp
-                used_inp.add(int(inp) % n_in)
-                det_faces[fi]["_rr_input_idx"] = int(inp) % n_in
-        else:
-            curr_boxes = [
-                np.asarray(det_faces[fi]["bbox"], dtype=np.float64).copy()
-                for fi in order
-            ]
-            prev_boxes = [
-                np.asarray(pb, dtype=np.float64).copy() for pb, _ in self._rr_prev_slots
-            ]
-            prev_inp = [ix for _, ix in self._rr_prev_slots]
-
-            curr_assign: list[int | None] = [None] * len(order)
-            if prev_boxes and len(prev_boxes) == len(prev_inp):
-                pairs: list[tuple[float, int, int]] = []
-                for ci in range(len(order)):
-                    for pj in range(len(prev_boxes)):
-                        iou_v = self._rr_calculate_iou(curr_boxes[ci], prev_boxes[pj])
-                        pairs.append((iou_v, ci, pj))
-                pairs.sort(key=lambda x: -x[0])
-                assigned_c: set[int] = set()
-                assigned_p: set[int] = set()
-                iou_floor = 0.08
-                for iou_v, ci, pj in pairs:
-                    if iou_v < iou_floor:
-                        break
-                    if ci in assigned_c or pj in assigned_p:
-                        continue
-                    assigned_c.add(ci)
-                    assigned_p.add(pj)
-                    curr_assign[ci] = prev_inp[pj]
-
-            used_inp_rr: set[int] = set()
-            for ci in range(len(order)):
-                if curr_assign[ci] is not None:
-                    used_inp_rr.add(int(curr_assign[ci]) % n_in)
-            for ci in range(len(order)):
-                if curr_assign[ci] is not None:
-                    continue
-                cand = next((j for j in range(n_in) if j not in used_inp_rr), None)
-                if cand is None:
-                    cand = ci % n_in
-                curr_assign[ci] = cand
-                used_inp_rr.add(int(cand) % n_in)
-
+        )
+        if use_tracks:
+            final_assign = list(base_assign)
             for ci, fi in enumerate(order):
-                det_faces[fi]["_rr_input_idx"] = int(curr_assign[ci]) % n_in
+                tid = int(det_faces[fi]["track_id"])
+                self._rr_track_last_seen[tid] = frame_number
+                mem_inp = int(base_assign[ci]) % n_in
+                if tid not in self._rr_track_to_input:
+                    self._rr_track_to_input[tid] = mem_inp
+                    final_assign[ci] = mem_inp
+                else:
+                    track_inp = int(self._rr_track_to_input[tid]) % n_in
+                    if spatially_matched[ci] and track_inp != mem_inp:
+                        self._rr_track_to_input[tid] = mem_inp
+                        final_assign[ci] = mem_inp
+                    else:
+                        final_assign[ci] = track_inp
+            for ci, fi in enumerate(order):
+                det_faces[fi]["_rr_input_idx"] = int(final_assign[ci]) % n_in
+        else:
+            for ci, fi in enumerate(order):
+                det_faces[fi]["_rr_input_idx"] = int(base_assign[ci]) % n_in
 
-        self._rr_prev_slots = [
+        fresh_mem = [
             (
                 np.asarray(det_faces[fi]["bbox"], dtype=np.float32).copy(),
                 int(det_faces[fi]["_rr_input_idx"]),
+                frame_number,
             )
             for fi in order
         ]
+        self._rr_memory_slots = self._rr_merge_ghost_memory(
+            curr_boxes, frame_number, fresh_mem
+        )
 
     def _parameters_for_input_rotate_mode(self) -> ParametersDict:
         """Face swap toggles/sliders (restorers, masks, etc.) use data_type *parameter*,
@@ -3347,11 +3473,12 @@ class FrameWorker(threading.Thread):
         if perf_stages is not None:
             perf_stages.mark("std_recognize")
 
-        if _sequential_match_active and det_faces_data_for_display:
+        if _sequential_match_active and _checked_inputs_ordered:
             self._apply_sequential_rotate_temporal_alignment(
                 det_faces_data_for_display,
                 _checked_inputs_ordered,
                 self.frame_number,
+                (int(img.shape[-1]), int(img.shape[-2])),
             )
 
         # Swapping / Editing Loop

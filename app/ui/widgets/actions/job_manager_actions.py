@@ -20,6 +20,7 @@ from app.ui.widgets.actions import card_actions
 from app.ui.widgets.actions import list_view_actions
 from app.ui.widgets.actions import video_control_actions
 from app.ui.widgets.actions import layout_actions
+from app.ui.widgets.actions import save_load_actions
 from app.ui.widgets import ui_workers
 from app.helpers.typing_helper import ParametersTypes, MarkerTypes
 import app.helpers.miscellaneous as misc_helpers
@@ -273,6 +274,8 @@ def _clear_main_window_state(main_window: "MainWindow"):
             or btn.media_id not in main_window.target_videos
         ):
             main_window.selected_video_button = None
+
+    list_view_actions.apply_main_window_title_for_selected_media(main_window)
 
 
 def _load_job_target_media(main_window: "MainWindow", data: dict):
@@ -809,29 +812,9 @@ def load_job_workspace(main_window: "MainWindow", job_name: str):
             if first_face_button:
                 first_face_button.setChecked(True)  # Visually select it
                 main_window.cur_selected_target_face_button = first_face_button
-                assigned_embedding_ids = (
-                    first_face_button.assigned_merged_embeddings.keys()
+                save_load_actions._sync_input_and_embedding_checkboxes_from_target_face(
+                    main_window, first_face_button
                 )
-                for embed_id in assigned_embedding_ids:
-                    embed_button = main_window.merged_embeddings.get(embed_id)
-                    if embed_button:
-                        embed_button.setChecked(True)
-                        print(
-                            f"[INFO] Checked embedding: {embed_button.embedding_name} (ID: {embed_id})"
-                        )
-
-                # *** Visually check assigned input faces for this face ***
-                print(
-                    f"[INFO] Checking assigned input faces for face_id: {first_face_id}"
-                )
-                assigned_input_face_ids = first_face_button.assigned_input_faces.keys()
-                for input_face_id in assigned_input_face_ids:
-                    input_face_button = main_window.input_faces.get(input_face_id)
-                    if input_face_button:
-                        input_face_button.setChecked(True)
-                        print(
-                            f"[INFO] Checked input face: {input_face_button.media_path} (ID: {input_face_id})"
-                        )
 
             print(
                 f"[INFO] Setting parameter widgets for loaded face_id: {first_face_id}"
@@ -970,29 +953,9 @@ def _restore_workspace_from_snapshot(main_window: "MainWindow", data: dict):
             if first_face_button:
                 first_face_button.setChecked(True)  # Visually select it
                 main_window.cur_selected_target_face_button = first_face_button
-                assigned_embedding_ids = (
-                    first_face_button.assigned_merged_embeddings.keys()
+                save_load_actions._sync_input_and_embedding_checkboxes_from_target_face(
+                    main_window, first_face_button
                 )
-                for embed_id in assigned_embedding_ids:
-                    embed_button = main_window.merged_embeddings.get(embed_id)
-                    if embed_button:
-                        embed_button.setChecked(True)
-                        print(
-                            f"[INFO] Checked embedding: {embed_button.embedding_name} (ID: {embed_id})"
-                        )
-
-                # *** Visually check assigned input faces for this face ***
-                print(
-                    f"[INFO] Checking assigned input faces for restored face_id: {first_face_id}"
-                )
-                assigned_input_face_ids = first_face_button.assigned_input_faces.keys()
-                for input_face_id in assigned_input_face_ids:
-                    input_face_button = main_window.input_faces.get(input_face_id)
-                    if input_face_button:
-                        input_face_button.setChecked(True)
-                        print(
-                            f"[INFO] Checked input face: {input_face_button.media_path} (ID: {input_face_id})"
-                        )
 
             print(
                 f"[INFO] Setting parameter widgets for restored face_id: {first_face_id}"

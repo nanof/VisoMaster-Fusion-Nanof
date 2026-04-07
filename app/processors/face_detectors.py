@@ -466,6 +466,79 @@ class FaceDetectors:
             kpss = np.array(refined_kpss, dtype=object)
         return det, kpss_5, kpss, score_values
 
+    def track_faces(
+        self,
+        img,
+        previous_detections,
+        landmark_score: float = 0.5,
+        landmark_detect_mode: str = "203",
+        **kwargs,
+    ):
+        """
+        Reuse bbox + 5-point landmarks from the last full detection when
+        ``FaceDetectionIntervalSlider`` skips the heavy detector while ByteTrack is off.
+
+        Without this, ``run_detect`` called a missing ``track_faces`` and crashed the
+        detection pipeline thread (playback freeze / apparent stop).
+        """
+        del landmark_score, landmark_detect_mode  # refined later via _refine_landmarks
+        if not previous_detections:
+            return None, None, None
+        try:
+            entries = list(previous_detections)
+        except TypeError:
+            return None, None, None
+
+        h = w = None
+        try:
+            if torch.is_tensor(img):
+                _sh = tuple(int(x) for x in img.shape)
+                if len(_sh) == 3:
+                    h, w = _sh[1], _sh[2]
+            elif isinstance(img, np.ndarray):
+                if img.ndim == 3:
+                    h, w = int(img.shape[0]), int(img.shape[1])
+        except (TypeError, ValueError, IndexError):
+            return None, None, None
+        if h is None or w is None or h < 2 or w < 2:
+            return None, None, None
+
+        b_list: list[np.ndarray] = []
+        k5_list: list[np.ndarray] = []
+        sc_list: list[float] = []
+        for e in entries:
+            if not isinstance(e, dict):
+                return None, None, None
+            bb = e.get("bbox")
+            k5 = e.get("kps_5")
+            if bb is None or k5 is None:
+                return None, None, None
+            bb_a = np.asarray(bb, dtype=np.float32).reshape(-1)
+            k5_a = np.asarray(k5, dtype=np.float32)
+            if bb_a.shape[0] != 4 or k5_a.shape != (5, 2):
+                return None, None, None
+            if (
+                np.any(~np.isfinite(bb_a))
+                or np.any(~np.isfinite(k5_a))
+                or float(bb_a[2]) <= float(bb_a[0])
+                or float(bb_a[3]) <= float(bb_a[1])
+            ):
+                return None, None, None
+            b_list.append(bb_a)
+            k5_list.append(k5_a)
+            try:
+                sc_list.append(float(e.get("score", 1.0)))
+            except (TypeError, ValueError):
+                sc_list.append(1.0)
+
+        if not b_list:
+            return None, None, None
+
+        det = np.stack(b_list, axis=0)
+        kpss_5 = np.stack(k5_list, axis=0)
+        scores = np.asarray(sc_list, dtype=np.float32)
+        return det, kpss_5, scores
+
     def _get_det10g_runner(self):
         """Lazy-load the Det10gTorch Custom-kernel runner for RetinaFace."""
         if self._det10g_runner is not None:

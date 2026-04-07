@@ -340,24 +340,140 @@ def _layout_preview_fps_label(main_window: "MainWindow") -> None:
     position_preview_overlay_labels(main_window)
 
 
+def _any_target_face_restorer_enabled(main_window: "MainWindow") -> bool:
+    params = getattr(main_window, "parameters", None)
+    if not isinstance(params, dict):
+        return False
+    for p in params.values():
+        if not isinstance(p, dict):
+            continue
+        if p.get("FaceRestorerEnableToggle"):
+            return True
+        if p.get("FaceRestorerEnable2Toggle"):
+            return True
+    return False
+
+
+def _compact_interp_method_label(method: str) -> str:
+    """Single-line shorthand for interpolation method (fits overlay width)."""
+    m = str(method).strip()
+    aliases = {
+        "Linear (GPU)": "Linear GPU",
+        "Neural (ONNX)": "Neural ONNX",
+        "Linear (OpenGL)": "Linear GL",
+        "Linear (CPU)": "Linear CPU",
+    }
+    if m in aliases:
+        return aliases[m]
+    collapsed = " ".join(m.split())
+    return (collapsed[:32] + "…") if len(collapsed) > 32 else collapsed
+
+
+def build_preview_active_settings_text(main_window: "MainWindow") -> str:
+    """One English line per enabled option; empty string if none."""
+    ctrl = main_window.control
+    lines: list[str] = []
+
+    if _any_target_face_restorer_enabled(main_window):
+        lines.append("Face restorer")
+
+    swap_btn = getattr(main_window, "swapfacesButton", None)
+    if swap_btn is not None and swap_btn.isChecked():
+        lines.append("Swap on")
+
+    if (
+        ctrl.get("DenoiserUNetEnableBeforeRestorersToggle", False)
+        or ctrl.get("DenoiserAfterFirstRestorerToggle", False)
+        or ctrl.get("DenoiserAfterRestorersToggle", False)
+    ):
+        lines.append("Denoiser")
+
+    if ctrl.get("FrameEnhancerEnableToggle", False):
+        lines.append("Frame enhancer")
+
+    if ctrl.get("AutoSwapToggle", False):
+        lines.append("Auto-swap")
+
+    if ctrl.get("KeepInputToggle", False):
+        lines.append("Keep input")
+
+    if ctrl.get("SwapOnlyBestMatchEnableToggle", False):
+        lines.append("Swap: best match only")
+
+    if ctrl.get("FaceTrackingEnableToggle", False):
+        lines.append("Face tracking")
+
+    if ctrl.get("KPSSmoothingEnableToggle", False):
+        lines.append("KPS smoothing")
+
+    if ctrl.get("PreviewFrameGenEnableToggle", False):
+        short = _compact_interp_method_label(
+            str(ctrl.get("FrameInterpolationMethodSelection", ""))
+        )
+        lines.append(f"Interpolation: {short}" if short else "Interpolation")
+
+    if ctrl.get("VideoPlaybackCustomFpsToggle"):
+        fps_v = ctrl.get("VideoPlaybackCustomFpsSlider", "—")
+        lines.append(f"Playback FPS (custom): {fps_v}")
+
+    if ctrl.get("VideoPlaybackBufferingToggle", False):
+        lines.append("Playback buffering")
+
+    if ctrl.get("VideoPlaybackLoopToggle", False):
+        lines.append("Playback loop")
+
+    if ctrl.get("SendVirtCamFramesEnableToggle", False):
+        lines.append("Virtual camera")
+
+    if ctrl.get("PipelineProfileOverlayEnableToggle", False):
+        lines.append("Pipeline profile overlay")
+
+    if ctrl.get("VideoPlaybackBenchSameFrameToggle", False):
+        lines.append("Benchmark: same frame")
+
+    return "\n".join(lines)
+
+
+def update_preview_active_settings_overlay(main_window: "MainWindow") -> None:
+    """Bottom-right preview hint: shows only lines for settings that are currently enabled."""
+    lbl = getattr(main_window, "previewActiveSettingsLabel", None)
+    if lbl is None:
+        return
+    text = build_preview_active_settings_text(main_window).strip()
+    lbl.setText(text)
+    lbl.setVisible(bool(text))
+    lbl.adjustSize()
+    position_preview_overlay_labels(main_window)
+
+
 def position_preview_overlay_labels(main_window: "MainWindow") -> None:
-    """Position FPS and metadata overlays at the top-left; pipeline profile top-right."""
+    """Position FPS top-left, media metadata bottom-left; pipeline profile top-right;
+    active-settings hint bottom-right."""
     margin = 8
-    gap = 4
     fps_lbl = main_window.previewFpsLabel
     meta_lbl = main_window.previewMediaMetaLabel
     prof_lbl = main_window.previewPipelineProfileLabel
-    fps_lbl.move(margin, margin)
-    if meta_lbl.isVisible() and meta_lbl.text().strip():
-        meta_lbl.move(margin, margin + fps_lbl.height() + gap)
-        meta_lbl.raise_()
-    fps_lbl.raise_()
     vw = main_window.graphicsViewFrame.width()
     vh = main_window.graphicsViewFrame.height()
+    fps_lbl.move(margin, margin)
+    meta_lbl.adjustSize()
+    if meta_lbl.isVisible() and meta_lbl.text().strip():
+        meta_lbl.move(margin, max(margin, vh - meta_lbl.height() - margin))
+        meta_lbl.raise_()
+    fps_lbl.raise_()
     prof_lbl.adjustSize()
     if prof_lbl.isVisible():
         prof_lbl.move(max(margin, vw - prof_lbl.width() - margin), margin)
         prof_lbl.raise_()
+    settings_lbl = getattr(main_window, "previewActiveSettingsLabel", None)
+    if settings_lbl is not None:
+        settings_lbl.adjustSize()
+        if settings_lbl.isVisible() and settings_lbl.text().strip():
+            settings_lbl.move(
+                max(margin, vw - settings_lbl.width() - margin),
+                max(margin, vh - settings_lbl.height() - margin),
+            )
+            settings_lbl.raise_()
     notif_lbl = getattr(main_window, "previewNotificationLabel", None)
     if notif_lbl is not None and notif_lbl.isVisible():
         notif_lbl.adjustSize()
@@ -404,6 +520,7 @@ def update_preview_media_metadata(main_window: "MainWindow") -> None:
     meta.adjustSize()
     now = time.perf_counter()
     _set_preview_fps_label(main_window, "— FPS", now)
+    update_preview_active_settings_overlay(main_window)
 
 
 def start_playback_fps_preview_session(main_window: "MainWindow") -> None:
@@ -595,6 +712,7 @@ def fit_image_to_view(
     main_window: "MainWindow", scene_item: QtWidgets.QGraphicsItem, scene_rect
 ):
     """Reset the view and fit the image to the view, keeping the aspect ratio."""
+    setattr(main_window, "_graphics_view_keep_transform_on_resize", False)
     graphicsViewFrame = main_window.graphicsViewFrame
     # Reset the transform and set the scene rectangle
     graphicsViewFrame.resetTransform()

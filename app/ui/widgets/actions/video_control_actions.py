@@ -1595,6 +1595,7 @@ def zoom_current_image_100(main_window: "MainWindow"):
     view.centerOn(pixmap_item)
     view.zoom_value = 0
     view.last_scale_factor = 1.0
+    setattr(main_window, "_graphics_view_keep_transform_on_resize", True)
 
 
 def show_graphics_view_context_menu(

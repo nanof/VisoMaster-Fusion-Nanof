@@ -1671,5 +1671,5 @@ def build_preview_media_metadata_text(
         dur = "—"
 
     line1 = f"{ext} · {disp} · {fourcc}"
-    line2 = f"{fps_str} fps · {nf} frames · {dur}"
+    line2 = f"{fps_str} fps · {dur}"
     return f"{line1}\n{line2}"

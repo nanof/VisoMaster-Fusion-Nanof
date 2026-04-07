@@ -1535,14 +1535,6 @@ class VideoProcessor(QObject):
             if isinstance(kpss_203, numpy.ndarray):
                 kpss_203 = numpy.empty((0, 203, 2), dtype=numpy.float32)
 
-        # 2. Update tracking state for the next sequential frame
-        detected_for_state = []
-        # Updated condition to use the sanitized bboxes array instead of checking isinstance again
-        if bboxes.shape[0] > 0:
-            for i in range(len(bboxes)):
-                detected_for_state.append({"bbox": bboxes[i], "score": 1.0})
-        self.last_detected_faces = detected_for_state
-
         # Get toggle value to enable smoothing
         is_smoothing_enabled = local_control_for_worker.get(
             "KPSSmoothingEnableToggle", True
@@ -1670,6 +1662,31 @@ class VideoProcessor(QObject):
             self._smoothed_kps.clear()
             self._smoothed_dense_kps.clear()
             self._smoothed_dense_kps_203.clear()
+
+        # 2. Update tracking state for the next sequential frame (after EMA): bbox + kps so
+        # FaceDetectionInterval skip frames can reuse landmarks via FaceDetectors.track_faces
+        # when ByteTrack is off (avoids AttributeError / dead detection thread).
+        detected_for_state: list[dict] = []
+        if bboxes.shape[0] > 0 and isinstance(kpss_5, numpy.ndarray) and kpss_5.shape[0] == len(
+            bboxes
+        ):
+            for i in range(len(bboxes)):
+                ent: dict = {
+                    "bbox": numpy.asarray(bboxes[i], dtype=numpy.float32).copy(),
+                    "score": 1.0,
+                    "kps_5": numpy.asarray(kpss_5[i], dtype=numpy.float32).copy(),
+                }
+                if isinstance(kpss, numpy.ndarray) and i < kpss.shape[0]:
+                    try:
+                        ent["kps_dense"] = numpy.asarray(kpss[i]).copy()
+                    except (TypeError, ValueError):
+                        pass
+                if isinstance(kpss_203, numpy.ndarray) and i < kpss_203.shape[0]:
+                    ent["kps_203"] = numpy.asarray(
+                        kpss_203[i], dtype=numpy.float32
+                    ).copy()
+                detected_for_state.append(ent)
+        self.last_detected_faces = detected_for_state
 
         return (
             bboxes,

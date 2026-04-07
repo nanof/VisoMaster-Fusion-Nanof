@@ -20,6 +20,7 @@ from app.ui.widgets.actions import graphics_view_actions
 from app.ui.widgets.actions import card_actions
 from app.ui.widgets.actions import save_load_actions
 from app.ui.widgets.actions import transcode_actions
+from app.ui.widgets.actions import list_view_actions
 import app.helpers.miscellaneous as misc_helpers
 from app.helpers import input_face_favorites_storage
 from app.helpers.miscellaneous import get_video_rotation
@@ -346,6 +347,7 @@ class TargetMediaCardButton(CardButton):
 
         # Preview overlay: codec/resolution/duration under the FPS label
         graphics_view_actions.update_preview_media_metadata(main_window)
+        list_view_actions.apply_main_window_title_for_selected_media(main_window)
 
         # list_view_actions.find_target_faces(main_window)
 
@@ -393,6 +395,7 @@ class TargetMediaCardButton(CardButton):
 
             main_window.video_processor.file_type = None
             graphics_view_actions.update_preview_media_metadata(main_window)
+            list_view_actions.apply_main_window_title_for_selected_media(main_window)
 
             if self.media_capture:
                 self.media_capture.release()

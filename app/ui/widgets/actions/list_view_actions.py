@@ -541,6 +541,7 @@ def select_target_medias(
     card_actions.clear_target_faces(main_window)
 
     main_window.selected_video_button = None
+    apply_main_window_title_for_selected_media(main_window)
     main_window.target_videos = {}
 
     main_window.video_loader_worker = ui_workers.TargetMediaLoaderWorker(
@@ -583,6 +584,7 @@ def load_target_screen_capture(main_window: "MainWindow"):
                 target_video.remove_target_media_from_list()
                 if target_video == main_window.selected_video_button:
                     main_window.selected_video_button = None
+                    apply_main_window_title_for_selected_media(main_window)
         main_window.placeholder_update_signal.emit(main_window.targetVideosList, False)
 
 
@@ -613,6 +615,7 @@ def load_target_webcams(
                 target_video.remove_target_media_from_list()
                 if target_video == main_window.selected_video_button:
                     main_window.selected_video_button = None
+                    apply_main_window_title_for_selected_media(main_window)
         main_window.placeholder_update_signal.emit(main_window.targetVideosList, False)
 
 
@@ -828,6 +831,47 @@ def _get_app_display_metadata(main_window: "MainWindow") -> AppDisplayMetadata:
 
     base_title = getattr(main_window, "_base_window_title", main_window.windowTitle())
     return get_app_display_metadata(main_window.project_root_path, base_title)
+
+
+def _selected_target_media_title_suffix(
+    btn: widget_components.TargetMediaCardButton,
+) -> str | None:
+    mp = getattr(btn, "media_path", None)
+    if mp is None or mp is False:
+        return None
+    name = os.path.basename(str(mp)).strip()
+    if name:
+        return name
+    ft = getattr(btn, "file_type", None)
+    if ft == "webcam":
+        return f"Webcam ({int(getattr(btn, 'webcam_index', -1))})"
+    if ft == "screen":
+        return "Screen capture"
+    return None
+
+
+def apply_main_window_title_for_selected_media(main_window: "MainWindow") -> None:
+    """Window title: app name (with optional git hash) plus selected target media filename."""
+    meta = getattr(main_window, "app_display_metadata", None)
+    if meta is None:
+        main_window._apply_runtime_window_title()
+        meta = main_window.app_display_metadata
+    base = meta.window_title
+
+    btn = getattr(main_window, "selected_video_button", None)
+    if btn in (None, False):
+        main_window.setWindowTitle(base)
+        return
+    if not isinstance(btn, widget_components.TargetMediaCardButton):
+        main_window.setWindowTitle(base)
+        return
+
+    suffix = _selected_target_media_title_suffix(btn)
+    if not suffix:
+        main_window.setWindowTitle(base)
+        return
+
+    main_window.setWindowTitle(f"{base} — {suffix}")
 
 
 def _open_about_link(main_window: "MainWindow", link_type: str):
