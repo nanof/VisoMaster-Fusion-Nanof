@@ -17,6 +17,9 @@ from app.helpers import miscellaneous as misc_helpers
 
 _ffprobe_timeout_sec = 60
 
+# ``ffprobe -show_entries stream=codec_name`` for AVC/H.264 elementary streams.
+H264_CODEC_NAMES = frozenset({"h264"})
+
 _nvenc_h264_cache: Optional[bool] = None
 
 
@@ -92,6 +95,24 @@ def iter_candidate_video_paths(folder: str, recursive: bool) -> List[str]:
         return []
     paths = misc_helpers.get_video_files(folder, include_subfolders=recursive)
     return sorted(paths, key=lambda p: os.path.basename(p).lower())
+
+
+def is_h264_codec_name(codec: Optional[str]) -> bool:
+    if not codec:
+        return False
+    return str(codec).strip().lower() in H264_CODEC_NAMES
+
+
+def filter_non_h264_paths(paths: Iterable[str]) -> List[str]:
+    """Paths whose first video stream is not H.264 (ffprobe). Unreadable/unknown skipped."""
+    out: List[str] = []
+    for p in paths:
+        c = ffprobe_video_codec_name(p)
+        if c is None:
+            continue
+        if not is_h264_codec_name(c):
+            out.append(p)
+    return out
 
 
 def filter_av1_paths(paths: Iterable[str]) -> List[str]:

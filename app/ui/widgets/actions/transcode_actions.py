@@ -1,4 +1,4 @@
-"""UI entry points for H.264 transcode (single file + batch AV1 folder)."""
+"""UI entry points for H.264 transcode (single file + batch folder non–H.264 → H.264)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from PySide6 import QtCore, QtWidgets
 from app.helpers import miscellaneous as misc_helpers
 from app.helpers import video_transcode as vt
 from app.ui.widgets.transcode_options_dialog import TranscodeOptionsDialog
-from app.ui.widgets.transcode_worker import Av1ScanWorker, H264TranscodeWorker
+from app.ui.widgets.transcode_worker import H264TranscodeWorker, NonH264ScanWorker
 
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
@@ -21,7 +21,7 @@ def _worker_attr(main_window: MainWindow) -> str:
 
 
 def _scan_worker_attr(main_window: MainWindow) -> str:
-    return "_av1_scan_worker"
+    return "_non_h264_scan_worker"
 
 
 def _active_worker(main_window: MainWindow) -> H264TranscodeWorker | None:
@@ -31,7 +31,7 @@ def _active_worker(main_window: MainWindow) -> H264TranscodeWorker | None:
     return None
 
 
-def _active_scan_worker(main_window: MainWindow) -> Av1ScanWorker | None:
+def _active_scan_worker(main_window: MainWindow) -> NonH264ScanWorker | None:
     w = getattr(main_window, _scan_worker_attr(main_window), None)
     if w is not None and w.isRunning():
         return w
@@ -48,7 +48,7 @@ def _run_transcode_worker(
     main_window: MainWindow,
     paths: List[str],
     *,
-    batch_av1: bool,
+    batch_folder: bool,
     encode_options: Optional[
         Tuple[Optional[int], bool, bool, Optional[float]]
     ] = None,
@@ -57,12 +57,12 @@ def _run_transcode_worker(
         QtWidgets.QMessageBox.information(
             main_window,
             "Transcode in progress",
-            "An H.264 conversion or AV1 folder scan is already running.",
+            "An H.264 conversion or folder scan is already running.",
         )
         return
 
     if encode_options is None:
-        dlg = TranscodeOptionsDialog(main_window, batch_av1=batch_av1)
+        dlg = TranscodeOptionsDialog(main_window, batch_folder=batch_folder)
         if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
         max_height, prefer_nvenc, _recursive, overwrite, target_fps = dlg.options()
@@ -138,7 +138,7 @@ def convert_target_video_to_h264(main_window: MainWindow, media_path: str) -> No
         QtWidgets.QMessageBox.information(
             main_window,
             "Busy",
-            "An H.264 conversion or AV1 folder scan is already running.",
+            "An H.264 conversion or folder scan is already running.",
         )
         return
     if not misc_helpers.is_ffmpeg_in_path():
@@ -161,10 +161,10 @@ def convert_target_video_to_h264(main_window: MainWindow, media_path: str) -> No
             "stop playback or switch to another video before converting.",
         )
 
-    _run_transcode_worker(main_window, [path], batch_av1=False)
+    _run_transcode_worker(main_window, [path], batch_folder=False)
 
 
-def batch_convert_av1_in_folder(main_window: MainWindow) -> None:
+def batch_convert_non_h264_in_folder(main_window: MainWindow) -> None:
     if not misc_helpers.is_ffmpeg_in_path():
         QtWidgets.QMessageBox.warning(
             main_window,
@@ -184,7 +184,7 @@ def batch_convert_av1_in_folder(main_window: MainWindow) -> None:
     if not folder or not os.path.isdir(folder):
         picked = QtWidgets.QFileDialog.getExistingDirectory(
             main_window,
-            "Folder containing AV1 videos",
+            "Folder containing videos to convert to H.264",
             folder or QtCore.QDir.homePath(),
         )
         if not picked:
@@ -196,7 +196,7 @@ def batch_convert_av1_in_folder(main_window: MainWindow) -> None:
     )
     dlg = TranscodeOptionsDialog(
         main_window,
-        batch_av1=True,
+        batch_folder=True,
         recursive_default=recursive_default,
     )
     if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
@@ -208,19 +208,19 @@ def batch_convert_av1_in_folder(main_window: MainWindow) -> None:
         QtWidgets.QMessageBox.information(
             main_window,
             "Busy",
-            "An H.264 conversion or AV1 folder scan is already running.",
+            "An H.264 conversion or folder scan is already running.",
         )
         return
 
     scan_prog = QtWidgets.QProgressDialog(main_window)
-    scan_prog.setWindowTitle("AV1 → H.264")
+    scan_prog.setWindowTitle("Non–H.264 → H.264")
     scan_prog.setLabelText("Scanning folder (ffprobe per file)…")
     scan_prog.setRange(0, 0)
     scan_prog.setMinimumDuration(0)
     scan_prog.setWindowModality(QtCore.Qt.WindowModality.NonModal)
     scan_prog.setCancelButton(None)
 
-    scan_worker = Av1ScanWorker(folder, recursive, parent=main_window)
+    scan_worker = NonH264ScanWorker(folder, recursive, parent=main_window)
     setattr(main_window, _scan_worker_attr(main_window), scan_worker)
     qc = QtCore.Qt.ConnectionType.QueuedConnection
 
@@ -229,20 +229,20 @@ def batch_convert_av1_in_folder(main_window: MainWindow) -> None:
     def _clear_scan_worker_ref() -> None:
         setattr(main_window, _scan_worker_attr(main_window), None)
 
-    def on_scan_found(av1_list: List[str]) -> None:
+    def on_scan_found(to_convert: List[str]) -> None:
         scan_prog.close()
-        if not av1_list:
+        if not to_convert:
             QtWidgets.QMessageBox.information(
                 main_window,
-                "AV1 → H.264",
-                "No AV1-encoded videos were found for the selected folder "
+                "Non–H.264 → H.264",
+                "No non–H.264 videos were found for the selected folder "
                 + ("(including subfolders)." if recursive else "."),
             )
             return
         confirm = QtWidgets.QMessageBox.question(
             main_window,
             "Confirm replace",
-            f"{len(av1_list)} AV1 file(s) will be converted to H.264 and originals will be "
+            f"{len(to_convert)} file(s) will be converted to H.264 and originals will be "
             f"replaced after a successful transcode.\n\nContinue?",
             QtWidgets.QMessageBox.StandardButton.Yes
             | QtWidgets.QMessageBox.StandardButton.No,
@@ -252,8 +252,8 @@ def batch_convert_av1_in_folder(main_window: MainWindow) -> None:
             return
         _run_transcode_worker(
             main_window,
-            av1_list,
-            batch_av1=True,
+            to_convert,
+            batch_folder=True,
             encode_options=opts,
         )
 
@@ -261,7 +261,7 @@ def batch_convert_av1_in_folder(main_window: MainWindow) -> None:
         scan_prog.close()
         QtWidgets.QMessageBox.critical(
             main_window,
-            "AV1 scan failed",
+            "Folder scan failed",
             msg,
         )
 

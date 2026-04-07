@@ -12,21 +12,21 @@ class TranscodeOptionsDialog(QtWidgets.QDialog):
         self,
         parent: Optional[QtWidgets.QWidget] = None,
         *,
-        batch_av1: bool = False,
+        batch_folder: bool = False,
         recursive_default: bool = False,
     ):
         super().__init__(parent)
-        self._batch_av1 = batch_av1
+        self._batch_folder = batch_folder
         self.setWindowTitle(
-            "Batch AV1 folder → H.264" if batch_av1 else "Convert to H.264"
+            "Batch folder → H.264 (non–H.264 only)" if batch_folder else "Convert to H.264"
         )
         self.setModal(True)
 
         layout = QtWidgets.QVBoxLayout(self)
 
-        if batch_av1:
+        if batch_folder:
             warn = QtWidgets.QLabel(
-                "All AV1 videos matching your search will be transcoded and "
+                "All non–H.264 videos in the folder will be transcoded and "
                 "<b>original files will be replaced</b> (no backup). "
                 "Close any of those files in other apps (and preferably unload them here) before continuing."
             )
@@ -76,7 +76,7 @@ class TranscodeOptionsDialog(QtWidgets.QDialog):
         self._gpu_check.setChecked(True)
         layout.addWidget(self._gpu_check)
 
-        if batch_av1:
+        if batch_folder:
             self._overwrite_check = None
         else:
             self._overwrite_check = QtWidgets.QCheckBox(

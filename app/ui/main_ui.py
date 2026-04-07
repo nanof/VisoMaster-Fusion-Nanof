@@ -262,7 +262,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             partial(list_view_actions.select_target_medias, self, "folder")
         )
         self.buttonBatchAv1ToH264.clicked.connect(
-            partial(transcode_actions.batch_convert_av1_in_folder, self)
+            partial(transcode_actions.batch_convert_non_h264_in_folder, self)
         )
         self.buttonInputFacesPath.clicked.connect(
             partial(list_view_actions.select_input_face_images, self, "folder")

@@ -935,10 +935,10 @@
                </sizepolicy>
               </property>
               <property name="toolTip">
-               <string>Find AV1 videos in the target folder and batch-convert them to H.264 (replaces each original file after a successful transcode).</string>
+               <string>Find videos in the target folder that are not H.264 (AV1, HEVC, VP9, etc.) and batch-convert them to H.264 (replaces each original file after a successful transcode).</string>
               </property>
               <property name="text">
-               <string>AV1→H.264</string>
+               <string>To H.264</string>
               </property>
               <property name="flat">
                <bool>true</bool>
