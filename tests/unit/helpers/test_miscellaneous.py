@@ -7,6 +7,7 @@ import pytest
 from app.helpers.miscellaneous import (
     count_issue_scan_frames,
     ParametersDict,
+    detector_input_size_from_control,
     find_best_target_match,
     is_av1_fourcc_tag,
     is_image_file,
@@ -346,3 +347,30 @@ class TestKeypointsAdjustmentsGuard:
         params = {"LandmarksPositionAdjEnableToggle": False}
         result = keypoints_adjustments(kps, params)
         np.testing.assert_array_equal(result, kps)
+
+
+def test_detector_input_size_fast_cap_clamps():
+    c = {
+        "DetectorInternalSizeSelection": "512",
+        "PerformanceFastDetectEnableToggle": True,
+        "PerformanceFastDetectCapSideSelection": "320",
+    }
+    assert detector_input_size_from_control(c) == (320, 320)
+
+
+def test_detector_input_size_fast_cap_min_of_user_and_cap():
+    c = {
+        "DetectorInternalSizeSelection": "256",
+        "PerformanceFastDetectEnableToggle": True,
+        "PerformanceFastDetectCapSideSelection": "384",
+    }
+    assert detector_input_size_from_control(c) == (256, 256)
+
+
+def test_detector_input_size_fast_cap_off_uses_user_only():
+    c = {
+        "DetectorInternalSizeSelection": "416",
+        "PerformanceFastDetectEnableToggle": False,
+        "PerformanceFastDetectCapSideSelection": "256",
+    }
+    assert detector_input_size_from_control(c) == (416, 416)

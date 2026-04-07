@@ -23,6 +23,8 @@ class FaceSwappers:
         self._w600k_lock = threading.Lock()
         self._inswapper_b1_lock = threading.Lock()
         self._inswapper_ort_batch_fail_logged = False
+        # After first batched ORT/TRT failure, skip further attempts this session (avoid B=16 errors every frame).
+        self._inswapper_ort_batch_session_disabled = False
         self._inswapper_torch = None  # InSwapperTorch instance
         self._inswapper_runner_b1: Optional[object] = None  # CUDA graph runner for B=1
         self._w600k_torch: Optional[object] = None  # IResNet50Torch
@@ -686,11 +688,20 @@ class FaceSwappers:
         (e.g. TensorRT engine fixed at batch 1) — caller falls back per-tile.
         """
         model_name = "Inswapper128"
+        if self._inswapper_ort_batch_session_disabled:
+            return False
         if self.models_processor.provider_name == "Custom":
             return False
-        v = os.environ.get("VISIOMASTER_INSWAPPER_ORT_BATCH", "1").strip().lower()
-        if v in ("0", "false", "no", "off"):
-            return False
+
+        v_raw = os.environ.get("VISIOMASTER_INSWAPPER_ORT_BATCH", "").strip()
+        if v_raw:
+            vl = v_raw.lower()
+            if vl in ("0", "false", "no", "off"):
+                return False
+        else:
+            # Native .engine builds are almost always batch 1; skip batched path unless user forces it.
+            if self.models_processor.provider_name == "TensorRT-Engine":
+                return False
 
         if images.dim() != 4 or images.shape[1] != 3:
             return False
@@ -755,12 +766,15 @@ class FaceSwappers:
             self._run_model_with_lazy_build_check(model_name, model, io_binding)
             return True
         except Exception as e:
+            self._inswapper_ort_batch_session_disabled = True
             if not self._inswapper_ort_batch_fail_logged:
                 self._inswapper_ort_batch_fail_logged = True
                 print(
                     f"[WARN] Inswapper128 ORT/TRT batched inference failed (B={B}); "
                     f"using per-tile for this session. First error: {e}. "
-                    f"Disable batch with VISIOMASTER_INSWAPPER_ORT_BATCH=0.",
+                    "Set VISIOMASTER_INSWAPPER_ORT_BATCH=0 to skip the attempt, or leave unset with "
+                    "TensorRT-Engine (batched path is off by default for .engine). "
+                    "Set VISIOMASTER_INSWAPPER_ORT_BATCH=1 to force batched tries (needs a dynamic-batch engine).",
                     flush=True,
                 )
             return False

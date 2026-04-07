@@ -54,6 +54,7 @@ _PERF_BUNDLE_FLAGS = frozenset(
         "VISIOMASTER_PERF_LOG",
         "VISIOMASTER_PERF_STAGES",
         "VISIOMASTER_PERF_SWAP_CORE",
+        "VISIOMASTER_PERF_LP_STITCH",
     }
 )
 
@@ -3198,6 +3199,12 @@ class FrameWorker(threading.Thread):
                         if k is not None:
                             k[:, 0] *= ratio_w
                             k[:, 1] *= ratio_h
+                if self.precomputed_kpss_203 is not None:
+                    _pk = np.asarray(self.precomputed_kpss_203, dtype=np.float32).copy()
+                    if _pk.ndim == 3 and _pk.shape[1:] == (203, 2):
+                        _pk[:, :, 0] *= ratio_w
+                        _pk[:, :, 1] *= ratio_h
+                        self.precomputed_kpss_203 = _pk
 
         # Manual Rotation
         if control["ManualRotationEnableToggle"]:
@@ -3326,7 +3333,7 @@ class FrameWorker(threading.Thread):
                         control.get("DetectorModelSelection", "RetinaFace"),
                         max_num=control.get("MaxFacesToDetectSlider", 1),
                         score=control.get("DetectorScoreSlider", 50) / 100.0,
-                        input_size=(512, 512),
+                        input_size=detector_input_size_from_control(control),
                         use_landmark_detection=True,
                         landmark_detect_mode="203",
                         landmark_score=control.get("LandmarkDetectScoreSlider", 50)
@@ -3400,10 +3407,21 @@ class FrameWorker(threading.Thread):
                             kpss_5[i],
                             _recognition_arc_model,
                             _rec_sim,
+                            track_id=_row_tid,
                         )
                     )
                     if _cached_emb is not None:
                         face_emb = _cached_emb
+                        self.video_processor.store_recognition_embedding(
+                            self.frame_number,
+                            i,
+                            _bbox_i,
+                            kpss_5[i],
+                            _cached_emb,
+                            _recognition_arc_model,
+                            _rec_sim,
+                            track_id=_row_tid,
+                        )
                 kps_all_i = kpss[i] if kpss is not None and i < len(kpss) else None
                 kps_203_i = (
                     kpss_203[i]
@@ -3423,6 +3441,19 @@ class FrameWorker(threading.Thread):
                 )
 
             _need_emb = [w for w in _work_faces if w["embedding"] is None]
+            _arcface_cap = int(
+                control.get("PerformanceRecognitionMaxArcFacePerFrameSlider", 0) or 0
+            )
+            if _arcface_cap > 0 and len(_need_emb) > _arcface_cap:
+                _need_emb.sort(
+                    key=lambda w: float(
+                        max(0.0, float(w["bbox"][2]) - float(w["bbox"][0]))
+                        * max(0.0, float(w["bbox"][3]) - float(w["bbox"][1]))
+                    ),
+                    reverse=True,
+                )
+                _need_emb = _need_emb[:_arcface_cap]
+
             if _need_emb:
                 _batch_ok = False
                 if _arcface_batch_on and len(_need_emb) >= 1:
@@ -3448,6 +3479,7 @@ class FrameWorker(threading.Thread):
                                         _e,
                                         _recognition_arc_model,
                                         _rec_sim,
+                                        track_id=int(_w.get("track_id", -1)),
                                     )
                 if not _batch_ok:
                     for _w in _need_emb:
@@ -3469,6 +3501,7 @@ class FrameWorker(threading.Thread):
                                 _e2,
                                 _recognition_arc_model,
                                 _rec_sim,
+                                track_id=int(_w.get("track_id", -1)),
                             )
 
             for _w in _work_faces:
@@ -3476,6 +3509,7 @@ class FrameWorker(threading.Thread):
                     {
                         "kps_5": _w["kps_5"],
                         "kps_all": _w["kps_all"],
+                        "kps_203": _w.get("kps_203"),
                         "embedding": _w["embedding"],
                         "bbox": _w["bbox"],
                         "track_id": int(_w.get("track_id", -1)),

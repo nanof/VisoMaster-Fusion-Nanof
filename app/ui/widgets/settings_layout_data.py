@@ -118,8 +118,8 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "and every VISIOMASTER_PIPELINE_METRICS_INTERVAL ORT calls, default 200). "
             "VISIOMASTER_ORT_PER_SESSION_LOCK=1 (experimental) uses one CUDA mutex per ONNX session instead of a "
             "global ORT lock — test for CUDA instability before relying on it. "
-            "VISIOMASTER_INSWAPPER_ORT_BATCH=0 disables batched Inswapper128 ORT for multi-tile (pixel-shift) mode "
-            "if your TensorRT engine is fixed batch-1.",
+            "Inswapper128 multi-tile: unset VISIOMASTER_INSWAPPER_ORT_BATCH for auto (batched ORT off under "
+            "TensorRT-Engine / fixed B=1). =0 never batch; =1 force batched ORT (needs dynamic batch).",
             "exec_function": graphics_view_actions.on_pipeline_profile_overlay_toggle,
             "exec_function_args": [],
         },
@@ -651,6 +651,34 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "default": "20",
             "step": 1,
             "help": "Set the maximum number of faces to detect in a frame",
+        },
+        "PerformanceFastDetectEnableToggle": {
+            "level": 1,
+            "label": "Performance: cap detector internal size",
+            "default": False,
+            "help": "When enabled, the detector letterbox side is the minimum of your "
+            "'Detector internal size' and the cap below. Faster feeder / detection; "
+            "small or distant faces may be missed or less stable.",
+        },
+        "PerformanceFastDetectCapSideSelection": {
+            "level": 2,
+            "label": "Fast-detect max side (px)",
+            "options": ["416", "384", "320", "256"],
+            "default": "384",
+            "parentToggle": "PerformanceFastDetectEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Upper bound for detector input side when the cap above is enabled.",
+        },
+        "PerformanceRecognitionMaxArcFacePerFrameSlider": {
+            "level": 1,
+            "label": "Performance: max ArcFace runs per frame (0 = all)",
+            "min_value": "0",
+            "max_value": "16",
+            "default": "0",
+            "step": 1,
+            "help": "After embedding cache reuse, at most this many faces get a new ArcFace "
+            "this frame (largest bounding boxes first). 0 = no limit. Smaller faces may get "
+            "no embedding and will not match swap targets — useful for single-main-face scenes.",
         },
         "AutoRotationToggle": {
             "level": 1,

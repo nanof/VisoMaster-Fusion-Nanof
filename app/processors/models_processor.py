@@ -174,6 +174,33 @@ def _providers_without_tensorrt_execution_provider(providers_for_model):
     return out
 
 
+def _providers_with_trt_options(providers_for_model, trt_opts: dict):
+    """Use per-model TensorRT EP options (FP16 whitelist, dynamic profiles) in ORT sessions."""
+    out = []
+    for p in providers_for_model:
+        name = p[0] if isinstance(p, (tuple, list)) else p
+        if name == "TensorrtExecutionProvider":
+            out.append(("TensorrtExecutionProvider", dict(trt_opts)))
+        else:
+            out.append(p)
+    return out
+
+
+def _trt_options_liveportrait_motion_extractor(base: dict) -> dict:
+    """
+    TensorRT profile for batch 1 and 2 so driving+target motion runs in one kernel.
+    Input name matches LivePortrait v0.1.0 ONNX (``img``). Set
+    ``VISIOMASTER_LP_MOTION_TRT_STATIC_BATCH=1`` to omit profiles (batch-1-only cache).
+    """
+    if _env_truthy("VISIOMASTER_LP_MOTION_TRT_STATIC_BATCH"):
+        return base
+    o = dict(base)
+    o["trt_profile_min_shapes"] = "img:1x3x256x256"
+    o["trt_profile_opt_shapes"] = "img:2x3x256x256"
+    o["trt_profile_max_shapes"] = "img:2x3x256x256"
+    return o
+
+
 class ModelsProcessor(QtCore.QObject):
     """
     Central hub for managing AI models (ONNX, TensorRT, PyTorch).
@@ -651,6 +678,11 @@ class ModelsProcessor(QtCore.QObject):
             else:
                 model_trt_options["trt_fp16_enable"] = False
 
+            if model_name == "LivePortraitMotionExtractor":
+                model_trt_options = _trt_options_liveportrait_motion_extractor(
+                    model_trt_options
+                )
+
             is_tensorrt_load = any(
                 (p[0] if isinstance(p, tuple) else p) == "TensorrtExecutionProvider"
                 for p in providers_for_model
@@ -778,6 +810,12 @@ class ModelsProcessor(QtCore.QObject):
                             )
                             return None  # Abort the load
 
+            ort_providers = (
+                _providers_with_trt_options(providers_for_model, model_trt_options)
+                if is_tensorrt_load
+                else providers_for_model
+            )
+
             # Now, proceed with the *actual* load in the main thread.
             try:
                 # MP-01: Double-checked load after re-acquiring the lock.
@@ -792,13 +830,13 @@ class ModelsProcessor(QtCore.QObject):
                     if session_options is None:
                         model_instance = onnxruntime.InferenceSession(
                             self.models_path[model_name],
-                            providers=providers_for_model,
+                            providers=ort_providers,
                         )
                     else:
                         model_instance = onnxruntime.InferenceSession(
                             self.models_path[model_name],
                             sess_options=session_options,
-                            providers=providers_for_model,
+                            providers=ort_providers,
                         )
                 except Exception as e_ort_first:
                     fb_providers = _providers_without_tensorrt_execution_provider(

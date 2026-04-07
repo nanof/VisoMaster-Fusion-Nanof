@@ -1,6 +1,8 @@
 import pickle
 import hashlib
-from typing import TYPE_CHECKING, Dict
+import time
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any, Dict
 import platform
 import os
 import threading
@@ -18,6 +20,78 @@ if TYPE_CHECKING:
     from app.processors.models_processor import ModelsProcessor
 
 SYSTEM_PLATFORM = platform.system()
+
+# Thread-local: LivePortrait stats during apply_face_expression_restorer (expr_profile).
+_lp_stitch_tls = threading.local()
+
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def lp_stitch_perf_env_active() -> bool:
+    """Env-based opt-in: LP_STITCH, PERF_STAGES, or PERF_BUNDLE."""
+    if _env_truthy("VISIOMASTER_PERF_LP_STITCH"):
+        return True
+    if _env_truthy("VISIOMASTER_PERF_STAGES"):
+        return True
+    if _env_truthy("VISIOMASTER_PERF_BUNDLE"):
+        return True
+    return False
+
+
+def liveportrait_wall_ms_enabled() -> bool:
+    """If set, accumulate host-side wall time around stitch/warp ONNX binds (rough vs GPU)."""
+    return _env_truthy("VISIOMASTER_PERF_LIVEPORTRAIT_MS")
+
+
+@contextmanager
+def expression_lp_stitch_profile_scope(models_processor: "ModelsProcessor"):
+    """Count lp_stitch / lp_warp_decode during Face Expression Restorer; print on exit."""
+    tls = _lp_stitch_tls
+    overlay = False
+    try:
+        overlay = bool(
+            models_processor.main_window.control.get(
+                "PipelineProfileOverlayEnableToggle", False
+            )
+        )
+    except Exception:
+        overlay = False
+    active = lp_stitch_perf_env_active() or overlay
+    tls.count = 0
+    tls.warp_count = 0
+    tls.stitch_ms = 0.0
+    tls.warp_ms = 0.0
+    prev = getattr(tls, "expr_profile", False)
+    tls.expr_profile = active
+    try:
+        yield
+    finally:
+        if active:
+            n = int(getattr(tls, "count", 0))
+            wn = int(getattr(tls, "warp_count", 0))
+            line = (
+                f"[PERF-LIVEPORTRAIT] apply_face_expression_restorer "
+                f"lp_stitch_calls={n} lp_warp_decode_calls={wn}"
+            )
+            if liveportrait_wall_ms_enabled():
+                sm = float(getattr(tls, "stitch_ms", 0.0))
+                wm = float(getattr(tls, "warp_ms", 0.0))
+                line += f" stitch_wall_ms={sm:.2f} warp_wall_ms={wm:.2f}"
+            print(line, flush=True)
+        tls.expr_profile = prev
+
+
+def slice_lp_motion_batch(motion: Dict[str, Any], index: int) -> Dict[str, Any]:
+    """Slice one batch element from lp_motion_extractor output (after flag_refine_info)."""
+    out: Dict[str, Any] = {}
+    for key, val in motion.items():
+        if isinstance(val, torch.Tensor) and val.dim() >= 1 and val.shape[0] > index:
+            out[key] = val[index : index + 1].contiguous()
+        else:
+            out[key] = val
+    return out
 
 
 class FaceEditors:
@@ -217,7 +291,17 @@ class FaceEditors:
         with torch.no_grad():
             I_s = torch.div(img.type(torch.float32), 255.0)
             I_s = torch.clamp(I_s, 0, 1)
-            I_s = torch.unsqueeze(I_s, 0).contiguous()
+            if I_s.dim() == 3:
+                I_s = I_s.unsqueeze(0)
+            elif I_s.dim() != 4:
+                raise ValueError(
+                    "lp_motion_extractor expects img [C,H,W] or [B,C,H,W], got "
+                    f"shape {tuple(img.shape)}"
+                )
+            bs = int(I_s.shape[0])
+            if bs < 1 or bs > 8:
+                raise ValueError(f"lp_motion_extractor batch size must be 1..8, got {bs}")
+            I_s = I_s.contiguous()
 
             model_name = "LivePortraitMotionExtractor"
 
@@ -230,25 +314,25 @@ class FaceEditors:
             inputs = {"img": I_s}
             output_spec = {
                 "pitch": torch.empty(
-                    (1, 66), dtype=torch.float32, device=self.models_processor.device
+                    (bs, 66), dtype=torch.float32, device=self.models_processor.device
                 ).contiguous(),
                 "yaw": torch.empty(
-                    (1, 66), dtype=torch.float32, device=self.models_processor.device
+                    (bs, 66), dtype=torch.float32, device=self.models_processor.device
                 ).contiguous(),
                 "roll": torch.empty(
-                    (1, 66), dtype=torch.float32, device=self.models_processor.device
+                    (bs, 66), dtype=torch.float32, device=self.models_processor.device
                 ).contiguous(),
                 "t": torch.empty(
-                    (1, 3), dtype=torch.float32, device=self.models_processor.device
+                    (bs, 3), dtype=torch.float32, device=self.models_processor.device
                 ).contiguous(),
                 "exp": torch.empty(
-                    (1, 63), dtype=torch.float32, device=self.models_processor.device
+                    (bs, 63), dtype=torch.float32, device=self.models_processor.device
                 ).contiguous(),
                 "scale": torch.empty(
-                    (1, 1), dtype=torch.float32, device=self.models_processor.device
+                    (bs, 1), dtype=torch.float32, device=self.models_processor.device
                 ).contiguous(),
                 "kp": torch.empty(
-                    (1, 63), dtype=torch.float32, device=self.models_processor.device
+                    (bs, 63), dtype=torch.float32, device=self.models_processor.device
                 ).contiguous(),
             }
 
@@ -416,6 +500,9 @@ class FaceEditors:
             torch.Tensor: A raw delta tensor representing the difference.
         """
         self._manage_editor_models(face_editor_type)
+        tls = _lp_stitch_tls
+        prof = getattr(tls, "expr_profile", False)
+        t0 = time.perf_counter() if prof and liveportrait_wall_ms_enabled() else None
         with torch.no_grad():
             # FE-12: fix typo feat_stiching -> feat_stitching
             feat_stitching = faceutil.concat_feat(kp_source, kp_driving).contiguous()
@@ -438,6 +525,13 @@ class FaceEditors:
             }
             results = self._run_onnx_io_binding(model_name, inputs, output_spec)
             delta = results["output"]
+
+        if t0 is not None:
+            tls.stitch_ms = float(getattr(tls, "stitch_ms", 0.0)) + (
+                time.perf_counter() - t0
+            )
+        if prof:
+            tls.count = int(getattr(tls, "count", 0)) + 1
 
         return delta
 
@@ -519,6 +613,9 @@ class FaceEditors:
             torch.Tensor: The final warped and decoded image tensor.
         """
         self._manage_editor_models(face_editor_type)
+        tls = _lp_stitch_tls
+        prof = getattr(tls, "expr_profile", False)
+        t0 = time.perf_counter() if prof and liveportrait_wall_ms_enabled() else None
         with torch.no_grad():
             feature_3d = feature_3d.contiguous()
             kp_source = kp_source.contiguous()
@@ -546,6 +643,13 @@ class FaceEditors:
             }
             results = self._run_onnx_io_binding(model_name, inputs, output_spec)
             out = results["out"]
+
+        if t0 is not None:
+            tls.warp_ms = float(getattr(tls, "warp_ms", 0.0)) + (
+                time.perf_counter() - t0
+            )
+        if prof:
+            tls.warp_count = int(getattr(tls, "warp_count", 0)) + 1
 
         return out
 

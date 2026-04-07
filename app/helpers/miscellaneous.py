@@ -92,6 +92,9 @@ def detector_input_size_from_control(control: Mapping[str, Any]) -> Tuple[int, i
     RetinaFace/SCRFD: ``run_detect`` snaps to the exported model's fixed input
     when it differs from the UI value (binding a smaller tensor than the TRT/ONNX
     engine expects can hang playback).
+
+    Optional ``PerformanceFastDetectEnableToggle`` + ``PerformanceFastDetectCapSideSelection``
+    clamp the effective side further (trade quality for feeder FPS).
     """
     raw = control.get("DetectorInternalSizeSelection", 512)
     try:
@@ -99,6 +102,14 @@ def detector_input_size_from_control(control: Mapping[str, Any]) -> Tuple[int, i
     except (TypeError, ValueError):
         side = 512
     side = max(128, min(640, side))
+    if control.get("PerformanceFastDetectEnableToggle", False):
+        cap_raw = control.get("PerformanceFastDetectCapSideSelection", "384")
+        try:
+            cap = int(str(cap_raw).strip())
+        except (TypeError, ValueError):
+            cap = 384
+        cap = max(128, min(640, cap))
+        side = min(side, cap)
     return (side, side)
 
 

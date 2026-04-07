@@ -80,6 +80,16 @@ def _bbox_iou_xyxy(a: numpy.ndarray, b: numpy.ndarray) -> float:
     return float(inter / union)
 
 
+def _recognition_cache_env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 LIVE_STREAM_FILE_TYPES = frozenset({"webcam", "screen"})
 
 TAIL_TOLERANCE = 30  # BUG-07: 10 was too tight — codec trailing B-frames can cause read
@@ -387,6 +397,9 @@ class VideoProcessor(QObject):
         )
         self._recognition_cache_max: int = 256
         self._recognition_cache_lock = threading.Lock()
+        # ByteTrack id → last ArcFace row (survives face-index reordering in det arrays).
+        self._recognition_track_last: "OrderedDict[int, dict[str, Any]]" = OrderedDict()
+        self._recognition_track_max: int = 128
         self.webcam_frames_to_display: queue.Queue[
             Tuple[numpy.ndarray, Any]
         ] = queue.Queue()  # (processed BGR frame, pipeline profile or None)
@@ -1179,6 +1192,7 @@ class VideoProcessor(QObject):
     def clear_recognition_embedding_cache(self) -> None:
         with self._recognition_cache_lock:
             self._recognition_cache_by_frame.clear()
+            self._recognition_track_last.clear()
 
     def try_reuse_recognition_embedding(
         self,
@@ -1188,22 +1202,48 @@ class VideoProcessor(QObject):
         kps_5: numpy.ndarray,
         model: str,
         sim_type: str,
+        track_id: int = -1,
     ) -> numpy.ndarray | None:
-        """Reuse embedding from (F-1, same face index) when bbox/kps are stable."""
+        """Reuse embedding when geometry matches previous frame or the same ByteTrack id."""
         if frame_num <= 0:
             return None
+        iou_th = _recognition_cache_env_float("VISIOMASTER_RECOG_CACHE_IOU", 0.88)
+        kps_th = _recognition_cache_env_float("VISIOMASTER_RECOG_CACHE_KPS", 4.0)
+        max_track_gap = int(
+            _recognition_cache_env_float("VISIOMASTER_RECOG_TRACK_MAX_FRAMES", 120.0)
+        )
         prev_key = (frame_num - 1, face_idx)
+
         with self._recognition_cache_lock:
             prev = self._recognition_cache_by_frame.get(prev_key)
-            if prev is None:
-                return None
-            if prev["model"] != model or prev["sim"] != sim_type:
-                return None
-            if _bbox_iou_xyxy(bbox, prev["bbox"]) < 0.88:
-                return None
-            if numpy.max(numpy.abs(kps_5.astype(numpy.float32) - prev["kps_5"])) > 4.0:
-                return None
-            return cast(numpy.ndarray, prev["emb"])
+            if prev is not None and prev["model"] == model and prev["sim"] == sim_type:
+                if _bbox_iou_xyxy(bbox, prev["bbox"]) >= iou_th:
+                    if (
+                        numpy.max(
+                            numpy.abs(
+                                kps_5.astype(numpy.float32) - prev["kps_5"]
+                            )
+                        )
+                        <= kps_th
+                    ):
+                        return cast(numpy.ndarray, prev["emb"])
+
+            if track_id >= 0:
+                tr = self._recognition_track_last.get(track_id)
+                if tr is not None and tr["model"] == model and tr["sim"] == sim_type:
+                    gap = frame_num - int(tr["frame_num"])
+                    if 0 < gap <= max_track_gap:
+                        if _bbox_iou_xyxy(bbox, tr["bbox"]) >= iou_th:
+                            if (
+                                numpy.max(
+                                    numpy.abs(
+                                        kps_5.astype(numpy.float32) - tr["kps_5"]
+                                    )
+                                )
+                                <= kps_th
+                            ):
+                                return cast(numpy.ndarray, tr["emb"])
+        return None
 
     def store_recognition_embedding(
         self,
@@ -1214,6 +1254,7 @@ class VideoProcessor(QObject):
         emb: numpy.ndarray,
         model: str,
         sim_type: str,
+        track_id: int = -1,
     ) -> None:
         if frame_num <= 0:
             return
@@ -1231,6 +1272,19 @@ class VideoProcessor(QObject):
             self._recognition_cache_by_frame.move_to_end(store_key)
             while len(self._recognition_cache_by_frame) > self._recognition_cache_max:
                 self._recognition_cache_by_frame.popitem(last=False)
+
+            if track_id >= 0:
+                self._recognition_track_last[track_id] = {
+                    "frame_num": int(frame_num),
+                    "bbox": row["bbox"].copy(),
+                    "kps_5": row["kps_5"].copy(),
+                    "emb": emb_c.copy(),
+                    "model": model,
+                    "sim": sim_type,
+                }
+                self._recognition_track_last.move_to_end(track_id)
+                while len(self._recognition_track_last) > self._recognition_track_max:
+                    self._recognition_track_last.popitem(last=False)
 
     def _clear_sequential_detection_feed_state(self) -> None:
         """Drop ByteTrack / EMA state after a timeline jump or new playback anchor.
@@ -1442,7 +1496,9 @@ class VideoProcessor(QObject):
                                 "DetectorScoreSlider", 50
                             )
                             / 100.0,
-                            input_size=(512, 512),
+                            input_size=misc_helpers.detector_input_size_from_control(
+                                local_control_for_worker
+                            ),
                             use_landmark_detection=True,
                             landmark_detect_mode="203",
                             landmark_score=local_control_for_worker.get(
