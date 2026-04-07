@@ -330,6 +330,7 @@ class ModelsProcessor(QtCore.QObject):
         self.dfm_models: Dict[str, DFMModel] = {}
         self.dfm_inference_lock = threading.Lock()
         self.force_unload_in_progress = False
+        self._model_last_used_mono: Dict[str, float] = {}
 
         # Initialize Sub-Processors
         self.face_detectors = FaceDetectors(self)
@@ -600,6 +601,64 @@ class ModelsProcessor(QtCore.QObject):
             print(f"[ERROR] Failed TensorRT cache check: {e}")
             return False
 
+    def _schedule_ort_warmup_if_enabled(self, model_name: str, session) -> None:
+        if not bool(
+            self.main_window.control.get("ModelWarmupOnLoadToggle", False)
+        ):
+            return
+        if session is None:
+            return
+        QtCore.QTimer.singleShot(
+            0,
+            lambda mn=model_name, s=session: self._try_ort_session_warmup(mn, s),
+        )
+
+    def _try_ort_session_warmup(self, model_name: str, session) -> None:
+        try:
+            feeds: Dict[str, np.ndarray] = {}
+            for inp in session.get_inputs():
+                shape = []
+                for d in inp.shape:
+                    if isinstance(d, int) and d > 0:
+                        shape.append(d)
+                    else:
+                        return
+                feeds[inp.name] = np.zeros(shape, dtype=np.float32)
+            session.run(None, feeds)
+        except Exception as e:
+            print(
+                f"[WARN] ORT warmup skipped for {model_name}: {e}",
+                flush=True,
+            )
+
+    def evict_idle_onnx_models(self) -> None:
+        """Unload ONNX sessions idle longer than ModelEvictIdleMinutesSlider (0=off)."""
+        try:
+            mins = int(
+                self.main_window.control.get("ModelEvictIdleMinutesSlider", 0) or 0
+            )
+        except (TypeError, ValueError):
+            mins = 0
+        if mins <= 0:
+            return
+        if self.main_window.control.get("KeepModelsAliveToggle", False):
+            return
+        if getattr(self.main_window.video_processor, "processing", False):
+            return
+        max_age = float(mins) * 60.0
+        now = time.monotonic()
+        protect = str(self.main_window.control.get("SwapModelSelection", ""))
+        to_drop: list[str] = []
+        with self.model_lock:
+            for name, inst in list(self.models.items()):
+                if inst is None or name == protect:
+                    continue
+                last = self._model_last_used_mono.get(name, now)
+                if now - last > max_age:
+                    to_drop.append(name)
+        for name in to_drop:
+            self.unload_model(name)
+
     def _providers_for_onnx_model(self, model_name: str):
         """ORT provider list for one ONNX file (CUDA fallback when TRT cannot init)."""
         if model_name not in ONNX_MODELS_SKIP_TENSORRT_EP:
@@ -621,6 +680,7 @@ class ModelsProcessor(QtCore.QObject):
         """
         with self.model_lock:
             if self.models.get(model_name):
+                self._model_last_used_mono[model_name] = time.monotonic()
                 return self.models[model_name]
 
             if model_name == "DMDNetTorch":
@@ -657,6 +717,8 @@ class ModelsProcessor(QtCore.QObject):
                     model_instance = self.load_model_trt(model_name)
                     if model_instance:
                         self.models_trt[model_name] = model_instance
+                        self._model_last_used_mono[model_name] = time.monotonic()
+                        self._schedule_ort_warmup_if_enabled(model_name, model_instance)
                         # No need to load ONNX version if TRT succeeds
                         return model_instance
                     else:
@@ -908,6 +970,8 @@ class ModelsProcessor(QtCore.QObject):
                     # MP-17: release large ONNX graph object after emap extraction
                     del graph
                     gc.collect()
+                self._model_last_used_mono[model_name] = time.monotonic()
+                self._schedule_ort_warmup_if_enabled(model_name, model_instance)
                 return model_instance
 
             except Exception:
@@ -1081,6 +1145,7 @@ class ModelsProcessor(QtCore.QObject):
 
                 if model_instance is not None:
                     print(f"[INFO] Unloading ONNX model: {model_name_to_unload}")
+                    self._model_last_used_mono.pop(model_name_to_unload, None)
                     # MP-06: set dict entry to None first, then del the instance
                     self.models[model_name_to_unload] = None
                     # Explicitly delete the object to trigger its __del__ method

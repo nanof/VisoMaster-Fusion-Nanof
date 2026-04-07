@@ -316,6 +316,7 @@ def show_hide_related_widgets(
             return
         if "Selection" in parent_widget_name:
             # Loop through all widgets data in the parent widget's group layout data
+            cur_text = parent_widget.currentText()
             for widget_name in group_layout_data.keys():
                 # Store the widget object (instance) from the parameters_widgets Dictionary
                 current_widget = main_window.parameter_widgets.get(widget_name)
@@ -325,11 +326,13 @@ def show_hide_related_widgets(
                     == parent_widget_name
                     and current_widget
                 ):
-                    # Check if the current_widget has the required value of Parent Widget's (selection) current value to hide/show the current_widget
-                    if (
-                        group_layout_data[widget_name].get("requiredSelectionValue")
-                        != parent_widget.currentText()
-                    ):
+                    wdata = group_layout_data[widget_name]
+                    req_in = wdata.get("requiredSelectionIn")
+                    if req_in is not None:
+                        visible = cur_text in req_in
+                    else:
+                        visible = wdata.get("requiredSelectionValue") == cur_text
+                    if not visible:
                         current_widget.hide()
                         current_widget.label_widget.hide()
                         current_widget.reset_default_button.hide()
@@ -896,6 +899,9 @@ def set_control_widgets_values(main_window: "MainWindow", enable_exec_func=True)
     setattr(main_window, "_preview_notifications_suppressed", True)
     try:
         migrate_interpolation_control_keys(main_window.control)
+        from app.ui.widgets.actions import pipeline_profile_actions as _pp_prof
+
+        _pp_prof.migrate_pipeline_profile_display_mode(main_window.control)
         # Get control values and parameter widgets from the main window
         control = main_window.control.copy()
         parameter_widgets = main_window.parameter_widgets
@@ -970,6 +976,13 @@ def set_control_widgets_values(main_window: "MainWindow", enable_exec_func=True)
 
                 # Re-enable frame refresh
                 widget.enable_refresh_frame = True
+        _prof_sel = parameter_widgets.get("PipelineProfileDisplayModeSelection")
+        if _prof_sel is not None:
+            show_hide_related_widgets(
+                main_window,
+                _prof_sel,
+                "PipelineProfileDisplayModeSelection",
+            )
         try:
             from app.helpers import detector_internal_size_ui
 

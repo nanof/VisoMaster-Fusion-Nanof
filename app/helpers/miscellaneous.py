@@ -1032,6 +1032,8 @@ def read_frame(
             flush=True,
         )
 
+    if frame is not None and not frame.flags["C_CONTIGUOUS"]:
+        frame = np.ascontiguousarray(frame)
     return True, frame
 
 

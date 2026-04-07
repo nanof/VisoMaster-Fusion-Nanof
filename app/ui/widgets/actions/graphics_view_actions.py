@@ -425,8 +425,13 @@ def build_preview_active_settings_text(main_window: "MainWindow") -> str:
     if ctrl.get("SendVirtCamFramesEnableToggle", False):
         lines.append("Virtual camera")
 
-    if ctrl.get("PipelineProfileOverlayEnableToggle", False):
-        lines.append("Pipeline profile overlay")
+    prof_mode = str(ctrl.get("PipelineProfileDisplayModeSelection", "Off"))
+    if prof_mode == "Preview overlay":
+        lines.append("Pipeline profile: preview")
+    elif prof_mode == "Dock panel":
+        lines.append("Pipeline profile: dock")
+    elif prof_mode == "Overlay + dock":
+        lines.append("Pipeline profile: preview + dock")
 
     if ctrl.get("VideoPlaybackBenchSameFrameToggle", False):
         lines.append("Benchmark: same frame")
@@ -625,28 +630,99 @@ def record_preview_frame_tick(main_window: "MainWindow") -> None:
         ) + 1
 
 
-def on_pipeline_profile_overlay_toggle(main_window: "MainWindow", _value: object) -> None:
-    """Settings toggle: show/hide pipeline profile overlay immediately."""
+def on_pipeline_profile_display_mode_changed(
+    main_window: "MainWindow", new_value: object
+) -> None:
+    """Combobox: keep legacy overlay/dock bools in sync and refresh profile UI."""
+    from app.ui.widgets.actions import pipeline_profile_actions as ppa
+
+    ppa.sync_legacy_profile_bools_from_mode(main_window.control, str(new_value))
     update_pipeline_profile_overlay(main_window, None)
+    update_preview_active_settings_overlay(main_window)
+
+
+def cycle_pipeline_profile_display_mode(main_window: "MainWindow") -> None:
+    """Shortcut (F5): cycle Off → preview → dock → both → Off."""
+    from app.ui.widgets.actions import pipeline_profile_actions as ppa
+
+    pm = main_window.parameter_widgets.get("PipelineProfileDisplayModeSelection")
+    if pm is None or not pm.isEnabled():
+        return
+    modes = list(ppa.PIPELINE_PROFILE_DISPLAY_MODES)
+    try:
+        i = modes.index(pm.currentText())
+    except ValueError:
+        i = 0
+    nxt = modes[(i + 1) % len(modes)]
+    pm.blockSignals(True)
+    pm.set_value(nxt)
+    pm.blockSignals(False)
+    on_pipeline_profile_display_mode_changed(main_window, nxt)
+
+
+def on_pipeline_profile_global_mean_column_toggle(
+    main_window: "MainWindow", _value: object
+) -> None:
+    """Reformat overlay/dock from cached per-thread display (no new frame needed)."""
+    from app.ui.widgets.actions import pipeline_profile_actions as ppa
+
+    overlay_on = bool(
+        main_window.control.get("PipelineProfileOverlayEnableToggle", False)
+    )
+    dock_on = bool(main_window.control.get("PipelineProfileDockEnableToggle", False))
+    if not overlay_on and not dock_on:
+        return
+    hdr = getattr(main_window, "_pipeline_profile_last_overlay_headers", None) or []
+    text = ppa.aggregate_rows_for_display(
+        main_window, [], None, header_lines=list(hdr) if hdr else None
+    )
+    lbl = main_window.previewPipelineProfileLabel
+    dock_te = getattr(main_window, "pipelineProfileDockTextEdit", None)
+    if overlay_on:
+        lbl.setText(text)
+        lbl.adjustSize()
+    if dock_on and dock_te is not None:
+        dock_te.setPlainText(text)
+    position_preview_overlay_labels(main_window)
 
 
 def update_pipeline_profile_overlay(
     main_window: "MainWindow", profile_payload: object | None
 ) -> None:
-    """Show aggregated pipeline timings when the settings toggle is on."""
+    """Show aggregated pipeline timings when overlay and/or dock toggle is on."""
     from app.ui.widgets.actions import pipeline_profile_actions as ppa
 
+    overlay_on = bool(
+        main_window.control.get("PipelineProfileOverlayEnableToggle", False)
+    )
+    dock_on = bool(main_window.control.get("PipelineProfileDockEnableToggle", False))
     lbl = main_window.previewPipelineProfileLabel
-    if not main_window.control.get("PipelineProfileOverlayEnableToggle", False):
+    dock = getattr(main_window, "pipelineProfileDock", None)
+    dock_te = getattr(main_window, "pipelineProfileDockTextEdit", None)
+
+    if not overlay_on and not dock_on:
         lbl.setVisible(False)
+        if dock is not None:
+            dock.setVisible(False)
         return
-    lbl.setVisible(True)
+
+    if overlay_on:
+        lbl.setVisible(True)
+    else:
+        lbl.setVisible(False)
+    if dock is not None:
+        dock.setVisible(bool(dock_on))
+
     if profile_payload is None:
         vp = getattr(main_window, "video_processor", None)
         if vp is not None and vp.processing:
             return
-        lbl.setText("Profile: —")
-        lbl.adjustSize()
+        idle_text = "Profile: —"
+        if overlay_on:
+            lbl.setText(idle_text)
+            lbl.adjustSize()
+        if dock_on and dock_te is not None:
+            dock_te.setPlainText(idle_text)
         position_preview_overlay_labels(main_window)
         return
     rows = ppa.flatten_pipeline_profile_payload(
@@ -681,13 +757,17 @@ def update_pipeline_profile_overlay(
         fn = profile_payload.get("frame_number")
         if fn is not None and wt:
             header_lines.append(f"Profile frame: {fn} · {wt}")
+    main_window._pipeline_profile_last_overlay_headers = list(header_lines)
     text = ppa.aggregate_rows_for_display(
         main_window, rows, wt, header_lines=header_lines or None
     )
     if rows and isinstance(profile_payload, dict):
         ppa.append_pipeline_profile_session_sample(main_window, profile_payload, rows)
-    lbl.setText(text)
-    lbl.adjustSize()
+    if overlay_on:
+        lbl.setText(text)
+        lbl.adjustSize()
+    if dock_on and dock_te is not None:
+        dock_te.setPlainText(text)
     position_preview_overlay_labels(main_window)
 
 

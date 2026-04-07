@@ -62,7 +62,7 @@ _PERF_BUNDLE_FLAGS = frozenset(
 def _pipeline_profile_collect_enabled(main_window: "MainWindow") -> bool:
     return _env_flag("VISIOMASTER_PERF_STAGES") or bool(
         main_window.control.get("PipelineProfileOverlayEnableToggle", False)
-    )
+    ) or bool(main_window.control.get("PipelineProfileDockEnableToggle", False))
 
 
 def _pipeline_profile_cuda_sync(main_window: "MainWindow") -> bool:
@@ -309,6 +309,13 @@ class FrameWorker(threading.Thread):
         self._vr_p2e_frame_size: Optional[tuple] = None
         # VR-MEM-03: per-worker frame counter for periodic CUDA allocator flush
         self._vr_processed_count: int = 0
+
+        # Accumulated swap_core stage ms for pipeline profile (sum over faces / frame).
+        self._swap_core_stage_accum: dict[str, float] = {}
+        # Phase 5: swapper auto-res hysteresis last dim per ByteTrack id (-1 = unset).
+        self._swapper_autores_dim_by_track: dict[int, int] = {}
+        # Phase 6: reuse dynamic side mask when geometry + params match (per frame).
+        self._dynamic_side_mask_cache: dict[tuple[Any, ...], torch.Tensor] = {}
 
         # Dirty-check cache for set_scaling_transforms (FW-PERF-07)
         self._last_scaling_control: dict | None = None
@@ -1450,6 +1457,20 @@ class FrameWorker(threading.Thread):
         img_numpy_rgb_uint8 = self.frame
         assert img_numpy_rgb_uint8 is not None, "frame must be set before processing"
 
+        self._swap_core_stage_accum.clear()
+        self._dynamic_side_mask_cache.clear()
+
+        if (
+            self.is_pool_worker
+            and self.video_processor.file_type == "video"
+            and self.frame_number > 0
+        ):
+            self.video_processor.maybe_note_scene_cut_for_arcface(
+                img_numpy_rgb_uint8,
+                self.frame_number,
+                control,
+            )
+
         _vr_on = bool(control.get("VR180ModeEnableToggle", False))
 
         # FW-PERF-07: standard-path scaling only. VR uses _process_frame_vr180's own
@@ -1590,16 +1611,36 @@ class FrameWorker(threading.Thread):
                 q_max = int(fq.maxsize)
             except (TypeError, ValueError, AttributeError):
                 pass
+        acc = getattr(self, "_swap_core_stage_accum", None) or {}
+        if acc:
+            for sk in sorted(acc.keys()):
+                stages.append((sk, float(acc[sk])))
+
+        # Feeder ∑ (instrumented) + worker wall from outer perf collector (avoids double-count
+        # when swap sub-stages sc_* are listed alongside std_swap_edit).
+        frame_total_attributed_ms = feeder_total + total
+
         return {
             "feeder": fd_dict,
             "worker": stages,
             "worker_total_ms": total,
             "feeder_total_ms": feeder_total,
+            "frame_total_attributed_ms": frame_total_attributed_ms,
             "worker_thread": self.name,
             "frame_number": int(self.frame_number),
             "frame_queue_depth_at_emit": q_depth,
             "frame_queue_max": q_max,
         }
+
+    def _merge_swap_core_perf_stages_from_collector(
+        self, coll: _PerfStageCollector | None
+    ) -> None:
+        if coll is None:
+            return
+        pl = coll.to_payload()
+        acc = self._swap_core_stage_accum
+        for n, ms in pl.get("stages", []):
+            acc[n] = acc.get(n, 0.0) + float(ms)
 
     # ------------------------------------------------------------------
     # VR180 helpers
@@ -2678,6 +2719,7 @@ class FrameWorker(threading.Thread):
                         source_latent_cache=source_latent_cache,
                         blendswap_source_rgb112=s0.get("blendswap_src112"),
                         uniface_source_rgb256=s0.get("uniface_src256"),
+                        swapper_autores_track_id=int(s0.get("swap_tid", -1)),
                     )
                 )
                 if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -2727,6 +2769,7 @@ class FrameWorker(threading.Thread):
                         source_latent_cache=source_latent_cache,
                         blendswap_source_rgb112=sp.get("blendswap_src112"),
                         uniface_source_rgb256=sp.get("uniface_src256"),
+                        swapper_autores_track_id=int(sp.get("swap_tid", -1)),
                     )
                 )
                 if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -2760,6 +2803,7 @@ class FrameWorker(threading.Thread):
                             source_latent_cache=source_latent_cache,
                             blendswap_source_rgb112=sp.get("blendswap_src112"),
                             uniface_source_rgb256=sp.get("uniface_src256"),
+                            swapper_autores_track_id=int(sp.get("swap_tid", -1)),
                         )
                     )
                     if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -2861,6 +2905,9 @@ class FrameWorker(threading.Thread):
                 source_latent_out_cache=source_latent_cache,
                 blendswap_source_rgb112=s.get("blendswap_src112"),
                 uniface_source_rgb256=s.get("uniface_src256"),
+                swapper_autores_track_id=int(
+                    s.get("fface", {}).get("track_id", -1)
+                ),
             )
             if inp_f is None or dim != 1 or latent is None:
                 return _sequential_from_ordered()
@@ -3022,6 +3069,9 @@ class FrameWorker(threading.Thread):
                 source_latent_out_cache=source_latent_cache,
                 blendswap_source_rgb112=s.get("blendswap_src112"),
                 uniface_source_rgb256=s.get("uniface_src256"),
+                swapper_autores_track_id=int(
+                    s.get("fface", {}).get("track_id", -1)
+                ),
             )
             if inp_f is None or dim != 2 or latent is None:
                 return _sequential_from_ordered()
@@ -3484,13 +3534,30 @@ class FrameWorker(threading.Thread):
                 control.get("PerformanceRecognitionMaxArcFacePerFrameSlider", 0) or 0
             )
             if _arcface_cap > 0 and len(_need_emb) > _arcface_cap:
-                _need_emb.sort(
-                    key=lambda w: float(
-                        max(0.0, float(w["bbox"][2]) - float(w["bbox"][0]))
-                        * max(0.0, float(w["bbox"][3]) - float(w["bbox"][1]))
-                    ),
-                    reverse=True,
-                )
+                _iw = float(img.shape[-1])
+                _ih = float(img.shape[-2])
+                _icx = 0.5 * _iw
+                _icy = 0.5 * _ih
+                try:
+                    _wcent = float(
+                        control.get("PerformanceArcFaceCenterBiasSlider", 0) or 0
+                    ) / 100.0
+                except (TypeError, ValueError):
+                    _wcent = 0.0
+
+                def _arcface_priority(w: dict[str, Any]) -> float:
+                    bw = max(0.0, float(w["bbox"][2]) - float(w["bbox"][0]))
+                    bh = max(0.0, float(w["bbox"][3]) - float(w["bbox"][1]))
+                    area = bw * bh
+                    if _wcent <= 0.0 or _iw < 2.0 or _ih < 2.0:
+                        return area
+                    cx = 0.5 * (float(w["bbox"][0]) + float(w["bbox"][2]))
+                    cy = 0.5 * (float(w["bbox"][1]) + float(w["bbox"][3]))
+                    nd = math.hypot((cx - _icx) / _iw, (cy - _icy) / _ih)
+                    cbonus = max(0.0, 1.0 - 2.0 * nd)
+                    return area * (1.0 + _wcent * cbonus)
+
+                _need_emb.sort(key=_arcface_priority, reverse=True)
                 _need_emb = _need_emb[:_arcface_cap]
 
             if _need_emb:
@@ -3736,6 +3803,9 @@ class FrameWorker(threading.Thread):
                                 source_latent_cache=_source_latent_cache,
                                 blendswap_source_rgb112=_bs112_best,
                                 uniface_source_rgb256=_uf256_best,
+                                swapper_autores_track_id=int(
+                                    best_fface.get("track_id", -1)
+                                ),
                             )
                             if edit_button_is_checked_global and any(
                                 params[f]
@@ -3911,6 +3981,9 @@ class FrameWorker(threading.Thread):
                                         source_latent_cache=_source_latent_cache,
                                         blendswap_source_rgb112=_bs112_rr,
                                         uniface_source_rgb256=_uf256_rr,
+                                        swapper_autores_track_id=int(
+                                            fface.get("track_id", -1)
+                                        ),
                                     )
                                 )
                                 if edit_button_is_checked_global and any(
@@ -4059,6 +4132,7 @@ class FrameWorker(threading.Thread):
                                     "kv_map": _reaging_kv,
                                     "blendswap_src112": _bs112_sa,
                                     "uniface_src256": _uf256_sa,
+                                    "swap_tid": int(fface.get("track_id", -1)),
                                 }
                             )
                             continue
@@ -4088,6 +4162,9 @@ class FrameWorker(threading.Thread):
                                     source_latent_cache=_source_latent_cache,
                                     blendswap_source_rgb112=_bs112_sa,
                                     uniface_source_rgb256=_uf256_sa,
+                                    swapper_autores_track_id=int(
+                                        fface.get("track_id", -1)
+                                    ),
                                 )
                             )
                             if edit_button_is_checked_global and any(
@@ -4637,6 +4714,7 @@ class FrameWorker(threading.Thread):
         source_latent_out_cache: dict | None = None,
         blendswap_source_rgb112: torch.Tensor | None = None,
         uniface_source_rgb256: torch.Tensor | None = None,
+        swapper_autores_track_id: int = -1,
     ):
         """
         Selects the correct input face resolution and computes the swapping latent vector
@@ -4702,17 +4780,46 @@ class FrameWorker(threading.Thread):
 
             dim = 1
             if parameters["SwapperResAutoSelectEnableToggle"]:
-                if tform.scale <= 1.00:
-                    dim = 4
+                sc = float(tform.scale)
+                if sc <= 1.00:
+                    raw_dim = 4
+                elif sc <= 1.75:
+                    raw_dim = 3
+                elif sc <= 2:
+                    raw_dim = 2
+                else:
+                    raw_dim = 1
+                dim = raw_dim
+                if parameters.get(
+                    "PerformanceSwapperAutoresHysteresisEnableToggle", False
+                ):
+                    tid = int(swapper_autores_track_id)
+                    ema = float(
+                        parameters.get(
+                            "PerformanceSwapperAutoresMotionEmaDecimalSlider", 0.35
+                        )
+                    )
+                    ema = max(0.05, min(0.95, ema))
+                    # Lower EMA → smoother motion proxy → wider deadband; higher EMA → tighter.
+                    _hy = 0.05 + (0.95 - ema) * (0.20 - 0.05) / 0.90
+                    prev_d = self._swapper_autores_dim_by_track.get(tid)
+                    if prev_d is not None and raw_dim < prev_d:
+                        thr = {4: 1.0, 3: 1.75, 2: 2.0}.get(prev_d, 0.0)
+                        if sc <= thr + _hy:
+                            dim = prev_d
+                    if tid >= 0:
+                        self._swapper_autores_dim_by_track[tid] = dim
+                elif int(swapper_autores_track_id) >= 0:
+                    self._swapper_autores_dim_by_track[
+                        int(swapper_autores_track_id)
+                    ] = raw_dim
+                if dim == 4:
                     input_face_affined = original_face_512
-                elif tform.scale <= 1.75:
-                    dim = 3
+                elif dim == 3:
                     input_face_affined = original_face_384
-                elif tform.scale <= 2:
-                    dim = 2
+                elif dim == 2:
                     input_face_affined = original_face_256
                 else:
-                    dim = 1
                     input_face_affined = original_face_128
             else:
                 if parameters["SwapperResSelection"] == "128":
@@ -6416,6 +6523,7 @@ class FrameWorker(threading.Thread):
         prefetched_swap_chw_uint8: torch.Tensor | None = None,
         blendswap_source_rgb112: torch.Tensor | None = None,
         uniface_source_rgb256: torch.Tensor | None = None,
+        swapper_autores_track_id: int = -1,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """
         Core function for face swapping. Handles:
@@ -6433,10 +6541,17 @@ class FrameWorker(threading.Thread):
         swapper_model = parameters["SwapModelSelection"]
         itex = 1  # FW-BUG-10: default before any branching to prevent NameError
         _swap_core_perf: _PerfStageCollector | None = None
-        if _env_flag("VISIOMASTER_PERF_SWAP_CORE"):
-            _swap_core_perf = _PerfStageCollector(
+        _do_swap_prof = _pipeline_profile_collect_enabled(
+            self.main_window
+        ) or _env_flag("VISIOMASTER_PERF_SWAP_CORE")
+        if _do_swap_prof:
+            _cuda_sc = (
                 self.models_processor.device == "cuda" and torch.cuda.is_available()
             )
+            _sync_sc = _pipeline_profile_cuda_sync(self.main_window)
+            if not _pipeline_profile_collect_enabled(self.main_window):
+                _sync_sc = _cuda_sc
+            _swap_core_perf = _PerfStageCollector(_sync_sc)
 
         # FW-PERF-4: set_scaling_transforms is already called in process_frame;
         # calling it again here per-face-per-frame rebuilds 12 transform objects
@@ -6564,6 +6679,7 @@ class FrameWorker(threading.Thread):
                     source_latent_out_cache=source_latent_cache,
                     blendswap_source_rgb112=blendswap_source_rgb112,
                     uniface_source_rgb256=uniface_source_rgb256,
+                    swapper_autores_track_id=int(swapper_autores_track_id),
                 )
             )
 
@@ -6646,16 +6762,42 @@ class FrameWorker(threading.Thread):
         current_swap_h, current_swap_w = swap.shape[1], swap.shape[2]
 
         yaw_deg, pitch_deg = faceutil.calc_face_yaw_pitch(kps_5)
-        side_mask = self.get_dynamic_side_mask(
-            yaw_deg,
-            pitch_deg,
-            current_swap_h,
-            current_swap_w,
-            self.models_processor.device,
-            parameters,
-            kps_5,
-            tform,
-        )
+        if parameters.get("ProfileAngleMaskEnableToggle", False):
+            _sm_key = (
+                round(float(yaw_deg), 2),
+                round(float(pitch_deg), 2),
+                int(current_swap_h),
+                int(current_swap_w),
+                round(float(tform.scale), 3),
+                int(parameters.get("ProfileAngleMaskThresholdSlider", 20)),
+                round(float(parameters.get("ProfileAngleMaskStrengthSlider", 100)), 1),
+            )
+            _sm_hit = self._dynamic_side_mask_cache.get(_sm_key)
+            if _sm_hit is not None:
+                side_mask = _sm_hit
+            else:
+                side_mask = self.get_dynamic_side_mask(
+                    yaw_deg,
+                    pitch_deg,
+                    current_swap_h,
+                    current_swap_w,
+                    self.models_processor.device,
+                    parameters,
+                    kps_5,
+                    tform,
+                )
+                self._dynamic_side_mask_cache[_sm_key] = side_mask
+        else:
+            side_mask = self.get_dynamic_side_mask(
+                yaw_deg,
+                pitch_deg,
+                current_swap_h,
+                current_swap_w,
+                self.models_processor.device,
+                parameters,
+                kps_5,
+                tform,
+            )
 
         # FW-PERF-09: skip get_border_mask entirely when the toggle is off;
         # when disabled it would just return all-ones, so the result equals side_mask.
@@ -7900,9 +8042,11 @@ class FrameWorker(threading.Thread):
         if is_perspective_crop:
             if _swap_core_perf is not None:
                 _swap_core_perf.mark("sc_perspective_out")
-                _swap_core_perf.emit(
-                    self.frame_number, self.name, "[PERF-SWAP-CORE]"
-                )
+                self._merge_swap_core_perf_stages_from_collector(_swap_core_perf)
+                if _env_flag("VISIOMASTER_PERF_SWAP_CORE"):
+                    _swap_core_perf.emit(
+                        self.frame_number, self.name, "[PERF-SWAP-CORE]"
+                    )
             return t512_mask(swap), t512_mask(swap_mask), None
 
         # Mask Post-Processing (Final Blend)
@@ -8085,7 +8229,11 @@ class FrameWorker(threading.Thread):
 
         if _swap_core_perf is not None:
             _swap_core_perf.mark("sc_warp_paste")
-            _swap_core_perf.emit(self.frame_number, self.name, "[PERF-SWAP-CORE]")
+            self._merge_swap_core_perf_stages_from_collector(_swap_core_perf)
+            if _env_flag("VISIOMASTER_PERF_SWAP_CORE"):
+                _swap_core_perf.emit(
+                    self.frame_number, self.name, "[PERF-SWAP-CORE]"
+                )
 
         return img, original_face_512_clone, swap_mask_clone
 

@@ -20,6 +20,7 @@ from app.ui.widgets.actions import list_view_actions
 from app.ui.widgets.actions import preview_notification_actions
 from app.ui.widgets.actions import transcode_actions
 from app.ui.widgets.actions import graphics_view_actions
+from app.ui.widgets.actions import pipeline_profile_actions
 from app.ui.widgets.actions import job_manager_actions
 from app.ui.widgets.actions import preset_actions
 from app.ui.widgets.advanced_embedding_editor import EmbeddingGUI
@@ -329,6 +330,29 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         )
         self.previewPipelineProfileLabel.setVisible(False)
 
+        self.pipelineProfileDock = QtWidgets.QDockWidget("Pipeline profile", self)
+        self.pipelineProfileDock.setObjectName("PipelineProfileDock")
+        self.pipelineProfileDockTextEdit = QtWidgets.QPlainTextEdit(self.pipelineProfileDock)
+        self.pipelineProfileDockTextEdit.setReadOnly(True)
+        self.pipelineProfileDockTextEdit.setFont(
+            QtGui.QFont("Consolas", 10)
+        )
+        self.pipelineProfileDock.setWidget(self.pipelineProfileDockTextEdit)
+        self.pipelineProfileDock.setVisible(False)
+        self.addDockWidget(
+            QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.pipelineProfileDock
+        )
+
+        self._model_idle_evict_timer = QtCore.QTimer(self)
+        self._model_idle_evict_timer.setInterval(120_000)
+        self._model_idle_evict_timer.timeout.connect(
+            partial(
+                lambda mw: mw.models_processor.evict_idle_onnx_models(),
+                self,
+            )
+        )
+        self._model_idle_evict_timer.start()
+
         self.previewNotificationLabel = QtWidgets.QLabel("", self.graphicsViewFrame)
         self.previewNotificationLabel.setStyleSheet(
             "QLabel { background-color: rgba(20, 20, 20, 220); color: #f0f0f0; "
@@ -566,6 +590,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             layoutWidget=self.settingsWidgetsLayout,
             data_type="control",
         )
+        pipeline_profile_actions.migrate_pipeline_profile_display_mode(self.control)
         QtCore.QTimer.singleShot(
             0,
             partial(detector_internal_size_ui.sync_detector_internal_size_combo, self),
@@ -1006,11 +1031,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             case QtCore.Qt.Key_S:
                 self.swapfacesButton.click()
             case QtCore.Qt.Key_F5:
-                pp_toggle = self.parameter_widgets.get(
-                    "PipelineProfileOverlayEnableToggle"
-                )
-                if pp_toggle is not None and pp_toggle.isEnabled():
-                    pp_toggle.click()
+                graphics_view_actions.cycle_pipeline_profile_display_mode(self)
             case QtCore.Qt.Key_F7:
                 fi_toggle = self.parameter_widgets.get("PreviewFrameGenEnableToggle")
                 if fi_toggle is not None and fi_toggle.isEnabled():

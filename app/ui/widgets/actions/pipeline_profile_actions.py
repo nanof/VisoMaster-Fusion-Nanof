@@ -22,6 +22,68 @@ PIPELINE_PROFILE_FEEDER_ORDER: Tuple[str, ...] = (
 
 PIPELINE_PROFILE_FEEDER_KEY_SET: frozenset[str] = frozenset(PIPELINE_PROFILE_FEEDER_ORDER)
 
+# Feeder ∑ + worker wall (outer _PerfStageCollector span); excludes duplicate sc_* vs std_swap_edit.
+PIPELINE_PROFILE_FRAME_TOTAL_KEY = "frame_total_attributed_ms"
+
+# Unified UI: ``PipelineProfileDisplayModeSelection`` (legacy overlay/dock bools stay in sync).
+PIPELINE_PROFILE_DISPLAY_MODE_OFF = "Off"
+PIPELINE_PROFILE_DISPLAY_MODE_OVERLAY = "Preview overlay"
+PIPELINE_PROFILE_DISPLAY_MODE_DOCK = "Dock panel"
+PIPELINE_PROFILE_DISPLAY_MODE_BOTH = "Overlay + dock"
+
+PIPELINE_PROFILE_DISPLAY_MODES: Tuple[str, ...] = (
+    PIPELINE_PROFILE_DISPLAY_MODE_OFF,
+    PIPELINE_PROFILE_DISPLAY_MODE_OVERLAY,
+    PIPELINE_PROFILE_DISPLAY_MODE_DOCK,
+    PIPELINE_PROFILE_DISPLAY_MODE_BOTH,
+)
+
+PIPELINE_PROFILE_DISPLAY_MODES_ACTIVE: frozenset[str] = frozenset(
+    (
+        PIPELINE_PROFILE_DISPLAY_MODE_OVERLAY,
+        PIPELINE_PROFILE_DISPLAY_MODE_DOCK,
+        PIPELINE_PROFILE_DISPLAY_MODE_BOTH,
+    )
+)
+
+
+def sync_legacy_profile_bools_from_mode(control: Dict[str, Any], mode: str) -> None:
+    """Mirror combobox state in ``PipelineProfile*EnableToggle`` for existing call sites."""
+    m = (
+        mode
+        if mode in PIPELINE_PROFILE_DISPLAY_MODES
+        else PIPELINE_PROFILE_DISPLAY_MODE_OFF
+    )
+    control["PipelineProfileDisplayModeSelection"] = m
+    control["PipelineProfileOverlayEnableToggle"] = m in (
+        PIPELINE_PROFILE_DISPLAY_MODE_OVERLAY,
+        PIPELINE_PROFILE_DISPLAY_MODE_BOTH,
+    )
+    control["PipelineProfileDockEnableToggle"] = m in (
+        PIPELINE_PROFILE_DISPLAY_MODE_DOCK,
+        PIPELINE_PROFILE_DISPLAY_MODE_BOTH,
+    )
+
+
+def migrate_pipeline_profile_display_mode(control: Dict[str, Any]) -> None:
+    """After loading JSON: ensure mode exists and legacy bool keys match."""
+    cur = control.get("PipelineProfileDisplayModeSelection")
+    if isinstance(cur, str) and cur in PIPELINE_PROFILE_DISPLAY_MODES:
+        sync_legacy_profile_bools_from_mode(control, cur)
+        return
+    ov = bool(control.get("PipelineProfileOverlayEnableToggle", False))
+    dk = bool(control.get("PipelineProfileDockEnableToggle", False))
+    if ov and dk:
+        m = PIPELINE_PROFILE_DISPLAY_MODE_BOTH
+    elif ov:
+        m = PIPELINE_PROFILE_DISPLAY_MODE_OVERLAY
+    elif dk:
+        m = PIPELINE_PROFILE_DISPLAY_MODE_DOCK
+    else:
+        m = PIPELINE_PROFILE_DISPLAY_MODE_OFF
+    sync_legacy_profile_bools_from_mode(control, m)
+
+
 # Cap stored samples per playback session (each displayed frame with overlay on).
 _PIPELINE_PROFILE_SESSION_MAX = 8000
 _PIPELINE_PROFILE_SESSION_REPORT_PREFIX = "[PIPELINE-PROFILE-SESSION]"
@@ -46,6 +108,15 @@ PIPELINE_STAGE_LABELS: Dict[str, str] = {
     "pass_through": "Passthrough",
     "feeder_subtotal": "Sum Feeder (ms)",
     "worker_subtotal": "Sum Worker (ms)",
+    "sc_align_crop": "Swap: align/crop",
+    "sc_swap_strength": "Swap: strength blend",
+    "sc_border_mask_init": "Swap: border mask",
+    "sc_maskcalc_xseg": "Swap: mask calc / xseg",
+    "sc_restore_color_fx": "Swap: restore/color FX",
+    "sc_perspective_out": "Swap: perspective out",
+    "sc_tail_view_maskpost": "Swap: tail / mask post",
+    "sc_warp_paste": "Swap: warp paste",
+    PIPELINE_PROFILE_FRAME_TOTAL_KEY: "Frame total (feeder ∑ + worker wall)",
 }
 
 # Column widths for monospace overlay.
@@ -83,8 +154,12 @@ def _ordered_stage_keys_union(per_thread: Dict[str, Dict[str, float]]) -> List[s
     for k in PIPELINE_PROFILE_FEEDER_ORDER:
         if k in all_keys:
             out.append(k)
-    for k in sorted(k for k in all_keys if k not in out):
+    for k in sorted(
+        kk for kk in all_keys if kk not in out and kk != PIPELINE_PROFILE_FRAME_TOTAL_KEY
+    ):
         out.append(k)
+    if PIPELINE_PROFILE_FRAME_TOTAL_KEY in all_keys:
+        out.append(PIPELINE_PROFILE_FRAME_TOTAL_KEY)
     return out
 
 
@@ -115,6 +190,12 @@ def flatten_pipeline_profile_payload(
                     rows.append((item[0], float(item[1])))
                 except (TypeError, ValueError):
                     pass
+    fta = payload.get(PIPELINE_PROFILE_FRAME_TOTAL_KEY)
+    if fta is not None:
+        try:
+            rows.append((PIPELINE_PROFILE_FRAME_TOTAL_KEY, float(fta)))
+        except (TypeError, ValueError):
+            pass
     return rows
 
 
@@ -163,11 +244,15 @@ def push_window_and_mean(
 def format_profile_overlay_multithread(
     per_thread: Dict[str, Dict[str, float]],
     header_lines: List[str] | None = None,
+    *,
+    global_mean_column: bool = False,
 ) -> str:
-    """One column per worker thread plus an Avg column (mean across threads per row).
+    """Format pipeline timings: per-thread columns + Avg, or a single Mean column.
 
-    Feeder-stage rows (read/detect in feeder thread) are grouped first, then worker
-    stages (GPU pipeline after dequeue), with subtotal lines to compare both sides.
+    When ``global_mean_column`` is True, only ``Stage | Mean`` is shown (mean across
+    worker threads for each row — same numbers as the former Avg column).
+
+    Feeder-stage rows are grouped first, then worker stages, with subtotals.
     """
     if not per_thread:
         return "Profile: —"
@@ -179,29 +264,47 @@ def format_profile_overlay_multithread(
         return "Profile: —"
 
     feeder_stages = [s for s in stages if s in PIPELINE_PROFILE_FEEDER_KEY_SET]
-    worker_stages = [s for s in stages if s not in PIPELINE_PROFILE_FEEDER_KEY_SET]
+    worker_stages = [
+        s
+        for s in stages
+        if s not in PIPELINE_PROFILE_FEEDER_KEY_SET
+        and s != PIPELINE_PROFILE_FRAME_TOTAL_KEY
+    ]
+    stages_for_breakdown_sum = [
+        s for s in stages if s != PIPELINE_PROFILE_FRAME_TOTAL_KEY
+    ]
 
     cw_l = _OVERLAY_COL_LABEL
     cw = _OVERLAY_COL_MS_THREAD
     lines: List[str] = []
     if header_lines:
         lines.extend(header_lines)
-    lines.append("Pipeline profile (ms) — Feeder | Worker")
-    hdr = f"{'Stage':<{cw_l}}"
-    for t in threads_sorted:
-        hdr += f"  {_short_thread_column_title(t):>{cw}}"
-    hdr += f"  {'Avg':>{cw}}"
+    if global_mean_column:
+        lines.append("Pipeline profile (ms) — mean across workers")
+        hdr = f"{'Stage':<{cw_l}}  {'Mean':>{cw}}"
+    else:
+        lines.append("Pipeline profile (ms) — Feeder | Worker")
+        hdr = f"{'Stage':<{cw_l}}"
+        for t in threads_sorted:
+            hdr += f"  {_short_thread_column_title(t):>{cw}}"
+        hdr += f"  {'Avg':>{cw}}"
     lines.append(hdr)
+
+    def _sep_row(title: str) -> None:
+        sep = f"{_overlay_fit_label(title):<{cw_l}}"
+        if global_mean_column:
+            sep += f"  {'':>{cw}}"
+        else:
+            for _t in threads_sorted:
+                sep += f"  {'':>{cw}}"
+            sep += f"  {'':>{cw}}"
+        lines.append(sep)
 
     def _append_stage_block(stage_list: List[str], title: str | None) -> None:
         if not stage_list:
             return
         if title:
-            sep = f"{_overlay_fit_label(title):<{cw_l}}"
-            for _t in threads_sorted:
-                sep += f"  {'':>{cw}}"
-            sep += f"  {'':>{cw}}"
-            lines.append(sep)
+            _sep_row(title)
         for stage in stage_list:
             label = _overlay_fit_label(PIPELINE_STAGE_LABELS.get(stage, stage))
             row = f"{label:<{cw_l}}"
@@ -211,11 +314,12 @@ def format_profile_overlay_multithread(
                 v = d.get(stage)
                 if v is not None:
                     vals.append(float(v))
-                row += (
-                    f"  {v:>{cw}.1f}"
-                    if v is not None
-                    else f"  {'—':>{cw}}"
-                )
+                if not global_mean_column:
+                    row += (
+                        f"  {v:>{cw}.1f}"
+                        if v is not None
+                        else f"  {'—':>{cw}}"
+                    )
             avg_v = sum(vals) / len(vals) if vals else None
             row += (
                 f"  {avg_v:>{cw}.1f}"
@@ -241,8 +345,9 @@ def format_profile_overlay_multithread(
                     any_v = True
             if any_v:
                 col_totals.append(ssum)
-                row += f"  {ssum:>{cw}.1f}"
-            else:
+                if not global_mean_column:
+                    row += f"  {ssum:>{cw}.1f}"
+            elif not global_mean_column:
                 row += f"  {'—':>{cw}}"
         avg_v = sum(col_totals) / len(col_totals) if col_totals else None
         row += (
@@ -256,14 +361,17 @@ def format_profile_overlay_multithread(
     _append_subtotal_row("feeder_subtotal", feeder_stages)
     _append_stage_block(worker_stages, "— Worker thread —" if worker_stages else None)
     _append_subtotal_row("worker_subtotal", worker_stages)
+    if PIPELINE_PROFILE_FRAME_TOTAL_KEY in stages:
+        _append_stage_block([PIPELINE_PROFILE_FRAME_TOTAL_KEY], None)
 
-    row = f"{'Total (all stages)':<{cw_l}}"
+    row = f"{'Total (breakdown ∑)':<{cw_l}}"
     totals: List[float] = []
     for t in threads_sorted:
         d = per_thread[t]
-        tot = sum(float(d.get(s, 0.0)) for s in stages)
+        tot = sum(float(d.get(s, 0.0)) for s in stages_for_breakdown_sum)
         totals.append(tot)
-        row += f"  {tot:>{cw}.1f}"
+        if not global_mean_column:
+            row += f"  {tot:>{cw}.1f}"
     avg_tot = sum(totals) / len(totals) if totals else 0.0
     row += f"  {avg_tot:>{cw}.1f}"
     lines.append(row)
@@ -276,7 +384,7 @@ def aggregate_rows_for_display(
     worker_thread: str | None,
     header_lines: List[str] | None = None,
 ) -> str:
-    """EMA or window smoothing per thread; table with one column per thread + Avg."""
+    """EMA or window smoothing per thread; overlay table per-thread + Avg or mean-only."""
     display: Dict[str, Dict[str, float]] = getattr(
         main_window, "_pipeline_profile_display_by_thread", None
     )
@@ -286,14 +394,22 @@ def aggregate_rows_for_display(
 
     wt = (worker_thread or "").strip() or "?"
 
+    ctrl = main_window.control
+    global_mean = bool(
+        ctrl.get("PipelineProfileOverlayGlobalMeanColumnToggle", False)
+    )
+
     if not rows:
         return (
-            format_profile_overlay_multithread(display, header_lines=header_lines)
+            format_profile_overlay_multithread(
+                display,
+                header_lines=header_lines,
+                global_mean_column=global_mean,
+            )
             if display
             else "Profile: —"
         )
 
-    ctrl = main_window.control
     mode = str(ctrl.get("PipelineProfileAggregationSelection", "EMA"))
     if mode in ("Ventana", "Window"):
         try:
@@ -326,7 +442,11 @@ def aggregate_rows_for_display(
         update_ema_per_stage(ema_bt[wt], rows, alpha)
         display[wt] = dict(ema_bt[wt])
 
-    return format_profile_overlay_multithread(display, header_lines=header_lines)
+    return format_profile_overlay_multithread(
+        display,
+        header_lines=header_lines,
+        global_mean_column=global_mean,
+    )
 
 
 def reset_pipeline_profile_state(main_window: Any) -> None:
@@ -334,10 +454,18 @@ def reset_pipeline_profile_state(main_window: Any) -> None:
     main_window._pipeline_profile_ema_by_thread = {}
     main_window._pipeline_profile_window_deques = {}
     main_window._pipeline_profile_display_by_thread = {}
+    main_window._pipeline_profile_last_overlay_headers = []
 
 def clear_pipeline_profile_session_samples(main_window: Any) -> None:
     """Empty session log at playback start (overlay samples for console report)."""
     main_window._pipeline_profile_session_samples = deque()
+
+
+def pipeline_profile_ui_timings_enabled(main_window: Any) -> bool:
+    """True when feeder/worker should attach timing dicts for overlay or dock."""
+    return bool(
+        main_window.control.get("PipelineProfileOverlayEnableToggle", False)
+    ) or bool(main_window.control.get("PipelineProfileDockEnableToggle", False))
 
 
 def append_pipeline_profile_session_sample(
@@ -345,8 +473,8 @@ def append_pipeline_profile_session_sample(
     profile_payload: dict[str, Any],
     rows: List[Tuple[str, float]],
 ) -> None:
-    """Record one frame while the pipeline profile overlay is enabled."""
-    if not main_window.control.get("PipelineProfileOverlayEnableToggle", False):
+    """Record one frame while the pipeline profile overlay or dock is enabled."""
+    if not pipeline_profile_ui_timings_enabled(main_window):
         return
     samples: Deque[dict[str, Any]] | None = getattr(
         main_window, "_pipeline_profile_session_samples", None

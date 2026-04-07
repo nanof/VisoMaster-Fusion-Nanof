@@ -55,6 +55,10 @@ def expression_lp_stitch_profile_scope(models_processor: "ModelsProcessor"):
             models_processor.main_window.control.get(
                 "PipelineProfileOverlayEnableToggle", False
             )
+        ) or bool(
+            models_processor.main_window.control.get(
+                "PipelineProfileDockEnableToggle", False
+            )
         )
     except Exception:
         overlay = False

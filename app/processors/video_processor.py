@@ -402,6 +402,11 @@ class VideoProcessor(QObject):
         self._recognition_track_max: int = 128
         # track_id → frame of last *fresh* ArcFace (lazy reuse does not advance this).
         self._recognition_last_arcface_frame: dict[int, int] = {}
+        # Scene-cut heuristic: normalized luminance histogram + force-refresh frame index.
+        self._scene_cut_hist_prev: numpy.ndarray | None = None
+        self._force_arcface_refresh_until_frame: int = -1
+        # Phase 7: last wall time each ONNX model key was used (unload idle).
+        self._model_last_used_mono: dict[str, float] = {}
         self.webcam_frames_to_display: queue.Queue[
             Tuple[numpy.ndarray, Any]
         ] = queue.Queue()  # (processed BGR frame, pipeline profile or None)
@@ -1196,6 +1201,97 @@ class VideoProcessor(QObject):
             self._recognition_cache_by_frame.clear()
             self._recognition_track_last.clear()
             self._recognition_last_arcface_frame.clear()
+        self._scene_cut_hist_prev = None
+        self._force_arcface_refresh_until_frame = -1
+
+    def maybe_note_scene_cut_for_arcface(
+        self,
+        frame_rgb_uint8: numpy.ndarray,
+        frame_num: int,
+        control: dict,
+    ) -> None:
+        """If luminance histogram jumps vs previous frame, force one fresh ArcFace pass."""
+        if not bool(control.get("PerformanceSceneCutArcFaceRefreshEnableToggle", True)):
+            return
+        if frame_rgb_uint8 is None or frame_rgb_uint8.size < 16:
+            return
+        try:
+            thr = float(
+                control.get("PerformanceSceneCutHistogramDiffDecimalSlider", 0.35)
+                or 0.35
+            )
+        except (TypeError, ValueError):
+            thr = 0.35
+        try:
+            small = cv2.resize(frame_rgb_uint8, (32, 32), interpolation=cv2.INTER_AREA)
+            gray = (
+                0.299 * small[:, :, 0]
+                + 0.587 * small[:, :, 1]
+                + 0.114 * small[:, :, 2]
+            ).astype(numpy.float32)
+            hist, _ = numpy.histogram(gray.ravel(), bins=16, range=(0.0, 255.0))
+            h = hist.astype(numpy.float64)
+            s = float(numpy.sum(h)) + 1e-6
+            h = h / s
+            prev = self._scene_cut_hist_prev
+            self._scene_cut_hist_prev = h.copy()
+            if prev is None or prev.shape != h.shape:
+                return
+            diff = float(numpy.sum(numpy.abs(h - prev)))
+            if diff > thr:
+                self._force_arcface_refresh_until_frame = int(frame_num)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _track_guided_roi_crop(
+        frame_rgb: numpy.ndarray,
+        previous_faces: list[dict],
+        pad_pct: float,
+    ) -> tuple[numpy.ndarray | None, tuple[int, int]]:
+        """Crop RGB image around union of previous bboxes; returns (crop, (x0,y0)) or (None,(0,0))."""
+        if not previous_faces or frame_rgb.ndim != 3 or frame_rgb.shape[2] < 3:
+            return None, (0, 0)
+        H, W = int(frame_rgb.shape[0]), int(frame_rgb.shape[1])
+        if H < 8 or W < 8:
+            return None, (0, 0)
+        xs1: list[float] = []
+        ys1: list[float] = []
+        xs2: list[float] = []
+        ys2: list[float] = []
+        for ent in previous_faces:
+            bb = ent.get("bbox")
+            if bb is None:
+                continue
+            b = numpy.asarray(bb, dtype=numpy.float64).ravel()
+            if b.shape[0] < 4:
+                continue
+            xs1.append(float(b[0]))
+            ys1.append(float(b[1]))
+            xs2.append(float(b[2]))
+            ys2.append(float(b[3]))
+        if not xs1:
+            return None, (0, 0)
+        x1 = max(0.0, min(xs1))
+        y1 = max(0.0, min(ys1))
+        x2 = min(float(W - 1), max(xs2))
+        y2 = min(float(H - 1), max(ys2))
+        bw = max(1.0, x2 - x1)
+        bh = max(1.0, y2 - y1)
+        side = max(bw, bh)
+        pad = max(4.0, side * max(0.0, float(pad_pct)) / 100.0)
+        cx = 0.5 * (x1 + x2)
+        cy = 0.5 * (y1 + y2)
+        half = 0.5 * (bw + 2.0 * pad)
+        half_y = 0.5 * (bh + 2.0 * pad)
+        x0 = int(max(0, math.floor(cx - half)))
+        y0 = int(max(0, math.floor(cy - half_y)))
+        x1c = int(min(W, math.ceil(cx + half)))
+        y1c = int(min(H, math.ceil(cy + half_y)))
+        if x1c - x0 < 32 or y1c - y0 < 32:
+            return None, (0, 0)
+        crop = numpy.ascontiguousarray(frame_rgb[y0:y1c, x0:x1c])
+        return crop, (x0, y0)
 
     def try_reuse_recognition_embedding(
         self,
@@ -1229,7 +1325,10 @@ class VideoProcessor(QObject):
                         )
                         <= kps_th
                     ):
-                        return cast(numpy.ndarray, prev["emb"])
+                        return cast(
+                            numpy.ndarray,
+                            numpy.asarray(prev["emb"], dtype=numpy.float32),
+                        )
 
             if track_id >= 0:
                 tr = self._recognition_track_last.get(track_id)
@@ -1245,7 +1344,10 @@ class VideoProcessor(QObject):
                                 )
                                 <= kps_th
                             ):
-                                return cast(numpy.ndarray, tr["emb"])
+                                return cast(
+                                    numpy.ndarray,
+                                    numpy.asarray(tr["emb"], dtype=numpy.float32),
+                                )
         return None
 
     def try_lazy_arcface_track_embedding(
@@ -1262,6 +1364,10 @@ class VideoProcessor(QObject):
         since the last *fresh* ArcFace for this track.
         """
         if frame_num <= 0 or track_id < 0 or min_interval_frames <= 1:
+            return None
+        if int(frame_num) == int(
+            getattr(self, "_force_arcface_refresh_until_frame", -2)
+        ):
             return None
         with self._recognition_cache_lock:
             tr = self._recognition_track_last.get(track_id)
@@ -1311,6 +1417,12 @@ class VideoProcessor(QObject):
         if frame_num <= 0:
             return
         emb_c = numpy.asarray(emb, dtype=numpy.float32).copy()
+        if bool(
+            self.main_window.control.get(
+                "PerformanceRecognitionEmbeddingsFp16Toggle", False
+            )
+        ):
+            emb_c = emb_c.astype(numpy.float16).copy()
         row = {
             "bbox": numpy.asarray(bbox, dtype=numpy.float32).copy(),
             "kps_5": numpy.asarray(kps_5, dtype=numpy.float32).copy(),
@@ -1490,15 +1602,81 @@ class VideoProcessor(QObject):
 
             owns_frame_tensor = frame_tensor is None
             if frame_tensor is None:
-                frame_tensor = (
+                full_frame_tensor = (
                     torch.from_numpy(frame_rgb)
                     .to(device, non_blocking=True)
                     .permute(2, 0, 1)  # Convert [H, W, C] -> [C, H, W]
                 )
+            else:
+                full_frame_tensor = frame_tensor
+
+            det_tensor = full_frame_tensor
+            roi_x = 0
+            roi_y = 0
+            prev_for_detect = previous_faces_arg
+            use_roi = (
+                bool(
+                    local_control_for_worker.get(
+                        "PerformanceDetectTrackRoiEnableToggle", False
+                    )
+                )
+                and previous_faces_arg is not None
+                and len(previous_faces_arg) > 0
+                and str(
+                    local_control_for_worker.get(
+                        "DetectorModelSelection", "RetinaFace"
+                    )
+                )
+                == "RetinaFace"
+                and not from_points
+            )
+            if use_roi:
+                try:
+                    pad_pct = float(
+                        local_control_for_worker.get(
+                            "PerformanceDetectTrackRoiPadPercentSlider", 55
+                        )
+                    )
+                except (TypeError, ValueError):
+                    pad_pct = 55.0
+                crop_np, (roi_x, roi_y) = self._track_guided_roi_crop(
+                    frame_rgb, previous_faces_arg, pad_pct
+                )
+                if crop_np is not None and crop_np.size > 0:
+                    det_tensor = (
+                        torch.from_numpy(crop_np)
+                        .to(device, non_blocking=True)
+                        .permute(2, 0, 1)
+                        .contiguous()
+                    )
+                    prev_for_detect = None
+
+            def _offset_det_geometry(
+                bb: numpy.ndarray,
+                k5: numpy.ndarray | None,
+                kd: numpy.ndarray | None,
+                ox: float,
+                oy: float,
+            ) -> tuple[numpy.ndarray, numpy.ndarray | None, numpy.ndarray | None]:
+                if ox == 0.0 and oy == 0.0:
+                    return bb, k5, kd
+                if bb is not None and getattr(bb, "size", 0) > 0:
+                    bb = numpy.asarray(bb, dtype=numpy.float32).copy()
+                    bb[:, [0, 2]] += ox
+                    bb[:, [1, 3]] += oy
+                if k5 is not None and getattr(k5, "size", 0) > 0:
+                    k5 = numpy.asarray(k5, dtype=numpy.float32).copy()
+                    k5[:, :, 0] += ox
+                    k5[:, :, 1] += oy
+                if kd is not None and getattr(kd, "size", 0) > 0:
+                    kd = numpy.asarray(kd, dtype=numpy.float32).copy()
+                    kd[:, :, 0] += ox
+                    kd[:, :, 1] += oy
+                return bb, k5, kd
 
             # 1. Primary Detection (respecting User's UI choice)
             bboxes, kpss_5, kpss = self.main_window.models_processor.run_detect(
-                frame_tensor,
+                det_tensor,
                 local_control_for_worker.get("DetectorModelSelection", "RetinaFace"),
                 max_num=int(local_control_for_worker.get("MaxFacesToDetectSlider", 20)),
                 score=local_control_for_worker.get("DetectorScoreSlider", 50) / 100.0,
@@ -1518,13 +1696,20 @@ class VideoProcessor(QObject):
                 use_mean_eyes=local_control_for_worker.get(
                     "LandmarkMeanEyesToggle", False
                 ),
-                previous_detections=previous_faces_arg,
+                previous_detections=prev_for_detect,
                 out_track_ids=detect_track_ids,
+            )
+            bboxes, kpss_5, kpss = _offset_det_geometry(
+                bboxes,
+                kpss_5,
+                kpss,
+                float(roi_x),
+                float(roi_y),
             )
             # When we allocated the CHW tensor here, hand it to the worker to skip a second
             # host→device copy of the same frame (feeder already uploaded for run_detect).
             feeder_chw_uint8_for_worker = (
-                frame_tensor if owns_frame_tensor else None
+                full_frame_tensor if owns_frame_tensor else None
             )
 
             # 2. Smart Double-Scan for 203 points
@@ -1537,7 +1722,7 @@ class VideoProcessor(QObject):
                     # Second pass for 203 landmarks; align to pass-1 boxes (ByteTrack order).
                     bboxes_203, _, raw_kpss_203 = (
                         self.main_window.models_processor.run_detect(
-                            frame_tensor,
+                            full_frame_tensor,
                             local_control_for_worker.get(
                                 "DetectorModelSelection", "RetinaFace"
                             ),
@@ -1622,7 +1807,7 @@ class VideoProcessor(QObject):
 
             # Free up VRAM immediately since the tensor is no longer needed in this thread
             if owns_frame_tensor:
-                del frame_tensor
+                del full_frame_tensor
 
             # ORT/TensorRT + copy_outputs_to_cpu() already finish GPU work before numpy exists.
             # An extra stream sync here blocks the feeder every frame (~0.5–3ms) and limits
@@ -2202,6 +2387,11 @@ class VideoProcessor(QObject):
                             "PipelineProfileOverlayEnableToggle", False
                         )
                     )
+                    or bool(
+                        self.main_window.control.get(
+                            "PipelineProfileDockEnableToggle", False
+                        )
+                    )
                 )
                 _bench_same = (
                     not is_segment_mode
@@ -2507,6 +2697,11 @@ class VideoProcessor(QObject):
                     or bool(
                         self.main_window.control.get(
                             "PipelineProfileOverlayEnableToggle", False
+                        )
+                    )
+                    or bool(
+                        self.main_window.control.get(
+                            "PipelineProfileDockEnableToggle", False
                         )
                     )
                 )

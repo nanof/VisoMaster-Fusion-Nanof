@@ -1,7 +1,14 @@
 from app.ui.widgets.actions import control_actions
 from app.ui.widgets.actions import graphics_view_actions
+from app.ui.widgets.actions import pipeline_profile_actions as pprofile_settings
 import cv2
 from typing import Any
+
+_PIPELINE_PROFILE_ACTIVE_OPTIONS = (
+    pprofile_settings.PIPELINE_PROFILE_DISPLAY_MODE_OVERLAY,
+    pprofile_settings.PIPELINE_PROFILE_DISPLAY_MODE_DOCK,
+    pprofile_settings.PIPELINE_PROFILE_DISPLAY_MODE_BOTH,
+)
 
 SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
     "Appearance": {
@@ -107,20 +114,17 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "exec_function": control_actions.apply_fps_aggressive_preset,
             "exec_function_args": [],
         },
-        "PipelineProfileOverlayEnableToggle": {
+        "PipelineProfileDisplayModeSelection": {
             "level": 1,
-            "label": "Pipeline profile overlay (preview)",
-            "default": False,
-            "help": "Show per-stage timings (feeder + worker) on the preview. On stop, prints a session summary "
-            "to the console ([PIPELINE-PROFILE-SESSION]). Optional: VISIOMASTER_PIPELINE_PROFILE_CSV=file.csv "
-            "appends rows while playing; VISIOMASTER_PERF_STAGES=1 logs per frame separately. "
-            "VISIOMASTER_PIPELINE_METRICS=1 logs raw/frame queue depth and ORT lock wait vs held (~every 500 frames "
-            "and every VISIOMASTER_PIPELINE_METRICS_INTERVAL ORT calls, default 200). "
-            "VISIOMASTER_ORT_PER_SESSION_LOCK=1 (experimental) uses one CUDA mutex per ONNX session instead of a "
-            "global ORT lock — test for CUDA instability before relying on it. "
-            "Inswapper128 multi-tile: unset VISIOMASTER_INSWAPPER_ORT_BATCH for auto (batched ORT off under "
-            "TensorRT-Engine / fixed B=1). =0 never batch; =1 force batched ORT (needs dynamic batch).",
-            "exec_function": graphics_view_actions.on_pipeline_profile_overlay_toggle,
+            "label": "Pipeline profile (timing)",
+            "options": list(pprofile_settings.PIPELINE_PROFILE_DISPLAY_MODES),
+            "default": pprofile_settings.PIPELINE_PROFILE_DISPLAY_MODE_OFF,
+            "help": "Where to show per-stage timings (feeder + worker). Preview overlay draws on the video; "
+            "dock opens a side panel (good for long tables). Either or both collects the same data. "
+            "On stop, prints [PIPELINE-PROFILE-SESSION] to the console. Optional: "
+            "VISIOMASTER_PIPELINE_PROFILE_CSV=file.csv; VISIOMASTER_PERF_STAGES=1; VISIOMASTER_PIPELINE_METRICS=1; "
+            "VISIOMASTER_ORT_PER_SESSION_LOCK=1 (experimental). Inswapper128: VISIOMASTER_INSWAPPER_ORT_BATCH.",
+            "exec_function": graphics_view_actions.on_pipeline_profile_display_mode_changed,
             "exec_function_args": [],
         },
         "PipelineProfileAggregationSelection": {
@@ -128,8 +132,8 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "label": "Profile aggregation",
             "options": ["EMA", "Window"],
             "default": "EMA",
-            "parentToggle": "PipelineProfileOverlayEnableToggle",
-            "requiredToggleValue": True,
+            "parentSelection": "PipelineProfileDisplayModeSelection",
+            "requiredSelectionIn": _PIPELINE_PROFILE_ACTIVE_OPTIONS,
             "help": "EMA: exponential moving average per stage. Window: mean of the last N frames.",
         },
         "PipelineProfileWindowFramesSlider": {
@@ -139,8 +143,8 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "max_value": "120",
             "default": "30",
             "step": 1,
-            "parentToggle": "PipelineProfileOverlayEnableToggle",
-            "requiredToggleValue": True,
+            "parentSelection": "PipelineProfileDisplayModeSelection",
+            "requiredSelectionIn": _PIPELINE_PROFILE_ACTIVE_OPTIONS,
             "help": "Number of frames for Window mode; also bounds history for EMA updates.",
         },
         "PipelineProfileEmaAlphaDecimalSlider": {
@@ -151,17 +155,28 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "default": "0.25",
             "step": 0.05,
             "decimals": 2,
-            "parentToggle": "PipelineProfileOverlayEnableToggle",
-            "requiredToggleValue": True,
+            "parentSelection": "PipelineProfileDisplayModeSelection",
+            "requiredSelectionIn": _PIPELINE_PROFILE_ACTIVE_OPTIONS,
             "help": "Smoothing factor for EMA (higher = react faster to changes).",
         },
         "PipelineProfileGpuSyncToggle": {
             "level": 2,
             "label": "CUDA sync between stages (accurate, slower)",
             "default": False,
-            "parentToggle": "PipelineProfileOverlayEnableToggle",
-            "requiredToggleValue": True,
+            "parentSelection": "PipelineProfileDisplayModeSelection",
+            "requiredSelectionIn": _PIPELINE_PROFILE_ACTIVE_OPTIONS,
             "help": "Call cuda.synchronize() at each stage mark for faithful GPU times; reduces preview FPS.",
+        },
+        "PipelineProfileOverlayGlobalMeanColumnToggle": {
+            "level": 2,
+            "label": "Profile table: single column (mean across workers)",
+            "default": False,
+            "parentSelection": "PipelineProfileDisplayModeSelection",
+            "requiredSelectionIn": _PIPELINE_PROFILE_ACTIVE_OPTIONS,
+            "help": "Show Stage | Mean only — same values as the old Avg column, without one column per "
+            "worker thread. Easier to read when using several threads; per-thread detail is hidden.",
+            "exec_function": graphics_view_actions.on_pipeline_profile_global_mean_column_toggle,
+            "exec_function_args": [],
         },
         "PipelineInflightBufferMultiplierSlider": {
             "level": 1,
@@ -186,6 +201,96 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "default": True,
             "help": "When several faces need embeddings on the same frame, run one batched ORT call "
             "(Inswapper128ArcFace + Opal/Pearl, non-Custom). Falls back per-face if batch fails.",
+        },
+        "PerformanceArcFaceCenterBiasSlider": {
+            "level": 1,
+            "label": "ArcFace cap: center bias (0–100)",
+            "min_value": "0",
+            "max_value": "100",
+            "default": "0",
+            "step": 5,
+            "help": "When max ArcFace/frame limits which faces run, boost priority for faces near "
+            "the frame center (0 = area only).",
+        },
+        "PerformanceSceneCutArcFaceRefreshEnableToggle": {
+            "level": 1,
+            "label": "Scene cut → force fresh ArcFace (1 frame)",
+            "default": True,
+            "help": "If the downscaled luminance histogram jumps, skip lazy track reuse once so "
+            "embeddings refresh after hard cuts.",
+        },
+        "PerformanceSceneCutHistogramDiffDecimalSlider": {
+            "level": 2,
+            "label": "Scene cut histogram L1 threshold",
+            "min_value": "0.1",
+            "max_value": "0.9",
+            "default": "0.35",
+            "step": 0.05,
+            "decimals": 2,
+            "parentToggle": "PerformanceSceneCutArcFaceRefreshEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Higher = fewer false scene cuts; lower = more refreshes.",
+        },
+        "PerformanceSwapperAutoresHysteresisEnableToggle": {
+            "level": 1,
+            "label": "Swapper auto-res: hysteresis (Inswapper128)",
+            "default": False,
+            "help": "When auto input resolution is on, avoid flickering 128↔512 by requiring extra "
+            "scale/motion margin before changing resolution (per ByteTrack id).",
+        },
+        "PerformanceSwapperAutoresMotionEmaDecimalSlider": {
+            "level": 2,
+            "label": "Hysteresis motion EMA alpha",
+            "min_value": "0.05",
+            "max_value": "0.95",
+            "default": "0.35",
+            "step": 0.05,
+            "decimals": 2,
+            "parentToggle": "PerformanceSwapperAutoresHysteresisEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Tunes the scale deadband when downgrading auto-res tier: lower alpha = wider margin "
+            "(stick to the previous resolution longer); higher alpha = tighter margin (react sooner).",
+        },
+        "PerformanceDetectTrackRoiEnableToggle": {
+            "level": 1,
+            "label": "Detection: track-guided ROI on skip frames",
+            "default": False,
+            "help": "When Face Detection Interval > 1 and ByteTrack ids exist, run RetinaFace on a "
+            "padded crop around the last bbox instead of the full frame on skip frames. Full-frame "
+            "detection still runs on interval boundaries.",
+        },
+        "PerformanceDetectTrackRoiPadPercentSlider": {
+            "level": 2,
+            "label": "Track ROI pad (% of max(w,h))",
+            "min_value": "20",
+            "max_value": "120",
+            "default": "55",
+            "step": 5,
+            "parentToggle": "PerformanceDetectTrackRoiEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Padding around the union of previous-frame track boxes before clamping to image.",
+        },
+        "ModelEvictIdleMinutesSlider": {
+            "level": 1,
+            "label": "Unload idle ONNX models after (minutes, 0=off)",
+            "min_value": "0",
+            "max_value": "120",
+            "default": "0",
+            "step": 5,
+            "help": "Periodic check: models not used for this many minutes may be unloaded unless "
+            "Keep models alive is on. Does not unload the active swapper mid-playback.",
+        },
+        "ModelWarmupOnLoadToggle": {
+            "level": 1,
+            "label": "Warm up model after load (1 dummy inference)",
+            "default": False,
+            "help": "Runs a minimal TensorRT/ONNX bind after a successful load to reduce first-frame hitch.",
+        },
+        "PerformanceRecognitionEmbeddingsFp16Toggle": {
+            "level": 1,
+            "label": "Store recognition embeddings as FP16 in RAM",
+            "default": False,
+            "help": "Reduces CPU cache footprint; values promoted to FP32 before ArcFace-related math.",
         },
     },
     "Output Settings": {
