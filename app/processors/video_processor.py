@@ -652,10 +652,29 @@ class VideoProcessor(QObject):
                 blend = self._preview_frame_gen_lerp(prev, curr, w_gl)
             else:
                 blend = curr
-            pixmap = common_widget_actions.get_pixmap_from_frame(self.main_window, blend)
-            graphics_view_actions.update_graphics_view(
-                self.main_window, pixmap, fn
-            )
+            if (
+                self.file_type == "video"
+                and graphics_view_actions.preview_fsr1_gpu_display_enabled(
+                    self.main_window
+                )
+                and graphics_view_actions.ensure_video_preview_opengl_viewport(
+                    self.main_window
+                )
+            ):
+                pixmap = QPixmap()
+                graphics_view_actions.update_graphics_view(
+                    self.main_window,
+                    pixmap,
+                    fn,
+                    preview_frame_bgr=blend,
+                )
+            else:
+                pixmap = common_widget_actions.get_pixmap_from_frame(
+                    self.main_window, blend
+                )
+                graphics_view_actions.update_graphics_view(
+                    self.main_window, pixmap, fn
+                )
 
     @Slot(object, int, object)
     def _on_neural_rife_async_done(self, out: Any, generation: int, err: Any) -> None:
@@ -772,8 +791,23 @@ class VideoProcessor(QObject):
             blend = self._neural_decouple_composite_frame()
         except Exception:
             blend = curr
-        pixmap = common_widget_actions.get_pixmap_from_frame(self.main_window, blend)
-        graphics_view_actions.update_graphics_view(self.main_window, pixmap, fn)
+        if (
+            self.file_type == "video"
+            and graphics_view_actions.preview_fsr1_gpu_display_enabled(self.main_window)
+            and graphics_view_actions.ensure_video_preview_opengl_viewport(
+                self.main_window
+            )
+        ):
+            pixmap = QPixmap()
+            graphics_view_actions.update_graphics_view(
+                self.main_window,
+                pixmap,
+                fn,
+                preview_frame_bgr=blend,
+            )
+        else:
+            pixmap = common_widget_actions.get_pixmap_from_frame(self.main_window, blend)
+            graphics_view_actions.update_graphics_view(self.main_window, pixmap, fn)
 
     @staticmethod
     def _preview_frame_gen_lerp(
@@ -973,16 +1007,33 @@ class VideoProcessor(QObject):
 
         self._reset_smooth_decouple_frame_buffers()
 
-        pixmap = common_widget_actions.get_pixmap_from_frame(self.main_window, frame)
+        use_fsr = (
+            self.file_type == "video"
+            and graphics_view_actions.preview_fsr1_gpu_display_enabled(self.main_window)
+            and graphics_view_actions.ensure_video_preview_opengl_viewport(
+                self.main_window
+            )
+        )
+        if use_fsr:
+            pixmap = QPixmap()
+        else:
+            pixmap = common_widget_actions.get_pixmap_from_frame(self.main_window, frame)
 
         if self.main_window.loading_new_media:
             graphics_view_actions.update_graphics_view(
-                self.main_window, pixmap, frame_number, reset_fit=True
+                self.main_window,
+                pixmap,
+                frame_number,
+                reset_fit=True,
+                preview_frame_bgr=frame if use_fsr else None,
             )
             self.main_window.loading_new_media = False
         else:
             graphics_view_actions.update_graphics_view(
-                self.main_window, pixmap, frame_number
+                self.main_window,
+                pixmap,
+                frame_number,
+                preview_frame_bgr=frame if use_fsr else None,
             )
         self.current_frame = frame
         common_widget_actions.update_gpu_memory_progressbar(self.main_window)
@@ -3259,10 +3310,30 @@ class VideoProcessor(QObject):
                 gpu_blend=gpu_blend_for_view,
             )
         else:
-            pixmap = common_widget_actions.get_pixmap_from_frame(self.main_window, frame)
-            graphics_view_actions.update_graphics_view(
-                self.main_window, pixmap, _ui_timeline_fn
+            use_fsr = (
+                self.file_type == "video"
+                and graphics_view_actions.preview_fsr1_gpu_display_enabled(
+                    self.main_window
+                )
+                and graphics_view_actions.ensure_video_preview_opengl_viewport(
+                    self.main_window
+                )
             )
+            if use_fsr:
+                pixmap = QPixmap()
+                graphics_view_actions.update_graphics_view(
+                    self.main_window,
+                    pixmap,
+                    _ui_timeline_fn,
+                    preview_frame_bgr=frame,
+                )
+            else:
+                pixmap = common_widget_actions.get_pixmap_from_frame(
+                    self.main_window, frame
+                )
+                graphics_view_actions.update_graphics_view(
+                    self.main_window, pixmap, _ui_timeline_fn
+                )
         graphics_view_actions.update_pipeline_profile_overlay(
             self.main_window, profile_for_overlay
         )

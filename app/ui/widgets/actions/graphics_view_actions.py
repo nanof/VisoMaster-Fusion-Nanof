@@ -1,6 +1,8 @@
+import os
 import time
 from typing import TYPE_CHECKING
 
+import cv2
 import numpy as np
 from PySide6 import QtWidgets, QtGui, QtCore
 
@@ -37,6 +39,112 @@ def is_linear_preview_interpolation_method(method: object) -> bool:
     return v in ("Linear (GPU)", "Linear (OpenGL)", "Linear (CPU)")
 
 
+def preview_opengl_surface_format() -> QtGui.QSurfaceFormat:
+    """OpenGL Core profile for QOpenGLWidget (FSR / linear blend). Override with VISIOMASTER_PREVIEW_GL=major.minor (e.g. 3.3 or 4.6)."""
+    raw = os.environ.get("VISIOMASTER_PREVIEW_GL", "").strip()
+    major, minor = 4, 5
+    if raw:
+        try:
+            if "." in raw:
+                a, b = raw.split(".", 1)
+                major, minor = max(3, int(a)), max(0, int(b))
+            else:
+                v = int(raw)
+                if v >= 40:
+                    major, minor = v // 10, v % 10
+                elif v == 33:
+                    major, minor = 3, 3
+        except ValueError:
+            pass
+    fmt = QtGui.QSurfaceFormat()
+    fmt.setRenderableType(QtGui.QSurfaceFormat.RenderableType.OpenGL)
+    fmt.setProfile(QtGui.QSurfaceFormat.OpenGLContextProfile.CoreProfile)
+    fmt.setMajorVersion(int(major))
+    fmt.setMinorVersion(int(minor))
+    fmt.setDepthBufferSize(24)
+    fmt.setStencilBufferSize(8)
+    fmt.setSwapBehavior(QtGui.QSurfaceFormat.SwapBehavior.DoubleBuffer)
+    # KHR_debug / glDebugMessageCallback (véase VISIOMASTER_GL_DEBUG en video_preview_fsr_gl_item)
+    raw_dbg = os.environ.get("VISIOMASTER_GL_DEBUG", "").strip().lower()
+    if raw_dbg in ("1", "true", "yes", "on", "all"):
+        try:
+            fmt.setOption(QtGui.QSurfaceFormat.FormatOption.DebugContext)
+        except Exception:
+            pass
+    return fmt
+
+
+def resolve_qgraphics_gl_viewport_widget(
+    painter: QtGui.QPainter,
+    widget: QtWidgets.QWidget | None,
+    scene: QtWidgets.QGraphicsScene | None,
+) -> QtWidgets.QWidget | None:
+    """Return the QOpenGLWidget used as viewport; paint() often gets widget=None with GL viewport."""
+    try:
+        from PySide6.QtOpenGLWidgets import QOpenGLWidget
+    except ImportError:
+        return None
+    if isinstance(widget, QOpenGLWidget):
+        return widget
+    dev = painter.device()
+    if isinstance(dev, QOpenGLWidget):
+        return dev
+    if scene is not None:
+        for view in scene.views():
+            vp = view.viewport()
+            if isinstance(vp, QOpenGLWidget):
+                return vp
+    return None
+
+
+def _ensure_graphics_view_full_viewport_updates_for_gl(main_window: "MainWindow") -> None:
+    """Minimal/Smart viewport updates often skip repainting QGraphicsItem + native GL (FSR/blend)."""
+    gv = main_window.graphicsViewFrame
+    if getattr(gv, "_visomaster_gl_full_viewport", False):
+        return
+    gv.setViewportUpdateMode(
+        QtWidgets.QGraphicsView.ViewportUpdateMode.FullViewportUpdate
+    )
+    setattr(gv, "_visomaster_gl_full_viewport", True)
+
+
+def ensure_preview_graphics_view_subclass(main_window: "MainWindow") -> None:
+    """Replace the designer QGraphicsView with VisoMasterPreviewGraphicsView."""
+    from app.ui.widgets.preview_graphics_view import VisoMasterPreviewGraphicsView
+
+    old = main_window.graphicsViewFrame
+    if isinstance(old, VisoMasterPreviewGraphicsView):
+        return
+    parent = old.parent()
+    lay = parent.layout() if parent is not None else None
+    new = VisoMasterPreviewGraphicsView(parent)
+    new._visomaster_main_window = main_window  # FSR overlay after paintEvent (see composite_fsr_*)
+    new.setObjectName(old.objectName())
+    new.setGeometry(old.geometry())
+    new.setSizePolicy(old.sizePolicy())
+    new.setMinimumSize(old.minimumSize())
+    new.setMaximumSize(old.maximumSize())
+    new.setMouseTracking(old.hasMouseTracking())
+    new.setFrameShape(old.frameShape())
+    new.setFrameShadow(old.frameShadow())
+    new.setLineWidth(old.lineWidth())
+    new.setMidLineWidth(old.midLineWidth())
+    if lay is not None:
+        lay.replaceWidget(old, new)
+    old.deleteLater()
+    main_window.graphicsViewFrame = new
+
+
+def _restore_graphics_view_viewport_update_mode(main_window: "MainWindow") -> None:
+    gv = main_window.graphicsViewFrame
+    if not getattr(gv, "_visomaster_gl_full_viewport", False):
+        return
+    gv.setViewportUpdateMode(
+        QtWidgets.QGraphicsView.ViewportUpdateMode.MinimalViewportUpdate
+    )
+    setattr(gv, "_visomaster_gl_full_viewport", False)
+
+
 def ensure_video_preview_opengl_viewport(main_window: "MainWindow") -> bool:
     """
     Switch QGraphicsView to an OpenGL viewport once (for shader-based linear preview).
@@ -46,7 +154,33 @@ def ensure_video_preview_opengl_viewport(main_window: "MainWindow") -> bool:
         try:
             from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
+            try:
+                from app.ui.widgets.preview_opengl_viewport_widget import (
+                    VisoMasterPreviewOpenGLViewport,
+                )
+            except ImportError:
+                VisoMasterPreviewOpenGLViewport = None  # type: ignore[misc, assignment]
+
             vport = main_window.graphicsViewFrame.viewport()
+            if (
+                VisoMasterPreviewOpenGLViewport is not None
+                and isinstance(vport, QOpenGLWidget)
+                and not isinstance(vport, VisoMasterPreviewOpenGLViewport)
+            ):
+                fmt = vport.format()
+                ub = vport.updateBehavior()
+                new_vp = VisoMasterPreviewOpenGLViewport(main_window)
+                new_vp.setFormat(fmt)
+                new_vp.setUpdateBehavior(ub)
+                main_window.graphicsViewFrame.setViewport(new_vp)
+                for attr in ("_video_preview_blend_gl_item", "_video_preview_fsr_gl_item"):
+                    it = getattr(main_window, attr, None)
+                    if it is not None:
+                        try:
+                            it.reset_gl_state()
+                        except Exception:
+                            pass
+                vport = new_vp
             if isinstance(vport, QOpenGLWidget) and not getattr(
                 vport, "_visomaster_no_partial_done", False
             ):
@@ -54,6 +188,7 @@ def ensure_video_preview_opengl_viewport(main_window: "MainWindow") -> bool:
                 setattr(vport, "_visomaster_no_partial_done", True)
         except Exception:
             pass
+        _ensure_graphics_view_full_viewport_updates_for_gl(main_window)
         return True
     try:
         from PySide6.QtOpenGLWidgets import QOpenGLWidget
@@ -65,13 +200,24 @@ def ensure_video_preview_opengl_viewport(main_window: "MainWindow") -> bool:
         setattr(main_window, "_video_preview_opengl_viewport_failed", True)
         return False
     try:
-        gl_vp = QOpenGLWidget()
+        try:
+            from app.ui.widgets.preview_opengl_viewport_widget import (
+                VisoMasterPreviewOpenGLViewport,
+            )
+        except ImportError:
+            VisoMasterPreviewOpenGLViewport = None  # type: ignore[misc, assignment]
+        if VisoMasterPreviewOpenGLViewport is not None:
+            gl_vp = VisoMasterPreviewOpenGLViewport(main_window)
+        else:
+            gl_vp = QOpenGLWidget()
+        gl_vp.setFormat(preview_opengl_surface_format())
         # PartialUpdate (default) can coalesce rapid repaints → ~half the visible refresh rate
         # (e.g. 30 logical updates / 15 compositor presents). Decoupled presenter needs each tick.
         gl_vp.setUpdateBehavior(QOpenGLWidget.UpdateBehavior.NoPartialUpdate)
         main_window.graphicsViewFrame.setViewport(gl_vp)
         main_window._video_preview_opengl_viewport_active = True
         main_window._video_preview_opengl_viewport_failed = False
+        _ensure_graphics_view_full_viewport_updates_for_gl(main_window)
         return True
     except Exception as e:
         print(f"[WARN] Linear preview GPU: could not enable OpenGL viewport: {e}")
@@ -80,7 +226,30 @@ def ensure_video_preview_opengl_viewport(main_window: "MainWindow") -> bool:
 
 
 def restore_video_preview_raster_viewport(main_window: "MainWindow") -> None:
-    """Revert QGraphicsView to the default raster viewport (CPU preview path)."""
+    """Revert QGraphicsView to raster when no OpenGL preview path is still required."""
+    if not preview_linear_gpu_display_enabled(main_window):
+        blend_item = getattr(main_window, "_video_preview_blend_gl_item", None)
+        if blend_item is not None:
+            try:
+                blend_item.setVisible(False)
+                blend_item.reset_gl_state()
+            except RuntimeError:
+                invalidate_video_preview_blend_gl_item_ref(main_window)
+    if not preview_fsr1_gpu_display_enabled(main_window):
+        fsr_item = getattr(main_window, "_video_preview_fsr_gl_item", None)
+        if fsr_item is not None:
+            try:
+                fsr_item.setVisible(False)
+                fsr_item.reset_gl_state()
+            except RuntimeError:
+                invalidate_video_preview_blend_gl_item_ref(main_window)
+
+    if preview_linear_gpu_display_enabled(main_window) or preview_fsr1_gpu_display_enabled(
+        main_window
+    ):
+        ensure_video_preview_opengl_viewport(main_window)
+        return
+
     if not getattr(main_window, "_video_preview_opengl_viewport_active", False):
         return
     try:
@@ -88,13 +257,7 @@ def restore_video_preview_raster_viewport(main_window: "MainWindow") -> None:
     except Exception as e:
         print(f"[WARN] Could not restore raster preview viewport: {e}")
     main_window._video_preview_opengl_viewport_active = False
-    item = getattr(main_window, "_video_preview_blend_gl_item", None)
-    if item is not None:
-        try:
-            item.setVisible(False)
-            item.reset_gl_state()
-        except RuntimeError:
-            invalidate_video_preview_blend_gl_item_ref(main_window)
+    _restore_graphics_view_viewport_update_mode(main_window)
 
 
 def preview_linear_gpu_display_enabled(main_window: "MainWindow") -> bool:
@@ -111,9 +274,127 @@ def preview_linear_gpu_display_enabled(main_window: "MainWindow") -> bool:
     return True
 
 
+def preview_fsr1_gpu_display_enabled(main_window: "MainWindow") -> bool:
+    """FSR 1 (EASU+RCAS) preview upscale/sharpen; exclusive with linear GPU blend path."""
+    if main_window.video_processor.file_type != "video":
+        return False
+    if not main_window.control.get("PreviewFsr1EnableToggle", False):
+        return False
+    if main_window.control.get("SendVirtCamFramesEnableToggle", False):
+        return False
+    if preview_linear_gpu_display_enabled(main_window):
+        return False
+    return True
+
+
+def preview_fsr1_sharpness(main_window: "MainWindow") -> float:
+    raw = main_window.control.get("PreviewFsr1SharpnessDecimalSlider", "0.35")
+    try:
+        return float(str(raw).strip())
+    except (TypeError, ValueError):
+        return 0.35
+
+
+def preview_fsr1_pipeline_shaders_enabled(main_window: "MainWindow") -> bool:
+    """When False, FSR preview uses a simple texture blit (tests GL setup vs EASU/RCAS)."""
+    return bool(main_window.control.get("PreviewFsr1ShadersEnableToggle", True))
+
+
+def preview_fsr1_source_scale_percent(main_window: "MainWindow") -> float:
+    """100 = textura a resolución completa; menor = downscale antes de EASU (solo preview, más upscale visible)."""
+    raw = main_window.control.get("PreviewFsr1SourceScalePercentSlider", "100")
+    try:
+        v = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return 100.0
+    return max(25.0, min(100.0, v))
+
+
+def primary_preview_graphics_item_for_fit(
+    main_window: "MainWindow",
+) -> tuple[QtWidgets.QGraphicsItem | None, QtCore.QRectF | None]:
+    """
+    Item visible que define el encuadre del preview (FSR, blend GPU o pixmap).
+    Evita usar el QGraphicsPixmapItem oculto durante FSR/GPU (rompe zoom y sceneRect).
+    """
+    scene = main_window.graphicsViewFrame.scene()
+    if scene is None:
+        return None, None
+
+    def _visible_item_rect(
+        it: QtWidgets.QGraphicsItem | None,
+    ) -> tuple[QtWidgets.QGraphicsItem | None, QtCore.QRectF | None]:
+        if it is None:
+            return None, None
+        try:
+            if it.scene() is not scene:
+                return None, None
+            if not it.isVisible():
+                return None, None
+            return it, it.boundingRect()
+        except RuntimeError:
+            return None, None
+
+    pair = _visible_item_rect(getattr(main_window, "_video_preview_fsr_gl_item", None))
+    if pair[0] is not None:
+        return pair
+    pair = _visible_item_rect(getattr(main_window, "_video_preview_blend_gl_item", None))
+    if pair[0] is not None:
+        return pair
+
+    for item in scene.items():
+        if isinstance(item, QtWidgets.QGraphicsPixmapItem) and item.isVisible():
+            return item, item.boundingRect()
+
+    for item in scene.items():
+        if isinstance(item, QtWidgets.QGraphicsPixmapItem):
+            return item, item.boundingRect()
+    return None, None
+
+
+def composite_fsr_preview_overlay_if_needed(
+    main_window: "MainWindow",
+    gv: QtWidgets.QGraphicsView,
+) -> None:
+    """
+    Dibuja el overlay FSR en OpenGL tras pintar la escena.
+
+    Qt pinta el viewport OpenGL desde QGraphicsView::paintEvent creando un
+    QPainter sobre el hijo viewport; no entrega QEvent::Paint al QOpenGLWidget,
+    así que VisoMasterPreviewOpenGLViewport.paintEvent no se ejecuta. Este
+    hook debe llamarse al final de VisoMasterPreviewGraphicsView.paintEvent.
+    """
+    if not preview_fsr1_gpu_display_enabled(main_window):
+        return
+    try:
+        from app.ui.widgets.preview_opengl_viewport_widget import (
+            VisoMasterPreviewOpenGLViewport,
+        )
+    except ImportError:
+        return
+    if VisoMasterPreviewOpenGLViewport is None:
+        return
+    vp = gv.viewport()
+    if not isinstance(vp, VisoMasterPreviewOpenGLViewport):
+        return
+    item = getattr(main_window, "_video_preview_fsr_gl_item", None)
+    if item is None:
+        return
+    try:
+        if not item.isVisible():
+            return
+    except RuntimeError:
+        return
+    try:
+        item.render_gl_in_viewport(vp, gv)
+    except Exception:
+        pass
+
+
 def invalidate_video_preview_blend_gl_item_ref(main_window: "MainWindow") -> None:
     """Call after scene.clear() (or similar): the C++ QGraphicsItem is destroyed but Python may still hold a wrapper."""
     main_window._video_preview_blend_gl_item = None
+    main_window._video_preview_fsr_gl_item = None
     setattr(main_window, "_gv_preview_pixmap_item", None)
 
 
@@ -183,6 +464,20 @@ def _get_or_create_blend_gl_item(
     return item
 
 
+def _get_or_create_fsr_gl_item(
+    main_window: "MainWindow", scene: QtWidgets.QGraphicsScene
+):
+    from app.ui.widgets.video_preview_fsr_gl_item import VideoPreviewFsrGlItem
+
+    item = getattr(main_window, "_video_preview_fsr_gl_item", None)
+    if not _blend_gl_item_still_valid(item, scene):
+        main_window._video_preview_fsr_gl_item = None
+        item = VideoPreviewFsrGlItem()
+        scene.addItem(item)
+        main_window._video_preview_fsr_gl_item = item
+    return item
+
+
 # @misc_helpers.benchmark  (Keep this decorator if you have it)
 def update_graphics_view(
     main_window: "MainWindow",
@@ -192,6 +487,7 @@ def update_graphics_view(
     size_mode: str = "preserve_previous_pixmap_size",
     *,
     gpu_blend: tuple[np.ndarray, np.ndarray, float] | None = None,
+    preview_frame_bgr: np.ndarray | None = None,
 ):
     # print('(update_graphics_view) current_frame_number', current_frame_number)
 
@@ -214,6 +510,11 @@ def update_graphics_view(
             invalidate_video_preview_blend_gl_item_ref(main_window)
         blend_item = None
 
+    fsr_item = getattr(main_window, "_video_preview_fsr_gl_item", None)
+    if not _blend_gl_item_still_valid(fsr_item, scene):
+        main_window._video_preview_fsr_gl_item = None
+        fsr_item = None
+
     if gpu_blend is not None and ensure_video_preview_opengl_viewport(main_window):
         prev_bgr, curr_bgr, bw = gpu_blend
         b_item = _get_or_create_blend_gl_item(main_window, scene)
@@ -226,6 +527,8 @@ def update_graphics_view(
             preview_linear_blend_shader_mode_int(main_window),
         )
         b_item.setVisible(True)
+        if fsr_item is not None:
+            fsr_item.setVisible(False)
         if pixmap_item is None:
             pixmap_item = QtWidgets.QGraphicsPixmapItem()
             pixmap_item.setTransformationMode(
@@ -245,11 +548,66 @@ def update_graphics_view(
         if reset_fit:
             fit_image_to_view(main_window, b_item, scene_rect)
         record_preview_frame_tick(main_window)
-        bump_graphics_view_repaint(main_window)
+        bump_graphics_view_repaint(main_window, sync=True)
+        return
+
+    use_fsr = (
+        preview_frame_bgr is not None
+        and preview_frame_bgr.ndim == 3
+        and preview_frame_bgr.shape[2] == 3
+        and preview_fsr1_gpu_display_enabled(main_window)
+        and ensure_video_preview_opengl_viewport(main_window)
+    )
+    if use_fsr:
+        f_item = _get_or_create_fsr_gl_item(main_window, scene)
+        if getattr(f_item, "_gl_failed", False):
+            f_item.reset_gl_state()
+        h0, w0 = int(preview_frame_bgr.shape[0]), int(preview_frame_bgr.shape[1])
+        scale_pct = preview_fsr1_source_scale_percent(main_window)
+        if scale_pct < 100.0:
+            nw = max(1, int(round(w0 * scale_pct / 100.0)))
+            nh = max(1, int(round(h0 * scale_pct / 100.0)))
+            frame_for_fsr = cv2.resize(
+                preview_frame_bgr, (nw, nh), interpolation=cv2.INTER_AREA
+            )
+        else:
+            frame_for_fsr = preview_frame_bgr
+        f_item.set_frame_sharpness(
+            frame_for_fsr,
+            preview_fsr1_sharpness(main_window),
+            layout_hw=(h0, w0),
+            display_frame=current_frame_number,
+            use_pipeline_shaders=preview_fsr1_pipeline_shaders_enabled(main_window),
+        )
+        f_item.setVisible(True)
+        if blend_item is not None and _blend_gl_item_still_valid(blend_item, scene):
+            blend_item.setVisible(False)
+        if pixmap_item is None:
+            pixmap_item = QtWidgets.QGraphicsPixmapItem()
+            pixmap_item.setTransformationMode(
+                QtCore.Qt.TransformationMode.SmoothTransformation
+            )
+            scene.addItem(pixmap_item)
+            main_window._gv_preview_pixmap_item = pixmap_item
+        pixmap_item.setVisible(False)
+        scene_rect = f_item.boundingRect()
+        gv = main_window.graphicsViewFrame
+        prev = gv.sceneRect()
+        if (
+            abs(prev.width() - scene_rect.width()) > 0.5
+            or abs(prev.height() - scene_rect.height()) > 0.5
+        ):
+            gv.setSceneRect(scene_rect)
+        if reset_fit:
+            fit_image_to_view(main_window, f_item, scene_rect)
+        record_preview_frame_tick(main_window)
+        bump_graphics_view_repaint(main_window, sync=True)
         return
 
     if blend_item is not None and _blend_gl_item_still_valid(blend_item, scene):
         blend_item.setVisible(False)
+    if fsr_item is not None and _blend_gl_item_still_valid(fsr_item, scene):
+        fsr_item.setVisible(False)
 
     # Resize the pixmap if necessary (e.g., face compare or mask compare mode)
     if pixmap_item and size_mode == "preserve_previous_pixmap_size":
@@ -411,6 +769,18 @@ def build_preview_active_settings_text(main_window: "MainWindow") -> str:
             str(ctrl.get("FrameInterpolationMethodSelection", ""))
         )
         lines.append(f"Interpolation: {short}" if short else "Interpolation")
+
+    if preview_fsr1_gpu_display_enabled(main_window):
+        if preview_fsr1_pipeline_shaders_enabled(main_window):
+            lines.append("FSR1 preview (EASU+RCAS)")
+        else:
+            lines.append("FSR1 preview — blit only (no FSR shaders)")
+        try:
+            sc = int(round(float(preview_fsr1_source_scale_percent(main_window))))
+        except (TypeError, ValueError):
+            sc = 100
+        if sc < 100:
+            lines.append(f"FSR1 source scale {sc}%")
 
     if ctrl.get("VideoPlaybackCustomFpsToggle"):
         fps_v = ctrl.get("VideoPlaybackCustomFpsSlider", "—")

@@ -287,15 +287,33 @@ class TargetMediaCardButton(CardButton):
         if frame is not None:
             main_window.scene.clear()
             graphics_view_actions.invalidate_video_preview_blend_gl_item_ref(main_window)
+            main_window.video_processor.file_type = self.file_type
             if self.file_type == "video":
                 # restore initial video position after reading. == 0
                 media_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
             main_window.video_processor.current_frame = frame
-            pixmap = common_widget_actions.get_pixmap_from_frame(main_window, frame)
-            graphics_view_actions.update_graphics_view(
-                main_window, pixmap, 0, reset_fit=True
+            use_fsr = (
+                self.file_type == "video"
+                and graphics_view_actions.preview_fsr1_gpu_display_enabled(main_window)
+                and graphics_view_actions.ensure_video_preview_opengl_viewport(
+                    main_window
+                )
             )
+            if use_fsr:
+                pixmap = QtGui.QPixmap()
+                graphics_view_actions.update_graphics_view(
+                    main_window,
+                    pixmap,
+                    0,
+                    reset_fit=True,
+                    preview_frame_bgr=frame,
+                )
+            else:
+                pixmap = common_widget_actions.get_pixmap_from_frame(main_window, frame)
+                graphics_view_actions.update_graphics_view(
+                    main_window, pixmap, 0, reset_fit=True
+                )
 
         self.reset_related_widgets_and_values()
 

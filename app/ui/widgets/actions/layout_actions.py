@@ -644,21 +644,16 @@ def show_hide_theatre_mode_panels(main_window: "MainWindow", checked):
 
 
 def fit_image_to_view_onchange(main_window: "MainWindow", *args):
-    pixmap_item = None
-    # Secure image search
-    for item in main_window.scene.items():
-        if isinstance(item, QtWidgets.QGraphicsPixmapItem):
-            pixmap_item = item
-            break
-
-    if pixmap_item:
-        scene_rect = pixmap_item.boundingRect()
+    fit_item, scene_rect = graphics_view_actions.primary_preview_graphics_item_for_fit(
+        main_window
+    )
+    if fit_item is not None and scene_rect is not None:
         QtCore.QTimer.singleShot(
             0,
             partial(
                 graphics_view_actions.fit_image_to_view,
                 main_window,
-                pixmap_item,
+                fit_item,
                 scene_rect,
             ),
         )

@@ -691,14 +691,15 @@ def handle_preview_frame_interpolation_toggle(
 ):
     """Frame Interpolation master toggle: sync RIFE session when using Neural mode."""
     sync_rife_preview_interpolation_model(main_window)
-    if not new_value:
-        from app.ui.widgets.actions import graphics_view_actions
-
-        graphics_view_actions.restore_video_preview_raster_viewport(main_window)
-        main_window.video_processor._smooth_decouple_stop_presenter()
+    from app.ui.widgets.actions import graphics_view_actions
     from app.ui.widgets.actions import preview_notification_actions as _preview_notify
 
+    if not new_value:
+        graphics_view_actions.restore_video_preview_raster_viewport(main_window)
+        main_window.video_processor._smooth_decouple_stop_presenter()
+
     _preview_notify.show_frame_interpolation_state(main_window, bool(new_value))
+    graphics_view_actions.update_preview_active_settings_overlay(main_window)
 
 
 def handle_preview_interpolation_steps_per_frame_change(
@@ -718,6 +719,7 @@ def handle_frame_interpolation_method_change(
     if not graphics_view_actions.is_linear_preview_interpolation_method(new_method):
         graphics_view_actions.restore_video_preview_raster_viewport(main_window)
         main_window.video_processor._smooth_decouple_stop_presenter()
+    graphics_view_actions.update_preview_active_settings_overlay(main_window)
 
 
 def handle_preview_neural_interp_model_change(
@@ -725,6 +727,45 @@ def handle_preview_neural_interp_model_change(
 ):
     """Al cambiar el checkpoint RIFE, descargar sesiones para evitar mezclar motores TRT."""
     sync_rife_preview_interpolation_model(main_window)
+
+
+def handle_preview_fsr1_toggle(
+    main_window: "MainWindow", new_value: bool, control_name: str
+) -> None:
+    del control_name
+    from app.ui.widgets.actions import graphics_view_actions
+
+    if new_value:
+        graphics_view_actions.ensure_video_preview_opengl_viewport(main_window)
+    else:
+        graphics_view_actions.restore_video_preview_raster_viewport(main_window)
+    graphics_view_actions.update_preview_active_settings_overlay(main_window)
+
+
+def handle_preview_fsr1_sharpness_change(
+    main_window: "MainWindow", _value: object, _control_name: str
+) -> None:
+    from app.ui.widgets.actions import graphics_view_actions
+
+    graphics_view_actions.bump_graphics_view_repaint(main_window, sync=True)
+
+
+def handle_preview_fsr1_shaders_toggle(
+    main_window: "MainWindow", _new_value: bool, _control_name: str
+) -> None:
+    from app.ui.widgets.actions import graphics_view_actions
+
+    graphics_view_actions.bump_graphics_view_repaint(main_window, sync=True)
+    graphics_view_actions.update_preview_active_settings_overlay(main_window)
+
+
+def handle_preview_fsr1_source_scale_change(
+    main_window: "MainWindow", _value: object, _control_name: str
+) -> None:
+    from app.ui.widgets.actions import graphics_view_actions
+
+    graphics_view_actions.bump_graphics_view_repaint(main_window, sync=True)
+    graphics_view_actions.update_preview_active_settings_overlay(main_window)
 
 
 def handle_face_parser_backbone_change(

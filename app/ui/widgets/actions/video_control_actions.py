@@ -1579,20 +1579,18 @@ def fit_view_to_current_image(main_window: "MainWindow"):
 
 
 def zoom_current_image_100(main_window: "MainWindow"):
+    from app.ui.widgets.actions import graphics_view_actions as _gva
+
     view = main_window.graphicsViewFrame
     if not view.scene():
         return
-    items = view.scene().items()
-    pixmap_item = next(
-        (item for item in items if isinstance(item, QtWidgets.QGraphicsPixmapItem)),
-        None,
-    )
-    if pixmap_item is None:
+    fit_item, scene_rect = _gva.primary_preview_graphics_item_for_fit(main_window)
+    if fit_item is None or scene_rect is None:
         return
 
     view.resetTransform()
-    view.setSceneRect(pixmap_item.boundingRect())
-    view.centerOn(pixmap_item)
+    view.setSceneRect(scene_rect)
+    view.centerOn(fit_item)
     view.zoom_value = 0
     view.last_scale_factor = 1.0
     setattr(main_window, "_graphics_view_keep_transform_on_resize", True)
@@ -2182,8 +2180,21 @@ def apply_av1_scrub_preview_frame(
     if vp.media_rotation != 0:
         frame_bgr = misc_helpers._apply_frame_rotation(frame_bgr, vp.media_rotation)
     vp._seek_cached_frame = None
-    pixmap = common_widget_actions.get_pixmap_from_frame(main_window, frame_bgr)
-    graphics_view_actions.update_graphics_view(main_window, pixmap, frame_num)
+    use_fsr = (
+        vp.file_type == "video"
+        and graphics_view_actions.preview_fsr1_gpu_display_enabled(main_window)
+        and graphics_view_actions.ensure_video_preview_opengl_viewport(main_window)
+    )
+    if use_fsr:
+        graphics_view_actions.update_graphics_view(
+            main_window,
+            QtGui.QPixmap(),
+            frame_num,
+            preview_frame_bgr=frame_bgr,
+        )
+    else:
+        pixmap = common_widget_actions.get_pixmap_from_frame(main_window, frame_bgr)
+        graphics_view_actions.update_graphics_view(main_window, pixmap, frame_num)
 
 
 # @misc_helpers.benchmark
@@ -2248,12 +2259,29 @@ def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
                     video_processor._seek_cached_frame = None
                 else:
                     video_processor._seek_cached_frame = (new_position, frame)
-                pixmap = common_widget_actions.get_pixmap_from_frame(
-                    main_window, frame
+                use_fsr = (
+                    video_processor.file_type == "video"
+                    and graphics_view_actions.preview_fsr1_gpu_display_enabled(
+                        main_window
+                    )
+                    and graphics_view_actions.ensure_video_preview_opengl_viewport(
+                        main_window
+                    )
                 )
-                graphics_view_actions.update_graphics_view(
-                    main_window, pixmap, new_position
-                )
+                if use_fsr:
+                    graphics_view_actions.update_graphics_view(
+                        main_window,
+                        QtGui.QPixmap(),
+                        new_position,
+                        preview_frame_bgr=frame,
+                    )
+                else:
+                    pixmap = common_widget_actions.get_pixmap_from_frame(
+                        main_window, frame
+                    )
+                    graphics_view_actions.update_graphics_view(
+                        main_window, pixmap, new_position
+                    )
             else:
                 print(
                     f"[WARN] on_change_video_seek_slider: Read failed at frame {new_position}. Attempting recovery..."
@@ -2308,13 +2336,29 @@ def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
                 video_processor._seek_cached_frame = (new_position, frame)
             # For preview, show the raw frame immediately.
             # The processed frame will be shown when the slider is released.
-            pixmap = common_widget_actions.get_pixmap_from_frame(main_window, frame)
-            graphics_view_actions.update_graphics_view(
-                main_window,
-                pixmap,
-                new_position,
-                size_mode="native_pixmap_size",
+            use_fsr = (
+                video_processor.file_type == "video"
+                and graphics_view_actions.preview_fsr1_gpu_display_enabled(main_window)
+                and graphics_view_actions.ensure_video_preview_opengl_viewport(
+                    main_window
+                )
             )
+            if use_fsr:
+                graphics_view_actions.update_graphics_view(
+                    main_window,
+                    QtGui.QPixmap(),
+                    new_position,
+                    size_mode="native_pixmap_size",
+                    preview_frame_bgr=frame,
+                )
+            else:
+                pixmap = common_widget_actions.get_pixmap_from_frame(main_window, frame)
+                graphics_view_actions.update_graphics_view(
+                    main_window,
+                    pixmap,
+                    new_position,
+                    size_mode="native_pixmap_size",
+                )
 
         else:
             # VP-34: Read failed. Trigger a stop/reopen cycle to recover from silent handle failures.

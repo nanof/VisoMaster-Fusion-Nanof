@@ -12,27 +12,107 @@ from typing import Any
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from app.ui.widgets.actions import graphics_view_actions
+
 try:
     from PySide6.QtOpenGL import (
         QOpenGLBuffer,
         QOpenGLShader,
         QOpenGLShaderProgram,
         QOpenGLTexture,
+        QOpenGLVertexArrayObject,
     )
 except ImportError:  # pragma: no cover
     QOpenGLBuffer = None  # type: ignore[misc, assignment]
     QOpenGLShader = None  # type: ignore[misc, assignment]
     QOpenGLShaderProgram = None  # type: ignore[misc, assignment]
     QOpenGLTexture = None  # type: ignore[misc, assignment]
+    QOpenGLVertexArrayObject = None  # type: ignore[misc, assignment]
 
 # OpenGL ES / desktop constants (avoid missing QOpenGL module on some PySide6 builds)
 _GL_FLOAT = 0x1406
 _GL_TRIANGLES = 0x0004
 _GL_DEPTH_TEST = 0x0B71
 _GL_BLEND = 0x0BE2
+_GL_UNPACK_ALIGNMENT = 0x0CF5
+_GL_FRAMEBUFFER = 0x8D40
 
 # Bump when changing shader source so existing sessions re-link (uniforms / logic).
 _BLEND_SHADER_PROGRAM_VERSION = 2
+
+
+def _gl_opengl_context_for_widget(
+    gl_widget: QtWidgets.QWidget | None, ctx: QtGui.QOpenGLContext | None
+) -> QtGui.QOpenGLContext | None:
+    if gl_widget is not None:
+        gc = getattr(gl_widget, "context", None)
+        if callable(gc):
+            try:
+                wctx = gc()
+                if wctx is not None:
+                    return wctx
+            except Exception:
+                pass
+    if ctx is not None:
+        return ctx
+    return QtGui.QOpenGLContext.currentContext()
+
+
+def _gl_extra_for_context(octx: QtGui.QOpenGLContext) -> Any:
+    from PySide6.QtGui import QOpenGLExtraFunctions
+
+    xf = QOpenGLExtraFunctions(octx)
+    if hasattr(xf, "initializeOpenGLFunctions"):
+        try:
+            xf.initializeOpenGLFunctions()
+        except Exception:
+            pass
+    return xf
+
+
+def _gl_bind_framebuffer(
+    f: Any,
+    ctx: QtGui.QOpenGLContext | None,
+    gl_widget: QtWidgets.QWidget | None,
+    fid: int,
+) -> None:
+    if fid <= 0:
+        return
+    octx = _gl_opengl_context_for_widget(gl_widget, ctx)
+    if octx is not None:
+        try:
+            xf = _gl_extra_for_context(octx)
+            if hasattr(xf, "glBindFramebuffer"):
+                xf.glBindFramebuffer(_GL_FRAMEBUFFER, int(fid))
+                return
+        except Exception:
+            pass
+        try:
+            xf2 = octx.extraFunctions()
+            if xf2 is not None and hasattr(xf2, "glBindFramebuffer"):
+                xf2.glBindFramebuffer(_GL_FRAMEBUFFER, int(fid))
+                return
+        except Exception:
+            pass
+    b = getattr(f, "glBindFramebuffer", None)
+    if b is not None:
+        b(_GL_FRAMEBUFFER, int(fid))
+
+
+def _bind_opengl_widget_default_fbo(
+    gl_widget: QtWidgets.QWidget, f: Any, ctx: QtGui.QOpenGLContext | None
+) -> None:
+    """QOpenGLWidget renders to defaultFramebufferObject(), not GL framebuffer 0."""
+    dfo = getattr(gl_widget, "defaultFramebufferObject", None)
+    if dfo is None:
+        return
+    try:
+        fid = int(dfo())
+    except Exception:
+        return
+    if fid <= 0:
+        return
+    _gl_bind_framebuffer(f, ctx, gl_widget, fid)
 
 
 _VS = """#version 330 core
@@ -141,6 +221,7 @@ class VideoBlendOpenGLItem(QtWidgets.QGraphicsObject):
         self._bh: int = 1
         self._program: QOpenGLShaderProgram | None = None
         self._vbo: QOpenGLBuffer | None = None
+        self._vao: Any = None
         self._tex0: QOpenGLTexture | None = None
         self._tex1: QOpenGLTexture | None = None
         self._tex_staging0: np.ndarray | None = None
@@ -189,6 +270,12 @@ class VideoBlendOpenGLItem(QtWidgets.QGraphicsObject):
         if self._vbo is not None:
             self._vbo.destroy()
             self._vbo = None
+        if self._vao is not None:
+            try:
+                self._vao.destroy()
+            except Exception:
+                pass
+            self._vao = None
         if self._program is not None:
             self._program.removeAllShaders()
             self._program = None
@@ -227,6 +314,18 @@ class VideoBlendOpenGLItem(QtWidgets.QGraphicsObject):
         self._vbo.create()
         return self._vbo.isCreated()
 
+    def _ensure_vao(self) -> bool:
+        if QOpenGLVertexArrayObject is None:
+            return False
+        if self._vao is not None and self._vao.isCreated():
+            return True
+        v = QOpenGLVertexArrayObject()
+        v.create()
+        if not v.isCreated():
+            return False
+        self._vao = v
+        return True
+
     def _ensure_texture(self, tex: QOpenGLTexture | None, w: int, h: int) -> QOpenGLTexture | None:
         if QOpenGLTexture is None:
             return None
@@ -262,21 +361,30 @@ class VideoBlendOpenGLItem(QtWidgets.QGraphicsObject):
         return t
 
     def _upload_tex(self, tex: QOpenGLTexture, rgb: np.ndarray) -> None:
-        """Upload RGB8 without QImage::setData (avoids Qt reconfiguring format/mips on allocated storage)."""
+        """Upload tightly packed RGB8; GL_UNPACK_ALIGNMENT=1 for odd row strides (w*3 % 4 != 0)."""
         h, w = rgb.shape[:2]
-        tex.bind(0)
-        tex.setData(
-            0,
-            0,
-            0,
-            w,
-            h,
-            1,
-            QOpenGLTexture.PixelFormat.RGB,
-            QOpenGLTexture.PixelType.UInt8,
-            rgb.tobytes(),
-        )
-        tex.release()
+        ctx = QtGui.QOpenGLContext.currentContext()
+        f = ctx.functions() if ctx is not None else None
+        ps = getattr(f, "glPixelStorei", None) if f is not None else None
+        if ps is not None:
+            ps(_GL_UNPACK_ALIGNMENT, 1)
+        try:
+            tex.bind(0)
+            tex.setData(
+                0,
+                0,
+                0,
+                w,
+                h,
+                1,
+                QOpenGLTexture.PixelFormat.RGB,
+                QOpenGLTexture.PixelType.UInt8,
+                rgb.tobytes(),
+            )
+            tex.release()
+        finally:
+            if ps is not None:
+                ps(_GL_UNPACK_ALIGNMENT, 4)
 
     def _build_vertices(self, painter: QtGui.QPainter) -> np.ndarray:
         """Two triangles (TL,TR,BL) and (TR,BR,BL) in NDC with UVs."""
@@ -320,6 +428,8 @@ class VideoBlendOpenGLItem(QtWidgets.QGraphicsObject):
             ],
             dtype=np.float32,
         )
+        verts[0::4] = np.clip(verts[0::4], -1.0, 1.0)
+        verts[1::4] = np.clip(verts[1::4], -1.0, 1.0)
         return verts
 
     def paint(  # noqa: N802
@@ -329,18 +439,19 @@ class VideoBlendOpenGLItem(QtWidgets.QGraphicsObject):
         widget: QtWidgets.QWidget | None,
     ) -> None:
         del option
-        if (
-            self._prev is None
-            or self._curr is None
-            or QOpenGLShaderProgram is None
-            or widget is None
-        ):
+        if self._prev is None or self._curr is None or QOpenGLShaderProgram is None:
             return
-        from PySide6.QtOpenGLWidgets import QOpenGLWidget
-
-        if not isinstance(widget, QOpenGLWidget):
+        gl_widget = graphics_view_actions.resolve_qgraphics_gl_viewport_widget(
+            painter, widget, self.scene()
+        )
+        if gl_widget is None:
             return
         if self._gl_failed:
+            return
+        try:
+            gl_widget.makeCurrent()
+        except Exception:
+            self._gl_failed = True
             return
         ctx = QtGui.QOpenGLContext.currentContext()
         if ctx is None:
@@ -348,7 +459,11 @@ class VideoBlendOpenGLItem(QtWidgets.QGraphicsObject):
 
         try:
             painter.beginNativePainting()
-            if not self._ensure_program() or not self._ensure_vbo():
+            if (
+                not self._ensure_program()
+                or not self._ensure_vbo()
+                or not self._ensure_vao()
+            ):
                 self._gl_failed = True
                 return
             if self._prev.shape != self._curr.shape:
@@ -411,6 +526,7 @@ class VideoBlendOpenGLItem(QtWidgets.QGraphicsObject):
             f.glViewport(0, 0, max(1, dev.width()), max(1, dev.height()))
             f.glDisable(_GL_DEPTH_TEST)
             f.glDisable(_GL_BLEND)
+            _bind_opengl_widget_default_fbo(gl_widget, f, ctx)
 
             assert self._program is not None
             self._program.bind()
@@ -422,10 +538,22 @@ class VideoBlendOpenGLItem(QtWidgets.QGraphicsObject):
             self._program.setUniformValue("u_mode", int(self._blend_mode))
 
             loc = self._program.attributeLocation("a_pos_uv")
-            self._program.enableAttributeArray(loc)
-            self._program.setAttributeBuffer(loc, _GL_FLOAT, 0, 4, 0)
-            f.glDrawArrays(_GL_TRIANGLES, 0, 6)
-            self._program.disableAttributeArray(loc)
+            vao = self._vao
+            use_vao = (
+                QOpenGLVertexArrayObject is not None
+                and vao is not None
+                and vao.isCreated()
+            )
+            if use_vao:
+                vao.bind()
+            try:
+                self._program.enableAttributeArray(loc)
+                self._program.setAttributeBuffer(loc, _GL_FLOAT, 0, 4, 0)
+                f.glDrawArrays(_GL_TRIANGLES, 0, 6)
+                self._program.disableAttributeArray(loc)
+            finally:
+                if use_vao:
+                    vao.release()
 
             self._tex0.release()
             self._tex1.release()

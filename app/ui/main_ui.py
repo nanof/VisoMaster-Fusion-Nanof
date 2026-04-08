@@ -269,6 +269,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             partial(list_view_actions.select_input_face_images, self, "folder")
         )
 
+        graphics_view_actions.ensure_preview_graphics_view_subclass(self)
+
         # Initialize graphics frame to view frames
         self.scene = QtWidgets.QGraphicsScene()
         self.graphicsViewFrame.setScene(self.scene)
@@ -919,18 +921,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         # print("[INFO] Called resizeEvent()")
         super().resizeEvent(event)
         self._queue_media_controls_balance()
-        # Call the method to fit the image to the view whenever the window resizes
-        items = self.scene.items()
-        pixmap_item = next(
-            (item for item in items if isinstance(item, QtWidgets.QGraphicsPixmapItem)),
-            None,
+        # Ajuste al redimensionar: FSR / blend GPU usan items OpenGL visibles; el pixmap suele estar oculto.
+        fit_item, scene_rect = graphics_view_actions.primary_preview_graphics_item_for_fit(
+            self
         )
-        if pixmap_item:
-            # Set the scene rectangle to the bounding rectangle of the pixmap
-            scene_rect = pixmap_item.boundingRect()
+        if fit_item is not None and scene_rect is not None:
             self.graphicsViewFrame.setSceneRect(scene_rect)
             if not getattr(self, "_graphics_view_keep_transform_on_resize", False):
-                graphics_view_actions.fit_image_to_view(self, pixmap_item, scene_rect)
+                graphics_view_actions.fit_image_to_view(self, fit_item, scene_rect)
         self._sync_theatre_base_window_snapshot()
 
     def moveEvent(self, event: QtGui.QMoveEvent):

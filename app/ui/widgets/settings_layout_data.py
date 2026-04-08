@@ -419,6 +419,55 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "Edge-aware: soften blend weight on strong edges (few extra taps). "
             "Pro: luma-weighted + edge-aware. Neural (RIFE) mode ignores this.",
         },
+        "PreviewFsr1EnableToggle": {
+            "level": 1,
+            "label": "FSR 1 preview (OpenGL)",
+            "default": False,
+            "help": "AMD FidelityFX Super Resolution 1.x (EASU + RCAS) on the main video preview only. "
+            "Off when Virtual Camera is on or when Linear (GPU) frame interpolation is active. "
+            "Does not change recording or exported files.",
+            "exec_function": control_actions.handle_preview_fsr1_toggle,
+            "exec_function_args": ["PreviewFsr1EnableToggle"],
+        },
+        "PreviewFsr1SharpnessDecimalSlider": {
+            "level": 2,
+            "label": "FSR1 RCAS sharpness",
+            "min_value": "0.00",
+            "max_value": "2.00",
+            "default": "0.35",
+            "step": 0.05,
+            "decimals": 2,
+            "parentToggle": "PreviewFsr1EnableToggle",
+            "requiredToggleValue": True,
+            "help": "RCAS sharpening strength (0 = very soft, ~0.35 typical, 2 = strong).",
+            "exec_function": control_actions.handle_preview_fsr1_sharpness_change,
+            "exec_function_args": ["PreviewFsr1SharpnessDecimalSlider"],
+        },
+        "PreviewFsr1ShadersEnableToggle": {
+            "level": 2,
+            "label": "FSR1: EASU+RCAS shaders",
+            "default": True,
+            "parentToggle": "PreviewFsr1EnableToggle",
+            "requiredToggleValue": True,
+            "help": "On: full FSR 1 pipeline (EASU upscale + RCAS sharpen). Off: same OpenGL path but only "
+            "a simple texture draw — use to see if problems come from FSR shaders or from viewport/textures/setup.",
+            "exec_function": control_actions.handle_preview_fsr1_shaders_toggle,
+            "exec_function_args": ["PreviewFsr1ShadersEnableToggle"],
+        },
+        "PreviewFsr1SourceScalePercentSlider": {
+            "level": 2,
+            "label": "FSR1 preview source scale (%)",
+            "min_value": "25",
+            "max_value": "100",
+            "default": "100",
+            "step": "5",
+            "parentToggle": "PreviewFsr1EnableToggle",
+            "requiredToggleValue": True,
+            "help": "Preview only: scales down the frame sent to FSR before EASU upscales to the on-screen size. "
+            "Below 100% the upscale is stronger so the effect is easier to see; 100% is normal (full-res source).",
+            "exec_function": control_actions.handle_preview_fsr1_source_scale_change,
+            "exec_function_args": ["PreviewFsr1SourceScalePercentSlider"],
+        },
         "FrameSkipStepSlider": {
             "level": 1,
             "label": "Frame Skip Step",
