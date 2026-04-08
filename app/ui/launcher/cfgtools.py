@@ -115,10 +115,56 @@ def set_launcher_enabled_to_cfg(value: int) -> None:
 
 # ---------- Branch Management ----------
 def get_branch_from_cfg() -> str:
-    """Read the configured branch from portable.cfg, defaulting to 'main'."""
+    """Read BRANCH from portable.cfg, else the current git branch, else 'main'."""
     cfg = read_portable_cfg()
-    # Ensure there's always a fallback
-    return (cfg.get("BRANCH") or "main").strip() or "main"
+    b = (cfg.get("BRANCH") or "").strip()
+    if b:
+        return b
+    from .gittools import run_git
+
+    r = run_git(["rev-parse", "--abbrev-ref", "HEAD"], capture=True)
+    if r and r.returncode == 0:
+        gb = (r.stdout or "").strip()
+        if gb and gb != "HEAD":
+            return gb
+    return "main"
+
+
+def get_launcher_branch_options() -> list[str]:
+    """Branches in the maintenance UI: main, dev, active git branch, and cfg BRANCH if needed."""
+    base = ["main", "dev"]
+    out: list[str] = list(base)
+    seen = set(out)
+    from .gittools import run_git
+
+    r = run_git(["rev-parse", "--abbrev-ref", "HEAD"], capture=True)
+    if r and r.returncode == 0:
+        cur = (r.stdout or "").strip()
+        if cur and cur != "HEAD" and cur not in seen:
+            out.append(cur)
+            seen.add(cur)
+
+    cfg_br = (read_portable_cfg().get("BRANCH") or "").strip()
+    if cfg_br and cfg_br not in seen:
+        out.append(cfg_br)
+    return out
+
+
+def sync_portable_branch_with_git_worktree() -> None:
+    """If portable.cfg BRANCH differs from the checked-out branch, update cfg to match."""
+    from .gittools import run_git
+
+    r = run_git(["rev-parse", "--abbrev-ref", "HEAD"], capture=True)
+    if not r or r.returncode != 0:
+        return
+    git_br = (r.stdout or "").strip()
+    if not git_br or git_br == "HEAD":
+        return
+    cfg_br = (read_portable_cfg().get("BRANCH") or "").strip()
+    if cfg_br == git_br:
+        return
+    if write_portable_cfg({"BRANCH": git_br}):
+        print(f"[Launcher] portable.cfg BRANCH synced to active git branch '{git_br}'.")
 
 
 # ---------- Version Tracking ----------

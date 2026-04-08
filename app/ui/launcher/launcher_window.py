@@ -45,6 +45,8 @@ from .cfgtools import (
     check_models_presence,
     write_portable_cfg,
     get_branch_from_cfg,
+    get_launcher_branch_options,
+    sync_portable_branch_with_git_worktree,
 )
 from .uiutils import (
     notify_backup_created,
@@ -131,6 +133,8 @@ class LauncherWindow(QtWidgets.QWidget):
         self.deps_changed = self.models_changed = self.files_changed = False
         self._user_moved = False
         self.last_checked_utc: datetime | None = None
+
+        sync_portable_branch_with_git_worktree()
 
         # Check for launcher script update
         self.launcher_update_available = is_launcher_update_available()
@@ -417,7 +421,7 @@ class LauncherWindow(QtWidgets.QWidget):
         branch_label.setStyleSheet("border: none; background: transparent;")
 
         self.branch_combo = QtWidgets.QComboBox()
-        self.branch_combo.addItems(["main", "dev"])
+        self.branch_combo.addItems(get_launcher_branch_options())
 
         # Set the current branch from config without triggering the signal
         self.branch_combo.blockSignals(True)
