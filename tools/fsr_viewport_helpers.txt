@@ -1,0 +1,79 @@
+
+    def _viewport_corner_flat(self, gv: QtWidgets.QGraphicsView) -> tuple[float, ...]:
+        rect = self.boundingRect()
+        out: list[float] = []
+        for cx, cy in (
+            (rect.left(), rect.top()),
+            (rect.right(), rect.top()),
+            (rect.left(), rect.bottom()),
+            (rect.right(), rect.bottom()),
+        ):
+            vp = gv.mapFromScene(self.mapToScene(QtCore.QPointF(cx, cy)))
+            out.extend((float(vp.x()), float(vp.y())))
+        return tuple(out)
+
+    def _item_device_pixel_size_from_view(
+        self, gv: QtWidgets.QGraphicsView
+    ) -> tuple[int, int]:
+        rect = self.boundingRect()
+        xs: list[float] = []
+        ys: list[float] = []
+        for cx, cy in (
+            (rect.left(), rect.top()),
+            (rect.right(), rect.top()),
+            (rect.left(), rect.bottom()),
+            (rect.right(), rect.bottom()),
+        ):
+            vp = gv.mapFromScene(self.mapToScene(QtCore.QPointF(cx, cy)))
+            xs.append(float(vp.x()))
+            ys.append(float(vp.y()))
+        rw = max(1, int(math.ceil(max(xs) - min(xs))))
+        rh = max(1, int(math.ceil(max(ys) - min(ys))))
+        return rw, rh
+
+    def _build_vertices_from_view(
+        self, gv: QtWidgets.QGraphicsView, ndc_w: int, ndc_h: int
+    ) -> np.ndarray:
+        rect = self.boundingRect()
+        dw = max(1, int(ndc_w))
+        dh = max(1, int(ndc_h))
+        ndc_uv = []
+        for cx, cy in (
+            (rect.left(), rect.top()),
+            (rect.right(), rect.top()),
+            (rect.left(), rect.bottom()),
+            (rect.right(), rect.bottom()),
+        ):
+            vp = gv.mapFromScene(self.mapToScene(QtCore.QPointF(cx, cy)))
+            px = float(vp.x())
+            py = float(vp.y())
+            x_ndc = 2.0 * px / float(dw) - 1.0
+            y_ndc = 1.0 - 2.0 * py / float(dh)
+            ndc_uv.append((x_ndc, y_ndc))
+        tl, tr, bl, br = ndc_uv
+        arr = np.array(
+            [
+                *tl,
+                0.0,
+                0.0,
+                *tr,
+                1.0,
+                0.0,
+                *bl,
+                0.0,
+                1.0,
+                *tr,
+                1.0,
+                0.0,
+                *br,
+                1.0,
+                1.0,
+                *bl,
+                0.0,
+                1.0,
+            ],
+            dtype=np.float32,
+        )
+        arr[0::4] = np.clip(arr[0::4], -1.0, 1.0)
+        arr[1::4] = np.clip(arr[1::4], -1.0, 1.0)
+        return arr

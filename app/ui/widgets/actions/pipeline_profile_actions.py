@@ -290,6 +290,17 @@ def format_profile_overlay_multithread(
         hdr += f"  {'Avg':>{cw}}"
     lines.append(hdr)
 
+    def _rule_under_header() -> None:
+        """Light rule aligned with table width (monospace)."""
+        w = cw_l + (len(threads_sorted) + 1) * (cw + 2) if not global_mean_column else cw_l + cw + 2
+        lines.append("." * min(max(w, 24), 72))
+
+    def _section_gap() -> None:
+        lines.append("")
+
+    _rule_under_header()
+    _section_gap()
+
     def _sep_row(title: str) -> None:
         sep = f"{_overlay_fit_label(title):<{cw_l}}"
         if global_mean_column:
@@ -357,13 +368,18 @@ def format_profile_overlay_multithread(
         )
         lines.append(row)
 
-    _append_stage_block(feeder_stages, "— Feeder thread —" if feeder_stages else None)
+    _append_stage_block(feeder_stages, "── Feeder ──" if feeder_stages else None)
     _append_subtotal_row("feeder_subtotal", feeder_stages)
-    _append_stage_block(worker_stages, "— Worker thread —" if worker_stages else None)
+    _section_gap()
+    _append_stage_block(worker_stages, "── Worker ──" if worker_stages else None)
     _append_subtotal_row("worker_subtotal", worker_stages)
+    _section_gap()
     if PIPELINE_PROFILE_FRAME_TOTAL_KEY in stages:
+        _sep_row("── Frame total ──")
         _append_stage_block([PIPELINE_PROFILE_FRAME_TOTAL_KEY], None)
+        _section_gap()
 
+    _sep_row("── Totals ──")
     row = f"{'Total (breakdown ∑)':<{cw_l}}"
     totals: List[float] = []
     for t in threads_sorted:

@@ -1,0 +1,343 @@
+def render_gl_in_viewport(
+        self,
+        gl_widget: QtWidgets.QWidget,
+        gv: QtWidgets.QGraphicsView,
+    ) -> None:
+        """Tras pintar la escena en QOpenGLWidget.paintEvent (sin beginNativePainting en el item)."""
+        if self._frame_bgr is None or QOpenGLShaderProgram is None:
+            return
+        if self._gl_failed:
+            if _fsr1_debug_env() and not getattr(
+                self, "_fsr1_debug_logged_stuck", False
+            ):
+                self._fsr1_debug_logged_stuck = True
+                _fsr1_dbg(
+                    "render: skipped (_gl_failed=True); turn FSR off/on or restart to retry"
+                )
+            return
+
+        if _fsr1_debug_level() >= 2:
+            n = getattr(self, "_fsr1_trace_paint_n", 0) + 1
+            self._fsr1_trace_paint_n = n
+            if n <= 15 or n % 120 == 0:
+                _fsr1_dbg(
+                    f"render #{n} present_seq={self._present_seq} "
+                    f"frame={getattr(self._frame_bgr, 'shape', None)}"
+                )
+
+        try:
+            gl_widget.makeCurrent()
+        except Exception as e:
+            self._gl_failed = True
+            _fsr1_dbg(f"makeCurrent failed: {e!r}")
+            return
+
+        ctx = gl_widget.context() or QtGui.QOpenGLContext.currentContext()
+        if ctx is None:
+            _fsr1_dbg("render_gl_in_viewport: no QOpenGLContext")
+            return
+
+        try:
+            isolate = _fsr1_isolate_mode()
+            if isolate in ("blit_src", "easu_only"):
+                if not self._fsr1_isolate_logged:
+                    self._fsr1_isolate_logged = True
+                    _fsr1_dbg(
+                        f"ISOLATE={isolate}: modo prueba (quita VISIOMASTER_FSR1_ISOLATE para pipeline completo)"
+                    )
+            elif isolate:
+                if not self._fsr1_isolate_bad_logged:
+                    self._fsr1_isolate_bad_logged = True
+                    _fsr1_dbg(
+                        f"VISIOMASTER_FSR1_ISOLATE desconocido={isolate!r}; use blit_src o easu_only"
+                    )
+
+            direct_blit = (not self._use_pipeline_shaders) or isolate == "blit_src"
+            easu_only = bool(self._use_pipeline_shaders and isolate == "easu_only")
+
+            _fsr1_gl_log_fb(ctx, gl_widget, "viewport overlay (post-scene)")
+            _fsr1_gl_drain_errors(ctx, "incoming")
+
+            self._apply_fsr_program_version()
+            if direct_blit:
+                if not self._ensure_blit_program():
+                    self._gl_failed = True
+                    _fsr1_dbg("blit shader build or link failed (see log above if printed)")
+                    return
+            else:
+                if not self._ensure_fsr_programs():
+                    self._gl_failed = True
+                    _fsr1_dbg("EASU/RCAS shader build or link failed (see log above if printed)")
+                    return
+                if not self._ensure_blit_program():
+                    self._gl_failed = True
+                    _fsr1_dbg("blit shader build or link failed (FSR composite)")
+                    return
+            self._fsr1_gl_log_uniforms_once()
+            if not self._ensure_vbo():
+                self._gl_failed = True
+                _fsr1_dbg("VBO create failed")
+                return
+            if not self._ensure_vao():
+                self._gl_failed = True
+                _fsr1_dbg(
+                    "VAO create failed (Core profile requiere VAO para glDrawArrays con VBO)"
+                )
+                return
+
+            h, w = self._frame_bgr.shape[:2]
+            self._tex_src = self._ensure_src_texture(w, h)
+            if self._tex_src is None:
+                self._gl_failed = True
+                _fsr1_dbg("source texture allocation failed")
+                return
+
+            if self._present_seq != self._upload_applied_seq:
+                rgb = _numpy_bgr_to_rgb_contiguous(self._frame_bgr)
+                self._upload_tex(self._tex_src, rgb)
+                self._upload_applied_seq = self._present_seq
+
+            vw = max(1, gl_widget.width())
+            vh = max(1, gl_widget.height())
+            vbo_key = (
+                vw,
+                vh,
+                self._lay_w,
+                self._lay_h,
+                0 if direct_blit else (2 if easu_only else 1),
+                self._viewport_corner_flat(gv),
+            )
+            rebuild = vbo_key != self._vbo_cache_key or self._cached_verts is None
+            if rebuild:
+                self._cached_verts = self._build_vertices_from_view(gv, vw, vh)
+                self._vbo_cache_key = vbo_key
+            verts = self._cached_verts
+
+            assert self._vbo is not None
+            self._vbo.bind()
+            if rebuild:
+                self._vbo.allocate(verts.tobytes(), verts.nbytes)
+
+            f = ctx.functions()
+            f.glViewport(0, 0, vw, vh)
+            f.glDisable(_GL_DEPTH_TEST)
+            f.glDisable(_GL_BLEND)
+            try:
+                f.glDisable(_GL_SCISSOR_TEST)
+            except Exception:
+                pass
+            try:
+                f.glDisable(_GL_CULL_FACE)
+            except Exception:
+                pass
+
+            self._bind_qopengl_widget_backbuffer(gl_widget, f, ctx)
+            _fsr1_gl_log_fb(ctx, gl_widget, "after bind widget draw target")
+
+            if direct_blit:
+                assert self._prog_blit is not None
+                xf0 = ctx.extraFunctions()
+                if xf0 is not None:
+                    xf0.glActiveTexture(_GL_TEXTURE0)
+                self._prog_blit.bind()
+                self._tex_src.bind(0)
+                self._set_uniform_int(self._prog_blit, "u_src", 0)
+                if not self._draw_quad_like_blend(self._prog_blit, f):
+                    self._gl_failed = True
+                    _fsr1_dbg("blit draw failed (attribute a_pos_uv / GL state)")
+                    self._vbo.release()
+                    return
+                self._tex_src.release()
+                self._prog_blit.release()
+                _fsr1_gl_drain_errors(ctx, "after direct blit")
+                _fsr1_gl_log_fb(ctx, gl_widget, "after direct blit")
+            else:
+                rw, rh = self._item_device_pixel_size_from_view(gv)
+                if (
+                    not self._ensure_fsr_pass_fbos(ctx, rw, rh)
+                    or self._fbo is None
+                    or self._fbo_rcas is None
+                ):
+                    self._gl_failed = True
+                    _fsr1_dbg(f"FSR pass FBO create failed ({rw}x{rh})")
+                    self._vbo.release()
+                    return
+
+                if not self._ensure_vbo_fs():
+                    self._gl_failed = True
+                    _fsr1_dbg("fullscreen VBO create failed")
+                    self._vbo.release()
+                    return
+
+                assert self._prog_easu is not None
+                assert self._prog_rcas is not None
+                raw_bind_pre = _gl_query_framebuffer_binding(f, ctx, gl_widget)
+                prev_qt_fbo = self._read_draw_framebuffer_id(f, ctx, gl_widget)
+                xf = ctx.extraFunctions()
+                if _fsr1_debug_gl():
+                    tid0 = int(self._fbo.texture())
+                    tid1 = int(self._fbo_rcas.texture())
+                    _fsr1_dbg(
+                        f"pre-pass FBO tex ids easu_out={tid0} rcas_out={tid1} passSize={rw}x{rh} "
+                        f"raw_BINDING={raw_bind_pre} restore_target_filtered={prev_qt_fbo!r}"
+                    )
+
+                self._fbo.bind()
+                f.glViewport(0, 0, rw, rh)
+                _fsr1_gl_log_fb(ctx, gl_widget, "bound EASU FBO")
+                self._vbo_fs.bind()
+                self._prog_easu.bind()
+                if xf is not None:
+                    xf.glActiveTexture(_GL_TEXTURE0)
+                self._tex_src.bind(0)
+                self._set_uniform_int(self._prog_easu, "u_src", 0)
+                self._set_uniform_vec2(self._prog_easu, "u_inSize", float(w), float(h))
+                self._set_uniform_vec2(self._prog_easu, "u_outSize", float(rw), float(rh))
+                if not self._draw_quad_like_blend(self._prog_easu, f):
+                    self._gl_failed = True
+                    _fsr1_dbg("EASU draw failed")
+                    self._vbo_fs.release()
+                    self._vbo.release()
+                    return
+                _fsr1_gl_drain_errors(ctx, "after EASU")
+                self._tex_src.release()
+                self._prog_easu.release()
+
+                if easu_only:
+                    if not self._ensure_blit_program():
+                        self._gl_failed = True
+                        _fsr1_dbg("blit program missing (easu_only)")
+                        self._vbo_fs.release()
+                        self._vbo.release()
+                        return
+                    self._restore_qt_draw_framebuffer(f, gl_widget, prev_qt_fbo, ctx)
+                    _fsr1_gl_log_fb(ctx, gl_widget, "after restore (easu_only)")
+                    f.glViewport(0, 0, vw, vh)
+                    self._vbo.bind()
+                    self._prog_blit.bind()
+                    tid_easu_out = int(self._fbo.texture())
+                    if xf is not None:
+                        xf.glActiveTexture(_GL_TEXTURE0)
+                    f.glBindTexture(_GL_TEXTURE_2D, tid_easu_out)
+                    self._set_uniform_int(self._prog_blit, "u_src", 0)
+                    if not self._draw_quad_like_blend(self._prog_blit, f):
+                        self._gl_failed = True
+                        _fsr1_dbg("easu_only composite blit failed")
+                        f.glBindTexture(_GL_TEXTURE_2D, 0)
+                        self._prog_blit.release()
+                        self._vbo_fs.release()
+                        self._vbo.release()
+                        return
+                    f.glBindTexture(_GL_TEXTURE_2D, 0)
+                    self._prog_blit.release()
+                    self._vbo_fs.release()
+                    _fsr1_gl_drain_errors(ctx, "after easu_only composite")
+                    _fsr1_gl_log_fb(ctx, gl_widget, "after easu_only composite")
+                else:
+                    self._fbo_rcas.bind()
+                    f.glViewport(0, 0, rw, rh)
+                    _fsr1_gl_log_fb(ctx, gl_widget, "bound RCAS FBO")
+                    self._prog_rcas.bind()
+                    tid_easu = int(self._fbo.texture())
+                    if xf is not None:
+                        xf.glActiveTexture(_GL_TEXTURE0)
+                    f.glBindTexture(_GL_TEXTURE_2D, tid_easu)
+                    self._set_uniform_int(self._prog_rcas, "u_tex", 0)
+                    self._set_uniform_vec2(self._prog_rcas, "u_outSize", float(rw), float(rh))
+                    self._set_uniform_float(
+                        self._prog_rcas, "u_sharpness", float(self._sharpness)
+                    )
+                    if not self._draw_quad_like_blend(self._prog_rcas, f):
+                        self._gl_failed = True
+                        _fsr1_dbg("RCAS draw failed")
+                        f.glBindTexture(_GL_TEXTURE_2D, 0)
+                        self._prog_rcas.release()
+                        self._vbo_fs.release()
+                        self._vbo.release()
+                        return
+                    _fsr1_gl_drain_errors(ctx, "after RCAS")
+                    f.glBindTexture(_GL_TEXTURE_2D, 0)
+                    self._prog_rcas.release()
+
+                    if not self._ensure_blit_program():
+                        self._gl_failed = True
+                        _fsr1_dbg("blit program missing for FSR composite")
+                        self._vbo_fs.release()
+                        self._vbo.release()
+                        return
+
+                    self._restore_qt_draw_framebuffer(f, gl_widget, prev_qt_fbo, ctx)
+                    _fsr1_gl_log_fb(ctx, gl_widget, "after restore (full pipeline)")
+                    f.glViewport(0, 0, vw, vh)
+                    self._vbo.bind()
+                    self._prog_blit.bind()
+                    tid_rcas = int(self._fbo_rcas.texture())
+                    if xf is not None:
+                        xf.glActiveTexture(_GL_TEXTURE0)
+                    f.glBindTexture(_GL_TEXTURE_2D, tid_rcas)
+                    self._set_uniform_int(self._prog_blit, "u_src", 0)
+                    if not self._draw_quad_like_blend(self._prog_blit, f):
+                        self._gl_failed = True
+                        _fsr1_dbg("FSR composite blit failed")
+                        f.glBindTexture(_GL_TEXTURE_2D, 0)
+                        self._prog_blit.release()
+                        self._vbo_fs.release()
+                        self._vbo.release()
+                        return
+                    f.glBindTexture(_GL_TEXTURE_2D, 0)
+                    self._prog_blit.release()
+                    self._vbo_fs.release()
+                    _fsr1_gl_drain_errors(ctx, "after full composite blit")
+                    _fsr1_gl_log_fb(ctx, gl_widget, "after full composite blit")
+
+            if _fsr1_debug_env() and not getattr(self, "_fsr1_debug_logged_ok", False):
+                self._fsr1_debug_logged_ok = True
+                xs = verts[0::4]
+                ys = verts[1::4]
+                dev_cls = type(gl_widget).__name__
+                try:
+                    dpr = float(gl_widget.devicePixelRatioF())
+                    dfbo = int(gl_widget.defaultFramebufferObject())
+                except Exception:
+                    dpr = -1.0
+                    dfbo = -1
+                try:
+                    fmean = float(np.mean(self._frame_bgr))
+                    fmax = float(np.max(self._frame_bgr))
+                except Exception:
+                    fmean = -1.0
+                    fmax = -1.0
+                fsr_pass = ""
+                if not direct_blit:
+                    rpw, rph = self._item_device_pixel_size_from_view(gv)
+                    fsr_pass = f" fsrPassFbo={rpw}x{rph}"
+                path = (
+                    "direct_blit"
+                    if direct_blit
+                    else ("easu_only" if easu_only else "full_easu_rcas")
+                )
+                iso = _fsr1_isolate_mode() or "-"
+                _fsr1_dbg(
+                    f"first successful render (viewport overlay): path={path} isolate={iso} "
+                    f"ui_pipeline_shaders={self._use_pipeline_shaders} "
+                    f"glWidget={dev_cls} {vw}x{vh} tex={w}x{h} layout={self._lay_w}x{self._lay_h} "
+                    f"widgetSize={gl_widget.width()}x{gl_widget.height()} dpr={dpr} defaultFBO={dfbo} "
+                    f"present_seq={self._present_seq} frame_mean={fmean:.1f} frame_max={fmax:.0f} "
+                    f"NDC_x=[{float(np.min(xs)):.4f},{float(np.max(xs)):.4f}] "
+                    f"NDC_y=[{float(np.min(ys)):.4f},{float(np.max(ys)):.4f}]{fsr_pass}"
+                )
+            self._vbo.release()
+        except Exception as e:
+            self._gl_failed = True
+            if _fsr1_debug_env():
+                traceback.print_exc()
+                _fsr1_dbg(f"render_gl_in_viewport exception: {e!r}")
+
+    def paint(  # noqa: N802
+        self,
+        painter: QtGui.QPainter,
+        option: QtWidgets.QStyleOptionGraphicsItem,
+        widget: QtWidgets.QWidget | None,
+    ) -> None:
+        del option, painter, widget
+        return
