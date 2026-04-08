@@ -22,7 +22,7 @@ class FrameEnhancers:
     Manages frame enhancement (upscaling, colorization) models and processes.
 
     This class handles model loading, tiling for large images, and execution
-    of various ONNX models (RealESRGAN, BSRGan, Deoldify, DDColor, etc.).
+    of various ONNX models (RealESRGAN, BSRGan, SPAN, Deoldify, DDColor, etc.).
     """
 
     def __init__(self, models_processor: "ModelsProcessor"):
@@ -44,6 +44,8 @@ class FrameEnhancers:
             "BSRGan-x4": "BSRGANx4",
             "UltraSharp-x4": "UltraSharpx4",
             "UltraMix-x4": "UltraMixx4",
+            "SPAN-4x": "SPANx4Nomo",
+            "SPAN-F-4x": "SPANFx4Mssim",
             "RealEsr-General-x4v3": "RealEsrx4v3",
             "DeOldify-Artistic": "DeoldifyArt",
             "DeOldify-Stable": "DeoldifyStable",
@@ -301,6 +303,8 @@ class FrameEnhancers:
             "UltraSharp-x4": self.run_ultrasharpx4,
             "UltraMix-x4": self.run_ultramixx4,
             "RealEsr-General-x4v3": self.run_realesrx4v3,
+            "SPAN-4x": self.run_spanx4_nomo,
+            "SPAN-F-4x": self.run_spanfx4_mssim,
         }
 
         fn_upscaler = upscaler_functions.get(enhancer_type)
@@ -424,7 +428,9 @@ class FrameEnhancers:
             buffer_ptr=output.data_ptr(),
         )
 
-        # Run the model with lazy build handling and synchronization
+        # Nota: no sincronizar aquí por tesela — run_with_iobinding ya bloquea al completar
+        # y un sync por tesela multiplicaba el coste (tirones en vídeo). SPAN evita TensorRT EP
+        # en models_processor para salida correcta.
         self._run_model_with_lazy_build_check(model_name, ort_session, io_binding)
 
     def run_realesrganx2(self, image, output):
@@ -503,6 +509,14 @@ class FrameEnhancers:
             output (torch.Tensor): The pre-allocated output tensor to be filled.
         """
         self._run_enhancer_model("UltraMixx4", image, output)
+
+    def run_spanx4_nomo(self, image, output):
+        """SPAN ×4 (NomosUni multijpg ONNX)."""
+        self._run_enhancer_model("SPANx4Nomo", image, output)
+
+    def run_spanfx4_mssim(self, image, output):
+        """SPAN ×4 con preentrenado MSSIM (misma topología; opción ligera en la práctica)."""
+        self._run_enhancer_model("SPANFx4Mssim", image, output)
 
     def run_deoldify_artistic(self, image, output):
         """
@@ -586,9 +600,17 @@ class FrameEnhancers:
                 | "BSRGan-x4"
                 | "UltraSharp-x4"
                 | "UltraMix-x4"
+                | "SPAN-4x"
+                | "SPAN-F-4x"
                 | "RealEsr-General-x4v3"
             ):
-                tile_size = 512
+                # SPAN es más ligero que RRDB: teselas mayores = menos pasadas ORT y mejor FPS.
+                # 1024→4096 de salida ~201 MiB float32; suele caber; si hay OOM, bajar a 768.
+                tile_size = (
+                    1024
+                    if enhancer_type in ("SPAN-4x", "SPAN-F-4x")
+                    else 512
+                )
 
                 if (
                     enhancer_type == "RealEsrgan-x2-Plus"

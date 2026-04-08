@@ -975,6 +975,8 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
                 "BSRGan-x4",
                 "UltraSharp-x4",
                 "UltraMix-x4",
+                "SPAN-4x",
+                "SPAN-F-4x",
                 "DDColor-Artistic",
                 "DDColor",
                 "DeOldify-Artistic",
@@ -984,7 +986,11 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "default": "RealEsrgan-x2-Plus",
             "parentToggle": "FrameEnhancerEnableToggle",
             "requiredToggleValue": True,
-            "help": "Select the type of frame enhancement to apply, based on the content and resolution requirements.",
+            "help": (
+                "Select the frame enhancement model. SPAN-4x / SPAN-F-4x are fast and light; "
+                "on video the gain vs. the original is often subtle. For stronger sharpening and texture, "
+                "use RealEsrgan-x4-Plus, UltraSharp-x4, or BSRGan-x4 (higher GPU cost)."
+            ),
             "exec_function": control_actions.handle_enhancer_model_selection_change,
             "exec_function_args": ["FrameEnhancerTypeSelection"],
         },

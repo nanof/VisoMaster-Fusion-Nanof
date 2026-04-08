@@ -4612,6 +4612,8 @@ class VideoProcessor(QObject):
                 "BSRGan-x4",
                 "UltraSharp-x4",
                 "UltraMix-x4",
+                "SPAN-4x",
+                "SPAN-F-4x",
                 "RealEsr-General-x4v3",
             ):
                 frame_height = frame_height * 4

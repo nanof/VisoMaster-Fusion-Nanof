@@ -97,6 +97,8 @@ fp16_safe_models_list = [
     "BSRGANx4",
     "UltraSharpx4",
     "UltraMixx4",
+    "SPANx4Nomo",
+    "SPANFx4Mssim",
     # --- Colors ---
     "DeoldifyArt",
     "DeoldifyStable",
@@ -440,6 +442,20 @@ models_list = [
         "local_path": f"{models_dir}/4x-UltraMix_Smooth.fp16.onnx",
         "hash": "3b96d63c239121b1ad5992e42a2089d6b4e1185c493c6440adfeafc0a20591eb",
         "url": f"{assets_repo}/v0.1.0/4x-UltraMix_Smooth.fp16.onnx",
+    },
+    # SPAN (×4) ONNX: entrada/salida dinámicas [N,3,H,W] float32 en rango ~0–1 (RGB).
+    {
+        "model_name": "SPANx4Nomo",
+        "local_path": f"{models_dir}/sr_extra/SPAN_x4_NomosUni_fp32.onnx",
+        "hash": "a435b009109e72c50ce95927dab0a6dde63e594cf57ba5a18ba63da67355698a",
+        "url": "https://huggingface.co/nesaorg/4xNomosUni_span_multijpg_fp32_opset17/resolve/main/4xNomosUni_span_multijpg_fp32_opset17.onnx",
+    },
+    # Misma topología SPAN ×4; preentrenado MSSIM (perfil “rápido” en retos ESR). No es el grafo reducido del informe NTIRE 2025.
+    {
+        "model_name": "SPANFx4Mssim",
+        "local_path": f"{models_dir}/sr_extra/SPANF_x4_mssim_pretrain_fp32.onnx",
+        "hash": "a9587d9645728f4710bdbe04c121f8d20ba4c9bcb9a36c6c1d7914a56fb31b01",
+        "url": "https://huggingface.co/nesaorg/4xmssim_span_pretrain_fp32_opset17/resolve/main/4xmssim_span_pretrain_fp32_opset17.onnx",
     },
     # TensorStack/RIFE ONNX: inputs img0, img1 [1,3,H,W] float32, timestep [1] float32; output [1,3,H,W].
     {

@@ -154,7 +154,10 @@ def gamma_decode_srgb_to_linear_rgb(srgb: torch.Tensor, gamma=SRGB_GAMMA):
 
 # TensorRT EP needs static shapes on subgraph inputs; some ONNX exports omit them
 # (ORT CUDA still runs them). See ORT: shape inference for TensorRT subgraphs.
-ONNX_MODELS_SKIP_TENSORRT_EP = frozenset({"RvmPortraitMatting"})
+# SPAN ×4: grafo dinámico + PixelShuffle; TensorRT EP (p. ej. FP16) suele dar salida corrupta con IOBinding.
+ONNX_MODELS_SKIP_TENSORRT_EP = frozenset(
+    {"RvmPortraitMatting", "SPANx4Nomo", "SPANFx4Mssim"}
+)
 
 
 def _env_truthy(name: str) -> bool:
