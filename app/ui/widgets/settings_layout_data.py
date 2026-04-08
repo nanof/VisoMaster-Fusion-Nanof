@@ -968,6 +968,7 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "level": 2,
             "label": "Frame Enhancer Type",
             "options": [
+                "CAS-Light",
                 "RealEsrgan-x2-Plus",
                 "RealEsrgan-x4-Plus",
                 "RealEsr-General-x4v3",
@@ -987,9 +988,9 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "parentToggle": "FrameEnhancerEnableToggle",
             "requiredToggleValue": True,
             "help": (
-                "Select the frame enhancement model. SPAN-4x / SPAN-F-4x are fast and light; "
-                "on video the gain vs. the original is often subtle. For stronger sharpening and texture, "
-                "use RealEsrgan-x4-Plus, UltraSharp-x4, or BSRGan-x4 (higher GPU cost)."
+                "Select the frame enhancement model. CAS-Light is a fast GPU sharpen (CAS-style, no ONNX); "
+                "use Blend to mix with the original. SPAN-4x / SPAN-F-4x are light SR models. "
+                "For stronger detail use RealEsrgan-x4-Plus, UltraSharp-x4, or BSRGan-x4 (higher GPU cost)."
             ),
             "exec_function": control_actions.handle_enhancer_model_selection_change,
             "exec_function_args": ["FrameEnhancerTypeSelection"],

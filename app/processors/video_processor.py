@@ -92,6 +92,19 @@ def _recognition_cache_env_float(name: str, default: float) -> float:
 
 LIVE_STREAM_FILE_TYPES = frozenset({"webcam", "screen"})
 
+# Durante la reproducción, ``feeder_control`` es una instantánea al inicio; estas claves
+# se toman de ``main_window.control`` en cada fotograma para que activar/desactivar el
+# enhancer (y sliders relacionados) surta efecto sin rehacer toda la copia profunda.
+_FEEDER_PLAYBACK_LIVE_CONTROL_KEYS = frozenset(
+    {
+        "FrameEnhancerEnableToggle",
+        "FrameEnhancerTypeSelection",
+        "FrameEnhancerBlendSlider",
+        "FrameEnhancerTemporalSmoothSlider",
+        "FrameEnhancerDownToggle",
+    }
+)
+
 TAIL_TOLERANCE = 30  # BUG-07: 10 was too tight — codec trailing B-frames can cause read
 # failures in the last ~10 frames on H.264/H.265 content, dropping valid end frames.
 MAX_CONSECUTIVE_ERRORS = (
@@ -2206,6 +2219,13 @@ class VideoProcessor(QObject):
                 break
         print("[INFO] Detection pipeline thread finished.", flush=True)
 
+    def _overlay_playback_live_control_keys(self, local_control: dict) -> None:
+        """Actualiza claves de UI que deben reflejarse al vuelo durante el vídeo."""
+        mw = self.main_window.control
+        for key in _FEEDER_PLAYBACK_LIVE_CONTROL_KEYS:
+            if key in mw:
+                local_control[key] = mw[key]
+
     def _feed_video_loop(self):
         """
         Unified feeder logic for standard video playback AND segment recording.
@@ -2429,6 +2449,9 @@ class VideoProcessor(QObject):
                             last_marker_data = marker_data
                         local_params_for_worker = self.feeder_parameters.copy()
                         local_control_for_worker = self.feeder_control.copy()
+                        self._overlay_playback_live_control_keys(
+                            local_control_for_worker
+                        )
                     _t_feed_before_rgb = time.perf_counter()
                     frame_rgb = self._benchmark_same_frame_rgb_cache.copy()
                     _t_feed_after_rgb = time.perf_counter()
@@ -2583,6 +2606,7 @@ class VideoProcessor(QObject):
                     # busy projects and capped FPS vs pre-GPU-refactor builds.
                     local_params_for_worker = self.feeder_parameters.copy()
                     local_control_for_worker = self.feeder_control.copy()
+                    self._overlay_playback_live_control_keys(local_control_for_worker)
 
                 _t_feed_before_rgb = time.perf_counter()
                 frame_rgb = misc_helpers.bgr_uint8_to_rgb_contiguous(frame_bgr)

@@ -23,6 +23,8 @@ class FrameEnhancers:
 
     This class handles model loading, tiling for large images, and execution
     of various ONNX models (RealESRGAN, BSRGan, SPAN, Deoldify, DDColor, etc.).
+    ``CAS-Light`` is a GPU tensor pass (estilo AMD CAS / filtro de fragment shader),
+    sin ONNX: útil para nitidez en tiempo real en vista previa y exportación.
     """
 
     def __init__(self, models_processor: "ModelsProcessor"):
@@ -52,10 +54,29 @@ class FrameEnhancers:
             "DeOldify-Video": "DeoldifyVideo",
             "DDColor-Artistic": "DDColorArt",
             "DDColor": "DDcolor",
+            # Sin modelo ONNX: nitidez adaptativa en PyTorch (equivalente práctico a CAS en shader).
+            "CAS-Light": None,
         }
         # LRU v2.Resize for enhance_core (dynamic output sizes; bilinear, antialias=False).
         self._enhance_resize_cache: OrderedDict[tuple, v2.Resize] = OrderedDict()
         self._ENHANCE_RESIZE_CACHE_MAX = 48
+
+    @staticmethod
+    def _cas_light_sharpen_rgb01(t: torch.Tensor, strength: float) -> torch.Tensor:
+        """
+        Nitidez tipo CAS (pasada espacial): refuerza bordes donde hay detalle local;
+        atenúa en zonas planas. Entrada/salida RGB float32 en [0, 1], forma [C, H, W].
+        """
+        if strength <= 0.0:
+            return t
+        x = t.unsqueeze(0)
+        x_pad = F.pad(x, (1, 1, 1, 1), mode="reflect")
+        blur = F.avg_pool2d(x_pad, kernel_size=3, stride=1, padding=0)
+        delta = x - blur
+        gate_src = delta.abs().mean(dim=1, keepdim=True)
+        gate = (gate_src * 5.5).clamp(0.0, 1.0)
+        out = (x + float(strength) * gate * delta).squeeze(0)
+        return torch.clamp(out, 0.0, 1.0)
 
     def unload_models(self):
         """
@@ -593,6 +614,27 @@ class FrameEnhancers:
         enhancer_type = control["FrameEnhancerTypeSelection"]
 
         match enhancer_type:
+            case "CAS-Light":
+                alpha = float(control["FrameEnhancerBlendSlider"]) / 100.0
+                if alpha <= 0.0:
+                    return img
+                image = img.type(torch.float32)
+                if torch.max(image) > 255:
+                    max_range = 65535.0
+                else:
+                    max_range = 255.0
+                f01 = torch.div(image, max_range)
+                # Fuerza base del filtro; el deslizador mezcla con el original.
+                strength = 0.45 + 0.95 * alpha
+                sharp = self._cas_light_sharpen_rgb01(f01, strength=strength)
+                blended = torch.add(
+                    torch.mul(sharp, alpha), torch.mul(f01, 1.0 - alpha)
+                )
+                blended = torch.clamp(blended, 0.0, 1.0).mul(max_range)
+                if max_range == 255.0:
+                    return blended.type(torch.uint8)
+                return blended.type(torch.uint16)
+
             case (
                 "RealEsrgan-x2-Plus"
                 | "RealEsrgan-x4-Plus"
