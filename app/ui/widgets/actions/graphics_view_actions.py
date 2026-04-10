@@ -606,6 +606,16 @@ def _get_or_create_nis_gl_item(
     return item
 
 
+def _preview_scene_rect_size_changed(
+    prev: QtCore.QRectF, scene_rect: QtCore.QRectF
+) -> bool:
+    """True si cambió el tamaño lógico del preview (p. ej. enhancer 4× o desactivar)."""
+    return (
+        abs(prev.width() - scene_rect.width()) > 0.5
+        or abs(prev.height() - scene_rect.height()) > 0.5
+    )
+
+
 # @misc_helpers.benchmark  (Keep this decorator if you have it)
 def update_graphics_view(
     main_window: "MainWindow",
@@ -675,12 +685,10 @@ def update_graphics_view(
         scene_rect = b_item.boundingRect()
         gv = main_window.graphicsViewFrame
         prev = gv.sceneRect()
-        if (
-            abs(prev.width() - scene_rect.width()) > 0.5
-            or abs(prev.height() - scene_rect.height()) > 0.5
-        ):
+        size_changed = _preview_scene_rect_size_changed(prev, scene_rect)
+        if size_changed:
             gv.setSceneRect(scene_rect)
-        if reset_fit:
+        if reset_fit or size_changed:
             fit_image_to_view(main_window, b_item, scene_rect)
         record_preview_frame_tick(main_window)
         bump_graphics_view_repaint(main_window, sync=True)
@@ -730,12 +738,10 @@ def update_graphics_view(
         scene_rect = n_it.boundingRect()
         gv = main_window.graphicsViewFrame
         prev = gv.sceneRect()
-        if (
-            abs(prev.width() - scene_rect.width()) > 0.5
-            or abs(prev.height() - scene_rect.height()) > 0.5
-        ):
+        size_changed = _preview_scene_rect_size_changed(prev, scene_rect)
+        if size_changed:
             gv.setSceneRect(scene_rect)
-        if reset_fit:
+        if reset_fit or size_changed:
             fit_image_to_view(main_window, n_it, scene_rect)
         record_preview_frame_tick(main_window)
         bump_graphics_view_repaint(main_window, sync=True)
@@ -785,12 +791,10 @@ def update_graphics_view(
         scene_rect = f_item.boundingRect()
         gv = main_window.graphicsViewFrame
         prev = gv.sceneRect()
-        if (
-            abs(prev.width() - scene_rect.width()) > 0.5
-            or abs(prev.height() - scene_rect.height()) > 0.5
-        ):
+        size_changed = _preview_scene_rect_size_changed(prev, scene_rect)
+        if size_changed:
             gv.setSceneRect(scene_rect)
-        if reset_fit:
+        if reset_fit or size_changed:
             fit_image_to_view(main_window, f_item, scene_rect)
         record_preview_frame_tick(main_window)
         bump_graphics_view_repaint(main_window, sync=True)
@@ -803,22 +807,33 @@ def update_graphics_view(
     if nis_item is not None and _blend_gl_item_still_valid(nis_item, scene):
         nis_item.setVisible(False)
 
-    # Resize the pixmap if necessary (e.g., face compare or mask compare mode)
+    # Resize the pixmap if necessary (e.g., face compare or mask compare mode).
+    # Solo si la resolución intrínseca no cambió: si cambió (enhancer, otro clip),
+    # escalar el pixmap nuevo al bbox antiguo rompe el zoom y rellena con upscale falso.
     if pixmap_item and size_mode == "preserve_previous_pixmap_size":
-        bounding_rect = pixmap_item.boundingRect()
-        b_width = int(bounding_rect.width())  # Explicit cast to int for PySide6 safety
-        b_height = int(
-            bounding_rect.height()
-        )  # Explicit cast to int for PySide6 safety
+        pm_prev = pixmap_item.pixmap()
+        same_intrinsic = (
+            pm_prev is not None
+            and not pm_prev.isNull()
+            and not pixmap.isNull()
+            and pm_prev.width() == pixmap.width()
+            and pm_prev.height() == pixmap.height()
+        )
+        if same_intrinsic:
+            bounding_rect = pixmap_item.boundingRect()
+            b_width = int(bounding_rect.width())  # Explicit cast to int for PySide6 safety
+            b_height = int(
+                bounding_rect.height()
+            )  # Explicit cast to int for PySide6 safety
 
-        # If the old pixmap bounding rect is larger than the new pixmap, scale the new one
-        if b_width > pixmap.width() and b_height > pixmap.height():
-            pixmap = pixmap.scaled(
-                b_width,
-                b_height,
-                QtCore.Qt.AspectRatioMode.KeepAspectRatio,
-                QtCore.Qt.TransformationMode.SmoothTransformation,  # Added smooth filter
-            )
+            # If the old pixmap bounding rect is larger than the new pixmap, scale the new one
+            if b_width > pixmap.width() and b_height > pixmap.height():
+                pixmap = pixmap.scaled(
+                    b_width,
+                    b_height,
+                    QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                    QtCore.Qt.TransformationMode.SmoothTransformation,  # Added smooth filter
+                )
 
     # Update or create pixmap item
     if pixmap_item:
@@ -836,14 +851,13 @@ def update_graphics_view(
     scene_rect = pixmap_item.boundingRect()
     gv = main_window.graphicsViewFrame
     prev = gv.sceneRect()
-    if (
-        abs(prev.width() - scene_rect.width()) > 0.5
-        or abs(prev.height() - scene_rect.height()) > 0.5
-    ):
+    size_changed = _preview_scene_rect_size_changed(prev, scene_rect)
+    if size_changed:
         gv.setSceneRect(scene_rect)
 
-    # Reset the view or restore the previous transform
-    if reset_fit:
+    # Ajustar al viewport si se pidió explícitamente o si cambió el tamaño del contenido
+    # (p. ej. frame enhancer ×2/×4 sin invalidar la matriz de zoom heredada).
+    if reset_fit or size_changed:
         fit_image_to_view(main_window, pixmap_item, scene_rect)
 
     record_preview_frame_tick(main_window)
