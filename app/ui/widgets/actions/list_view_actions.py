@@ -713,6 +713,53 @@ def set_up_list_widget_placeholder(
     list_widget.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
 
 
+def _open_existing_path_in_os_file_manager(path: str) -> None:
+    """Open an existing file or directory in the OS file manager."""
+    if not isinstance(path, str) or not path or not os.path.exists(path):
+        return
+    normalized_path = os.path.normpath(os.path.abspath(path))
+    if sys.platform == "win32":
+        try:
+            subprocess.Popen(["explorer", normalized_path])
+        except FileNotFoundError:
+            subprocess.Popen([r"C:\Windows\explorer.exe", normalized_path])
+    elif sys.platform == "darwin":
+        subprocess.run(["open", "-R", path])
+    else:
+        directory = os.path.dirname(os.path.abspath(path))
+        subprocess.run(["xdg-open", directory])
+
+
+def open_target_media_folder(
+    main_window: "MainWindow", folder_name: str | None = None
+) -> None:
+    if not folder_name:
+        folder_name = getattr(main_window, "last_target_media_folder_path", "")
+        if not (isinstance(folder_name, str) and folder_name.strip()):
+            label = getattr(main_window, "labelTargetVideosPath", None)
+            if label is not None:
+                tip = label.toolTip()
+                folder_name = tip if isinstance(tip, str) else ""
+        if not (isinstance(folder_name, str) and folder_name.strip()):
+            return
+    _open_existing_path_in_os_file_manager(str(folder_name).strip())
+
+
+def open_input_faces_folder(
+    main_window: "MainWindow", folder_name: str | None = None
+) -> None:
+    if not folder_name:
+        folder_name = getattr(main_window, "last_input_media_folder_path", "")
+        if not (isinstance(folder_name, str) and folder_name.strip()):
+            label = getattr(main_window, "labelInputFacesPath", None)
+            if label is not None:
+                tip = label.toolTip()
+                folder_name = tip if isinstance(tip, str) else ""
+        if not (isinstance(folder_name, str) and folder_name.strip()):
+            return
+    _open_existing_path_in_os_file_manager(str(folder_name).strip())
+
+
 def select_output_media_folder(main_window: "MainWindow"):
     folder_name = QtWidgets.QFileDialog.getExistingDirectory(main_window)
     if folder_name:
@@ -727,25 +774,7 @@ def open_output_media_folder(main_window: "MainWindow", folder_name: str | None 
         configured_folder = main_window.control.get("OutputMediaFolder")
         folder_name = configured_folder if isinstance(configured_folder, str) else None
     if isinstance(folder_name, str) and folder_name:
-        if os.path.exists(folder_name):
-            # Normalize path
-            normalized_path = os.path.normpath(os.path.abspath(folder_name))
-
-            if sys.platform == "win32":
-                # Windows - use full path to explorer.exe to avoid PATH issues
-                try:
-                    # Method 1: Using subprocess without shell (more secure and reliable)
-                    subprocess.Popen(["explorer", normalized_path])
-                except FileNotFoundError:
-                    # Fallback: Use full path to explorer.exe
-                    subprocess.Popen([r"C:\Windows\explorer.exe", normalized_path])
-            elif sys.platform == "darwin":
-                # macOS
-                subprocess.run(["open", "-R", folder_name])
-            else:
-                # Linux
-                directory = os.path.dirname(os.path.abspath(folder_name))
-                subprocess.run(["xdg-open", directory])
+        _open_existing_path_in_os_file_manager(folder_name)
 
 
 def show_shortcuts(main_window: "MainWindow"):

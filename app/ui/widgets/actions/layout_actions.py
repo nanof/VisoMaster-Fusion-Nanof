@@ -512,7 +512,7 @@ def add_widgets_to_tab_layout(
                         cast(Callable, widget_data["click_handler"]), main_window
                     )
                 )
-                horizontal_layout = add_horizontal_layout_to_category(
+                row_widget, horizontal_layout = add_horizontal_layout_to_category(
                     category_layout, label, btn
                 )
                 widget = btn
@@ -750,6 +750,29 @@ def set_up_menu_actions(main_window: "MainWindow"):
         main_window.actionHelp_About = QtGui.QAction("About", main_window)
         main_window.menuHelp.addSeparator()
         main_window.menuHelp.addAction(main_window.actionHelp_About)
+
+    # MainWindow.ui may omit these; layout_actions expects them since merge with dev.
+    if not hasattr(main_window, "actionOpen_Target_Media_Folder"):
+        main_window.actionOpen_Target_Media_Folder = QtGui.QAction(
+            "Open Target Media Folder", main_window
+        )
+        main_window.actionOpen_Input_Faces_Folder = QtGui.QAction(
+            "Open Input Faces Folder", main_window
+        )
+        main_window.actionOpen_Output_Folder = QtGui.QAction(
+            "Open Output Folder", main_window
+        )
+        anchor = main_window.actionLoad_Embeddings
+        main_window.menuFile.insertSeparator(anchor)
+        main_window.menuFile.insertAction(
+            anchor, main_window.actionOpen_Output_Folder
+        )
+        main_window.menuFile.insertAction(
+            anchor, main_window.actionOpen_Input_Faces_Folder
+        )
+        main_window.menuFile.insertAction(
+            anchor, main_window.actionOpen_Target_Media_Folder
+        )
 
     main_window.actionLoad_SavedWorkspace.triggered.connect(
         partial(

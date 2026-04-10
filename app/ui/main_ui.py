@@ -157,6 +157,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.parameters_list = {}
         self.control: ControlTypes = {}
         self.parameter_widgets: ParametersWidgetTypes = {}
+        self.parameter_section_states: dict[str, bool] = {}
+        self.parameter_sections: dict[str, widget_components.CollapsibleSection] = {}
 
         # UNet related
         self.previous_kv_file_selection = ""
@@ -798,6 +800,33 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 selection_widget.addItem(placeholder)
                 self.control[widget_name] = ""
                 selection_widget.setCurrentText(placeholder)
+
+    def register_parameter_section(
+        self,
+        section_id: str,
+        section_widget: widget_components.CollapsibleSection,
+    ):
+        self.parameter_sections[section_id] = section_widget
+        expanded = self.parameter_section_states.get(section_id, True)
+        self.parameter_section_states[section_id] = expanded
+        section_widget.set_expanded(expanded, animate=False, update_state=False)
+
+    def apply_parameter_section_states(
+        self, section_states: dict[str, bool] | None = None
+    ):
+        if section_states is None:
+            for section_id, section_widget in self.parameter_sections.items():
+                self.parameter_section_states[section_id] = True
+                section_widget.set_expanded(True, animate=False, update_state=False)
+            return
+
+        for section_id, expanded in section_states.items():
+            self.parameter_section_states[section_id] = bool(expanded)
+
+        for section_id, section_widget in self.parameter_sections.items():
+            expanded = bool(section_states.get(section_id, True))
+            self.parameter_section_states[section_id] = expanded
+            section_widget.set_expanded(expanded, animate=False, update_state=False)
 
     def _populate_denoiser_unet_models(self):
         self._populate_model_file_selection_widget(
