@@ -177,16 +177,25 @@ class IssueScanWorker(qtc.QThread):
         self._scan_scope_text = main_window.video_processor.describe_issue_scan_scope(
             self._scan_ranges
         )
-        self._target_height = main_window.video_processor._get_target_input_height()
-        self._base_control = main_window.control.copy()
-        self._base_params = {
-            face_id: params.copy() for face_id, params in main_window.parameters.items()
-        }
-        self._control_defaults_snapshot = {
-            widget_name: widget.default_value
-            for widget_name, widget in main_window.parameter_widgets.items()
-            if widget_name in main_window.control
-        }
+        self._base_control = main_window.video_processor._filter_scan_control(
+            main_window.control.copy()
+        )
+        self._base_params = main_window.video_processor._filter_scan_face_params(
+            {
+                face_id: params.copy()
+                for face_id, params in main_window.parameters.items()
+            },
+            getattr(main_window, "target_faces", {}).keys(),
+        )
+        self._control_defaults_snapshot = (
+            main_window.video_processor._filter_scan_control(
+                {
+                    widget_name: widget.default_value
+                    for widget_name, widget in main_window.parameter_widgets.items()
+                    if widget_name in main_window.control
+                }
+            )
+        )
         self._target_faces_snapshot = (
             main_window.video_processor.prepare_issue_scan_target_faces_snapshot(
                 self._scan_ranges,
@@ -227,7 +236,6 @@ class IssueScanWorker(qtc.QThread):
                 issue_found_callback=issue_found_callback,
                 is_cancelled=self._cancel_event.is_set,
                 scan_ranges=self._scan_ranges,
-                target_height=self._target_height,
                 base_control=self._base_control,
                 base_params=self._base_params,
                 target_faces_snapshot=self._target_faces_snapshot,
@@ -247,6 +255,8 @@ class IssueScanWorker(qtc.QThread):
                 bool(result.get("cancelled", False)),
             )
         except Exception as exc:
+            print(f"[ERROR] IssueScanWorker Failed to run: {exc}")
+            traceback.print_exc()
             self.failed.emit(str(exc))
 
 

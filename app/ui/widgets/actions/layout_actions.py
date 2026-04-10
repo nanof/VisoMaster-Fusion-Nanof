@@ -1,5 +1,6 @@
 from typing import TYPE_CHECKING, cast, Union, List, Callable
 from functools import partial
+import re
 
 from PySide6 import QtWidgets, QtCore, QtGui
 
@@ -22,12 +23,18 @@ def add_widgets_to_tab_layout(
     LAYOUT_DATA: LayoutDictTypes,
     layoutWidget: QtWidgets.QVBoxLayout,
     data_type="parameter",
+    section_namespace: str = "default",
 ):
     layout = QtWidgets.QVBoxLayout()
     layout.setContentsMargins(0, 0, 10, 0)
     scroll_area = QtWidgets.QScrollArea()
     scroll_area.setWidgetResizable(True)
+    scroll_area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
     scroll_content = QtWidgets.QWidget()
+    scroll_content.setSizePolicy(
+        QtWidgets.QSizePolicy.Policy.Expanding,
+        QtWidgets.QSizePolicy.Policy.Preferred,
+    )
     scroll_content.setLayout(layout)
     scroll_area.setWidget(scroll_content)
     scroll_area.setFrameShape(QtWidgets.QFrame.NoFrame)
@@ -35,17 +42,51 @@ def add_widgets_to_tab_layout(
     def add_horizontal_layout_to_category(
         category_layout: QtWidgets.QFormLayout, *widgets
     ):
-        horizontal_layout = QtWidgets.QHBoxLayout()
+        row_widget = QtWidgets.QWidget()
+        row_widget.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Maximum,
+        )
+        horizontal_layout = QtWidgets.QHBoxLayout(row_widget)
 
         for widget in widgets:
             horizontal_layout.addWidget(widget)
-        category_layout.addRow(horizontal_layout)
-        return horizontal_layout
+        category_layout.addRow(row_widget)
+        return row_widget, horizontal_layout
+
+    def create_layout_action_button(button_data: dict):
+        action_button = QtWidgets.QPushButton(cast(str, button_data["label"]))
+        action_button.setToolTip(cast(str, button_data.get("help", "")))
+        if "fixed_width" in button_data:
+            action_button.setFixedWidth(cast(int, button_data["fixed_width"]))
+        else:
+            action_button.setMaximumWidth(55)
+        if "exec_function" in button_data:
+            action_button.clicked.connect(
+                partial(cast(Callable, button_data["exec_function"]), main_window)
+            )
+        return action_button
+
+    def build_section_id(category_name: str) -> str:
+        normalized_name = re.sub(r"[^a-z0-9]+", "_", category_name.lower()).strip("_")
+        return f"{section_namespace}:{normalized_name}"
 
     for category, widgets in LAYOUT_DATA.items():
-        group_box = widget_components.FormGroupBox(main_window, title=category)
+        section_id = build_section_id(category)
+        display_title = (
+            "Face Editor"
+            if section_namespace == "face_editor" and not category
+            else category
+        )
+        group_box = widget_components.CollapsibleSection(
+            main_window,
+            title=display_title,
+            section_id=section_id,
+            expanded=main_window.parameter_section_states.get(section_id, True),
+        )
         category_layout = QtWidgets.QFormLayout()
-        group_box.setLayout(category_layout)
+        group_box.content_widget.setLayout(category_layout)
+        main_window.register_parameter_section(section_id, group_box)
 
         for widget_name, widget_data in widgets.items():
             spacing_level = cast(int, widget_data["level"])
@@ -65,7 +106,7 @@ def add_widgets_to_tab_layout(
                     widget_components.ParameterResetDefaultButton(related_widget=widget)
                 )
 
-                horizontal_layout = add_horizontal_layout_to_category(
+                row_widget, horizontal_layout = add_horizontal_layout_to_category(
                     category_layout, widget, label, widget.reset_default_button
                 )
 
@@ -136,7 +177,7 @@ def add_widgets_to_tab_layout(
                 widget.reset_default_button = (
                     widget_components.ParameterResetDefaultButton(related_widget=widget)
                 )
-                horizontal_layout = add_horizontal_layout_to_category(
+                row_widget, horizontal_layout = add_horizontal_layout_to_category(
                     category_layout, label, widget, widget.reset_default_button
                 )
 
@@ -221,7 +262,7 @@ def add_widgets_to_tab_layout(
                 widget.reset_default_button = (
                     widget_components.ParameterResetDefaultButton(related_widget=widget)
                 )
-                horizontal_layout = add_horizontal_layout_to_category(
+                row_widget, horizontal_layout = add_horizontal_layout_to_category(
                     category_layout,
                     label,
                     widget,
@@ -352,20 +393,28 @@ def add_widgets_to_tab_layout(
                 ]
                 if "action_button" in widget_data:
                     _ab_data: dict = cast(dict, widget_data["action_button"])
-                    _action_btn = QtWidgets.QPushButton(cast(str, _ab_data["label"]))
-                    _action_btn.setToolTip(cast(str, _ab_data.get("help", "")))
-                    _action_btn.setMaximumWidth(55)
-                    if "exec_function" in _ab_data:
-                        _action_btn.clicked.connect(
-                            partial(
-                                cast(Callable, _ab_data["exec_function"]), main_window
-                            )
-                        )
+                    _action_btn = create_layout_action_button(_ab_data)
                     _slider_row_widgets.append(_action_btn)
-                horizontal_layout = add_horizontal_layout_to_category(
+                row_widget, horizontal_layout = add_horizontal_layout_to_category(
                     category_layout,
                     *_slider_row_widgets,
                 )
+                if "below_row_button" in widget_data:
+                    _below_ab_data: dict = cast(dict, widget_data["below_row_button"])
+                    _below_action_btn = create_layout_action_button(_below_ab_data)
+                    _below_spacer = QtWidgets.QWidget()
+                    _below_spacer.setSizePolicy(
+                        QtWidgets.QSizePolicy.Policy.Expanding,
+                        QtWidgets.QSizePolicy.Policy.Maximum,
+                    )
+                    _below_row_widget, _below_horizontal_layout = (
+                        add_horizontal_layout_to_category(
+                            category_layout,
+                            _below_action_btn,
+                            _below_spacer,
+                        )
+                    )
+                    widget.below_row_widget = _below_row_widget
 
                 if data_type == "parameter":
                     common_widget_actions.create_default_parameter(
@@ -513,7 +562,7 @@ def add_widgets_to_tab_layout(
                 widget.reset_default_button = (
                     widget_components.ParameterResetDefaultButton(related_widget=widget)
                 )
-                horizontal_layout = add_horizontal_layout_to_category(
+                row_widget, horizontal_layout = add_horizontal_layout_to_category(
                     category_layout, label, widget, widget.reset_default_button
                 )
 
@@ -530,11 +579,14 @@ def add_widgets_to_tab_layout(
                 # widget.returnPressed.connect(partial(on_enter_pressed, widget, widget_name))
 
             horizontal_layout.setContentsMargins(spacing_level * 10, 0, 0, 0)
+            widget.row_widget = row_widget
             main_window.parameter_widgets[widget_name] = widget
 
         category_layout.setVerticalSpacing(2)
         category_layout.setHorizontalSpacing(2)
         layout.addWidget(group_box)
+
+    layout.addStretch(1)
 
     layoutWidget.addWidget(scroll_area)
 
@@ -665,13 +717,13 @@ def set_up_menu_actions(main_window: "MainWindow"):
 
     if not hasattr(main_window, "actionEdit_CopyParameters"):
         main_window.actionEdit_CopyParameters = QtGui.QAction(
-            "Copy Parameters", main_window
+            "Copy Parameters from Selected Face", main_window
         )
         main_window.actionEdit_PasteParameters = QtGui.QAction(
-            "Paste Parameters", main_window
+            "Paste Parameters to Selected Face", main_window
         )
         main_window.actionEdit_ResetParameters = QtGui.QAction(
-            "Reset Parameters", main_window
+            "Reset Selected Face Parameters", main_window
         )
         main_window.menuEdit.clear()
         main_window.menuEdit.addAction(main_window.actionEdit_CopyParameters)
@@ -723,6 +775,15 @@ def set_up_menu_actions(main_window: "MainWindow"):
     )
     main_window.actionLoad_Source_Images_Folder.triggered.connect(
         partial(list_view_actions.select_input_face_images, main_window, "folder")
+    )
+    main_window.actionOpen_Target_Media_Folder.triggered.connect(
+        partial(list_view_actions.open_target_media_folder, main_window)
+    )
+    main_window.actionOpen_Input_Faces_Folder.triggered.connect(
+        partial(list_view_actions.open_input_faces_folder, main_window)
+    )
+    main_window.actionOpen_Output_Folder.triggered.connect(
+        partial(list_view_actions.open_output_media_folder, main_window)
     )
     main_window.actionLoad_Embeddings.triggered.connect(
         partial(save_load_actions.open_embeddings_from_file, main_window)
@@ -801,6 +862,12 @@ def set_all_parameters_and_control_widgets_enabled(
     ):
         if hasattr(main_window, attr_name):
             getattr(main_window, attr_name).setDisabled(disabled)
+
+    # Compare/mask toolbar toggles
+    if hasattr(main_window, "faceCompareToggleButton"):
+        main_window.faceCompareToggleButton.setDisabled(disabled)
+    if hasattr(main_window, "faceMaskToggleButton"):
+        main_window.faceMaskToggleButton.setDisabled(disabled)
 
     # List items
     for _, embed_button in main_window.merged_embeddings.items():

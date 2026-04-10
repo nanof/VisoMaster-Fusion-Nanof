@@ -6,6 +6,20 @@ if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
 
 
+def _get_target_video_filter_checked(
+    main_window: "MainWindow", action_name: str, checkbox_name: str, default: bool
+) -> bool:
+    checkbox = getattr(main_window, checkbox_name, None)
+    if checkbox is not None:
+        return checkbox.isChecked()
+
+    action = getattr(main_window, action_name, None)
+    if action is not None:
+        return action.isChecked()
+
+    return default
+
+
 def filter_target_videos(main_window: "MainWindow", *args):
     main_window.target_videos_filter_worker.stop_thread()
 
@@ -13,11 +27,26 @@ def filter_target_videos(main_window: "MainWindow", *args):
     search_text = main_window.targetVideosSearchBox.text().lower()
 
     include_file_types = []
-    if main_window.filterImagesCheckBox.isChecked():
+    if _get_target_video_filter_checked(
+        main_window,
+        "targetVideosFilterImagesAction",
+        "targetVideosFilterImagesCheckBox",
+        True,
+    ):
         include_file_types.append("image")
-    if main_window.filterVideosCheckBox.isChecked():
+    if _get_target_video_filter_checked(
+        main_window,
+        "targetVideosFilterVideosAction",
+        "targetVideosFilterVideosCheckBox",
+        True,
+    ):
         include_file_types.append("video")
-    if main_window.filterWebcamsCheckBox.isChecked():
+    if _get_target_video_filter_checked(
+        main_window,
+        "targetVideosFilterWebcamsAction",
+        "targetVideosFilterWebcamsCheckBox",
+        False,
+    ):
         include_file_types.append("webcam")
     if main_window.filterScreenCaptureCheckBox.isChecked():
         include_file_types.append("screen")

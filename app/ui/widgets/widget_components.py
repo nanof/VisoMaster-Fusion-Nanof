@@ -483,7 +483,7 @@ class TargetMediaCardButton(CardButton):
     def create_context_menu(self):
         self.popMenu = QtWidgets.QMenu(self)
         if self.file_type == "video" and os.path.isfile(self.media_path):
-            convert_action = QtGui.QAction("Convert to H.264…", self)
+            convert_action = QtGui.QAction("Convert to H.264ÔÇª", self)
             convert_action.triggered.connect(
                 lambda: transcode_actions.convert_target_video_to_h264(
                     self.main_window, self.media_path
@@ -735,13 +735,13 @@ class TargetFaceCardButton(CardButton):
 
         # Itera su `assigned_input_faces` e raccogli gli embedding e i modelli
         for _, embedding_store in self.assigned_input_faces.items():
-            if embedding_store:  # Verifica se l'embedding_store non è vuoto
+            if embedding_store:  # Verifica se l'embedding_store non ├¿ vuoto
                 all_embedding_swap_models.update(embedding_store.keys())
                 all_input_embeddings.append(embedding_store)  # Aggiungi l'intero store
 
         # Itera su `assigned_merged_embeddings` e raccogli gli embedding e i modelli
         for _, embedding_store in self.assigned_merged_embeddings.items():
-            if embedding_store:  # Verifica se l'embedding_store non è vuoto
+            if embedding_store:  # Verifica se l'embedding_store non ├¿ vuoto
                 all_embedding_swap_models.update(embedding_store.keys())
                 all_input_embeddings.append(embedding_store)  # Aggiungi l'intero store
 
@@ -2003,7 +2003,7 @@ class ParameterSlider(QtWidgets.QSlider, ParametersWidget):
         new_position = QtWidgets.QStyle.sliderValueFromPosition(
             self.minimum(), self.maximum(), x, self.width()
         )
-        # Applica lo step size, arrotondando il valore allo step più vicino
+        # Applica lo step size, arrotondando il valore allo step pi├╣ vicino
         return round(new_position / self.step_size) * self.step_size
 
 
@@ -2173,7 +2173,7 @@ class ParameterDecimalSlider(QtWidgets.QSlider, ParametersWidget):
         # Converti la nuova posizione nello spazio decimale
         new_value = new_position / self.scale_factor
 
-        # Applica lo step size, arrotondando il valore allo step più vicino
+        # Applica lo step size, arrotondando il valore allo step pi├╣ vicino
         new_value = round(new_value / self.step_size) * self.step_size
 
         # Imposta il nuovo valore con la precisione corretta
@@ -2377,3 +2377,201 @@ class FormGroupBox(QtWidgets.QGroupBox):
             QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Preferred
         )
         self.setFlat(True)
+class SectionHeaderButton(QtWidgets.QPushButton):
+    def __init__(self, title: str, expanded: bool = True, parent=None):
+        super().__init__(title, parent)
+        self._indicator_angle: float = 90.0 if expanded else 0.0
+        self._fixed_height = 24
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+        self.setFlat(True)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.setFixedHeight(self._fixed_height)
+        self.setText("")
+        self.setStyleSheet("QPushButton {border: none;background: transparent;}")
+        self._title = title
+
+    def _get_indicator_angle(self) -> float:
+        return self._indicator_angle
+
+    def _set_indicator_angle(self, angle: float):
+        self._indicator_angle = angle
+        self.update()
+
+    indicator_angle = QtCore.Property(
+        float,
+        fget=_get_indicator_angle,
+        fset=_set_indicator_angle,
+    )
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+
+        background_rect = self.rect().adjusted(0, 0, -1, -1)
+        background_color = self.palette().buttonText().color()
+        background_color.setAlpha(20 if self.underMouse() else 10)
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(background_color)
+        painter.drawRoundedRect(background_rect, 4, 4)
+
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(self.palette().buttonText())
+
+        triangle = QtGui.QPolygonF(
+            [
+                QtCore.QPointF(-3.5, -4.5),
+                QtCore.QPointF(-3.5, 4.5),
+                QtCore.QPointF(4.5, 0),
+            ]
+        )
+        center = QtCore.QPointF(11, self.height() / 2)
+        painter.translate(center)
+        painter.rotate(self._indicator_angle)
+        painter.drawPolygon(triangle)
+        painter.resetTransform()
+
+        text_rect = self.rect().adjusted(24, 0, -8, 0)
+        painter.setPen(self.palette().buttonText().color())
+        font = painter.font()
+        font.setWeight(QtGui.QFont.Weight.Bold)
+        painter.setFont(font)
+        painter.drawText(
+            text_rect,
+            QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft,
+            self._title,
+        )
+        painter.end()
+
+
+class CollapsibleSection(QtWidgets.QWidget):
+    _expanded_layout_spacing = 2
+    _collapsed_layout_spacing = 0
+    _expanded_bottom_margin = 2
+    _collapsed_bottom_margin = 2
+
+    def __init__(
+        self,
+        main_window: "MainWindow",
+        title: str,
+        section_id: str,
+        expanded: bool = True,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.main_window = main_window
+        self.section_id = section_id
+        self._expanded = expanded
+
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Maximum,
+        )
+
+        self.header_button = SectionHeaderButton(title, expanded=expanded, parent=self)
+        self.header_button.clicked.connect(
+            lambda _checked=False: self.toggle_expanded()
+        )
+
+        self.content_widget = QtWidgets.QWidget(self)
+        self.content_widget.setVisible(expanded)
+        self.content_widget.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Maximum,
+        )
+
+        self.indicator_animation = QtCore.QPropertyAnimation(
+            self.header_button, b"indicator_angle", self
+        )
+        self.indicator_animation.setDuration(160)
+        self.indicator_animation.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, self._expanded_bottom_margin)
+        layout.setSpacing(self._expanded_layout_spacing)
+        layout.addWidget(self.header_button)
+        layout.addWidget(self.content_widget)
+        self._apply_layout_mode(expanded)
+
+    def content_layout(self) -> QtWidgets.QVBoxLayout:
+        existing_layout = self.content_widget.layout()
+        if existing_layout is None:
+            content_layout = QtWidgets.QVBoxLayout(self.content_widget)
+            content_layout.setContentsMargins(0, 0, 0, 0)
+            content_layout.setSpacing(0)
+            return content_layout
+        return existing_layout
+
+    def is_expanded(self) -> bool:
+        return self._expanded
+
+    def _collapsed_height(self) -> int:
+        margins = self.layout().contentsMargins()
+        return margins.top() + self.header_button.height() + margins.bottom()
+
+    def _collapsed_size(self) -> QtCore.QSize:
+        return QtCore.QSize(0, self._collapsed_height())
+
+    def _apply_layout_mode(self, expanded: bool) -> None:
+        layout = self.layout()
+        if expanded:
+            layout.setContentsMargins(0, 0, 0, self._expanded_bottom_margin)
+            layout.setSpacing(self._expanded_layout_spacing)
+            self.content_widget.setVisible(True)
+            self.content_widget.setMinimumHeight(0)
+            self.content_widget.setMaximumHeight(16777215)
+        else:
+            layout.setContentsMargins(0, 0, 0, self._collapsed_bottom_margin)
+            layout.setSpacing(self._collapsed_layout_spacing)
+            self.content_widget.setVisible(False)
+            self.content_widget.setMinimumHeight(0)
+            self.content_widget.setMaximumHeight(0)
+        self.content_widget.updateGeometry()
+        layout.invalidate()
+        layout.activate()
+
+    def minimumSizeHint(self) -> QtCore.QSize:
+        if not self._expanded:
+            return self._collapsed_size()
+        return super().minimumSizeHint()
+
+    def sizeHint(self) -> QtCore.QSize:
+        if not self._expanded:
+            return self._collapsed_size()
+        return super().sizeHint()
+
+    def set_expanded(
+        self,
+        expanded: bool,
+        animate: bool = True,
+        update_state: bool = True,
+    ):
+        expanded = bool(expanded)
+        previous_state = self._expanded
+        self._expanded = expanded
+
+        self._apply_layout_mode(expanded)
+        self.adjustSize()
+        self.updateGeometry()
+        parent_layout = self.parentWidget().layout() if self.parentWidget() else None
+        if parent_layout is not None:
+            parent_layout.invalidate()
+            parent_layout.activate()
+
+        start_angle = 90 if previous_state else 0
+        end_angle = 90 if expanded else 0
+        if animate:
+            self.indicator_animation.stop()
+            self.indicator_animation.setStartValue(start_angle)
+            self.indicator_animation.setEndValue(end_angle)
+            self.indicator_animation.start()
+        else:
+            self.header_button.indicator_angle = end_angle
+
+        if update_state:
+            self.main_window.parameter_section_states[self.section_id] = expanded
+
+    def toggle_expanded(self):
+        self.set_expanded(not self._expanded)

@@ -199,3 +199,19 @@ def test_parent_toggle_references_exist():
             assert parent in all_keys, (
                 f"{cat}/{name}.parentToggle='{parent}' does not exist as a widget key"
             )
+
+
+def test_theatre_mode_uses_fullscreen_toggle_exists_in_video_playback_settings():
+    entry = SETTINGS_LAYOUT_DATA["Video Playback Settings"][
+        "TheatreModeUsesFullscreenToggle"
+    ]
+    assert entry["label"] == "Theatre Mode Uses Fullscreen"
+    assert entry["default"] is False
+
+
+def test_confirm_before_stopping_recording_toggle_exists_in_video_recording_settings():
+    entry = SETTINGS_LAYOUT_DATA["Video Recording Settings"][
+        "ConfirmBeforeStoppingRecordingToggle"
+    ]
+    assert entry["label"] == "Confirm Before Stopping Recording"
+    assert entry["default"] is True

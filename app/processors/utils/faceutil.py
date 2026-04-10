@@ -3025,8 +3025,6 @@ def histogram_matching_DFL_test(source_image, target_image, diffslider):
 def histogram_matching_DFL_Orig(source_image, target_image, mask, diffslider):
     """
     OPTIMIZED Statistical Color Transfer (Reinhard) using Mask.
-    CRITICAL FIX: Calculates Mean and Std ONLY on valid pixels (mask > 0).
-    This prevents black background pixels from skewing the color statistics.
     """
 
     # 1. Prepare Data
@@ -3036,10 +3034,14 @@ def histogram_matching_DFL_Orig(source_image, target_image, mask, diffslider):
     # Ensure mask is binary and right shape
     if mask.dim() == 3 and mask.shape[0] == 1:
         mask = mask.squeeze(0)  # [H, W]
-    valid_mask = mask > 0.05  # Threshold to exclude soft edges/noise
 
-    # If mask is empty, return original
-    if valid_mask.sum() == 0:
+    # Exclude black background pixels from statistical calculations.
+    s_valid = s_img.sum(dim=0) > 0.01
+    t_valid = t_img.sum(dim=0) > 0.01
+    valid_mask = (mask > 0.05) & s_valid & t_valid
+
+    # If mask is empty after filtering, return original
+    if valid_mask.sum() < 100:
         return target_image
 
     # 2. Convert to LAB
@@ -3047,24 +3049,20 @@ def histogram_matching_DFL_Orig(source_image, target_image, mask, diffslider):
     t_lab = rgb_to_lab(t_img, normalize=False)
 
     # 3. Calculate Stats on VALID PIXELS ONLY
-    # We flatten the spatial dimensions and select only masked pixels
     # Shape becomes [3, N_Valid_Pixels]
     s_masked = s_lab[:, valid_mask]
     t_masked = t_lab[:, valid_mask]
 
-    # Calculate Mean and Std along the pixel dimension (dim=1)
-    # Reshape to [3, 1, 1] for broadcasting back to image
+    # Calculate Mean and Std
     s_mean = s_masked.mean(dim=1).view(3, 1, 1)
     s_std = s_masked.std(dim=1).view(3, 1, 1)
 
     t_mean = t_masked.mean(dim=1).view(3, 1, 1)
     t_std = t_masked.std(dim=1).view(3, 1, 1)
 
-    t_std += 1e-6  # Safety
+    t_std += 1e-6  # Safety against division by zero
 
     # 4. Apply Transfer globally
-    # Ideally we apply it only to masked area, but blending handles the rest.
-    # Applying globally ensures smooth transition at edges.
     t_lab_trans = (t_lab - t_mean) * (s_std / t_std) + s_mean
 
     # 5. Clamp LAB values
@@ -3091,24 +3089,17 @@ def apply_adain_color_transfer(
     calc_mask: torch.Tensor = None,
 ) -> torch.Tensor:
     """
-    Applies statistical color transfer (AdaIN) from the target to the source,
-    using a restricted core mask for calculating statistics, and the full soft mask
-    for the final blending. Prevents color banding, edge pollution, and teeth coloration.
-
-    Args:
-        source: Tensor [C, H, W] in Float (0.0 - 255.0).
-        target: Tensor [C, H, W] in Float (0.0 - 255.0).
-        mask: Tensor [1, H, W] boolean or float (Used for BLENDING).
-        blend_amount: Float 0.0 to 100.0.
-        calc_mask: Optional Tensor [1, H, W]. If None, auto-generates an eroded core mask.
+    Applies statistical color transfer (AdaIN) from the target to the source.
+    Now operates in LAB Color Space instead of RGB.
+    RGB matching crushes contrast. LAB safely separates Lightness (L) from Color (A/B).
     """
     import torch.nn.functional as F
 
     eps = 1e-6
 
-    # Ensure tensors are float
-    src_f = source.float()
-    tgt_f = target.float()
+    # Convert to float and normalize to [0, 1] for LAB conversion
+    src_norm = source.float() / 255.0
+    tgt_norm = target.float() / 255.0
 
     # Format blending mask
     if mask.dtype == torch.bool:
@@ -3118,56 +3109,72 @@ def apply_adain_color_transfer(
 
     # 1. PREPARE THE CALCULATION MASK (Statistics Core)
     if calc_mask is None:
-        # Auto-generate a safe core mask by heavily eroding the soft mask.
-        # Negative max_pool2d is a highly optimized mathematical erosion trick.
-        # Kernel 31 erodes ~15 pixels inward, completely removing blurry edges.
+        # Auto-generate a safe core mask by heavily eroding the soft mask
         core_mask = -F.max_pool2d(
             -mask.unsqueeze(0), kernel_size=31, stride=1, padding=15
         ).squeeze(0)
 
-        # Binarize to ensure no semi-transparent background pixels corrupt the math
         calc_mask_ready = (core_mask > 0.8).float()
 
-        # Failsafe: If the face is so small that erosion destroyed the mask, revert to original
+        # Failsafe if erosion destroyed the mask
         if torch.sum(calc_mask_ready) < 100:
             calc_mask_ready = mask
     else:
-        if calc_mask.dtype == torch.bool:
-            calc_mask = calc_mask.float()
-        if calc_mask.dim() == 2:
-            calc_mask = calc_mask.unsqueeze(0)
-        calc_mask_ready = calc_mask
+        calc_mask_ready = (
+            calc_mask.float() if calc_mask.dtype == torch.bool else calc_mask
+        )
+        if calc_mask_ready.dim() == 2:
+            calc_mask_ready = calc_mask_ready.unsqueeze(0)
+
+    # Filter out black padding pixels from the calculation
+    non_black = (src_norm.sum(dim=0, keepdim=True) > 0.01) & (
+        tgt_norm.sum(dim=0, keepdim=True) > 0.01
+    )
+    calc_mask_ready = calc_mask_ready * non_black.float()
 
     calc_mask_sum = torch.sum(calc_mask_ready, dim=(1, 2), keepdim=True) + eps
 
-    # 2. Compute Means (Color/Brightness) strictly on the Core Mask
+    # 2. CONVERT TO LAB SPACE
+    src_lab = rgb_to_lab(src_norm, normalize=False)
+    tgt_lab = rgb_to_lab(tgt_norm, normalize=False)
+
+    # 3. Compute Means and Variances on LAB channels strictly inside the core mask
     src_mean = (
-        torch.sum(src_f * calc_mask_ready, dim=(1, 2), keepdim=True) / calc_mask_sum
+        torch.sum(src_lab * calc_mask_ready, dim=(1, 2), keepdim=True) / calc_mask_sum
     )
     tgt_mean = (
-        torch.sum(tgt_f * calc_mask_ready, dim=(1, 2), keepdim=True) / calc_mask_sum
+        torch.sum(tgt_lab * calc_mask_ready, dim=(1, 2), keepdim=True) / calc_mask_sum
     )
 
-    # 3. Compute Variances (Contrast) strictly on the Core Mask
     src_var = (
-        torch.sum(calc_mask_ready * (src_f - src_mean) ** 2, dim=(1, 2), keepdim=True)
+        torch.sum(calc_mask_ready * (src_lab - src_mean) ** 2, dim=(1, 2), keepdim=True)
         / calc_mask_sum
     )
     tgt_var = (
-        torch.sum(calc_mask_ready * (tgt_f - tgt_mean) ** 2, dim=(1, 2), keepdim=True)
+        torch.sum(calc_mask_ready * (tgt_lab - tgt_mean) ** 2, dim=(1, 2), keepdim=True)
         / calc_mask_sum
     )
 
     src_std = torch.sqrt(src_var + eps)
     tgt_std = torch.sqrt(tgt_var + eps)
 
-    # 4. Apply AdaIN transformation to the ENTIRE source image
-    src_normalized = (src_f - src_mean) / src_std
-    src_matched = (src_normalized * tgt_std) + tgt_mean
+    # 4. Apply AdaIN transformation globally in LAB space
+    src_matched_lab = ((src_lab - src_mean) / src_std) * tgt_std + tgt_mean
 
-    # 5. Blend based on user amount and the SOFT APPLICATION MASK
+    # Clamp LAB values to valid biological/visual ranges to prevent artifacts
+    src_matched_lab[0] = torch.clamp(src_matched_lab[0], 0, 100)  # L (Lightness)
+    src_matched_lab[1] = torch.clamp(src_matched_lab[1], -127, 127)  # A (Red/Green)
+    src_matched_lab[2] = torch.clamp(src_matched_lab[2], -127, 127)  # B (Blue/Yellow)
+
+    # 5. Convert back to RGB and scale back to [0, 255]
+    src_matched_rgb = lab_to_rgb(src_matched_lab, normalize=False) * 255.0
+    src_matched_rgb = torch.clamp(src_matched_rgb, 0.0, 255.0)
+
+    # 6. Blend based on user amount and the SOFT APPLICATION MASK
     alpha = blend_amount / 100.0
-    result = (src_matched * mask * alpha) + (src_f * (1.0 - (mask * alpha)))
+    result = (src_matched_rgb * mask * alpha) + (
+        source.float() * (1.0 - (mask * alpha))
+    )
 
     return torch.clamp(result, 0.0, 255.0)
 

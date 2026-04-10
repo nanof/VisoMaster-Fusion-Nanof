@@ -101,6 +101,7 @@ def video_actions_env():
             common_widget_actions=common_widget_actions,
             view_fullscreen=video_control_actions.view_fullscreen,
             toggle_theatre_mode=video_control_actions.toggle_theatre_mode,
+            record_video=video_control_actions.record_video,
             disable_compare_preview_modes_for_recording=(
                 video_control_actions._disable_compare_preview_modes_for_recording
             ),
@@ -205,6 +206,7 @@ class _StatefulFullscreenWindow:
         state: str = "normal",
         geometry: _FakeGeometry | None = None,
         is_theatre_mode: bool = False,
+        theatre_forced_fullscreen: bool = False,
     ):
         self._state = state
         self._geometry = geometry or _FakeGeometry()
@@ -216,6 +218,7 @@ class _StatefulFullscreenWindow:
         self._was_maximized = state == "maximized"
         self._was_custom_fullscreen = False
         self._was_normal_geometry = self._normal_geometry
+        self._theatre_forced_fullscreen = theatre_forced_fullscreen
         self._sync_calls: list[bool] = []
         self._theatre_snapshot_sync_calls = 0
         self.showFullScreen = MagicMock(side_effect=self._show_fullscreen)
@@ -260,6 +263,8 @@ class _StatefulFullscreenWindow:
             return
 
         if self.isFullScreen():
+            if self._theatre_forced_fullscreen:
+                return
             self._was_custom_fullscreen = True
             self._was_maximized = False
             self._was_normal_geometry = (
@@ -453,12 +458,32 @@ class _FakeGraphicsViewFrame:
         return None
 
 
-def _make_theatre_entry_window(*, is_fullscreen: bool, is_maximized: bool = False):
+def _make_theatre_entry_window(
+    *,
+    is_fullscreen: bool,
+    is_maximized: bool = False,
+    theatre_uses_fullscreen: bool = False,
+):
     menu_bar = _FakeMenuBar()
+    state = "fullscreen" if is_fullscreen else "maximized" if is_maximized else "normal"
+
+    def _show_fullscreen():
+        nonlocal state
+        state = "fullscreen"
+
+    def _show_normal():
+        nonlocal state
+        state = "normal"
+
+    def _show_maximized():
+        nonlocal state
+        state = "maximized"
+
     return SimpleNamespace(
         is_theatre_mode=False,
         is_full_screen=False,
         _saved_window_state=None,
+        _theatre_forced_fullscreen=False,
         input_Target_DockWidget=_FakeWidget(),
         input_Faces_DockWidget=_FakeWidget(),
         jobManagerDockWidget=_FakeWidget(),
@@ -471,12 +496,16 @@ def _make_theatre_entry_window(*, is_fullscreen: bool, is_maximized: bool = Fals
         panelVisibilityCheckBoxLayout=_FakeLayout(),
         graphicsViewFrame=_FakeGraphicsViewFrame(),
         saveState=lambda: "window-state",
-        isMaximized=lambda: is_maximized,
-        isFullScreen=lambda: is_fullscreen,
+        isMaximized=lambda: state == "maximized",
+        isFullScreen=lambda: state == "fullscreen",
         normalGeometry=lambda: "normal-geometry",
         geometry=lambda: "live-geometry",
+        control={"TheatreModeUsesFullscreenToggle": theatre_uses_fullscreen},
         setWindowState=MagicMock(),
-        showFullScreen=MagicMock(),
+        showFullScreen=MagicMock(side_effect=_show_fullscreen),
+        showNormal=MagicMock(side_effect=_show_normal),
+        showMaximized=MagicMock(side_effect=_show_maximized),
+        setGeometry=MagicMock(),
     )
 
 
@@ -535,6 +564,128 @@ def test_toggle_theatre_mode_keeps_maximized_window_when_base_mode_is_maximized(
     assert main_window.is_full_screen is False
 
 
+def test_toggle_theatre_mode_enters_fullscreen_from_windowed_state_when_enabled(
+    monkeypatch, video_actions_env
+):
+    monkeypatch.setattr(
+        video_actions_env.module, "_set_media_controls_visible", lambda *_args: None
+    )
+    video_actions_env.module.layout_actions.fit_image_to_view_onchange.reset_mock()
+    main_window = _make_theatre_entry_window(
+        is_fullscreen=False,
+        is_maximized=False,
+        theatre_uses_fullscreen=True,
+    )
+
+    video_actions_env.toggle_theatre_mode(main_window)
+
+    assert main_window._was_custom_fullscreen is False
+    assert main_window._theatre_forced_fullscreen is True
+    assert main_window._was_maximized is False
+    assert main_window._was_normal_geometry == "live-geometry"
+    main_window.setWindowState.assert_called_once_with(
+        video_actions_env.module.QtCore.Qt.WindowState.WindowFullScreen
+    )
+    main_window.showFullScreen.assert_called_once()
+    assert main_window.is_full_screen is True
+
+
+def test_toggle_theatre_mode_enters_fullscreen_from_maximized_state_when_enabled(
+    monkeypatch, video_actions_env
+):
+    monkeypatch.setattr(
+        video_actions_env.module, "_set_media_controls_visible", lambda *_args: None
+    )
+    video_actions_env.module.layout_actions.fit_image_to_view_onchange.reset_mock()
+    main_window = _make_theatre_entry_window(
+        is_fullscreen=False,
+        is_maximized=True,
+        theatre_uses_fullscreen=True,
+    )
+
+    video_actions_env.toggle_theatre_mode(main_window)
+
+    assert main_window._was_custom_fullscreen is False
+    assert main_window._theatre_forced_fullscreen is True
+    assert main_window._was_maximized is True
+    assert main_window._was_normal_geometry == "normal-geometry"
+    main_window.setWindowState.assert_called_once_with(
+        video_actions_env.module.QtCore.Qt.WindowState.WindowFullScreen
+    )
+    main_window.showFullScreen.assert_called_once()
+    assert main_window.is_full_screen is True
+
+
+def test_toggle_theatre_mode_keeps_existing_fullscreen_when_setting_enabled(
+    monkeypatch, video_actions_env
+):
+    monkeypatch.setattr(
+        video_actions_env.module, "_set_media_controls_visible", lambda *_args: None
+    )
+    video_actions_env.module.layout_actions.fit_image_to_view_onchange.reset_mock()
+    main_window = _make_theatre_entry_window(
+        is_fullscreen=True,
+        theatre_uses_fullscreen=True,
+    )
+
+    video_actions_env.toggle_theatre_mode(main_window)
+
+    assert main_window._was_custom_fullscreen is True
+    assert main_window._theatre_forced_fullscreen is False
+    assert main_window._was_normal_geometry == "normal-geometry"
+    main_window.setWindowState.assert_called_once_with(
+        video_actions_env.module.QtCore.Qt.WindowState.WindowFullScreen
+    )
+    main_window.showFullScreen.assert_called_once()
+    assert main_window.is_full_screen is True
+
+
+def test_toggle_theatre_mode_seeds_fullscreen_restore_geometry_when_forced(
+    monkeypatch, video_actions_env
+):
+    monkeypatch.setattr(
+        video_actions_env.module, "_set_media_controls_visible", lambda *_args: None
+    )
+    video_actions_env.module.layout_actions.fit_image_to_view_onchange.reset_mock()
+    main_window = _make_theatre_entry_window(
+        is_fullscreen=False,
+        is_maximized=False,
+        theatre_uses_fullscreen=True,
+    )
+
+    video_actions_env.toggle_theatre_mode(main_window)
+    video_actions_env.view_fullscreen(main_window)
+
+    assert main_window.is_theatre_mode is True
+    assert main_window._fullscreen_restore_was_maximized is False
+    assert main_window._fullscreen_restore_geometry is None
+    main_window.showNormal.assert_called_once()
+    assert main_window.setGeometry.call_args_list[-1].args == ("live-geometry",)
+
+
+def test_toggle_theatre_mode_seeds_fullscreen_restore_maximized_when_forced(
+    monkeypatch, video_actions_env
+):
+    monkeypatch.setattr(
+        video_actions_env.module, "_set_media_controls_visible", lambda *_args: None
+    )
+    video_actions_env.module.layout_actions.fit_image_to_view_onchange.reset_mock()
+    main_window = _make_theatre_entry_window(
+        is_fullscreen=False,
+        is_maximized=True,
+        theatre_uses_fullscreen=True,
+    )
+
+    video_actions_env.toggle_theatre_mode(main_window)
+    video_actions_env.view_fullscreen(main_window)
+
+    assert main_window.is_theatre_mode is True
+    assert main_window._fullscreen_restore_was_maximized is False
+    assert main_window._fullscreen_restore_geometry is None
+    main_window.showMaximized.assert_called_once()
+    main_window.showNormal.assert_not_called()
+
+
 def test_toggle_theatre_mode_restores_saved_normal_geometry_on_exit(
     monkeypatch, video_actions_env
 ):
@@ -554,6 +705,7 @@ def test_toggle_theatre_mode_restores_saved_normal_geometry_on_exit(
     main_window = SimpleNamespace(
         is_theatre_mode=True,
         _was_custom_fullscreen=False,
+        _theatre_forced_fullscreen=True,
         _was_maximized=False,
         _was_normal_geometry=saved_geometry,
         _saved_window_state="window-state",
@@ -595,6 +747,7 @@ def test_toggle_theatre_mode_restores_saved_normal_geometry_on_exit(
         (False,),
         (True,),
     ]
+    assert main_window._theatre_forced_fullscreen is False
     assert main_window.is_full_screen is False
 
 
@@ -610,6 +763,7 @@ def test_toggle_theatre_mode_restores_maximized_state_on_exit(
     main_window = SimpleNamespace(
         is_theatre_mode=True,
         _was_custom_fullscreen=False,
+        _theatre_forced_fullscreen=True,
         _was_maximized=True,
         _was_normal_geometry="normal-geometry",
         _saved_window_state="window-state",
@@ -652,7 +806,66 @@ def test_toggle_theatre_mode_restores_maximized_state_on_exit(
         (False,),
         (True,),
     ]
+    assert main_window._theatre_forced_fullscreen is False
     assert main_window.is_full_screen is False
+
+
+def test_toggle_theatre_mode_restores_existing_fullscreen_state_on_exit(
+    monkeypatch, video_actions_env
+):
+    monkeypatch.setattr(
+        video_actions_env.module, "_set_media_controls_visible", lambda *_args: None
+    )
+    video_actions_env.module.layout_actions.fit_image_to_view_onchange.reset_mock()
+
+    menu_bar = _FakeMenuBar()
+    main_window = SimpleNamespace(
+        is_theatre_mode=True,
+        _was_custom_fullscreen=True,
+        _theatre_forced_fullscreen=False,
+        _was_maximized=False,
+        _was_normal_geometry="normal-geometry",
+        _saved_window_state="window-state",
+        _saved_dock_states={},
+        _saved_layout_props={},
+        _main_v_spacers=[],
+        _top_bar_spacers=[],
+        _top_bar_widgets_state={},
+        input_Target_DockWidget=_FakeWidget(False),
+        input_Faces_DockWidget=_FakeWidget(False),
+        jobManagerDockWidget=_FakeWidget(False),
+        controlOptionsDockWidget=_FakeWidget(False),
+        facesPanelGroupBox=_FakeWidget(False),
+        menuBar=lambda: menu_bar,
+        horizontalLayout=_FakeLayout(),
+        verticalLayout=_FakeLayout(),
+        verticalLayoutMediaControls=_FakeLayout(),
+        panelVisibilityCheckBoxLayout=_FakeLayout(),
+        graphicsViewFrame=_FakeGraphicsViewFrame(),
+        isFullScreen=lambda: True,
+        isMaximized=lambda: False,
+        normalGeometry=lambda: "normal-geometry",
+        geometry=lambda: "live-geometry",
+        showFullScreen=MagicMock(),
+        showMaximized=MagicMock(),
+        showNormal=MagicMock(),
+        setWindowState=MagicMock(),
+        setGeometry=MagicMock(),
+        restoreState=MagicMock(),
+        setUpdatesEnabled=MagicMock(),
+    )
+
+    video_actions_env.toggle_theatre_mode(main_window)
+
+    main_window.setWindowState.assert_called_once_with(
+        video_actions_env.module.QtCore.Qt.WindowState.WindowFullScreen
+    )
+    main_window.showFullScreen.assert_not_called()
+    main_window.showMaximized.assert_not_called()
+    main_window.showNormal.assert_not_called()
+    main_window.restoreState.assert_called_once_with("window-state")
+    assert main_window._theatre_forced_fullscreen is False
+    assert main_window.is_full_screen is True
 
 
 def test_disable_compare_preview_modes_for_recording_disables_both_and_toasts(
@@ -687,3 +900,176 @@ def test_disable_compare_preview_modes_for_recording_is_noop_when_already_off(
 
     assert calls == []
     video_actions_env.common_widget_actions.create_and_show_toast_message.assert_not_called()
+
+
+class _FakeRecordButton:
+    def __init__(self):
+        self.checked_states = []
+        self.block_calls = []
+
+    def blockSignals(self, value):
+        self.block_calls.append(value)
+
+    def setChecked(self, value):
+        self.checked_states.append(value)
+
+    def setIcon(self, *_args):
+        return None
+
+    def setToolTip(self, *_args):
+        return None
+
+
+class _FakePromptBox:
+    Warning = "warning"
+    Yes = 1
+    No = 2
+    next_result = Yes
+    instances: list["_FakePromptBox"] = []
+
+    def __init__(self, _parent):
+        self.window_title = None
+        self.text = None
+        self.informative_text = None
+        self.standard_buttons = None
+        self.default_button = None
+        _FakePromptBox.instances.append(self)
+
+    def setIcon(self, _icon):
+        return None
+
+    def setWindowTitle(self, value):
+        self.window_title = value
+
+    def setText(self, value):
+        self.text = value
+
+    def setInformativeText(self, value):
+        self.informative_text = value
+
+    def setStandardButtons(self, value):
+        self.standard_buttons = value
+
+    def setDefaultButton(self, value):
+        self.default_button = value
+
+    def exec(self):
+        return _FakePromptBox.next_result
+
+
+def _make_record_stop_window(
+    *,
+    confirm_before_stop: bool = True,
+    recording: bool = False,
+    is_processing_segments: bool = False,
+    job_manager_initiated_record: bool = False,
+):
+    return SimpleNamespace(
+        control={"ConfirmBeforeStoppingRecordingToggle": confirm_before_stop},
+        video_processor=SimpleNamespace(
+            file_type="video",
+            recording=recording,
+            is_processing_segments=is_processing_segments,
+            finalize_segment_concatenation=MagicMock(),
+            _finalize_default_style_recording=MagicMock(),
+        ),
+        buttonMediaRecord=_FakeRecordButton(),
+        buttonMediaPlay=SimpleNamespace(setEnabled=MagicMock()),
+        job_manager_initiated_record=job_manager_initiated_record,
+    )
+
+
+def test_record_video_prompts_before_manual_stop_when_setting_enabled(
+    monkeypatch, video_actions_env
+):
+    _FakePromptBox.instances = []
+    _FakePromptBox.next_result = _FakePromptBox.Yes
+    monkeypatch.setattr(
+        video_actions_env.module.QtWidgets, "QMessageBox", _FakePromptBox
+    )
+    main_window = _make_record_stop_window(recording=True, confirm_before_stop=True)
+
+    video_actions_env.record_video(main_window, checked=False)
+
+    assert len(_FakePromptBox.instances) == 1
+    prompt = _FakePromptBox.instances[0]
+    assert prompt.window_title == "Confirm stop"
+    assert prompt.text == "Stop recording?"
+    assert (
+        prompt.informative_text
+        == "Recording will stop immediately. Output may be incomplete."
+    )
+    main_window.video_processor._finalize_default_style_recording.assert_called_once()
+
+
+def test_record_video_skips_prompt_before_manual_stop_when_setting_disabled(
+    monkeypatch, video_actions_env
+):
+    _FakePromptBox.instances = []
+    monkeypatch.setattr(
+        video_actions_env.module.QtWidgets, "QMessageBox", _FakePromptBox
+    )
+    main_window = _make_record_stop_window(recording=True, confirm_before_stop=False)
+
+    video_actions_env.record_video(main_window, checked=False)
+
+    assert _FakePromptBox.instances == []
+    main_window.video_processor._finalize_default_style_recording.assert_called_once()
+
+
+def test_record_video_skips_prompt_for_job_manager_stop_even_when_enabled(
+    monkeypatch, video_actions_env
+):
+    _FakePromptBox.instances = []
+    monkeypatch.setattr(
+        video_actions_env.module.QtWidgets, "QMessageBox", _FakePromptBox
+    )
+    main_window = _make_record_stop_window(
+        recording=True,
+        confirm_before_stop=True,
+        job_manager_initiated_record=True,
+    )
+
+    video_actions_env.record_video(main_window, checked=False)
+
+    assert _FakePromptBox.instances == []
+    main_window.video_processor._finalize_default_style_recording.assert_called_once()
+
+
+def test_record_video_rearms_toggle_when_stop_is_cancelled(
+    monkeypatch, video_actions_env
+):
+    _FakePromptBox.instances = []
+    _FakePromptBox.next_result = _FakePromptBox.No
+    monkeypatch.setattr(
+        video_actions_env.module.QtWidgets, "QMessageBox", _FakePromptBox
+    )
+    main_window = _make_record_stop_window(recording=True, confirm_before_stop=True)
+
+    video_actions_env.record_video(main_window, checked=False)
+
+    assert len(_FakePromptBox.instances) == 1
+    assert main_window.buttonMediaRecord.block_calls == [True, False]
+    assert main_window.buttonMediaRecord.checked_states == [True]
+    main_window.video_processor._finalize_default_style_recording.assert_not_called()
+    main_window.video_processor.finalize_segment_concatenation.assert_not_called()
+
+
+def test_record_video_finalizes_segment_recording_after_confirmation(
+    monkeypatch, video_actions_env
+):
+    _FakePromptBox.instances = []
+    _FakePromptBox.next_result = _FakePromptBox.Yes
+    monkeypatch.setattr(
+        video_actions_env.module.QtWidgets, "QMessageBox", _FakePromptBox
+    )
+    main_window = _make_record_stop_window(
+        is_processing_segments=True,
+        confirm_before_stop=True,
+    )
+
+    video_actions_env.record_video(main_window, checked=False)
+
+    assert len(_FakePromptBox.instances) == 1
+    main_window.video_processor.finalize_segment_concatenation.assert_called_once()
+    main_window.video_processor._finalize_default_style_recording.assert_not_called()

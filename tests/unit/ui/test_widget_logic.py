@@ -7,8 +7,8 @@ Targets:
   - DFMModelManager              — filesystem scanning (app/helpers/miscellaneous.py)
 
 show_hide_related_widgets is tested by constructing minimal mock objects that
-match the interface the function reads from, and verifying that it calls
-.show() / .hide() on the child widget correctly.
+match the interface the function reads from, and verifying that it updates
+row/widget visibility correctly via setVisible(...).
 No Qt display is needed — we mock at the object level.
 """
 
@@ -76,8 +76,8 @@ from app.helpers.miscellaneous import DFMModelManager  # noqa: E402
 #
 # For the Toggle case ("Toggle" in parent_widget_name):
 #   - For each child widget whose layout_info["parentToggle"] contains
-#     parent_widget_name, the function evaluates the toggle(s) and calls
-#     child.show() or child.hide().
+#     parent_widget_name, the function evaluates the toggle(s) and updates
+#     row/widget visibility via setVisible(...).
 #
 # We build a thin mock infrastructure that matches what the function reads.
 # =============================================================================
@@ -96,6 +96,10 @@ def _make_toggle_setup(
     Returns (main_window, parent_widget, child_widget).
     """
     child_widget = MagicMock()
+    child_widget.row_widget = MagicMock()
+    child_widget.label_widget = None
+    child_widget.reset_default_button = None
+    child_widget.line_edit = None
 
     # Layout info for the child widget
     child_layout_info = {
@@ -141,8 +145,8 @@ def test_toggle_on_required_true_shows_child():
         parent_is_checked=True,
     )
     show_hide_related_widgets(mw, parent, "VR180ModeEnableToggle")
-    child.show.assert_called_once()
-    child.hide.assert_not_called()
+    child.row_widget.setVisible.assert_called_once_with(True)
+    child.setVisible.assert_called_once_with(True)
 
 
 # ---------------------------------------------------------------------------
@@ -158,8 +162,8 @@ def test_toggle_off_required_true_hides_child():
         parent_is_checked=False,
     )
     show_hide_related_widgets(mw, parent, "VR180ModeEnableToggle")
-    child.hide.assert_called_once()
-    child.show.assert_not_called()
+    child.row_widget.setVisible.assert_called_once_with(False)
+    child.setVisible.assert_called_once_with(False)
 
 
 # ---------------------------------------------------------------------------
@@ -176,8 +180,8 @@ def test_toggle_off_required_false_shows_child():
         parent_is_checked=False,
     )
     show_hide_related_widgets(mw, parent, "SomeFeatureToggle")
-    child.show.assert_called_once()
-    child.hide.assert_not_called()
+    child.row_widget.setVisible.assert_called_once_with(True)
+    child.setVisible.assert_called_once_with(True)
 
 
 # ---------------------------------------------------------------------------
@@ -193,13 +197,29 @@ def test_toggle_on_required_false_hides_child():
         parent_is_checked=True,
     )
     show_hide_related_widgets(mw, parent, "SomeFeatureToggle")
-    child.hide.assert_called_once()
-    child.show.assert_not_called()
+    child.row_widget.setVisible.assert_called_once_with(False)
+    child.setVisible.assert_called_once_with(False)
 
 
 # ---------------------------------------------------------------------------
 # Widget not in parameter_widgets → no show/hide call (graceful skip)
 # ---------------------------------------------------------------------------
+
+
+def test_toggle_updates_below_row_widget_visibility():
+    mw, parent, child = _make_toggle_setup(
+        parent_name="FaceReagingEnableToggle",
+        child_name="FaceReagingTargetAgeSlider",
+        required_toggle_value=False,
+        parent_is_checked=True,
+    )
+    child.below_row_widget = MagicMock()
+
+    show_hide_related_widgets(mw, parent, "FaceReagingEnableToggle")
+
+    child.row_widget.setVisible.assert_called_once_with(False)
+    child.below_row_widget.setVisible.assert_called_once_with(False)
+    child.setVisible.assert_called_once_with(False)
 
 
 def test_child_not_in_parameter_widgets_is_skipped():
@@ -241,6 +261,10 @@ def test_vr180_real_scenario_toggle_on():
     from settings_layout_data.
     """
     eye_mode_widget = MagicMock()
+    eye_mode_widget.row_widget = MagicMock()
+    eye_mode_widget.label_widget = None
+    eye_mode_widget.reset_default_button = None
+    eye_mode_widget.line_edit = None
     toggle_mock = MagicMock()
     toggle_mock.isChecked.return_value = True  # VR180 is ON
 
@@ -268,14 +292,18 @@ def test_vr180_real_scenario_toggle_on():
 
     show_hide_related_widgets(mw, parent_widget, "VR180ModeEnableToggle")
 
-    eye_mode_widget.show.assert_called_once()
-    eye_mode_widget.hide.assert_not_called()
+    eye_mode_widget.row_widget.setVisible.assert_called_once_with(True)
+    eye_mode_widget.setVisible.assert_called_once_with(True)
     # The unrelated widget should not be shown (its parentToggle is "OtherToggle")
-    other_widget.show.assert_not_called()
+    other_widget.setVisible.assert_not_called()
 
 
 def test_vr180_real_scenario_toggle_off():
     eye_mode_widget = MagicMock()
+    eye_mode_widget.row_widget = MagicMock()
+    eye_mode_widget.label_widget = None
+    eye_mode_widget.reset_default_button = None
+    eye_mode_widget.line_edit = None
     toggle_mock = MagicMock()
     toggle_mock.isChecked.return_value = False  # VR180 is OFF
 
@@ -296,8 +324,8 @@ def test_vr180_real_scenario_toggle_off():
 
     show_hide_related_widgets(mw, parent_widget, "VR180ModeEnableToggle")
 
-    eye_mode_widget.hide.assert_called_once()
-    eye_mode_widget.show.assert_not_called()
+    eye_mode_widget.row_widget.setVisible.assert_called_once_with(False)
+    eye_mode_widget.setVisible.assert_called_once_with(False)
 
 
 # =============================================================================
