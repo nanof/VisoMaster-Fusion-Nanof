@@ -12,6 +12,19 @@ if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
 
 _PREVIEW_FPS_STALE_SEC = 1.15
+
+# Diagnóstico NIS: omisiones del hook composite (una vez por motivo) + contador de renders.
+_nis_composite_skip_logged: set[str] = set()
+_nis_composite_to_render_count: list[int] = [0]
+
+
+def _nis_composite_skip_log(key: str, detail: str) -> None:
+    if not preview_nis_debug_env():
+        return
+    if key in _nis_composite_skip_logged:
+        return
+    _nis_composite_skip_logged.add(key)
+    print(f"[NIS] composite_nis omitido: {detail}", flush=True)
 # Session-average FPS (second overlay line): ignore this many seconds after Play (buffer/preroll).
 _SESSION_FPS_WARMUP_SEC = 3.0
 
@@ -64,7 +77,7 @@ def preview_opengl_surface_format() -> QtGui.QSurfaceFormat:
     fmt.setDepthBufferSize(24)
     fmt.setStencilBufferSize(8)
     fmt.setSwapBehavior(QtGui.QSurfaceFormat.SwapBehavior.DoubleBuffer)
-    # KHR_debug / glDebugMessageCallback (véase VISIOMASTER_GL_DEBUG en video_preview_fsr_gl_item)
+    # KHR_debug: véase VISIOMASTER_GL_DEBUG / GL_DEBUG_NOTIFICATIONS / GL_DEBUG_SYNC en video_preview_fsr_gl_item
     raw_dbg = os.environ.get("VISIOMASTER_GL_DEBUG", "").strip().lower()
     if raw_dbg in ("1", "true", "yes", "on", "all"):
         try:
@@ -173,7 +186,11 @@ def ensure_video_preview_opengl_viewport(main_window: "MainWindow") -> bool:
                 new_vp.setFormat(fmt)
                 new_vp.setUpdateBehavior(ub)
                 main_window.graphicsViewFrame.setViewport(new_vp)
-                for attr in ("_video_preview_blend_gl_item", "_video_preview_fsr_gl_item"):
+                for attr in (
+                    "_video_preview_blend_gl_item",
+                    "_video_preview_fsr_gl_item",
+                    "_video_preview_nis_gl_item",
+                ):
                     it = getattr(main_window, attr, None)
                     if it is not None:
                         try:
@@ -243,10 +260,18 @@ def restore_video_preview_raster_viewport(main_window: "MainWindow") -> None:
                 fsr_item.reset_gl_state()
             except RuntimeError:
                 invalidate_video_preview_blend_gl_item_ref(main_window)
+    if not preview_nis_gpu_display_enabled(main_window):
+        nis_item = getattr(main_window, "_video_preview_nis_gl_item", None)
+        if nis_item is not None:
+            try:
+                nis_item.setVisible(False)
+                nis_item.reset_gl_state()
+            except RuntimeError:
+                invalidate_video_preview_blend_gl_item_ref(main_window)
 
     if preview_linear_gpu_display_enabled(main_window) or preview_fsr1_gpu_display_enabled(
         main_window
-    ):
+    ) or preview_nis_gpu_display_enabled(main_window):
         ensure_video_preview_opengl_viewport(main_window)
         return
 
@@ -287,6 +312,38 @@ def preview_fsr1_gpu_display_enabled(main_window: "MainWindow") -> bool:
     return True
 
 
+def preview_nis_gpu_display_enabled_with_toggle(
+    main_window: "MainWindow", preview_nis_on: bool
+) -> bool:
+    """Misma lógica que la ruta GPU NIS, usando *preview_nis_on* en lugar del control (p. ej. antes de update_control)."""
+    if main_window.video_processor.file_type != "video":
+        return False
+    if not preview_nis_on:
+        return False
+    if main_window.control.get("SendVirtCamFramesEnableToggle", False):
+        return False
+    if preview_linear_gpu_display_enabled(main_window):
+        return False
+    if main_window.control.get("PreviewFsr1EnableToggle", False):
+        return False
+    return True
+
+
+def preview_nis_gpu_display_enabled(main_window: "MainWindow") -> bool:
+    """NVIDIA Image Scaling (NVScaler) preview; exclusive with FSR1 and linear GPU blend."""
+    return preview_nis_gpu_display_enabled_with_toggle(
+        main_window,
+        bool(main_window.control.get("PreviewNisEnableToggle", False)),
+    )
+
+
+def preview_gl_spatial_upscale_preview_enabled(main_window: "MainWindow") -> bool:
+    """True if FSR1 or NIS preview upscale path should receive BGR frames."""
+    return preview_fsr1_gpu_display_enabled(main_window) or preview_nis_gpu_display_enabled(
+        main_window
+    )
+
+
 def preview_fsr1_sharpness(main_window: "MainWindow") -> float:
     raw = main_window.control.get("PreviewFsr1SharpnessDecimalSlider", "0.35")
     try:
@@ -308,6 +365,39 @@ def preview_fsr1_source_scale_percent(main_window: "MainWindow") -> float:
     except (TypeError, ValueError):
         return 100.0
     return max(25.0, min(100.0, v))
+
+
+def preview_nis_sharpness_0_1(main_window: "MainWindow") -> float:
+    raw = main_window.control.get("PreviewNisSharpnessDecimalSlider", "0.50")
+    try:
+        return float(str(raw).strip())
+    except (TypeError, ValueError):
+        return 0.5
+
+
+def preview_nis_compute_shaders_enabled(main_window: "MainWindow") -> bool:
+    return bool(main_window.control.get("PreviewNisShadersEnableToggle", True))
+
+
+def preview_nis_source_scale_percent(main_window: "MainWindow") -> float:
+    raw = main_window.control.get("PreviewNisSourceScalePercentSlider", "100")
+    try:
+        v = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return 100.0
+    return max(25.0, min(100.0, v))
+
+
+def preview_nis_debug_env() -> bool:
+    """VISIOMASTER_DEBUG_NIS=1 (etc.): trazas [NIS] en consola (arrancar app desde terminal)."""
+    v = os.environ.get("VISIOMASTER_DEBUG_NIS", "").strip().lower()
+    return v in ("1", "true", "yes", "on", "all")
+
+
+def preview_gl_khr_debug_env() -> bool:
+    """VISIOMASTER_GL_DEBUG=1: contexto debug + callback KHR (mensajes del driver si los hay)."""
+    v = os.environ.get("VISIOMASTER_GL_DEBUG", "").strip().lower()
+    return v in ("1", "true", "yes", "on", "all")
 
 
 def primary_preview_graphics_item_for_fit(
@@ -336,6 +426,9 @@ def primary_preview_graphics_item_for_fit(
             return None, None
 
     pair = _visible_item_rect(getattr(main_window, "_video_preview_fsr_gl_item", None))
+    if pair[0] is not None:
+        return pair
+    pair = _visible_item_rect(getattr(main_window, "_video_preview_nis_gl_item", None))
     if pair[0] is not None:
         return pair
     pair = _visible_item_rect(getattr(main_window, "_video_preview_blend_gl_item", None))
@@ -389,12 +482,72 @@ def composite_fsr_preview_overlay_if_needed(
         item.render_gl_in_viewport(vp, gv)
     except Exception:
         pass
+    _notify_preview_spatial_resolution_overlay_deferred(main_window, item, "fsr")
+
+
+def composite_nis_preview_overlay_if_needed(
+    main_window: "MainWindow",
+    gv: QtWidgets.QGraphicsView,
+) -> None:
+    if not preview_nis_gpu_display_enabled(main_window):
+        _nis_composite_skip_log("gpu", "preview_nis_gpu_display_enabled=False")
+        return
+    try:
+        from app.ui.widgets.preview_opengl_viewport_widget import (
+            VisoMasterPreviewOpenGLViewport,
+        )
+    except ImportError:
+        _nis_composite_skip_log("import_vp", "no se pudo importar VisoMasterPreviewOpenGLViewport")
+        return
+    if VisoMasterPreviewOpenGLViewport is None:
+        _nis_composite_skip_log("vp_cls", "VisoMasterPreviewOpenGLViewport es None")
+        return
+    vp = gv.viewport()
+    if not isinstance(vp, VisoMasterPreviewOpenGLViewport):
+        _nis_composite_skip_log(
+            "vp_type",
+            f"viewport no es OpenGL ({type(vp).__module__}.{type(vp).__name__}); "
+            "el hook NIS no corre",
+        )
+        return
+    item = getattr(main_window, "_video_preview_nis_gl_item", None)
+    if item is None:
+        _nis_composite_skip_log("item", "_video_preview_nis_gl_item no existe aún")
+        return
+    try:
+        if not item.isVisible():
+            _nis_composite_skip_log("invisible", "item NIS no visible")
+            return
+    except RuntimeError:
+        _nis_composite_skip_log("dead", "item NIS RuntimeError al comprobar visible")
+        return
+    if preview_nis_debug_env():
+        _nis_composite_to_render_count[0] += 1
+        n = _nis_composite_to_render_count[0]
+        if n <= 300:
+            print(f"[NIS] composite → render_gl_in_viewport (#{n})", flush=True)
+    try:
+        item.render_gl_in_viewport(vp, gv)
+    except Exception:
+        if os.environ.get("VISIOMASTER_DEBUG_NIS", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+            "all",
+        ):
+            import traceback
+
+            print("[NIS] Excepción no capturada en composite (capa graphics_view):", flush=True)
+            traceback.print_exc()
+    _notify_preview_spatial_resolution_overlay_deferred(main_window, item, "nis")
 
 
 def invalidate_video_preview_blend_gl_item_ref(main_window: "MainWindow") -> None:
     """Call after scene.clear() (or similar): the C++ QGraphicsItem is destroyed but Python may still hold a wrapper."""
     main_window._video_preview_blend_gl_item = None
     main_window._video_preview_fsr_gl_item = None
+    main_window._video_preview_nis_gl_item = None
     setattr(main_window, "_gv_preview_pixmap_item", None)
 
 
@@ -478,6 +631,20 @@ def _get_or_create_fsr_gl_item(
     return item
 
 
+def _get_or_create_nis_gl_item(
+    main_window: "MainWindow", scene: QtWidgets.QGraphicsScene
+):
+    from app.ui.widgets.video_preview_nis_gl_item import VideoPreviewNisGlItem
+
+    item = getattr(main_window, "_video_preview_nis_gl_item", None)
+    if not _blend_gl_item_still_valid(item, scene):
+        main_window._video_preview_nis_gl_item = None
+        item = VideoPreviewNisGlItem()
+        scene.addItem(item)
+        main_window._video_preview_nis_gl_item = item
+    return item
+
+
 # @misc_helpers.benchmark  (Keep this decorator if you have it)
 def update_graphics_view(
     main_window: "MainWindow",
@@ -515,6 +682,11 @@ def update_graphics_view(
         main_window._video_preview_fsr_gl_item = None
         fsr_item = None
 
+    nis_item = getattr(main_window, "_video_preview_nis_gl_item", None)
+    if not _blend_gl_item_still_valid(nis_item, scene):
+        main_window._video_preview_nis_gl_item = None
+        nis_item = None
+
     if gpu_blend is not None and ensure_video_preview_opengl_viewport(main_window):
         prev_bgr, curr_bgr, bw = gpu_blend
         b_item = _get_or_create_blend_gl_item(main_window, scene)
@@ -529,6 +701,8 @@ def update_graphics_view(
         b_item.setVisible(True)
         if fsr_item is not None:
             fsr_item.setVisible(False)
+        if nis_item is not None:
+            nis_item.setVisible(False)
         if pixmap_item is None:
             pixmap_item = QtWidgets.QGraphicsPixmapItem()
             pixmap_item.setTransformationMode(
@@ -547,6 +721,61 @@ def update_graphics_view(
             gv.setSceneRect(scene_rect)
         if reset_fit:
             fit_image_to_view(main_window, b_item, scene_rect)
+        record_preview_frame_tick(main_window)
+        bump_graphics_view_repaint(main_window, sync=True)
+        return
+
+    use_nis = (
+        preview_frame_bgr is not None
+        and preview_frame_bgr.ndim == 3
+        and preview_frame_bgr.shape[2] == 3
+        and preview_nis_gpu_display_enabled(main_window)
+        and ensure_video_preview_opengl_viewport(main_window)
+    )
+    if use_nis:
+        n_it = _get_or_create_nis_gl_item(main_window, scene)
+        if getattr(n_it, "_gl_failed", False):
+            n_it.reset_gl_state()
+        h0, w0 = int(preview_frame_bgr.shape[0]), int(preview_frame_bgr.shape[1])
+        scale_pct = preview_nis_source_scale_percent(main_window)
+        if scale_pct < 100.0:
+            nw = max(1, int(round(w0 * scale_pct / 100.0)))
+            nh = max(1, int(round(h0 * scale_pct / 100.0)))
+            frame_for_nis = cv2.resize(
+                preview_frame_bgr, (nw, nh), interpolation=cv2.INTER_AREA
+            )
+        else:
+            frame_for_nis = preview_frame_bgr
+        n_it.set_frame_sharpness(
+            frame_for_nis,
+            preview_nis_sharpness_0_1(main_window),
+            layout_hw=(h0, w0),
+            display_frame=current_frame_number,
+            use_compute_shaders=preview_nis_compute_shaders_enabled(main_window),
+        )
+        n_it.setVisible(True)
+        if blend_item is not None and _blend_gl_item_still_valid(blend_item, scene):
+            blend_item.setVisible(False)
+        if fsr_item is not None and _blend_gl_item_still_valid(fsr_item, scene):
+            fsr_item.setVisible(False)
+        if pixmap_item is None:
+            pixmap_item = QtWidgets.QGraphicsPixmapItem()
+            pixmap_item.setTransformationMode(
+                QtCore.Qt.TransformationMode.SmoothTransformation
+            )
+            scene.addItem(pixmap_item)
+            main_window._gv_preview_pixmap_item = pixmap_item
+        pixmap_item.setVisible(False)
+        scene_rect = n_it.boundingRect()
+        gv = main_window.graphicsViewFrame
+        prev = gv.sceneRect()
+        if (
+            abs(prev.width() - scene_rect.width()) > 0.5
+            or abs(prev.height() - scene_rect.height()) > 0.5
+        ):
+            gv.setSceneRect(scene_rect)
+        if reset_fit:
+            fit_image_to_view(main_window, n_it, scene_rect)
         record_preview_frame_tick(main_window)
         bump_graphics_view_repaint(main_window, sync=True)
         return
@@ -580,6 +809,8 @@ def update_graphics_view(
             use_pipeline_shaders=preview_fsr1_pipeline_shaders_enabled(main_window),
         )
         f_item.setVisible(True)
+        if nis_item is not None and _blend_gl_item_still_valid(nis_item, scene):
+            nis_item.setVisible(False)
         if blend_item is not None and _blend_gl_item_still_valid(blend_item, scene):
             blend_item.setVisible(False)
         if pixmap_item is None:
@@ -608,6 +839,8 @@ def update_graphics_view(
         blend_item.setVisible(False)
     if fsr_item is not None and _blend_gl_item_still_valid(fsr_item, scene):
         fsr_item.setVisible(False)
+    if nis_item is not None and _blend_gl_item_still_valid(nis_item, scene):
+        nis_item.setVisible(False)
 
     # Resize the pixmap if necessary (e.g., face compare or mask compare mode)
     if pixmap_item and size_mode == "preserve_previous_pixmap_size":
@@ -727,6 +960,79 @@ def _compact_interp_method_label(method: str) -> str:
     return (collapsed[:32] + "…") if len(collapsed) > 32 else collapsed
 
 
+def _preview_spatial_resolution_line(
+    main_window: "MainWindow", item_attr: str
+) -> str | None:
+    """Texel size fed to the scaler → on-screen pass size (preview item footprint)."""
+    item = getattr(main_window, item_attr, None)
+    if item is None:
+        return None
+    src = getattr(item, "_preview_overlay_src_wh", None)
+    tgt = getattr(item, "_preview_overlay_tgt_wh", None)
+    if (
+        not isinstance(src, tuple)
+        or len(src) != 2
+        or not isinstance(tgt, tuple)
+        or len(tgt) != 2
+    ):
+        return None
+    sw, sh = int(src[0]), int(src[1])
+    tw, th = int(tgt[0]), int(tgt[1])
+    return f"{sw}×{sh} → {tw}×{th}"
+
+
+def _notify_preview_spatial_resolution_overlay(
+    main_window: "MainWindow",
+    item: object,
+    kind: str,
+) -> None:
+    """Re-run active-settings overlay when FSR/NIS source→target pixels change (e.g. resize)."""
+    cache_attr = "_preview_spatial_resolution_overlay_key"
+    key: tuple[object, ...] | None = None
+    if item is not None:
+        src = getattr(item, "_preview_overlay_src_wh", None)
+        tgt = getattr(item, "_preview_overlay_tgt_wh", None)
+        if (
+            isinstance(src, tuple)
+            and len(src) == 2
+            and isinstance(tgt, tuple)
+            and len(tgt) == 2
+        ):
+            key = (
+                kind,
+                id(item),
+                int(src[0]),
+                int(src[1]),
+                int(tgt[0]),
+                int(tgt[1]),
+            )
+    prev = getattr(main_window, cache_attr, None)
+    if key == prev:
+        return
+    setattr(main_window, cache_attr, key)
+    update_preview_active_settings_overlay(main_window)
+
+
+def _notify_preview_spatial_resolution_overlay_deferred(
+    main_window: "MainWindow",
+    item: object,
+    kind: str,
+) -> None:
+    """Evita setText/move de QLabel durante paintEvent del preview (reentrada → bloqueo)."""
+
+    def _run() -> None:
+        try:
+            _notify_preview_spatial_resolution_overlay(main_window, item, kind)
+        except Exception:
+            pass
+
+    app = QtCore.QCoreApplication.instance()
+    if app is None:
+        _run()
+    else:
+        QtCore.QTimer.singleShot(0, _run)
+
+
 def build_preview_active_settings_text(main_window: "MainWindow") -> str:
     """One English line per enabled option; empty string if none."""
     ctrl = main_window.control
@@ -781,6 +1087,28 @@ def build_preview_active_settings_text(main_window: "MainWindow") -> str:
             sc = 100
         if sc < 100:
             lines.append(f"FSR1 source scale {sc}%")
+        res = _preview_spatial_resolution_line(
+            main_window, "_video_preview_fsr_gl_item"
+        )
+        if res:
+            lines.append(res)
+
+    if preview_nis_gpu_display_enabled(main_window):
+        if preview_nis_compute_shaders_enabled(main_window):
+            lines.append("NIS preview (NVScaler compute)")
+        else:
+            lines.append("NIS preview — blit only (no compute)")
+        try:
+            scn = int(round(float(preview_nis_source_scale_percent(main_window))))
+        except (TypeError, ValueError):
+            scn = 100
+        if scn < 100:
+            lines.append(f"NIS source scale {scn}%")
+        res_n = _preview_spatial_resolution_line(
+            main_window, "_video_preview_nis_gl_item"
+        )
+        if res_n:
+            lines.append(res_n)
 
     if ctrl.get("VideoPlaybackCustomFpsToggle"):
         fps_v = ctrl.get("VideoPlaybackCustomFpsSlider", "—")

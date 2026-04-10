@@ -729,6 +729,29 @@ def handle_preview_neural_interp_model_change(
     sync_rife_preview_interpolation_model(main_window)
 
 
+def _exclusive_preview_spatial_upscale_off_other(
+    main_window: "MainWindow", *, keep_fsr: bool
+) -> None:
+    """FSR1 y NIS no pueden estar activos a la vez: apaga el otro toggle y su widget."""
+    other = "PreviewNisEnableToggle" if keep_fsr else "PreviewFsr1EnableToggle"
+    if not main_window.control.get(other, False):
+        return
+    main_window.control[other] = False
+    w = main_window.parameter_widgets.get(other)
+    if w is not None:
+        w.blockSignals(True)
+        try:
+            w.setChecked(False)
+        finally:
+            w.blockSignals(False)
+        try:
+            common_widget_actions.show_hide_related_widgets(
+                main_window, w, other, None, None
+            )
+        except Exception:
+            pass
+
+
 def handle_preview_fsr1_toggle(
     main_window: "MainWindow", new_value: bool, control_name: str
 ) -> None:
@@ -736,6 +759,7 @@ def handle_preview_fsr1_toggle(
     from app.ui.widgets.actions import graphics_view_actions
 
     if new_value:
+        _exclusive_preview_spatial_upscale_off_other(main_window, keep_fsr=True)
         graphics_view_actions.ensure_video_preview_opengl_viewport(main_window)
     else:
         graphics_view_actions.restore_video_preview_raster_viewport(main_window)
@@ -760,6 +784,64 @@ def handle_preview_fsr1_shaders_toggle(
 
 
 def handle_preview_fsr1_source_scale_change(
+    main_window: "MainWindow", _value: object, _control_name: str
+) -> None:
+    from app.ui.widgets.actions import graphics_view_actions
+
+    graphics_view_actions.bump_graphics_view_repaint(main_window, sync=True)
+    graphics_view_actions.update_preview_active_settings_overlay(main_window)
+
+
+def handle_preview_nis_toggle(
+    main_window: "MainWindow", new_value: bool, control_name: str
+) -> None:
+    del control_name
+    from app.ui.widgets.actions import graphics_view_actions
+
+    if graphics_view_actions.preview_nis_debug_env() or graphics_view_actions.preview_gl_khr_debug_env():
+        gpu = graphics_view_actions.preview_nis_gpu_display_enabled_with_toggle(
+            main_window, new_value
+        )
+        print(
+            f"[NIS] Ajuste UI: NIS preview {'ON' if new_value else 'OFF'}; "
+            f"ruta GPU NVScaler con este estado={gpu} "
+            f"(requiere vídeo, sin FSR1 ni linear blend ni virt. cam)",
+            flush=True,
+        )
+
+    if new_value:
+        _exclusive_preview_spatial_upscale_off_other(main_window, keep_fsr=False)
+        graphics_view_actions.ensure_video_preview_opengl_viewport(main_window)
+    else:
+        graphics_view_actions.restore_video_preview_raster_viewport(main_window)
+    graphics_view_actions.update_preview_active_settings_overlay(main_window)
+
+
+def handle_preview_nis_sharpness_change(
+    main_window: "MainWindow", _value: object, _control_name: str
+) -> None:
+    from app.ui.widgets.actions import graphics_view_actions
+
+    graphics_view_actions.bump_graphics_view_repaint(main_window, sync=True)
+
+
+def handle_preview_nis_shaders_toggle(
+    main_window: "MainWindow", new_value: bool, _control_name: str
+) -> None:
+    from app.ui.widgets.actions import graphics_view_actions
+
+    if graphics_view_actions.preview_nis_debug_env() or graphics_view_actions.preview_gl_khr_debug_env():
+        print(
+            f"[NIS] «NIS shaders» → {bool(new_value)} "
+            f"(False = solo blit, sin compute NVScaler)",
+            flush=True,
+        )
+
+    graphics_view_actions.bump_graphics_view_repaint(main_window, sync=True)
+    graphics_view_actions.update_preview_active_settings_overlay(main_window)
+
+
+def handle_preview_nis_source_scale_change(
     main_window: "MainWindow", _value: object, _control_name: str
 ) -> None:
     from app.ui.widgets.actions import graphics_view_actions

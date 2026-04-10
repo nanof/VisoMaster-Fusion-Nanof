@@ -1,7 +1,7 @@
 """
 QGraphicsView subclass for the video preview (swap-in at startup).
 
-Linear GPU blend sigue en QGraphicsItem::paint(). FSR1 se compone aquí tras
+Linear GPU blend sigue en QGraphicsItem::paint(). FSR1 / NIS se componen aquí tras
 super().paintEvent() porque Qt no invoca QOpenGLWidget.paintEvent en el viewport.
 """
 
@@ -19,3 +19,4 @@ class VisoMasterPreviewGraphicsView(QtWidgets.QGraphicsView):
         from app.ui.widgets.actions import graphics_view_actions as graphics_view_actions_mod
 
         graphics_view_actions_mod.composite_fsr_preview_overlay_if_needed(mw, self)
+        graphics_view_actions_mod.composite_nis_preview_overlay_if_needed(mw, self)

@@ -1,11 +1,11 @@
 """
-QOpenGLWidget used as QGraphicsView viewport for FSR / linear-blend preview.
+QOpenGLWidget used as QGraphicsView viewport for FSR / NIS / linear-blend preview.
 
-FSR1 se compone desde `VisoMasterPreviewGraphicsView.paintEvent` (tras pintar la
-escena), vía `graphics_view_actions.composite_fsr_preview_overlay_if_needed` →
-`VideoPreviewFsrGlItem.render_gl_in_viewport`. Qt no llama a
-`QOpenGLWidget.paintEvent` cuando el viewport se pinta desde `QGraphicsView`.
-El blend lineal GPU sigue en `VideoBlendOpenGLItem.paint()`.
+FSR1 y NIS se componen desde `VisoMasterPreviewGraphicsView.paintEvent` (tras
+pintar la escena), vía `composite_*_preview_overlay_if_needed` →
+`VideoPreviewFsrGlItem` / `VideoPreviewNisGlItem.render_gl_in_viewport`. Qt no
+llama a `QOpenGLWidget.paintEvent` cuando el viewport se pinta desde
+`QGraphicsView`. El blend lineal GPU sigue en `VideoBlendOpenGLItem.paint()`.
 """
 
 from __future__ import annotations

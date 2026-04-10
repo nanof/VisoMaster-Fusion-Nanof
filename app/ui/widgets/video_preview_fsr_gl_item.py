@@ -19,7 +19,9 @@ Debug (stderr/terminal):
   VISIOMASTER_DEBUG_FSR1_GL=1 — igual que nivel 3 sin cambiar el número principal
   VISIOMASTER_GL_GETERROR=1 — volcar glGetError con nombre simbólico (GL_INVALID_VALUE, …) aunque FSR1_GL no esté
   VISIOMASTER_GL_DEBUG=1 — contexto OpenGL con DebugContext + glDebugMessageCallback (mensajes del driver;
-      reiniciar la app). glGetError solo dice el tipo de error, no qué argumento falló; KHR_debug sí suele detallar.
+      reiniciar la app). El registro del callback se aplaza al siguiente tick del event loop (evita cuelgues
+      si se activa durante paint del preview). NOTIFICATION omitidas salvo VISIOMASTER_GL_DEBUG_NOTIFICATIONS=1;
+      GL_DEBUG_OUTPUT_SYNCHRONOUS solo con VISIOMASTER_GL_DEBUG_SYNC=1.
 
 Aislar fallos — **anulan el toggle de UI «FSR1: EASU+RCAS shaders»** mientras estén definidas:
   VISIOMASTER_FSR1_ISOLATE=blit_src  — solo textura + blit (nunca EASU ni RCAS)
@@ -74,6 +76,7 @@ _GL_LINEAR = 0x2601
 _GL_RGBA = 0x1908
 _GL_UNSIGNED_BYTE = 0x1401
 _GL_RGBA8 = 0x8058
+_GL_RGBA32F = 0x8814
 _GL_TEXTURE_WRAP_S = 0x2802
 _GL_TEXTURE_WRAP_T = 0x2803
 _GL_CLAMP_TO_EDGE = 0x812F
@@ -96,6 +99,7 @@ _GL_CONTEXT_LOST = 0x0507
 # KHR_debug
 _GL_DEBUG_OUTPUT = 0x92E0
 _GL_DEBUG_OUTPUT_SYNCHRONOUS = 0x8242
+_GL_DEBUG_SEVERITY_NOTIFICATION = 0x826B
 
 _GL_ERROR_NAMES: dict[int, str] = {
     _GL_NO_ERROR: "GL_NO_ERROR",
@@ -115,6 +119,9 @@ _FSR_PROG_VER = 7
 _fsr1_khr_debug_callback_refs: list[Any] = []
 _fsr1_khr_debug_installed_ctx_ids: set[int] = set()
 _fsr1_gl_geterror_note_shown = False
+_gl_driver_logged_ctx: set[int] = set()
+_khr_notif_emitted = 0
+_khr_notif_cap_warned = False
 
 # Full-viewport NDC quad for EASU/RCAS (they use gl_FragCoord vs u_outSize; must fill the FBO).
 _FS_FULLSCREEN_NDC_UV = np.array(
@@ -179,9 +186,35 @@ def _fsr1_env_truthy(name: str) -> bool:
     return v in ("1", "true", "yes", "on", "all")
 
 
+def _debug_nis_env() -> bool:
+    v = os.environ.get("VISIOMASTER_DEBUG_NIS", "").strip().lower()
+    return v in ("1", "true", "yes", "on", "all")
+
+
 def _fsr1_log_gl_geterrors() -> bool:
     """Si True, drenar y mostrar la cola glGetError (nombres + hex)."""
-    return _fsr1_debug_gl() or _fsr1_env_truthy("VISIOMASTER_GL_GETERROR")
+    return (
+        _fsr1_debug_gl()
+        or _fsr1_env_truthy("VISIOMASTER_GL_GETERROR")
+        or _fsr1_env_truthy("VISIOMASTER_GL_DEBUG")
+        or _debug_nis_env()
+    )
+
+
+def _khr_notification_cap() -> int:
+    """
+    NOTIFICATION sin VISIOMASTER_GL_DEBUG_NOTIFICATIONS=1:
+    0 = ninguna; -1 = sin tope; otro entero = máximo a imprimir (defecto 40).
+    """
+    if _fsr1_env_truthy("VISIOMASTER_GL_DEBUG_NOTIFICATIONS"):
+        return -1
+    raw = os.environ.get("VISIOMASTER_GL_DEBUG_NOTIFICATION_CAP", "40").strip().lower()
+    if raw in ("0", "off", "none"):
+        return 0
+    try:
+        return int(raw)
+    except ValueError:
+        return 40
 
 
 def _gl_error_label(code: int) -> str:
@@ -211,11 +244,14 @@ def _fsr1_try_install_khr_debug(ctx: QtGui.QOpenGLContext | None) -> None:
         except Exception:
             addr = 0
     if addr == 0:
+        _msg_cb_missing = (
+            "VISIOMASTER_GL_DEBUG: glDebugMessageCallback no encontrado "
+            "(¿OpenGL < 4.3 / sin KHR_debug?)"
+        )
         if _fsr1_log_gl_geterrors() and _fsr1_debug_env():
-            _fsr1_dbg(
-                "VISIOMASTER_GL_DEBUG: glDebugMessageCallback no encontrado "
-                "(¿OpenGL < 4.3 / sin KHR_debug?)"
-            )
+            _fsr1_dbg(_msg_cb_missing)
+        elif _fsr1_env_truthy("VISIOMASTER_GL_DEBUG"):
+            print(f"[GL] {_msg_cb_missing}", flush=True)
         _fsr1_khr_debug_installed_ctx_ids.add(cid)
         return
 
@@ -233,6 +269,24 @@ def _fsr1_try_install_khr_debug(ctx: QtGui.QOpenGLContext | None) -> None:
     SET_CALLBACK = functype(None, ctypes.c_void_p, ctypes.c_void_p)
 
     def _on_debug(source, type_, id_, severity, length, message, _user) -> None:
+        global _khr_notif_emitted, _khr_notif_cap_warned
+        sev_int = int(severity)
+        if sev_int == _GL_DEBUG_SEVERITY_NOTIFICATION:
+            cap = _khr_notification_cap()
+            if cap == 0:
+                return
+            if cap > 0 and _khr_notif_emitted >= cap:
+                if not _khr_notif_cap_warned:
+                    _khr_notif_cap_warned = True
+                    print(
+                        "[GL KHR_debug] (NOTIFICATION: límite alcanzado; "
+                        "VISIOMASTER_GL_DEBUG_NOTIFICATIONS=1 para todas, "
+                        "o sube VISIOMASTER_GL_DEBUG_NOTIFICATION_CAP)",
+                        flush=True,
+                    )
+                return
+            if cap > 0:
+                _khr_notif_emitted += 1
         try:
             if message:
                 if length and int(length) > 0:
@@ -258,8 +312,9 @@ def _fsr1_try_install_khr_debug(ctx: QtGui.QOpenGLContext | None) -> None:
         setter = SET_CALLBACK(addr)
         setter(ctypes.cast(cb, ctypes.c_void_p), None)
     except Exception as e:
-        if _fsr1_debug_env():
-            _fsr1_dbg(f"VISIOMASTER_GL_DEBUG: glDebugMessageCallback falló: {e!r}")
+        _gl_debug_setup_log(
+            f"VISIOMASTER_GL_DEBUG: glDebugMessageCallback falló: {e!r}"
+        )
         _fsr1_khr_debug_installed_ctx_ids.add(cid)
         return
 
@@ -267,14 +322,48 @@ def _fsr1_try_install_khr_debug(ctx: QtGui.QOpenGLContext | None) -> None:
     try:
         if hasattr(xf, "glEnable"):
             xf.glEnable(_GL_DEBUG_OUTPUT)
-            xf.glEnable(_GL_DEBUG_OUTPUT_SYNCHRONOUS)
+            if _fsr1_env_truthy("VISIOMASTER_GL_DEBUG_SYNC"):
+                xf.glEnable(_GL_DEBUG_OUTPUT_SYNCHRONOUS)
     except Exception:
         pass
     _fsr1_khr_debug_installed_ctx_ids.add(cid)
-    if _fsr1_debug_env():
-        _fsr1_dbg(
-            "VISIOMASTER_GL_DEBUG: callback KHR_debug instalado (mensajes del driver en consola)"
+    _gl_debug_setup_log(
+        "VISIOMASTER_GL_DEBUG: callback KHR_debug instalado "
+        "(NOTIFICATION con tope por defecto; sync solo con VISIOMASTER_GL_DEBUG_SYNC=1)"
+    )
+    if _fsr1_env_truthy("VISIOMASTER_GL_DEBUG"):
+        cap = _khr_notification_cap()
+        if cap < 0:
+            cap_hint = "todas (VISIOMASTER_GL_DEBUG_NOTIFICATIONS=1)"
+        elif cap == 0:
+            cap_hint = (
+                "ninguna (¿VISIOMASTER_GL_DEBUG_NOTIFICATION_CAP=0? sube el valor o "
+                "usa VISIOMASTER_GL_DEBUG_NOTIFICATIONS=1)"
+            )
+        else:
+            cap_hint = f"primeras {cap} (VISIOMASTER_GL_DEBUG_NOTIFICATION_CAP)"
+        print(
+            f"[GL] NOTIFICATION: {cap_hint}. "
+            "NIS: VISIOMASTER_DEBUG_NIS=1 + glGetError con GL_DEBUG o DEBUG_NIS.",
+            flush=True,
         )
+
+
+def schedule_khr_debug_install_for_context(ctx: QtGui.QOpenGLContext | None) -> None:
+    """
+    No registrar glDebugMessageCallback ni glEnable(DEBUG_OUTPUT) en el mismo stack que
+    QGraphicsView.paintEvent sobre QOpenGLWidget: en Windows + algunos drivers la UI puede
+    quedar colgada justo después del log «callback instalado». Se difiere al siguiente tick.
+    """
+    if ctx is None or not _fsr1_env_truthy("VISIOMASTER_GL_DEBUG"):
+        return
+    if id(ctx) in _fsr1_khr_debug_installed_ctx_ids:
+        return
+    app = QtCore.QCoreApplication.instance()
+    if app is None:
+        _fsr1_try_install_khr_debug(ctx)
+        return
+    QtCore.QTimer.singleShot(0, lambda c=ctx: _fsr1_try_install_khr_debug(c))
 
 
 _GL_DEBUG_SEVERITY_NAMES: dict[int, str] = {
@@ -316,6 +405,14 @@ def _fsr1_dbg(msg: str) -> None:
         print(f"[FSR1] {msg}", flush=True)
 
 
+def _gl_debug_setup_log(msg: str) -> None:
+    """VISIOMASTER_GL_DEBUG sin FSR1 debug: prefijo [GL]; con FSR1 debug reutiliza _fsr1_dbg."""
+    if _fsr1_debug_env():
+        _fsr1_dbg(msg)
+    elif _fsr1_env_truthy("VISIOMASTER_GL_DEBUG"):
+        print(f"[GL] {msg}", flush=True)
+
+
 def _gl_opengl_context_for_widget(
     gl_widget: QtWidgets.QWidget | None, ctx: QtGui.QOpenGLContext | None
 ) -> QtGui.QOpenGLContext | None:
@@ -355,6 +452,74 @@ def _gl_base_functions(ctx: QtGui.QOpenGLContext) -> Any:
         except Exception:
             pass
     return f
+
+
+def log_gl_driver_info_once(ctx: QtGui.QOpenGLContext | None) -> None:
+    """Una vez por contexto: vendor/renderer/version/glsl (no depende de KHR NOTIFICATION)."""
+    if ctx is None:
+        return
+    if not (
+        _fsr1_env_truthy("VISIOMASTER_GL_DEBUG")
+        or _debug_nis_env()
+    ):
+        return
+    cid = id(ctx)
+    if cid in _gl_driver_logged_ctx:
+        return
+    _gl_driver_logged_ctx.add(cid)
+    _GL_VENDOR = 0x1F00
+    _GL_RENDERER = 0x1F01
+    _GL_VERSION = 0x1F02
+    _GL_GLSL = 0x8B8C
+
+    def _decode_gs(raw: object) -> str:
+        if raw is None:
+            return "?"
+        try:
+            if isinstance(raw, (bytes, bytearray)):
+                return raw.decode("utf-8", errors="replace")
+            if hasattr(raw, "data") and callable(raw.data):
+                return bytes(raw.data()).decode("utf-8", errors="replace")
+            return str(raw)
+        except Exception:
+            return "?"
+
+    try:
+        bf = ctx.functions()
+        if bf is not None and hasattr(bf, "initializeOpenGLFunctions"):
+            try:
+                bf.initializeOpenGLFunctions()
+            except Exception:
+                pass
+        if bf is None or not hasattr(bf, "glGetString"):
+            print("[GL] glGetString no disponible en ctx.functions()", flush=True)
+            return
+        for label, enum in (
+            ("vendor", _GL_VENDOR),
+            ("renderer", _GL_RENDERER),
+            ("version", _GL_VERSION),
+            ("glsl", _GL_GLSL),
+        ):
+            try:
+                s = _decode_gs(bf.glGetString(enum))
+            except Exception as exc:
+                s = f"<?> ({exc!r})"
+            print(f"[GL] {label}={s}", flush=True)
+    except Exception as e:
+        print(f"[GL] driver info error: {e!r}", flush=True)
+
+
+def gl_texture_barrier_after_image_write(ctx: QtGui.QOpenGLContext | None) -> None:
+    """OpenGL 4.5: coherencia imageStore → muestreo como textura (evita negro en algunos drivers)."""
+    if ctx is None:
+        return
+    xf = _gl_extra_for_context(ctx)
+    tb = getattr(xf, "glTextureBarrier", None)
+    if callable(tb):
+        try:
+            tb()
+        except Exception:
+            pass
 
 
 def _gl_texture_functions(ctx: QtGui.QOpenGLContext) -> Any:
@@ -400,6 +565,12 @@ def _gl_gen_texture_name(f: Any) -> int:
         r = f.glGenTextures(1)
         if isinstance(r, int) and r > 0:
             return r
+        try:
+            tr = int(r)
+            if tr > 0:
+                return tr
+        except (TypeError, ValueError):
+            pass
         if isinstance(r, (list, tuple)) and len(r) >= 1:
             t = int(r[0])
             if t > 0:
@@ -574,6 +745,42 @@ def _fsr_gl_c_tex_image_2d_rgba8_empty(
     return True
 
 
+def _fsr_gl_c_tex_image_2d_rgba32f(
+    ctx: QtGui.QOpenGLContext, target: int, w: int, h: int, pixels_addr: int
+) -> bool:
+    """Subida coef NIS (RGBA32F); usa el mismo camino ctypes que la textura vídeo raw."""
+    p = _fsr_gl_c_proc_addr(ctx, b"glTexImage2D")
+    if p == 0:
+        return False
+    Fn = _gl_ctypes_fn()(
+        None,
+        ctypes.c_uint32,
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    )(p)
+    try:
+        Fn(
+            int(target),
+            0,
+            int(_GL_RGBA32F),
+            int(w),
+            int(h),
+            0,
+            int(_GL_RGBA),
+            int(_GL_FLOAT),
+            ctypes.c_void_p(int(pixels_addr)),
+        )
+    except Exception:
+        return False
+    return True
+
+
 def _fsr_gl_c_tex_sub_image_2d_rgba(
     ctx: QtGui.QOpenGLContext, target: int, w: int, h: int, rgba: np.ndarray
 ) -> None:
@@ -730,13 +937,36 @@ def _fsr1_gl_drain_errors(ctx: QtGui.QOpenGLContext | None, tag: str) -> None:
         codes.append(e)
     if not codes:
         return
+
+    def _gl_geterror_log_bracket(t: str) -> str:
+        tl = t.lower()
+        if "nis" in tl:
+            return "NIS"
+        if any(
+            s in tl
+            for s in (
+                "easu",
+                "rcas",
+                "incoming",
+                "direct blit",
+                "composite",
+                "isolate",
+            )
+        ):
+            return "FSR1"
+        if _fsr1_debug_env():
+            return "FSR1"
+        if _debug_nis_env():
+            return "NIS"
+        return "GL"
+
+    bracket = _gl_geterror_log_bracket(tag)
     lines = [f"{tag} glGetError[{i}] {_gl_error_label(c)}" for i, c in enumerate(codes)]
     for ln in lines:
         if _fsr1_debug_env():
             _fsr1_dbg(ln)
         else:
-            # VISIOMASTER_GL_GETERROR=1 sin VISIOMASTER_DEBUG_FSR1
-            print(f"[FSR1] {ln}", flush=True)
+            print(f"[{bracket}] {ln}", flush=True)
     if not _fsr1_gl_geterror_note_shown:
         _fsr1_gl_geterror_note_shown = True
         note = (
@@ -746,7 +976,7 @@ def _fsr1_gl_drain_errors(ctx: QtGui.QOpenGLContext | None, tag: str) -> None:
         if _fsr1_debug_env():
             _fsr1_dbg(note)
         else:
-            print(f"[FSR1] {note}", flush=True)
+            print(f"[{bracket}] {note}", flush=True)
 
 
 def _fsr1_gl_log_fb(ctx: QtGui.QOpenGLContext, gl_widget: QtWidgets.QWidget, tag: str) -> None:
@@ -879,6 +1109,9 @@ class VideoPreviewFsrGlItem(QtWidgets.QGraphicsObject):
         self._fsr1_isolate_logged: bool = False
         self._fsr1_isolate_bad_logged: bool = False
         self._fsr1_pipeline_path_key: str | None = None
+        # Last spatial pass resolutions for preview overlay (tex W×H → output W×H).
+        self._preview_overlay_src_wh: tuple[int, int] | None = None
+        self._preview_overlay_tgt_wh: tuple[int, int] | None = None
         self.setZValue(1.0)
         self.setCacheMode(QtWidgets.QGraphicsItem.CacheMode.NoCache)
 
@@ -1722,7 +1955,8 @@ class VideoPreviewFsrGlItem(QtWidgets.QGraphicsObject):
             _fsr1_dbg("render_gl_in_viewport: no QOpenGLContext")
             return
 
-        _fsr1_try_install_khr_debug(ctx)
+        schedule_khr_debug_install_for_context(ctx)
+        log_gl_driver_info_once(ctx)
 
         try:
             isolate = _fsr1_isolate_mode()
@@ -1824,6 +2058,10 @@ class VideoPreviewFsrGlItem(QtWidgets.QGraphicsObject):
             except Exception:
                 pass
 
+            rw, rh = self._item_device_pixel_size_from_view(gv)
+            self._preview_overlay_src_wh = (int(w), int(h))
+            self._preview_overlay_tgt_wh = (int(rw), int(rh))
+
             self._bind_qopengl_widget_backbuffer(gl_widget, f, ctx)
             _fsr1_gl_log_fb(ctx, gl_widget, "after bind widget draw target")
 
@@ -1844,7 +2082,6 @@ class VideoPreviewFsrGlItem(QtWidgets.QGraphicsObject):
                 _fsr1_gl_drain_errors(ctx, "after direct blit")
                 _fsr1_gl_log_fb(ctx, gl_widget, "after direct blit")
             else:
-                rw, rh = self._item_device_pixel_size_from_view(gv)
                 if (
                     not self._ensure_fsr_pass_fbos(ctx, rw, rh)
                     or self._fbo is None
@@ -1890,6 +2127,10 @@ class VideoPreviewFsrGlItem(QtWidgets.QGraphicsObject):
                     self._vbo.release()
                     return
                 _fsr1_gl_drain_errors(ctx, "after EASU")
+                # Coherencia escritura FBO EASU → muestreo en RCAS (evita GL_INVALID_OPERATION en NVIDIA).
+                gl_texture_barrier_after_image_write(ctx)
+                # No llamar _fbo.release()/bindDefault(): en QOpenGLWidget eso suele enlazar FBO 0
+                # (incorrecto). El siguiente bind() del FBO destino cambia el draw target.
                 self._src_gl_unbind_unit0(ctx)
                 self._prog_easu.release()
 
@@ -1944,6 +2185,7 @@ class VideoPreviewFsrGlItem(QtWidgets.QGraphicsObject):
                         self._vbo.release()
                         return
                     _fsr1_gl_drain_errors(ctx, "after RCAS")
+                    gl_texture_barrier_after_image_write(ctx)
                     f.glBindTexture(_GL_TEXTURE_2D, 0)
                     self._prog_rcas.release()
 
@@ -2076,6 +2318,8 @@ class VideoPreviewFsrGlItem(QtWidgets.QGraphicsObject):
         self._fsr1_isolate_logged = False
         self._fsr1_isolate_bad_logged = False
         self._fsr1_pipeline_path_key = None
+        self._preview_overlay_src_wh = None
+        self._preview_overlay_tgt_wh = None
         self._destroy_gl_objects()
 
     def _fsr1_gl_log_uniforms_once(self) -> None:

@@ -295,7 +295,9 @@ class TargetMediaCardButton(CardButton):
             main_window.video_processor.current_frame = frame
             use_fsr = (
                 self.file_type == "video"
-                and graphics_view_actions.preview_fsr1_gpu_display_enabled(main_window)
+                and graphics_view_actions.preview_gl_spatial_upscale_preview_enabled(
+                    main_window
+                )
                 and graphics_view_actions.ensure_video_preview_opengl_viewport(
                     main_window
                 )

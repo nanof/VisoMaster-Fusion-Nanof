@@ -2180,12 +2180,14 @@ def apply_av1_scrub_preview_frame(
     if vp.media_rotation != 0:
         frame_bgr = misc_helpers._apply_frame_rotation(frame_bgr, vp.media_rotation)
     vp._seek_cached_frame = None
-    use_fsr = (
+    use_gl_upscale = (
         vp.file_type == "video"
-        and graphics_view_actions.preview_fsr1_gpu_display_enabled(main_window)
+        and graphics_view_actions.preview_gl_spatial_upscale_preview_enabled(
+            main_window
+        )
         and graphics_view_actions.ensure_video_preview_opengl_viewport(main_window)
     )
-    if use_fsr:
+    if use_gl_upscale:
         graphics_view_actions.update_graphics_view(
             main_window,
             QtGui.QPixmap(),
@@ -2259,16 +2261,16 @@ def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
                     video_processor._seek_cached_frame = None
                 else:
                     video_processor._seek_cached_frame = (new_position, frame)
-                use_fsr = (
+                use_gl_upscale = (
                     video_processor.file_type == "video"
-                    and graphics_view_actions.preview_fsr1_gpu_display_enabled(
+                    and graphics_view_actions.preview_gl_spatial_upscale_preview_enabled(
                         main_window
                     )
                     and graphics_view_actions.ensure_video_preview_opengl_viewport(
                         main_window
                     )
                 )
-                if use_fsr:
+                if use_gl_upscale:
                     graphics_view_actions.update_graphics_view(
                         main_window,
                         QtGui.QPixmap(),
@@ -2336,14 +2338,16 @@ def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
                 video_processor._seek_cached_frame = (new_position, frame)
             # For preview, show the raw frame immediately.
             # The processed frame will be shown when the slider is released.
-            use_fsr = (
+            use_gl_upscale = (
                 video_processor.file_type == "video"
-                and graphics_view_actions.preview_fsr1_gpu_display_enabled(main_window)
+                and graphics_view_actions.preview_gl_spatial_upscale_preview_enabled(
+                    main_window
+                )
                 and graphics_view_actions.ensure_video_preview_opengl_viewport(
                     main_window
                 )
             )
-            if use_fsr:
+            if use_gl_upscale:
                 graphics_view_actions.update_graphics_view(
                     main_window,
                     QtGui.QPixmap(),
