@@ -157,12 +157,19 @@ def gamma_decode_srgb_to_linear_rgb(srgb: torch.Tensor, gamma=SRGB_GAMMA):
 # SPAN ×4: grafo dinámico + PixelShuffle; TensorRT EP (p. ej. FP16) suele dar salida corrupta con IOBinding.
 # RealEsrx4v3 (realesr-general-x4v3): con TensorRT EP + teselas + buffer de salida reutilizado suele
 # producir mosaicos/trozos desordenados; CUDA EP es estable (mismo patrón que SPAN).
+# GPEN-BFR-*: ORT TensorRT EP + trt_fp16_enable has been observed to hang the process (no further
+# log lines after FP16 ENABLED) on some Windows stacks; CUDA EP is stable for these restorers.
 ONNX_MODELS_SKIP_TENSORRT_EP = frozenset(
     {
         "RvmPortraitMatting",
         "SPANx4Nomo",
         "SPANFx4Mssim",
         "RealEsrx4v3",
+        "GPENBFR256",
+        "GPENBFR256FP16",
+        "GPENBFR512",
+        "GPENBFR1024",
+        "GPENBFR2048",
     }
 )
 
@@ -182,6 +189,20 @@ def _providers_without_tensorrt_execution_provider(providers_for_model):
     if not out:
         return [("CUDAExecutionProvider"), ("CPUExecutionProvider")]
     return out
+
+
+def _ort_warmup_numpy_dtype_for_input(inp) -> type:
+    """Match ORT declared input element type for session.run warmup (avoids float32 vs float16 mismatch)."""
+    ty = (getattr(inp, "type", "") or "").lower()
+    if "float16" in ty:
+        return np.float16
+    if "uint8" in ty:
+        return np.uint8
+    if "int64" in ty:
+        return np.int64
+    if "int32" in ty:
+        return np.int32
+    return np.float32
 
 
 def _providers_with_trt_options(providers_for_model, trt_opts: dict):
@@ -633,7 +654,8 @@ class ModelsProcessor(QtCore.QObject):
                         shape.append(d)
                     else:
                         return
-                feeds[inp.name] = np.zeros(shape, dtype=np.float32)
+                dt = _ort_warmup_numpy_dtype_for_input(inp)
+                feeds[inp.name] = np.zeros(shape, dtype=dt)
             session.run(None, feeds)
         except Exception as e:
             print(

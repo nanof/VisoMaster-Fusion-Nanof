@@ -23,6 +23,29 @@ from app.ui.widgets.actions import common_actions as common_widget_actions
 #'''
 
 
+# GPEN ONNX names used by FaceRestorers.model_map. With provider **Custom**, inference
+# uses GPENTorch + lazy init — eager ORT InferenceSession on the GUI thread (especially
+# FP16) can block the UI for a long time or appear frozen; ORT is still loaded on demand
+# from the worker if Custom inference fails.
+_GPEN_ORT_SKIP_WHEN_CUSTOM: frozenset[str] = frozenset(
+    {
+        "GPENBFR256",
+        "GPENBFR256FP16",
+        "GPENBFR512",
+        "GPENBFR1024",
+        "GPENBFR2048",
+    }
+)
+
+
+def _skip_eager_ort_load_for_gpen_custom(
+    main_window: "MainWindow", onnx_model_name: str
+) -> bool:
+    if main_window.models_processor.provider_name != "Custom":
+        return False
+    return onnx_model_name in _GPEN_ORT_SKIP_WHEN_CUSTOM
+
+
 def on_detector_model_selection_change(main_window: "MainWindow", new_model: str):
     """Show/hide detector letterbox combo and fill supported sizes for the selected model."""
     detector_internal_size_ui.sync_detector_internal_size_combo(main_window, new_model)
@@ -499,8 +522,13 @@ def handle_restorer_state_change(
                 print(
                     f"[WARN] Model '{model_to_change}' is already loaded by the other restorer slot. Skipping redundant load."
                 )
-            else:
+            elif not _skip_eager_ort_load_for_gpen_custom(main_window, model_to_change):
                 main_window.models_processor.load_model(model_to_change)
+            else:
+                print(
+                    f"[INFO] Custom provider: skipping eager ORT load for {model_to_change} "
+                    "(GPENTorch on demand)."
+                )
 
             if active_model_attr:
                 setattr(
@@ -572,7 +600,13 @@ def handle_model_selection_change(
     # If the enhancer is enabled, load the new model, but only if it's not already loaded by the other slot.
     if is_enabled and new_model_name:
         if new_model_name != other_model:
-            main_window.models_processor.load_model(new_model_name)
+            if not _skip_eager_ort_load_for_gpen_custom(main_window, new_model_name):
+                main_window.models_processor.load_model(new_model_name)
+            else:
+                print(
+                    f"[INFO] Custom provider: skipping eager ORT load for {new_model_name} "
+                    "(GPENTorch on demand)."
+                )
         else:
             print(
                 f"[WARN] Model '{new_model_name}' is already loaded by the other restorer slot. Skipping redundant load."

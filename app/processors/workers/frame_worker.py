@@ -1463,6 +1463,8 @@ class FrameWorker(threading.Thread):
 
         self._swap_core_stage_accum.clear()
         self._dynamic_side_mask_cache.clear()
+        self._pipeline_profile_inswapper_px_set = set()
+        self._pipeline_profile_inswapper_auto_any = False
 
         if (
             self.is_pool_worker
@@ -1624,7 +1626,7 @@ class FrameWorker(threading.Thread):
         # when swap sub-stages sc_* are listed alongside std_swap_edit).
         frame_total_attributed_ms = feeder_total + total
 
-        return {
+        out: dict[str, Any] = {
             "feeder": fd_dict,
             "worker": stages,
             "worker_total_ms": total,
@@ -1635,6 +1637,39 @@ class FrameWorker(threading.Thread):
             "frame_queue_depth_at_emit": q_depth,
             "frame_queue_max": q_max,
         }
+        px_set = getattr(self, "_pipeline_profile_inswapper_px_set", None)
+        if isinstance(px_set, set) and px_set:
+            out["inswapper_profile_face_px_list"] = sorted(int(x) for x in px_set)
+            out["inswapper_profile_auto_resolution"] = bool(
+                getattr(self, "_pipeline_profile_inswapper_auto_any", False)
+            )
+        return out
+
+    def _note_pipeline_profile_inswapper_dim(
+        self, dim: int, parameters: dict | Any
+    ) -> None:
+        """Record Inswapper128 face-tile side length(s) for pipeline profile overlay."""
+        if not _pipeline_profile_collect_enabled(self.main_window):
+            return
+        try:
+            d = int(dim)
+        except (TypeError, ValueError):
+            return
+        if d < 1 or d > 4:
+            return
+        px = d * 128
+        s = getattr(self, "_pipeline_profile_inswapper_px_set", None)
+        if not isinstance(s, set):
+            s = set()
+            self._pipeline_profile_inswapper_px_set = s
+        s.add(px)
+        try:
+            auto = bool(parameters["SwapperResAutoSelectEnableToggle"])
+        except (KeyError, TypeError):
+            auto = False
+        self._pipeline_profile_inswapper_auto_any = bool(
+            getattr(self, "_pipeline_profile_inswapper_auto_any", False)
+        ) or auto
 
     def _merge_swap_core_perf_stages_from_collector(
         self, coll: _PerfStageCollector | None
@@ -4947,6 +4982,8 @@ class FrameWorker(threading.Thread):
                     dim = 4
                     input_face_affined = original_face_512
 
+            self._note_pipeline_profile_inswapper_dim(dim, parameters)
+
         # --- InStyleSwapper Logic ---
         elif swapper_model in (
             "InStyleSwapper256 Version A",
@@ -7087,6 +7124,9 @@ class FrameWorker(threading.Thread):
         # need float32 for CPU-side convs (see swap.float() note above).
         swap = swap.float()
 
+        if _swap_core_perf is not None:
+            _swap_core_perf.mark("sc_swap_after_border_fx")
+
         # --- RESTORATION 1 ---
         # FW-PERF-11: defer clone until we know it is needed (lazy snapshot)
         swap_original = None
@@ -7118,6 +7158,9 @@ class FrameWorker(threading.Thread):
             swap_restorecalc = swap.clone()
         else:
             swap_restorecalc = swap
+
+        if _swap_core_perf is not None:
+            _swap_core_perf.mark("sc_face_restorer_primary")
 
         # Occluder
         if parameters["OccluderEnableToggle"]:
@@ -7174,6 +7217,9 @@ class FrameWorker(threading.Thread):
                     swap_mask.shape[-2], swap_mask.shape[-1]
                 )(swap_mask_noFP)
             swap_mask_noFP.mul_(swap_mask)
+
+        if _swap_core_perf is not None:
+            _swap_core_perf.mark("sc_occluder_matting")
 
         # --- MASKS (Parser / CLIPs / Restore) ---
         # need_any_parser computed above (FW-PERF-12)
@@ -7279,6 +7325,9 @@ class FrameWorker(threading.Thread):
                 mask_resized = img_swap_mask
             swap_mask = swap_mask * mask_resized
 
+        if _swap_core_perf is not None:
+            _swap_core_perf.mark("sc_parser_clip_restore_mouth")
+
         # --- DFL XSeg ---
         # FW-PERF-5: use promoted instance-attribute transform
         t256_near = self.t256_near
@@ -7351,7 +7400,7 @@ class FrameWorker(threading.Thread):
         mask_autocolor = mask_autocolor > 0.05
 
         if _swap_core_perf is not None:
-            _swap_core_perf.mark("sc_maskcalc_xseg")
+            _swap_core_perf.mark("sc_dfl_xseg_calc_masks")
 
         # Auto Restore (First Pass)
         if (
@@ -8175,9 +8224,14 @@ class FrameWorker(threading.Thread):
 
         # Mask Post-Processing (Final Blend)
         _omb = parameters["OverallMaskBlendAmountSlider"]
-        swap_mask = self._get_cached_gaussian_blur(
-            _omb * 2 + 1, (_omb + 1) * 0.2
-        )(swap_mask)
+        try:
+            _omb_f = float(_omb)
+        except (TypeError, ValueError):
+            _omb_f = 0.0
+        if _omb_f > 0.0:
+            swap_mask = self._get_cached_gaussian_blur(
+                int(_omb_f * 2 + 1), (_omb_f + 1) * 0.2
+            )(swap_mask)
 
         if border_mask.shape[-1] != swap_mask.shape[-1]:
             border_mask = self._get_cached_resize_bilinear_aa(

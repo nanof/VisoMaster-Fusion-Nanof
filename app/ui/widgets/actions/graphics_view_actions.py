@@ -1430,6 +1430,18 @@ def update_pipeline_profile_overlay(
         fn = profile_payload.get("frame_number")
         if fn is not None and wt:
             header_lines.append(f"Profile frame: {fn} · {wt}")
+        px_list = profile_payload.get("inswapper_profile_face_px_list")
+        auto_res = bool(
+            profile_payload.get("inswapper_profile_auto_resolution", False)
+        )
+        if auto_res and isinstance(px_list, list) and px_list:
+            try:
+                parts = " + ".join(str(int(x)) for x in px_list)
+            except (TypeError, ValueError):
+                parts = "?"
+            header_lines.append(
+                f"Resolución Inswapper128 (auto): {parts} px"
+            )
     main_window._pipeline_profile_last_overlay_headers = list(header_lines)
     text = ppa.aggregate_rows_for_display(
         main_window, rows, wt, header_lines=header_lines or None

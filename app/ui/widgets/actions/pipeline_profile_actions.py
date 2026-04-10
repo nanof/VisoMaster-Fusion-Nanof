@@ -22,7 +22,8 @@ PIPELINE_PROFILE_FEEDER_ORDER: Tuple[str, ...] = (
 
 PIPELINE_PROFILE_FEEDER_KEY_SET: frozenset[str] = frozenset(PIPELINE_PROFILE_FEEDER_ORDER)
 
-# Feeder ∑ + worker wall (outer _PerfStageCollector span); excludes duplicate sc_* vs std_swap_edit.
+# Feeder ∑ + worker wall (outer _PerfStageCollector span). Swap sub-stages (sc_*)
+# are summed inside std_swap_edit wall time; do not add both into one “physics” budget.
 PIPELINE_PROFILE_FRAME_TOTAL_KEY = "frame_total_attributed_ms"
 
 # Unified UI: ``PipelineProfileDisplayModeSelection`` (legacy overlay/dock bools stay in sync).
@@ -90,37 +91,44 @@ _PIPELINE_PROFILE_SESSION_REPORT_PREFIX = "[PIPELINE-PROFILE-SESSION]"
 
 # Display labels for overlay (fallback: raw stage id).
 PIPELINE_STAGE_LABELS: Dict[str, str] = {
-    "read_frame_ms": "Read frame",
-    "feeder_state_ms": "Feeder state / markers",
-    "rgb_pack_ms": "RGB pack",
-    "feeder_params_lock_ms": "Params lock",
-    "sequential_detect_ms": "Detect (feeder)",
-    "prep_scaling_h2d": "Prep GPU (H2D)",
-    "vr180": "VR180 pipeline",
-    "std_upscale_rotate": "Scale / rotate",
-    "std_detect_feeder_or_fallback": "Detect (worker)",
-    "std_recognize": "Recognition",
-    "std_swap_edit": "Swap / edit",
-    "std_undo_resize": "Undo scale",
-    "std_overlays_compare": "Overlays / compare",
-    "frame_enhancer": "Frame enhancer",
-    "d2h_numpy": "GPU to CPU",
+    "read_frame_ms": "Feeder: read frame",
+    "feeder_state_ms": "Feeder: state / markers",
+    "rgb_pack_ms": "Feeder: RGB pack",
+    "feeder_params_lock_ms": "Feeder: params lock",
+    "sequential_detect_ms": "Feeder: detect (sequential)",
+    "prep_scaling_h2d": "Worker: frame to GPU (H2D)",
+    "vr180": "Worker: VR180 pipeline",
+    "std_upscale_rotate": "Worker: scale / rotate",
+    "std_detect_feeder_or_fallback": "Worker: face detect",
+    "std_recognize": "Worker: recognition / embeddings",
+    "std_swap_edit": "Worker: swap+edits (outer span)",
+    "std_undo_resize": "Worker: undo working resize",
+    "std_overlays_compare": "Worker: compare / mask preview",
+    "frame_enhancer": "Worker: global frame enhancer",
+    "d2h_numpy": "Worker: result GPU→CPU (numpy)",
     "pass_through": "Passthrough",
     "feeder_subtotal": "Sum Feeder (ms)",
     "worker_subtotal": "Sum Worker (ms)",
-    "sc_align_crop": "Swap: align/crop",
-    "sc_swap_strength": "Swap: strength blend",
-    "sc_border_mask_init": "Swap: border mask",
-    "sc_maskcalc_xseg": "Swap: mask calc / xseg",
-    "sc_restore_color_fx": "Swap: restore/color FX",
-    "sc_perspective_out": "Swap: perspective out",
-    "sc_tail_view_maskpost": "Swap: tail / mask post",
-    "sc_warp_paste": "Swap: warp paste",
+    "sc_align_crop": "Swap: tform + multi-res face crops",
+    "sc_swap_strength": "Swap: swapper infer + strength blend",
+    "sc_border_mask_init": "Swap: side+border masks, buf init",
+    "sc_swap_after_border_fx": "Swap: expr/editor/denoiser/mouth",
+    "sc_face_restorer_primary": "Swap: face restorer (pass 1)",
+    "sc_occluder_matting": "Swap: occluder + RVM + U2Net",
+    "sc_parser_clip_restore_mouth": "Swap: parser + CLIP + eyes/mouth",
+    "sc_dfl_xseg_calc_masks": "Swap: DFL XSeg + merge calc masks",
+    "sc_restore_color_fx": "Swap: color + FX + later restorers",
+    "sc_perspective_out": "Swap: perspective early exit",
+    "sc_tail_view_maskpost": "Swap: final mask blur + view buf",
+    "sc_warp_paste": "Swap: inverse warp + ROI paste",
+    # Legacy swap_core keys (pre-split); still shown if old logs/CSV contain them.
+    "sc_maskcalc_xseg": "Swap: occ+parser+XSeg+mask (legacy)",
+    "sc_masks_occl_parser_xseg_merge": "Swap: occ+parser+XSeg (legacy)",
     PIPELINE_PROFILE_FRAME_TOTAL_KEY: "Frame total (feeder ∑ + worker wall)",
 }
 
-# Column widths for monospace overlay.
-_OVERLAY_COL_LABEL = 22
+# Column widths for monospace overlay (wider labels after swap_core split).
+_OVERLAY_COL_LABEL = 36
 _OVERLAY_COL_MS_THREAD = 8  # per-thread and Avg ms columns
 
 

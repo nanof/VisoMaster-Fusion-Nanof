@@ -312,9 +312,14 @@ class FaceRestorers:
         if cache_key in self._gpen_runner:
             return self._gpen_runner.get(cache_key)
         label = f"{size}" + (" HF-FP16" if variant == "fp16hf" else "")
+        _dlg_msg = (
+            f"Loading GPEN-BFR-{label} (direct inference)…"
+            if variant == "fp16hf"
+            else f"Capturing CUDA graph for GPEN-BFR-{label}…"
+        )
         self.models_processor.show_build_dialog.emit(
             "Finalizing Custom Provider",
-            f"Capturing CUDA graph for GPEN-BFR-{label}…",
+            _dlg_msg,
         )
         try:
             with self._custom_init_lock:
@@ -347,23 +352,31 @@ class FaceRestorers:
                         self._gpen_torch[cache_key] = None
                         self._gpen_runner[cache_key] = None
                         return None
-                try:
-                    from custom_kernels.gpen_bfr.gpen_torch import (
-                        build_cuda_graph_runner,
-                    )
-
-                    inp_hw = model.in_size  # type: ignore[attr-defined]
-                    with self.models_processor.cuda_graph_capture_lock:
-                        runner = build_cuda_graph_runner(
-                            model,  # type: ignore[arg-type]
-                            inp_shape=(1, 3, inp_hw, inp_hw),
-                        )
-                    self._gpen_runner[cache_key] = runner
-                except Exception as e:
+                # FP16 HF weights: CUDA graph capture has been observed to hang or freeze
+                # the app on some Windows + driver stacks; direct GPENTorch.__call__ is stable.
+                if variant == "fp16hf":
                     print(
-                        f"[GPENTorch] CUDA graph build failed for GPEN-{label}, using direct inference: {e}"
+                        "[GPENTorch] FP16 HF: direct inference (CUDA graph capture skipped)."
                     )
-                    self._gpen_runner[cache_key] = model  # fallback: direct model call
+                    self._gpen_runner[cache_key] = model
+                else:
+                    try:
+                        from custom_kernels.gpen_bfr.gpen_torch import (
+                            build_cuda_graph_runner,
+                        )
+
+                        inp_hw = model.in_size  # type: ignore[attr-defined]
+                        with self.models_processor.cuda_graph_capture_lock:
+                            runner = build_cuda_graph_runner(
+                                model,  # type: ignore[arg-type]
+                                inp_shape=(1, 3, inp_hw, inp_hw),
+                            )
+                        self._gpen_runner[cache_key] = runner
+                    except Exception as e:
+                        print(
+                            f"[GPENTorch] CUDA graph build failed for GPEN-{label}, using direct inference: {e}"
+                        )
+                        self._gpen_runner[cache_key] = model  # fallback: direct model call
         finally:
             self.models_processor.hide_build_dialog.emit()
         return self._gpen_runner.get(cache_key)
@@ -709,6 +722,7 @@ class FaceRestorers:
 
         return net_outs
 
+    @torch.inference_mode()
     def apply_facerestorer(
         self,
         swapped_face_upscaled,
