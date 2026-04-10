@@ -3498,11 +3498,33 @@ class FrameWorker(threading.Thread):
             _lazy_iv = int(
                 control.get("PerformanceRecognitionLazyArcFaceIntervalSlider", 1) or 1
             )
-            if _lazy_iv > 1 and _need_emb:
+            if _need_emb:
+                try:
+                    _stride_iv = int(
+                        control.get(
+                            "PerformanceMatchedTrackArcfaceStrideSlider", 1
+                        )
+                        or 1
+                    )
+                except (TypeError, ValueError):
+                    _stride_iv = 1
+                _stride_iv = max(1, min(16, _stride_iv))
+                try:
+                    _mt_mem = int(
+                        control.get(
+                            "PerformanceRecognitionMatchedTrackMemorySlider", 48
+                        )
+                        or 48
+                    )
+                except (TypeError, ValueError):
+                    _mt_mem = 48
+                _mt_mem = max(8, min(180, _mt_mem))
+
                 _still_need = []
                 for w in _need_emb:
                     _tid = int(w.get("track_id", -1))
-                    if _tid >= 0:
+                    _lazy_e = None
+                    if _lazy_iv > 1 and _tid >= 0:
                         _lazy_e = (
                             self.video_processor.try_lazy_arcface_track_embedding(
                                 self.frame_number,
@@ -3512,21 +3534,32 @@ class FrameWorker(threading.Thread):
                                 _lazy_iv,
                             )
                         )
-                        if _lazy_e is not None:
-                            w["embedding"] = _lazy_e
-                            if _use_recognition_cache:
-                                self.video_processor.store_recognition_embedding(
-                                    self.frame_number,
-                                    int(w["i"]),
-                                    w["bbox"],
-                                    w["kps_5"],
-                                    _lazy_e,
-                                    _recognition_arc_model,
-                                    _rec_sim,
-                                    track_id=_tid,
-                                    counted_as_fresh_arcface=False,
-                                )
-                            continue
+                    if _lazy_e is None and _stride_iv > 1 and _tid >= 0:
+                        _lazy_e = (
+                            self.video_processor.try_matched_track_stride_reuse(
+                                self.frame_number,
+                                _tid,
+                                _recognition_arc_model,
+                                _rec_sim,
+                                _stride_iv,
+                                max_match_age_frames=_mt_mem,
+                            )
+                        )
+                    if _lazy_e is not None:
+                        w["embedding"] = _lazy_e
+                        if _use_recognition_cache:
+                            self.video_processor.store_recognition_embedding(
+                                self.frame_number,
+                                int(w["i"]),
+                                w["bbox"],
+                                w["kps_5"],
+                                _lazy_e,
+                                _recognition_arc_model,
+                                _rec_sim,
+                                track_id=_tid,
+                                counted_as_fresh_arcface=False,
+                            )
+                        continue
                     _still_need.append(w)
                 _need_emb = _still_need
 
@@ -3544,18 +3577,53 @@ class FrameWorker(threading.Thread):
                     ) / 100.0
                 except (TypeError, ValueError):
                     _wcent = 0.0
+                try:
+                    _wmt = float(
+                        control.get(
+                            "PerformanceArcFaceMatchedTrackBoostSlider", 0
+                        )
+                        or 0
+                    ) / 100.0
+                except (TypeError, ValueError):
+                    _wmt = 0.0
+                try:
+                    _mt_mem_cap = int(
+                        control.get(
+                            "PerformanceRecognitionMatchedTrackMemorySlider", 48
+                        )
+                        or 48
+                    )
+                except (TypeError, ValueError):
+                    _mt_mem_cap = 48
+                _mt_mem_cap = max(8, min(180, _mt_mem_cap))
+                with self.video_processor._recognition_cache_lock:
+                    _match_snap = dict(
+                        self.video_processor._recognition_track_last_matched_frame
+                    )
+                _fn = int(self.frame_number)
 
                 def _arcface_priority(w: dict[str, Any]) -> float:
                     bw = max(0.0, float(w["bbox"][2]) - float(w["bbox"][0]))
                     bh = max(0.0, float(w["bbox"][3]) - float(w["bbox"][1]))
                     area = bw * bh
                     if _wcent <= 0.0 or _iw < 2.0 or _ih < 2.0:
-                        return area
-                    cx = 0.5 * (float(w["bbox"][0]) + float(w["bbox"][2]))
-                    cy = 0.5 * (float(w["bbox"][1]) + float(w["bbox"][3]))
-                    nd = math.hypot((cx - _icx) / _iw, (cy - _icy) / _ih)
-                    cbonus = max(0.0, 1.0 - 2.0 * nd)
-                    return area * (1.0 + _wcent * cbonus)
+                        base = area
+                    else:
+                        cx = 0.5 * (float(w["bbox"][0]) + float(w["bbox"][2]))
+                        cy = 0.5 * (float(w["bbox"][1]) + float(w["bbox"][3]))
+                        nd = math.hypot((cx - _icx) / _iw, (cy - _icy) / _ih)
+                        cbonus = max(0.0, 1.0 - 2.0 * nd)
+                        base = area * (1.0 + _wcent * cbonus)
+                    if _wmt > 0.0:
+                        tid = int(w.get("track_id", -1))
+                        if tid >= 0:
+                            lm = _match_snap.get(tid)
+                            if (
+                                lm is not None
+                                and _fn - int(lm) <= _mt_mem_cap
+                            ):
+                                base *= 1.0 + _wmt
+                    return base
 
                 _need_emb.sort(key=_arcface_priority, reverse=True)
                 _need_emb = _need_emb[:_arcface_cap]
@@ -3702,6 +3770,11 @@ class FrameWorker(threading.Thread):
                     if best_fface is not None and (
                         swap_button_is_checked_global or edit_button_is_checked_global
                     ):
+                        _best_tid = int(best_fface.get("track_id", -1))
+                        if _best_tid >= 0:
+                            self.video_processor.note_track_matched_for_recognition(
+                                _best_tid, self.frame_number
+                            )
                         denoiser_on = (
                             control.get(
                                 "DenoiserUNetEnableBeforeRestorersToggle", False
@@ -4001,6 +4074,11 @@ class FrameWorker(threading.Thread):
                                         params_rr.data,
                                         control,
                                     )
+                                _rtid = int(fface.get("track_id", -1))
+                                if _rtid >= 0:
+                                    self.video_processor.note_track_matched_for_recognition(
+                                        _rtid, self.frame_number
+                                    )
                             except Exception as e:
                                 print(
                                     f"[ERROR] Standard mode swap_core failed "
@@ -4014,6 +4092,12 @@ class FrameWorker(threading.Thread):
                         fface["embedding"], control, target_faces_snapshot
                     )
                     fface["matched_target"] = best_target
+                    if best_target:
+                        _mtid = int(fface.get("track_id", -1))
+                        if _mtid >= 0:
+                            self.video_processor.note_track_matched_for_recognition(
+                                _mtid, self.frame_number
+                            )
 
                     if best_target and params and (
                         swap_button_is_checked_global or edit_button_is_checked_global

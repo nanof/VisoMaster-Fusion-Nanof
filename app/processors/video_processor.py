@@ -418,6 +418,9 @@ class VideoProcessor(QObject):
         # Scene-cut heuristic: normalized luminance histogram + force-refresh frame index.
         self._scene_cut_hist_prev: numpy.ndarray | None = None
         self._force_arcface_refresh_until_frame: int = -1
+        # ByteTrack id → frame index when that detection last had a swap target match
+        # (ArcFace cap priority + optional matched-only stride reuse).
+        self._recognition_track_last_matched_frame: dict[int, int] = {}
         # Phase 7: last wall time each ONNX model key was used (unload idle).
         self._model_last_used_mono: dict[str, float] = {}
         self.webcam_frames_to_display: queue.Queue[
@@ -1269,8 +1272,51 @@ class VideoProcessor(QObject):
             self._recognition_cache_by_frame.clear()
             self._recognition_track_last.clear()
             self._recognition_last_arcface_frame.clear()
+            self._recognition_track_last_matched_frame.clear()
         self._scene_cut_hist_prev = None
         self._force_arcface_refresh_until_frame = -1
+
+    def note_track_matched_for_recognition(self, track_id: int, frame_num: int) -> None:
+        """Record that this ByteTrack id had a positive target match (swap/edit path)."""
+        if track_id < 0 or frame_num <= 0:
+            return
+        with self._recognition_cache_lock:
+            self._recognition_track_last_matched_frame[int(track_id)] = int(frame_num)
+
+    def try_matched_track_stride_reuse(
+        self,
+        frame_num: int,
+        track_id: int,
+        model: str,
+        sim_type: str,
+        stride_frames: int,
+        *,
+        max_match_age_frames: int = 48,
+    ) -> numpy.ndarray | None:
+        """Reuse track embedding without ArcFace when stride>1 and track matched recently.
+
+        Unlike lazy interval (all tracks), this only applies to ``track_id`` keys present
+        in ``_recognition_track_last_matched_frame`` so new/unknown faces still get a run.
+        """
+        if frame_num <= 0 or track_id < 0 or stride_frames <= 1:
+            return None
+        if int(frame_num) == int(
+            getattr(self, "_force_arcface_refresh_until_frame", -2)
+        ):
+            return None
+        with self._recognition_cache_lock:
+            mf = self._recognition_track_last_matched_frame.get(track_id)
+            if mf is None or frame_num - int(mf) > int(max_match_age_frames):
+                return None
+            tr = self._recognition_track_last.get(track_id)
+            if tr is None or tr["model"] != model or tr["sim"] != sim_type:
+                return None
+            last_f = self._recognition_last_arcface_frame.get(track_id)
+            if last_f is None:
+                return numpy.asarray(tr["emb"], dtype=numpy.float32).copy()
+            if frame_num - int(last_f) < int(stride_frames):
+                return numpy.asarray(tr["emb"], dtype=numpy.float32).copy()
+        return None
 
     def maybe_note_scene_cut_for_arcface(
         self,

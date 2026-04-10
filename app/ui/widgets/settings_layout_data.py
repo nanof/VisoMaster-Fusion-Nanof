@@ -212,6 +212,40 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "help": "When max ArcFace/frame limits which faces run, boost priority for faces near "
             "the frame center (0 = area only).",
         },
+        "PerformanceArcFaceMatchedTrackBoostSlider": {
+            "level": 1,
+            "label": "ArcFace cap: boost recently matched tracks (0–100)",
+            "min_value": "0",
+            "max_value": "100",
+            "default": "0",
+            "step": 5,
+            "help": "When a ByteTrack id had a swap/edit match within the “matched track memory” "
+            "window below, multiply its priority score by (1 + this/100) so it is less likely to "
+            "lose a slot when max ArcFace/frame is tight. 0 = off.",
+        },
+        "PerformanceRecognitionMatchedTrackMemorySlider": {
+            "level": 1,
+            "label": "Matched-track memory (frames)",
+            "min_value": "8",
+            "max_value": "180",
+            "default": "48",
+            "step": 4,
+            "help": "How long a track stays “recently matched” for cap boost and for matched-only "
+            "ArcFace stride (below). Larger = stickier priority / reuse; cuts or new faces fall out "
+            "naturally after this many frames without a new match note.",
+        },
+        "PerformanceMatchedTrackArcfaceStrideSlider": {
+            "level": 1,
+            "label": "Matched tracks: min frames between real ArcFace",
+            "min_value": "1",
+            "max_value": "12",
+            "default": "1",
+            "step": 1,
+            "help": "1 = off. For ByteTrack ids that matched a target within matched-track memory, "
+            "reuse the last embedding without ArcFace until this many frames have passed since the "
+            "last *fresh* ArcFace (same idea as global lazy track, but only for faces you are already "
+            "swapping). Geometry cache and scene-cut refresh still apply first.",
+        },
         "PerformanceSceneCutArcFaceRefreshEnableToggle": {
             "level": 1,
             "label": "Scene cut → force fresh ArcFace (1 frame)",
