@@ -654,7 +654,7 @@ class VideoProcessor(QObject):
                 blend = curr
             if (
                 self.file_type == "video"
-                and graphics_view_actions.preview_fsr1_gpu_display_enabled(
+                and graphics_view_actions.preview_gl_spatial_upscale_preview_enabled(
                     self.main_window
                 )
                 and graphics_view_actions.ensure_video_preview_opengl_viewport(
@@ -793,7 +793,9 @@ class VideoProcessor(QObject):
             blend = curr
         if (
             self.file_type == "video"
-            and graphics_view_actions.preview_fsr1_gpu_display_enabled(self.main_window)
+            and graphics_view_actions.preview_gl_spatial_upscale_preview_enabled(
+                self.main_window
+            )
             and graphics_view_actions.ensure_video_preview_opengl_viewport(
                 self.main_window
             )
@@ -1007,14 +1009,16 @@ class VideoProcessor(QObject):
 
         self._reset_smooth_decouple_frame_buffers()
 
-        use_fsr = (
+        use_gl_upscale = (
             self.file_type == "video"
-            and graphics_view_actions.preview_fsr1_gpu_display_enabled(self.main_window)
+            and graphics_view_actions.preview_gl_spatial_upscale_preview_enabled(
+                self.main_window
+            )
             and graphics_view_actions.ensure_video_preview_opengl_viewport(
                 self.main_window
             )
         )
-        if use_fsr:
+        if use_gl_upscale:
             pixmap = QPixmap()
         else:
             pixmap = common_widget_actions.get_pixmap_from_frame(self.main_window, frame)
@@ -1025,7 +1029,7 @@ class VideoProcessor(QObject):
                 pixmap,
                 frame_number,
                 reset_fit=True,
-                preview_frame_bgr=frame if use_fsr else None,
+                preview_frame_bgr=frame if use_gl_upscale else None,
             )
             self.main_window.loading_new_media = False
         else:
@@ -1033,7 +1037,7 @@ class VideoProcessor(QObject):
                 self.main_window,
                 pixmap,
                 frame_number,
-                preview_frame_bgr=frame if use_fsr else None,
+                preview_frame_bgr=frame if use_gl_upscale else None,
             )
         self.current_frame = frame
         common_widget_actions.update_gpu_memory_progressbar(self.main_window)
@@ -3310,16 +3314,16 @@ class VideoProcessor(QObject):
                 gpu_blend=gpu_blend_for_view,
             )
         else:
-            use_fsr = (
+            use_gl_upscale = (
                 self.file_type == "video"
-                and graphics_view_actions.preview_fsr1_gpu_display_enabled(
+                and graphics_view_actions.preview_gl_spatial_upscale_preview_enabled(
                     self.main_window
                 )
                 and graphics_view_actions.ensure_video_preview_opengl_viewport(
                     self.main_window
                 )
             )
-            if use_fsr:
+            if use_gl_upscale:
                 pixmap = QPixmap()
                 graphics_view_actions.update_graphics_view(
                     self.main_window,
