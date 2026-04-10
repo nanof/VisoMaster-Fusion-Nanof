@@ -12,19 +12,6 @@ if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
 
 _PREVIEW_FPS_STALE_SEC = 1.15
-
-# Diagnóstico NIS: omisiones del hook composite (una vez por motivo) + contador de renders.
-_nis_composite_skip_logged: set[str] = set()
-_nis_composite_to_render_count: list[int] = [0]
-
-
-def _nis_composite_skip_log(key: str, detail: str) -> None:
-    if not preview_nis_debug_env():
-        return
-    if key in _nis_composite_skip_logged:
-        return
-    _nis_composite_skip_logged.add(key)
-    print(f"[NIS] composite_nis omitido: {detail}", flush=True)
 # Session-average FPS (second overlay line): ignore this many seconds after Play (buffer/preroll).
 _SESSION_FPS_WARMUP_SEC = 3.0
 
@@ -490,56 +477,30 @@ def composite_nis_preview_overlay_if_needed(
     gv: QtWidgets.QGraphicsView,
 ) -> None:
     if not preview_nis_gpu_display_enabled(main_window):
-        _nis_composite_skip_log("gpu", "preview_nis_gpu_display_enabled=False")
         return
     try:
         from app.ui.widgets.preview_opengl_viewport_widget import (
             VisoMasterPreviewOpenGLViewport,
         )
     except ImportError:
-        _nis_composite_skip_log("import_vp", "no se pudo importar VisoMasterPreviewOpenGLViewport")
         return
     if VisoMasterPreviewOpenGLViewport is None:
-        _nis_composite_skip_log("vp_cls", "VisoMasterPreviewOpenGLViewport es None")
         return
     vp = gv.viewport()
     if not isinstance(vp, VisoMasterPreviewOpenGLViewport):
-        _nis_composite_skip_log(
-            "vp_type",
-            f"viewport no es OpenGL ({type(vp).__module__}.{type(vp).__name__}); "
-            "el hook NIS no corre",
-        )
         return
     item = getattr(main_window, "_video_preview_nis_gl_item", None)
     if item is None:
-        _nis_composite_skip_log("item", "_video_preview_nis_gl_item no existe aún")
         return
     try:
         if not item.isVisible():
-            _nis_composite_skip_log("invisible", "item NIS no visible")
             return
     except RuntimeError:
-        _nis_composite_skip_log("dead", "item NIS RuntimeError al comprobar visible")
         return
-    if preview_nis_debug_env():
-        _nis_composite_to_render_count[0] += 1
-        n = _nis_composite_to_render_count[0]
-        if n <= 300:
-            print(f"[NIS] composite → render_gl_in_viewport (#{n})", flush=True)
     try:
         item.render_gl_in_viewport(vp, gv)
     except Exception:
-        if os.environ.get("VISIOMASTER_DEBUG_NIS", "").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-            "on",
-            "all",
-        ):
-            import traceback
-
-            print("[NIS] Excepción no capturada en composite (capa graphics_view):", flush=True)
-            traceback.print_exc()
+        pass
     _notify_preview_spatial_resolution_overlay_deferred(main_window, item, "nis")
 
 

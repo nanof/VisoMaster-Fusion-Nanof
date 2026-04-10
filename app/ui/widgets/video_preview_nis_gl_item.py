@@ -10,8 +10,7 @@ Mutex with FSR1 preview: only one spatial upscale path active (see control handl
 
 OpenGL: VISIOMASTER_GL_DEBUG=1 activa KHR_debug; NOTIFICATION con tope (cap) salvo
 VISIOMASTER_GL_DEBUG_NOTIFICATIONS=1. Vendor/renderer: mismo flag o VISIOMASTER_DEBUG_NIS=1.
-Ruta NIS: VISIOMASTER_DEBUG_NIS=1 (también drena glGetError y trazas «trace #N» paso a paso).
-  Si el log se corta al cerrar: PYTHONUNBUFFERED=1 (o python -u) y lanzar sin launcher que oculte stderr.
+Ruta NIS: VISIOMASTER_DEBUG_NIS=1 (también drena glGetError).
 Upscale >2×: varios pasos NVScaler (ping-pong FBO); un solo paso con k_scale<0.5 suele dar negro.
 Tras compute se desenlaza la image unit 0 antes del blit (misma textura image+sampler → negro en NVIDIA).
 Opcional: VISIOMASTER_NIS_NO_TEXTURE_GATHER=1 sustituye NIS_TEXTURE_GATHER en nis_scaler.comp (sin romper #version).
@@ -21,7 +20,6 @@ from __future__ import annotations
 
 import math
 import os
-import sys
 import traceback
 from pathlib import Path
 from typing import Any
@@ -125,22 +123,6 @@ def _nis_debug() -> bool:
 def _nis_dbg(msg: str) -> None:
     if _nis_debug():
         print(f"[NIS] {msg}", flush=True)
-
-
-_NIS_TRACE_SEQ = [0]
-
-
-def _nis_render_trace(msg: str) -> None:
-    """Breadcrumb con flush agresivo (TDR/crash del driver a veces no dejan buffer estándar)."""
-    if not _nis_debug():
-        return
-    _NIS_TRACE_SEQ[0] += 1
-    print(f"[NIS] trace #{_NIS_TRACE_SEQ[0]}: {msg}", flush=True)
-    try:
-        sys.stdout.flush()
-        sys.stderr.flush()
-    except Exception:
-        pass
 
 
 def _nis_emit_shader_log(title: str, log: str | None) -> None:
@@ -993,20 +975,13 @@ class VideoPreviewNisGlItem(QtWidgets.QGraphicsObject):
         gv: QtWidgets.QGraphicsView,
     ) -> None:
         if self._frame_bgr is None or QOpenGLShaderProgram is None:
-            if _nis_debug() and not getattr(self, "_nis_logged_skip_no_frame", False):
-                self._nis_logged_skip_no_frame = True
-                _nis_render_trace("salida temprana: sin frame_bgr o QOpenGLShaderProgram")
             return
         if self._gl_failed:
-            if _nis_debug() and not getattr(self, "_nis_logged_skip_gl_failed", False):
-                self._nis_logged_skip_gl_failed = True
-                _nis_render_trace("salida temprana: _gl_failed=True (reinicia preview o toggles NIS)")
             return
         try:
             gl_widget.makeCurrent()
         except Exception as e:
             self._gl_failed = True
-            print(f"[NIS] makeCurrent falló (se desactiva reintento GL): {e!r}", flush=True)
             if _nis_debug():
                 _nis_dbg(f"makeCurrent failed: {e!r}")
             return
@@ -1019,7 +994,6 @@ class VideoPreviewNisGlItem(QtWidgets.QGraphicsObject):
                     "render skip: sin QOpenGLContext en el viewport (¿preview OpenGL no activo?)"
                 )
             return
-        _nis_render_trace("makeCurrent OK, contexto listo")
         schedule_khr_debug_install_for_context(ctx)
         log_gl_driver_info_once(ctx)
         xf = _gl_extra_for_context(ctx)
@@ -1029,10 +1003,6 @@ class VideoPreviewNisGlItem(QtWidgets.QGraphicsObject):
         limit_px = nis_max_compute_output_pixels()
         oversize_dst = self._use_compute and (rw0 * rh0 > limit_px)
         direct_blit = (not self._use_compute) or oversize_dst
-        _nis_render_trace(
-            f"layout tex={w}x{h} dst_item_px={rw0}x{rh0} use_compute={self._use_compute} "
-            f"direct_blit={direct_blit} oversize_dst={oversize_dst} limit_px={limit_px}"
-        )
         if oversize_dst and not getattr(self, "_nis_oversize_warned", False):
             self._nis_oversize_warned = True
             print(
@@ -1044,36 +1014,23 @@ class VideoPreviewNisGlItem(QtWidgets.QGraphicsObject):
 
         try:
             if not direct_blit:
-                _nis_render_trace("ensure_compute…")
                 if not self._ensure_compute():
                     self._gl_failed = True
-                    _nis_render_trace("fallo ensure_compute")
                     return
-                _nis_render_trace("ensure_compute OK")
-            _nis_render_trace("ensure_blit_program…")
             if not self._ensure_blit_program():
                 self._gl_failed = True
-                _nis_render_trace("fallo ensure_blit_program")
                 return
-            _nis_render_trace("ensure VBO/VAO…")
             if not self._ensure_vbo() or not self._ensure_vao():
                 self._gl_failed = True
-                _nis_render_trace("fallo VBO/VAO")
                 return
-            _nis_render_trace("src_gl_ensure…")
             if not self._src_gl_ensure(ctx, w, h):
                 self._gl_failed = True
-                _nis_render_trace("fallo src_gl_ensure")
                 return
             if self._present_seq != self._upload_applied_seq:
-                _nis_render_trace("upload textura vídeo → GPU…")
                 rgb = _numpy_bgr_to_rgb_contiguous(self._frame_bgr)
                 rgba = _numpy_rgb_to_rgba_contiguous(rgb)
                 self._src_gl_upload_rgba(ctx, rgba)
                 self._upload_applied_seq = self._present_seq
-                _nis_render_trace("upload textura hecho")
-            else:
-                _nis_render_trace("reutiliza textura (mismo present_seq)")
 
             vw = max(1, gl_widget.width())
             vh = max(1, gl_widget.height())
@@ -1109,9 +1066,6 @@ class VideoPreviewNisGlItem(QtWidgets.QGraphicsObject):
             self._preview_overlay_src_wh = (int(w), int(h))
             self._preview_overlay_tgt_wh = (int(rw), int(rh))
             prev_qt_fbo = _gl_query_framebuffer_binding(f, ctx, gl_widget)
-            _nis_render_trace(
-                f"viewport widget={vw}x{vh} phys={vp_w}x{vp_h} rwrh={rw}x{rh} prev_fbo={prev_qt_fbo!r}"
-            )
 
             if direct_blit:
                 extra_blit = (
@@ -1132,17 +1086,14 @@ class VideoPreviewNisGlItem(QtWidgets.QGraphicsObject):
                 self._prog_blit.bind()
                 self._src_gl_bind_unit0(ctx)
                 self._set_uniform_int(self._prog_blit, "u_src", 0)
-                _nis_render_trace("direct_blit: draw_quad → backbuffer…")
                 if not self._draw_quad_like_blend(self._prog_blit, f):
                     self._gl_failed = True
                     self._src_gl_unbind_unit0(ctx)
                     self._prog_blit.release()
                     self._vbo.release()
-                    _nis_render_trace("direct_blit: draw_quad falló")
                     return
                 self._src_gl_unbind_unit0(ctx)
                 self._prog_blit.release()
-                _nis_render_trace("direct_blit: OK")
             else:
                 ubo_single = pack_nis_scaler_ubo(
                     input_tex_w=w,
@@ -1158,10 +1109,6 @@ class VideoPreviewNisGlItem(QtWidgets.QGraphicsObject):
                 chain = nis_upscale_chain(w, h, rw, rh)
                 use_single = ubo_single is not None and self._ensure_nis_fbo(ctx, rw, rh)
                 use_chain = (not use_single) and bool(chain)
-                _nis_render_trace(
-                    f"compute rama: use_single={use_single} use_chain={use_chain} "
-                    f"chain_len={len(chain)}"
-                )
 
                 if not use_single and not use_chain:
                     if ubo_single is None:
@@ -1187,32 +1134,25 @@ class VideoPreviewNisGlItem(QtWidgets.QGraphicsObject):
                     self._prog_blit.bind()
                     self._src_gl_bind_unit0(ctx)
                     self._set_uniform_int(self._prog_blit, "u_src", 0)
-                    _nis_render_trace("fallback blit (sin single ni chain) draw_quad…")
                     if not self._draw_quad_like_blend(self._prog_blit, f):
                         self._gl_failed = True
                         self._src_gl_unbind_unit0(ctx)
                         self._prog_blit.release()
                         self._vbo.release()
-                        _nis_render_trace("fallback blit falló")
                         return
                     self._src_gl_unbind_unit0(ctx)
                     self._prog_blit.release()
                     self._vbo.release()
-                    _nis_render_trace("fallback blit OK, return")
                     return
-                _nis_render_trace("ensure_coef_textures + UBO…")
                 if not self._ensure_coef_textures(ctx):
                     self._gl_failed = True
                     self._vbo.release()
-                    _nis_render_trace("fallo ensure_coef_textures")
                     return
                 if not self._ensure_ubo():
                     self._gl_failed = True
                     self._vbo.release()
-                    _nis_render_trace("fallo ensure_ubo")
                     return
                 assert self._ubo is not None
-                _nis_render_trace("coef + UBO OK; APIs compute…")
 
                 bind_buf_base = getattr(xf, "glBindBufferBase", None)
                 dispatch = getattr(xf, "glDispatchCompute", None)
@@ -1248,7 +1188,6 @@ class VideoPreviewNisGlItem(QtWidgets.QGraphicsObject):
                     )
 
                 _fsr1_gl_drain_errors(ctx, "NIS pre compute dispatch")
-                _nis_render_trace("post drain_errors pre compute")
 
                 final_tex_id: int
                 if use_single:
@@ -1268,18 +1207,13 @@ class VideoPreviewNisGlItem(QtWidgets.QGraphicsObject):
                     bind_img(0, out_tid, 0, False, 0, _GL_WRITE_ONLY, _GL_RGBA8)
                     gx = max(1, (rw + _NIS_BLOCK_W - 1) // _NIS_BLOCK_W)
                     gy = max(1, (rh + _NIS_BLOCK_H - 1) // _NIS_BLOCK_H)
-                    _nis_render_trace(
-                        f"single: glDispatchCompute grid=({gx},{gy},1) out_tex={out_tid} dst={rw}x{rh}"
-                    )
                     dispatch(int(gx), int(gy), 1)
-                    _nis_render_trace("single: post dispatch → memoryBarrier + textureBarrier")
                     mem_barrier(
                         _GL_SHADER_IMAGE_ACCESS_BARRIER_BIT
                         | _GL_TEXTURE_FETCH_BARRIER_BIT
                     )
                     gl_texture_barrier_after_image_write(ctx)
                     _fsr1_gl_drain_errors(ctx, "NIS after compute (single)")
-                    _nis_render_trace("single: compute paso terminado")
                     self._nis_unbind_compute_samplers(ctx, f, None)
                     self._prog_compute.release()
                     final_tex_id = int(out_tid)
@@ -1287,10 +1221,7 @@ class VideoPreviewNisGlItem(QtWidgets.QGraphicsObject):
                     read_tid: int | None = None
                     cw, ch = w, h
                     primary_out = True
-                    for _step_i, (tw, th) in enumerate(chain):
-                        _nis_render_trace(
-                            f"chain step {_step_i + 1}/{len(chain)}: {tw}x{th} (from {cw}x{ch})"
-                        )
+                    for tw, th in chain:
                         step_ubo = pack_nis_scaler_ubo(
                             input_tex_w=cw,
                             input_tex_h=ch,
@@ -1336,11 +1267,7 @@ class VideoPreviewNisGlItem(QtWidgets.QGraphicsObject):
                         bind_img(0, out_tid, 0, False, 0, _GL_WRITE_ONLY, _GL_RGBA8)
                         gx = max(1, (tw + _NIS_BLOCK_W - 1) // _NIS_BLOCK_W)
                         gy = max(1, (th + _NIS_BLOCK_H - 1) // _NIS_BLOCK_H)
-                        _nis_render_trace(
-                            f"chain: dispatch grid=({gx},{gy},1) out_tid={out_tid}"
-                        )
                         dispatch(int(gx), int(gy), 1)
-                        _nis_render_trace(f"chain step {_step_i + 1}: post dispatch barriers")
                         mem_barrier(
                             _GL_SHADER_IMAGE_ACCESS_BARRIER_BIT
                             | _GL_TEXTURE_FETCH_BARRIER_BIT
@@ -1367,14 +1294,12 @@ class VideoPreviewNisGlItem(QtWidgets.QGraphicsObject):
                         return
                     final_tex_id = int(read_tid)
 
-                _nis_render_trace(f"unbind image0; blit final_tex_id={final_tex_id} → pantalla")
                 _nis_gl_unbind_image_unit0(xf)
                 # No usar QOpenGLFramebufferObject.bindDefault() aquí: en QOpenGLWidget el
                 # «default» real es defaultFramebufferObject(), no FBO 0; bindDefault()
                 # puede colgar o romper el contexto y dejar el preview congelado.
                 gl_texture_barrier_after_image_write(ctx)
                 _fsr1_gl_drain_errors(ctx, "NIS pre blit to screen")
-                _nis_render_trace("restore Qt FBO + viewport + prog_blit para quad final")
                 self._restore_qt_draw_framebuffer(f, gl_widget, prev_qt_fbo, ctx)
                 f.glViewport(0, 0, vp_w, vp_h)
                 assert self._prog_blit is not None
@@ -1382,18 +1307,15 @@ class VideoPreviewNisGlItem(QtWidgets.QGraphicsObject):
                 _fsr_gl_active_texture_unit0(ctx)
                 f.glBindTexture(_GL_TEXTURE_2D, final_tex_id)
                 self._set_uniform_int(self._prog_blit, "u_src", 0)
-                _nis_render_trace("draw_quad FBO→backbuffer…")
                 if not self._draw_quad_like_blend(self._prog_blit, f):
                     self._gl_failed = True
                     f.glBindTexture(_GL_TEXTURE_2D, 0)
                     self._prog_blit.release()
                     self._vbo.release()
-                    _nis_render_trace("quad final falló")
                     return
                 f.glBindTexture(_GL_TEXTURE_2D, 0)
                 self._prog_blit.release()
                 _fsr1_gl_drain_errors(ctx, "NIS after blit to screen")
-                _nis_render_trace("quad final OK")
 
             self._vbo.release()
             if not self._compute_ok_logged and not direct_blit:
@@ -1409,7 +1331,6 @@ class VideoPreviewNisGlItem(QtWidgets.QGraphicsObject):
                         f"NVScaler compute OK  tex={w}x{h} dst_rect={rw}x{rh} "
                         f"(mismo criterio que el overlay source→target)"
                     )
-            _nis_render_trace("render_gl_in_viewport fin OK (frame)")
         except Exception as e:
             self._gl_failed = True
             try:
@@ -1418,9 +1339,8 @@ class VideoPreviewNisGlItem(QtWidgets.QGraphicsObject):
                     vb.release()
             except Exception:
                 pass
-            print(f"[NIS] render_gl_in_viewport error (se desactiva reintento GL): {e!r}", flush=True)
-            traceback.print_exc()
             if _nis_debug():
+                traceback.print_exc()
                 _nis_dbg(f"render_gl_in_viewport exception: {e!r}")
 
     def paint(  # noqa: N802
@@ -1443,6 +1363,4 @@ class VideoPreviewNisGlItem(QtWidgets.QGraphicsObject):
         self._nis_dbg_path_key = None
         self._nis_dbg_no_ctx_logged = False
         self._nis_oversize_warned = False
-        self._nis_logged_skip_no_frame = False
-        self._nis_logged_skip_gl_failed = False
         self._destroy_gl_objects()
