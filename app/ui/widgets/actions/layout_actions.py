@@ -92,8 +92,12 @@ def add_widgets_to_tab_layout(
             spacing_level = cast(int, widget_data["level"])
             label = QtWidgets.QLabel(cast(str, widget_data["label"]))
             label.setToolTip(cast(str, widget_data["help"]))
-
-            if "Toggle" in widget_name:
+            mirror_chk = cast(
+                Union[str, None], widget_data.get("mirror_checkable_button")
+            )
+            if mirror_chk:
+                # Default-arg binding: loop locals must not be captured by reference alone.
+                mirror_button_attr = str(mirror_chk)
                 widget = widget_components.ToggleButton(
                     label=cast(str, widget_data["label"]),
                     widget_name=widget_name,
@@ -101,7 +105,73 @@ def add_widgets_to_tab_layout(
                     label_widget=label,
                     main_window=main_window,
                 )
-                widget.setChecked(cast(bool, widget_data["default"]))
+                target_btn = getattr(main_window, mirror_button_attr, None)
+                init_swap = False
+                if target_btn is not None and hasattr(target_btn, "isChecked"):
+                    init_swap = bool(target_btn.isChecked())
+                widget.setChecked(init_swap)
+                stub_reset = QtWidgets.QWidget()
+                stub_reset.setFixedSize(0, 0)
+                widget.reset_default_button = stub_reset
+                row_widget, horizontal_layout = add_horizontal_layout_to_category(
+                    category_layout, widget, label, stub_reset
+                )
+
+                def _mirror_to_toolbar_swap(
+                    _checked,
+                    _attr: str = mirror_button_attr,
+                    _mw: "MainWindow" = main_window,
+                    _tw: widget_components.ToggleButton = widget,
+                ):
+                    tb = getattr(_mw, _attr, None)
+                    if tb is None or not hasattr(tb, "setChecked"):
+                        return
+                    tb.blockSignals(True)
+                    tb.setChecked(_tw.isChecked())
+                    tb.blockSignals(False)
+                    video_control_actions.process_swap_faces(_mw)
+
+                def _toolbar_to_mirror_swap(
+                    checked,
+                    _tw: widget_components.ToggleButton = widget,
+                ):
+                    _tw.blockSignals(True)
+                    _tw.setChecked(bool(checked))
+                    _tw.blockSignals(False)
+
+                widget.toggled.connect(_mirror_to_toolbar_swap)
+                if target_btn is not None and hasattr(target_btn, "toggled"):
+                    target_btn.toggled.connect(_toolbar_to_mirror_swap)
+
+                horizontal_layout.setContentsMargins(spacing_level * 10, 0, 0, 0)
+                widget.row_widget = row_widget
+                main_window.parameter_widgets[widget_name] = widget
+                continue
+
+            bind_control = cast(
+                Union[str, None], widget_data.get("bind_control")
+            )
+            storage_key = bind_control or widget_name
+
+            if "Toggle" in widget_name:
+                init_toggle = cast(bool, widget_data["default"])
+                if bind_control and data_type == "control":
+                    raw = main_window.control.get(storage_key, widget_data["default"])
+                    init_toggle = bool(raw)
+                elif bind_control and data_type == "parameter":
+                    init_toggle = bool(
+                        common_widget_actions.get_current_parameter_value(
+                            main_window, storage_key, widget_data["default"]
+                        )
+                    )
+                widget = widget_components.ToggleButton(
+                    label=cast(str, widget_data["label"]),
+                    widget_name=widget_name,
+                    group_layout_data=widgets,
+                    label_widget=label,
+                    main_window=main_window,
+                )
+                widget.setChecked(init_toggle)
                 widget.reset_default_button = (
                     widget_components.ParameterResetDefaultButton(related_widget=widget)
                 )
@@ -111,10 +181,11 @@ def add_widgets_to_tab_layout(
                 )
 
                 if data_type == "parameter":
-                    common_widget_actions.create_default_parameter(
-                        main_window, widget_name, cast(bool, widget_data["default"])
-                    )
-                else:
+                    if not bind_control:
+                        common_widget_actions.create_default_parameter(
+                            main_window, widget_name, cast(bool, widget_data["default"])
+                        )
+                elif not bind_control:
                     common_widget_actions.create_control(
                         main_window, widget_name, cast(bool, widget_data["default"])
                     )
@@ -126,10 +197,12 @@ def add_widgets_to_tab_layout(
                     *args,
                 ):
                     toggle_state = toggle_widget.isChecked()
+                    bc = cast(Union[str, None], widget_data.get("bind_control"))
+                    control_key = bc or toggle_widget_name
                     if data_type == "parameter":
                         common_widget_actions.update_parameter(
                             main_window,
-                            toggle_widget_name,
+                            control_key,
                             toggle_state,
                             enable_refresh_frame=toggle_widget.enable_refresh_frame,
                             exec_function=widget_data.get("exec_function"),
@@ -137,16 +210,32 @@ def add_widgets_to_tab_layout(
                                 list, widget_data.get("exec_function_args", [])
                             ),
                         )
+                        if bc:
+                            primary_toggle = main_window.parameter_widgets.get(bc)
+                            if primary_toggle is not None:
+                                common_widget_actions.show_hide_related_widgets(
+                                    main_window,
+                                    primary_toggle,
+                                    bc,
+                                )
                     elif data_type == "control":
                         common_widget_actions.update_control(
                             main_window,
-                            toggle_widget_name,
+                            control_key,
                             toggle_state,
                             exec_function=widget_data.get("exec_function"),
                             exec_function_args=cast(
                                 list, widget_data.get("exec_function_args", [])
                             ),
                         )
+                        if bc:
+                            primary_toggle = main_window.parameter_widgets.get(bc)
+                            if primary_toggle is not None:
+                                common_widget_actions.show_hide_related_widgets(
+                                    main_window,
+                                    primary_toggle,
+                                    bc,
+                                )
 
                 widget.toggled.connect(
                     partial(onchange_toggle, widget, widget_name, widget_data)
@@ -161,6 +250,10 @@ def add_widgets_to_tab_layout(
                 if callable(default):
                     default = default(main_window.dfm_model_manager)
 
+                init_selection = default
+                if bind_control and data_type == "control":
+                    init_selection = main_window.control.get(storage_key, default)
+
                 widget = widget_components.SelectionBox(
                     label=cast(str, widget_data["label"]),
                     widget_name=widget_name,
@@ -172,7 +265,7 @@ def add_widgets_to_tab_layout(
                 )
 
                 widget.addItems(cast(List[str], options))
-                widget.setCurrentText(cast(str, default))
+                widget.setCurrentText(str(init_selection))
 
                 widget.reset_default_button = (
                     widget_components.ParameterResetDefaultButton(related_widget=widget)
@@ -185,7 +278,7 @@ def add_widgets_to_tab_layout(
                     common_widget_actions.create_default_parameter(
                         main_window, widget_name, default
                     )
-                else:
+                elif not bind_control:
                     common_widget_actions.create_control(
                         main_window, widget_name, default
                     )
@@ -199,6 +292,8 @@ def add_widgets_to_tab_layout(
                     actual_value = selection_widget.currentData()
                     if actual_value is None:
                         actual_value = selected_value
+                    bc_sel = cast(Union[str, None], widget_data.get("bind_control"))
+                    control_key_sel = bc_sel or selection_widget_name
                     if data_type == "parameter":
                         common_widget_actions.update_parameter(
                             main_window,
@@ -213,13 +308,21 @@ def add_widgets_to_tab_layout(
                     elif data_type == "control":
                         common_widget_actions.update_control(
                             main_window,
-                            selection_widget_name,
+                            control_key_sel,
                             actual_value,
                             exec_function=widget_data.get("exec_function"),
                             exec_function_args=cast(
                                 list, widget_data.get("exec_function_args", [])
                             ),
                         )
+                        if bc_sel:
+                            primary_sel = main_window.parameter_widgets.get(bc_sel)
+                            if primary_sel is not None:
+                                common_widget_actions.show_hide_related_widgets(
+                                    main_window,
+                                    primary_sel,
+                                    bc_sel,
+                                )
 
                 widget.currentTextChanged.connect(
                     partial(onchange_selection, widget, widget_name, widget_data)
@@ -416,13 +519,26 @@ def add_widgets_to_tab_layout(
                     )
                     widget.below_row_widget = _below_row_widget
 
+                if bind_control and data_type == "control":
+                    try:
+                        _iv = int(
+                            float(
+                                main_window.control.get(
+                                    storage_key, widget_data["default"]
+                                )
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        _iv = int(cast(Union[int, float, str], widget_data["default"]))
+                    widget.set_value(_iv)
+
                 if data_type == "parameter":
                     common_widget_actions.create_default_parameter(
                         main_window,
                         widget_name,
                         int(cast(Union[int, float, str], widget_data["default"])),
                     )
-                else:
+                elif not bind_control:
                     common_widget_actions.create_control(
                         main_window,
                         widget_name,
@@ -435,6 +551,8 @@ def add_widgets_to_tab_layout(
                     widget_data: dict,
                     new_value=False,
                 ):
+                    bc_sl = cast(Union[str, None], widget_data.get("bind_control"))
+                    control_key_sl = bc_sl or slider_widget_name
                     if data_type == "parameter":
                         common_widget_actions.update_parameter(
                             main_window,
@@ -445,7 +563,7 @@ def add_widgets_to_tab_layout(
                     elif data_type == "control":
                         common_widget_actions.update_control(
                             main_window,
-                            slider_widget_name,
+                            control_key_sl,
                             new_value,
                             exec_function=widget_data.get("exec_function"),
                             exec_function_args=cast(
@@ -476,6 +594,8 @@ def add_widgets_to_tab_layout(
                         new_value = slider_widget.min_value
                     slider_widget.line_edit.set_value(new_value)
                     slider_widget.setValue(int(new_value))
+                    bc_le = cast(Union[str, None], widget_data.get("bind_control"))
+                    control_key_le = bc_le or slider_widget_name
                     if data_type == "parameter":
                         common_widget_actions.update_parameter(
                             main_window,
@@ -486,7 +606,7 @@ def add_widgets_to_tab_layout(
                     elif data_type == "control":
                         common_widget_actions.update_control(
                             main_window,
-                            slider_widget_name,
+                            control_key_le,
                             new_value,
                             exec_function=widget_data.get("exec_function"),
                             exec_function_args=cast(
@@ -581,6 +701,15 @@ def add_widgets_to_tab_layout(
             horizontal_layout.setContentsMargins(spacing_level * 10, 0, 0, 0)
             widget.row_widget = row_widget
             main_window.parameter_widgets[widget_name] = widget
+            if bind_control:
+                if data_type == "control":
+                    common_widget_actions.register_control_widget_mirror(
+                        main_window, bind_control, widget
+                    )
+                elif data_type == "parameter":
+                    common_widget_actions.register_parameter_widget_mirror(
+                        main_window, bind_control, widget
+                    )
 
         category_layout.setVerticalSpacing(2)
         category_layout.setHorizontalSpacing(2)
@@ -596,6 +725,19 @@ def add_widgets_to_tab_layout(
             widget = main_window.parameter_widgets[widget_name]
             common_widget_actions.show_hide_related_widgets(
                 main_window, widget, widget_name
+            )
+
+    _bound_for_show_hide: set[str] = set()
+    for _cat, _wmap in LAYOUT_DATA.items():
+        for _wn, _wd in _wmap.items():
+            _bc = _wd.get("bind_control")
+            if _bc:
+                _bound_for_show_hide.add(cast(str, _bc))
+    for _bc in _bound_for_show_hide:
+        _pw = main_window.parameter_widgets.get(_bc)
+        if _pw is not None:
+            common_widget_actions.show_hide_related_widgets(
+                main_window, _pw, _bc
             )
 
 

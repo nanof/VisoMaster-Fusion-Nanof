@@ -73,6 +73,108 @@ def _set_single_widget_value(widget: QtWidgets.QWidget, value) -> None:
         widget.setValue(int(value))
 
 
+def register_control_widget_mirror(
+    main_window: "MainWindow", control_name: str, widget: QtWidgets.QWidget
+) -> None:
+    """Registra un widget de la pestaña Esenciales enlazado a `control[control_name]`."""
+    mirrors = getattr(main_window, "_control_widget_mirrors", None)
+    if mirrors is None:
+        mirrors = {}
+        main_window._control_widget_mirrors = mirrors
+    mirrors.setdefault(control_name, []).append(widget)
+
+
+def sync_all_widgets_for_control_key(
+    main_window: "MainWindow", control_name: str, control_value
+) -> None:
+    """Alinea el control primario (Settings) y los espejos (Esenciales) con `control_value`."""
+    mirrors = getattr(main_window, "_control_widget_mirrors", {}).get(control_name, ())
+    primary = main_window.parameter_widgets.get(control_name)
+    seen: set[int] = set()
+    for w in (*([primary] if primary is not None else []), *mirrors):
+        if w is None or id(w) in seen:
+            continue
+        seen.add(id(w))
+        w.blockSignals(True)
+        try:
+            _set_single_widget_value(w, control_value)
+        finally:
+            w.blockSignals(False)
+
+
+def sync_control_mirror_widgets_only(
+    main_window: "MainWindow", control_name: str, control_value
+) -> None:
+    """Tras actualizar el widget primario desde `control`, sincroniza solo los espejos."""
+    for w in getattr(main_window, "_control_widget_mirrors", {}).get(control_name, ()):
+        w.blockSignals(True)
+        try:
+            _set_single_widget_value(w, control_value)
+        finally:
+            w.blockSignals(False)
+
+
+def get_current_parameter_value(
+    main_window: "MainWindow", parameter_name: str, default: Any
+) -> Any:
+    """Valor actual del parámetro para la cara seleccionada o el panel actual."""
+    fid = main_window.selected_target_face_id
+    if (
+        fid
+        and fid in main_window.parameters
+        and parameter_name in main_window.parameters[fid]
+    ):
+        return main_window.parameters[fid][parameter_name]
+    if (
+        main_window.current_widget_parameters
+        and parameter_name in main_window.current_widget_parameters
+    ):
+        return main_window.current_widget_parameters[parameter_name]
+    return main_window.default_parameters.get(parameter_name, default)
+
+
+def register_parameter_widget_mirror(
+    main_window: "MainWindow", parameter_name: str, widget: QtWidgets.QWidget
+) -> None:
+    mirrors = getattr(main_window, "_parameter_widget_mirrors", None)
+    if mirrors is None:
+        mirrors = {}
+        main_window._parameter_widget_mirrors = mirrors
+    mirrors.setdefault(parameter_name, []).append(widget)
+
+
+def sync_all_widgets_for_parameter_key(
+    main_window: "MainWindow", parameter_name: str, parameter_value
+) -> None:
+    mirrors = getattr(main_window, "_parameter_widget_mirrors", {}).get(
+        parameter_name, ()
+    )
+    primary = main_window.parameter_widgets.get(parameter_name)
+    seen: set[int] = set()
+    for w in (*([primary] if primary is not None else []), *mirrors):
+        if w is None or id(w) in seen:
+            continue
+        seen.add(id(w))
+        w.blockSignals(True)
+        try:
+            _set_single_widget_value(w, parameter_value)
+        finally:
+            w.blockSignals(False)
+
+
+def sync_parameter_mirror_widgets_only(
+    main_window: "MainWindow", parameter_name: str, parameter_value
+) -> None:
+    for w in getattr(main_window, "_parameter_widget_mirrors", {}).get(
+        parameter_name, ()
+    ):
+        w.blockSignals(True)
+        try:
+            _set_single_widget_value(w, parameter_value)
+        finally:
+            w.blockSignals(False)
+
+
 def update_control(
     main_window: "MainWindow",
     control_name,
@@ -110,6 +212,7 @@ def update_control(
                 cast(ControlTypes, main_window.video_processor.feeder_control)[
                     control_name
                 ] = control_value
+    sync_all_widgets_for_control_key(main_window, control_name, control_value)
     refresh_frame(main_window)
 
 
@@ -198,6 +301,8 @@ def update_parameter(
         # The first argument is always the main_window, followed by the new value
         final_exec_args: list = [main_window, parameter_value] + exec_function_args
         exec_function(*final_exec_args)
+
+    sync_all_widgets_for_parameter_key(main_window, parameter_name, parameter_value)
 
 
 def refresh_frame(main_window: "MainWindow", synchronous: bool = False):
@@ -776,6 +881,9 @@ def set_widgets_values_using_face_id_parameters(
             else:
                 widget.set_value(parameter_value)
             widget.enable_refresh_frame = True
+            sync_parameter_mirror_widgets_only(
+                main_window, parameter_name, parameter_value
+            )
 
 
 def run_parameter_layout_exec_functions(main_window: "MainWindow") -> None:
@@ -976,6 +1084,9 @@ def set_control_widgets_values(main_window: "MainWindow", enable_exec_func=True)
 
                 # Re-enable frame refresh
                 widget.enable_refresh_frame = True
+            sync_control_mirror_widgets_only(
+                main_window, control_name, control_value
+            )
         _prof_sel = parameter_widgets.get("PipelineProfileDisplayModeSelection")
         if _prof_sel is not None:
             show_hide_related_widgets(
