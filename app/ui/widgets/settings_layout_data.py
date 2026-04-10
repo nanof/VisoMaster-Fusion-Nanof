@@ -104,14 +104,21 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
         },
         "PerformancePresetSelection": {
             "level": 1,
-            "label": "FPS preset (layer A)",
+            "label": "Performance preset (video)",
             "options": [
                 "Custom (no preset)",
                 "High FPS — 720p input, interval 3, det 416, Inswapper 128",
+                "Multi-face @ 720p — ArcFace cap + match boost",
+                "Single face @ 1080p — quality",
+                "Balanced — 1080p resize, interval 2",
+                "Light — 540p, interval 4, tight ArcFace",
+                "Webcam / baja latencia — 480p, det 1, Inswapper 128, ArcFace mínimo",
             ],
             "default": "Custom (no preset)",
-            "help": "Applies a reversible bundle aligned with the aggressive-FPS plan. Measure impact with VISIOMASTER_PERF_BUNDLE=1 (enables PERF_LOG + STAGES + SWAP_CORE).",
-            "exec_function": control_actions.apply_fps_aggressive_preset,
+            "help": "Applies a coordinated bundle (resize, detection interval, detector side, ArcFace/lazy/cap, "
+            "match boost, optional Inswapper 128). Does not change swapper model choice except the High FPS "
+            "preset. Use VISIOMASTER_PERF_BUNDLE=1 to measure impact.",
+            "exec_function": control_actions.apply_performance_preset_selection,
             "exec_function_args": [],
         },
         "PipelineProfileDisplayModeSelection": {

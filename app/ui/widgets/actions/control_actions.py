@@ -1214,94 +1214,254 @@ def handle_auto_mouth_toggle(main_window: "MainWindow", new_value: bool) -> None
         print("[INFO] Auto Mouth Expression enabled. Mouth action detector ready.")
 
 
-_FPS_AGGRESSIVE_PRESET_LABEL = (
+PERFORMANCE_PRESET_CUSTOM = "Custom (no preset)"
+PERFORMANCE_PRESET_AGGRESSIVE = (
     "High FPS — 720p input, interval 3, det 416, Inswapper 128"
 )
-_FPS_PRESET_CUSTOM = "Custom (no preset)"
+PERFORMANCE_PRESET_MULTI_720 = "Multi-face @ 720p — ArcFace cap + match boost"
+PERFORMANCE_PRESET_SINGLE_1080 = "Single face @ 1080p — quality"
+PERFORMANCE_PRESET_BALANCED = "Balanced — 1080p resize, interval 2"
+PERFORMANCE_PRESET_LIGHT = "Light — 540p, interval 4, tight ArcFace"
+PERFORMANCE_PRESET_WEBCAM_LOW_LATENCY = (
+    "Webcam / baja latencia — 480p, det 1, Inswapper 128, ArcFace mínimo"
+)
+
+# Back-compat for any external reference
+_FPS_PRESET_CUSTOM = PERFORMANCE_PRESET_CUSTOM
+_FPS_AGGRESSIVE_PRESET_LABEL = PERFORMANCE_PRESET_AGGRESSIVE
 
 
-def apply_fps_aggressive_preset(main_window: "MainWindow", value: str) -> None:
-    """Settings → General: apply layer-A style defaults (plan: FPS agresivo x2)."""
-    if value != _FPS_AGGRESSIVE_PRESET_LABEL:
-        return
+def _performance_preset_reset_combo(main_window: "MainWindow") -> None:
+    ca = common_widget_actions
+    main_window.control["PerformancePresetSelection"] = PERFORMANCE_PRESET_CUSTOM
+    pre = main_window.parameter_widgets.get("PerformancePresetSelection")
+    if pre:
+        pre.blockSignals(True)
+        ca._set_single_widget_value(pre, PERFORMANCE_PRESET_CUSTOM)
+        pre.blockSignals(False)
 
+
+def _apply_inswapper128_resolution_128(main_window: "MainWindow") -> None:
+    ca = common_widget_actions
+    if main_window.video_processor.processing:
+        with main_window.video_processor.state_lock:
+            fp = main_window.video_processor.feeder_parameters
+            if fp:
+                for _fid, p in fp.items():
+                    if isinstance(p, dict) and p.get("SwapModelSelection") == "Inswapper128":
+                        p["SwapperResSelection"] = "128"
+
+    for _fid, params in list(main_window.parameters.items()):
+        if isinstance(params, dict) and params.get("SwapModelSelection") == "Inswapper128":
+            params["SwapperResSelection"] = "128"
+
+    if (
+        isinstance(main_window.default_parameters, dict)
+        and main_window.default_parameters.get("SwapModelSelection") == "Inswapper128"
+    ):
+        main_window.default_parameters["SwapperResSelection"] = "128"
+
+    if isinstance(main_window.current_widget_parameters, dict):
+        if (
+            main_window.current_widget_parameters.get("SwapModelSelection")
+            == "Inswapper128"
+        ):
+            main_window.current_widget_parameters["SwapperResSelection"] = "128"
+
+    sw = main_window.parameter_widgets.get("SwapperResSelection")
+    if sw:
+        sw.enable_refresh_frame = False
+        ca._set_single_widget_value(sw, "128")
+        sw.enable_refresh_frame = True
+
+
+def _apply_performance_control_bundle(
+    main_window: "MainWindow",
+    updates: dict[str, Any],
+    *,
+    log_message: str,
+    apply_finish: bool = True,
+) -> None:
+    """Apply control dict, sync feeder keys that exist, refresh related toggle visibility."""
     ca = common_widget_actions
     prev_batch = getattr(main_window, "_batch_update_in_progress", False)
     main_window._batch_update_in_progress = True
     try:
-        main_window.control["GlobalInputResizeToggle"] = True
-        main_window.control["GlobalInputResizeSizeSelection"] = "720p"
-        main_window.control["FaceDetectionIntervalSlider"] = 3
-        main_window.control["DetectorInternalSizeSelection"] = "416"
+        for key, val in updates.items():
+            main_window.control[key] = val
 
         if main_window.video_processor.processing:
             with main_window.video_processor.state_lock:
                 fc = main_window.video_processor.feeder_control
                 if fc:
-                    fc["GlobalInputResizeToggle"] = True
-                    fc["GlobalInputResizeSizeSelection"] = "720p"
-                    fc["FaceDetectionIntervalSlider"] = 3
-                    fc["DetectorInternalSizeSelection"] = "416"
-                fp = main_window.video_processor.feeder_parameters
-                if fp:
-                    for _fid, p in fp.items():
-                        if isinstance(p, dict) and p.get("SwapModelSelection") == "Inswapper128":
-                            p["SwapperResSelection"] = "128"
+                    for key, val in updates.items():
+                        if key in fc:
+                            fc[key] = val
 
-        for key, val in (
-            ("GlobalInputResizeToggle", True),
-            ("GlobalInputResizeSizeSelection", "720p"),
-            ("FaceDetectionIntervalSlider", 3),
-            ("DetectorInternalSizeSelection", "416"),
-        ):
+        for key, val in updates.items():
             w = main_window.parameter_widgets.get(key)
             if w:
                 w.enable_refresh_frame = False
-                ca._set_single_widget_value(w, val)
-                w.enable_refresh_frame = True
+                try:
+                    ca._set_single_widget_value(w, val)
+                finally:
+                    w.enable_refresh_frame = True
 
-        for _fid, params in list(main_window.parameters.items()):
-            if isinstance(params, dict) and params.get("SwapModelSelection") == "Inswapper128":
-                params["SwapperResSelection"] = "128"
-
-        if (
-            isinstance(main_window.default_parameters, dict)
-            and main_window.default_parameters.get("SwapModelSelection")
-            == "Inswapper128"
-        ):
-            main_window.default_parameters["SwapperResSelection"] = "128"
-
-        if isinstance(main_window.current_widget_parameters, dict):
-            if (
-                main_window.current_widget_parameters.get("SwapModelSelection")
-                == "Inswapper128"
-            ):
-                main_window.current_widget_parameters["SwapperResSelection"] = "128"
-
-        sw = main_window.parameter_widgets.get("SwapperResSelection")
-        if sw:
-            sw.enable_refresh_frame = False
-            ca._set_single_widget_value(sw, "128")
-            sw.enable_refresh_frame = True
+        for key in updates:
+            w = main_window.parameter_widgets.get(key)
+            if isinstance(w, widget_components.ToggleButton):
+                common_widget_actions.show_hide_related_widgets(
+                    main_window, w, key, None, None
+                )
     finally:
         main_window._batch_update_in_progress = prev_batch
 
-    print(
-        "[INFO] FPS preset applied: 720p input resize ON, detection interval 3, "
-        "detector internal 416, Inswapper resolution 128 (where applicable). "
-        "Compare EPs with VISIOMASTER_PERF_BUNDLE=1.",
-        flush=True,
-    )
+    if not apply_finish:
+        return
 
-    def _reset_preset_combo() -> None:
-        main_window.control["PerformancePresetSelection"] = _FPS_PRESET_CUSTOM
-        pre = main_window.parameter_widgets.get("PerformancePresetSelection")
-        if pre:
-            pre.blockSignals(True)
-            ca._set_single_widget_value(pre, _FPS_PRESET_CUSTOM)
-            pre.blockSignals(False)
+    print(f"[INFO] Performance preset: {log_message}", flush=True)
+    common_widget_actions.refresh_frame(main_window)
+    QtCore.QTimer.singleShot(0, lambda: _performance_preset_reset_combo(main_window))
 
-    QtCore.QTimer.singleShot(0, _reset_preset_combo)
+
+def apply_performance_preset_selection(main_window: "MainWindow", value: str) -> None:
+    """Settings → General: apply bundled performance / recognition options."""
+    if value == PERFORMANCE_PRESET_CUSTOM:
+        return
+
+    if value == PERFORMANCE_PRESET_AGGRESSIVE:
+        _apply_performance_control_bundle(
+            main_window,
+            {
+                "GlobalInputResizeToggle": True,
+                "GlobalInputResizeSizeSelection": "720p",
+                "FaceDetectionIntervalSlider": 3,
+                "DetectorInternalSizeSelection": "416",
+            },
+            log_message="",
+            apply_finish=False,
+        )
+        _apply_inswapper128_resolution_128(main_window)
+        print(
+            "[INFO] Performance preset: 720p resize, interval 3, detector 416, "
+            "Inswapper 128 where applicable. Compare with VISIOMASTER_PERF_BUNDLE=1.",
+            flush=True,
+        )
+        common_widget_actions.refresh_frame(main_window)
+        QtCore.QTimer.singleShot(0, lambda: _performance_preset_reset_combo(main_window))
+        return
+
+    if value == PERFORMANCE_PRESET_WEBCAM_LOW_LATENCY:
+        _apply_performance_control_bundle(
+            main_window,
+            {
+                "GlobalInputResizeToggle": True,
+                "GlobalInputResizeSizeSelection": "480p",
+                "FaceDetectionIntervalSlider": 1,
+                "DetectorInternalSizeSelection": "320",
+                "ArcFaceBatchInferenceToggle": True,
+                "PerformanceRecognitionMaxArcFacePerFrameSlider": 2,
+                "PerformanceRecognitionLazyArcFaceIntervalSlider": 12,
+                "PerformanceArcFaceCenterBiasSlider": 45,
+                "PerformanceArcFaceMatchedTrackBoostSlider": 50,
+                "PerformanceRecognitionMatchedTrackMemorySlider": 64,
+                "PerformanceMatchedTrackArcfaceStrideSlider": 4,
+                "PerformanceSceneCutArcFaceRefreshEnableToggle": True,
+            },
+            log_message="",
+            apply_finish=False,
+        )
+        _apply_inswapper128_resolution_128(main_window)
+        print(
+            "[INFO] Performance preset: webcam / baja latencia — 480p, detección cada frame, "
+            "detector 320, tope 2 ArcFace, lazy 12, Inswapper 128 donde aplique.",
+            flush=True,
+        )
+        common_widget_actions.refresh_frame(main_window)
+        QtCore.QTimer.singleShot(0, lambda: _performance_preset_reset_combo(main_window))
+        return
+
+    _bundles: dict[str, tuple[dict[str, Any], str]] = {
+        PERFORMANCE_PRESET_MULTI_720: (
+            {
+                "GlobalInputResizeToggle": True,
+                "GlobalInputResizeSizeSelection": "720p",
+                "FaceDetectionIntervalSlider": 2,
+                "DetectorInternalSizeSelection": "416",
+                "ArcFaceBatchInferenceToggle": True,
+                "PerformanceRecognitionMaxArcFacePerFrameSlider": 4,
+                "PerformanceRecognitionLazyArcFaceIntervalSlider": 6,
+                "PerformanceArcFaceCenterBiasSlider": 35,
+                "PerformanceArcFaceMatchedTrackBoostSlider": 45,
+                "PerformanceRecognitionMatchedTrackMemorySlider": 56,
+                "PerformanceMatchedTrackArcfaceStrideSlider": 3,
+                "PerformanceSceneCutArcFaceRefreshEnableToggle": True,
+            },
+            "multi-face 720p: cap 4 ArcFace, lazy 6, center+match boost, matched stride 3, scene-cut refresh on.",
+        ),
+        PERFORMANCE_PRESET_SINGLE_1080: (
+            {
+                "GlobalInputResizeToggle": True,
+                "GlobalInputResizeSizeSelection": "1080p",
+                "FaceDetectionIntervalSlider": 1,
+                "DetectorInternalSizeSelection": "512",
+                "ArcFaceBatchInferenceToggle": True,
+                "PerformanceRecognitionMaxArcFacePerFrameSlider": 0,
+                "PerformanceRecognitionLazyArcFaceIntervalSlider": 8,
+                "PerformanceArcFaceCenterBiasSlider": 0,
+                "PerformanceArcFaceMatchedTrackBoostSlider": 0,
+                "PerformanceRecognitionMatchedTrackMemorySlider": 48,
+                "PerformanceMatchedTrackArcfaceStrideSlider": 1,
+                "PerformanceSceneCutArcFaceRefreshEnableToggle": True,
+            },
+            "single face 1080p: all ArcFace (cap 0), lazy 8, no cap boost, stride off.",
+        ),
+        PERFORMANCE_PRESET_BALANCED: (
+            {
+                "GlobalInputResizeToggle": True,
+                "GlobalInputResizeSizeSelection": "1080p",
+                "FaceDetectionIntervalSlider": 2,
+                "DetectorInternalSizeSelection": "512",
+                "ArcFaceBatchInferenceToggle": True,
+                "PerformanceRecognitionMaxArcFacePerFrameSlider": 0,
+                "PerformanceRecognitionLazyArcFaceIntervalSlider": 4,
+                "PerformanceArcFaceCenterBiasSlider": 20,
+                "PerformanceArcFaceMatchedTrackBoostSlider": 25,
+                "PerformanceRecognitionMatchedTrackMemorySlider": 48,
+                "PerformanceMatchedTrackArcfaceStrideSlider": 1,
+                "PerformanceSceneCutArcFaceRefreshEnableToggle": True,
+            },
+            "balanced 1080p: interval 2, lazy 4, mild center+match boost.",
+        ),
+        PERFORMANCE_PRESET_LIGHT: (
+            {
+                "GlobalInputResizeToggle": True,
+                "GlobalInputResizeSizeSelection": "540p",
+                "FaceDetectionIntervalSlider": 4,
+                "DetectorInternalSizeSelection": "320",
+                "ArcFaceBatchInferenceToggle": True,
+                "PerformanceRecognitionMaxArcFacePerFrameSlider": 3,
+                "PerformanceRecognitionLazyArcFaceIntervalSlider": 8,
+                "PerformanceArcFaceCenterBiasSlider": 30,
+                "PerformanceArcFaceMatchedTrackBoostSlider": 40,
+                "PerformanceRecognitionMatchedTrackMemorySlider": 48,
+                "PerformanceMatchedTrackArcfaceStrideSlider": 2,
+                "PerformanceSceneCutArcFaceRefreshEnableToggle": True,
+            },
+            "light 540p: interval 4, det 320, ArcFace cap 3, lazy 8, stride 2.",
+        ),
+    }
+
+    entry = _bundles.get(value)
+    if entry is None:
+        return
+    bundle, msg = entry
+    _apply_performance_control_bundle(main_window, bundle, log_message=msg)
+
+
+def apply_fps_aggressive_preset(main_window: "MainWindow", value: str) -> None:
+    """Deprecated: use apply_performance_preset_selection."""
+    apply_performance_preset_selection(main_window, value)
 
 
 def start_screen_capture_region_picker(main_window: "MainWindow"):

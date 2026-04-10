@@ -239,6 +239,10 @@ class FrameWorker(threading.Thread):
         self._RESIZE_CACHE_MAX = 40  # swap_core uses many dynamic (H,W) bilinear+AA pairs
         self._gaussian_blur_cache: _OrderedDict = _OrderedDict()
         self._GAUSSIAN_BLUR_CACHE_MAX = 48
+        # FW-PERF-15: Border mask at 128² depends only on sliders; swap_core + VR can call
+        # get_border_mask multiple times per frame with identical parameters.
+        self._border_mask_128_cache: _OrderedDict = _OrderedDict()
+        self._BORDER_MASK_128_CACHE_MAX = 8
         # FW-PERF-11: v2.GaussianBlur chain for face_restorer_auto blur fallback (lazy-built)
         self._auto_restore_blur_chain: list[v2.GaussianBlur] | None = None
         self._d2h_pin_hwc: torch.Tensor | None = None
@@ -1309,7 +1313,7 @@ class FrameWorker(threading.Thread):
             ):
                 # Fallback mask logic
                 persp_final_combined_mask_1x512x512_float_for_paste = (
-                    t512_mask(self.get_border_mask(parameters_for_face.data)[0]).float()
+                    t512_mask(self.get_border_mask(parameters_for_face.data)).float()
                     if swap_button_is_checked_global
                     else torch.zeros(
                         (1, 512, 512),
@@ -1330,7 +1334,7 @@ class FrameWorker(threading.Thread):
                 )
 
                 if parameters_for_face.get("BordermaskEnableToggle", False):
-                    border_mask_128, _ = self.get_border_mask(parameters_for_face.data)
+                    border_mask_128 = self.get_border_mask(parameters_for_face.data)
                     border_mask_512 = t512_mask(border_mask_128)
                     persp_final_combined_mask_1x512x512_float_for_paste *= (
                         border_mask_512
@@ -3547,18 +3551,19 @@ class FrameWorker(threading.Thread):
                         )
                     if _lazy_e is not None:
                         w["embedding"] = _lazy_e
-                        if _use_recognition_cache:
-                            self.video_processor.store_recognition_embedding(
-                                self.frame_number,
-                                int(w["i"]),
-                                w["bbox"],
-                                w["kps_5"],
-                                _lazy_e,
-                                _recognition_arc_model,
-                                _rec_sim,
-                                track_id=_tid,
-                                counted_as_fresh_arcface=False,
-                            )
+                        # Always persist track LRU (ByteTrack lazy / stale reuse) even when
+                        # frame-index recognition cache is off (webcam/screen, frame 0).
+                        self.video_processor.store_recognition_embedding(
+                            self.frame_number,
+                            int(w["i"]),
+                            w["bbox"],
+                            w["kps_5"],
+                            _lazy_e,
+                            _recognition_arc_model,
+                            _rec_sim,
+                            track_id=_tid,
+                            counted_as_fresh_arcface=False,
+                        )
                         continue
                     _still_need.append(w)
                 _need_emb = _still_need
@@ -3644,7 +3649,7 @@ class FrameWorker(threading.Thread):
                         if _batch_ok:
                             for _w, _e in zip(_need_emb, _batched):
                                 _w["embedding"] = _e
-                                if _use_recognition_cache:
+                                if _e is not None:
                                     self.video_processor.store_recognition_embedding(
                                         self.frame_number,
                                         int(_w["i"]),
@@ -3666,7 +3671,7 @@ class FrameWorker(threading.Thread):
                             _recognition_arc_model,
                         )
                         _w["embedding"] = _e2
-                        if _use_recognition_cache and _e2 is not None:
+                        if _e2 is not None:
                             self.video_processor.store_recognition_embedding(
                                 self.frame_number,
                                 int(_w["i"]),
@@ -3691,18 +3696,41 @@ class FrameWorker(threading.Thread):
                 )
                 if _stale is not None:
                     _w["embedding"] = _stale
-                    if _use_recognition_cache:
-                        self.video_processor.store_recognition_embedding(
-                            self.frame_number,
-                            int(_w["i"]),
-                            _w["bbox"],
-                            _w["kps_5"],
-                            _stale,
-                            _recognition_arc_model,
-                            _rec_sim,
-                            track_id=_ftid,
-                            counted_as_fresh_arcface=False,
-                        )
+                    self.video_processor.store_recognition_embedding(
+                        self.frame_number,
+                        int(_w["i"]),
+                        _w["bbox"],
+                        _w["kps_5"],
+                        _stale,
+                        _recognition_arc_model,
+                        _rec_sim,
+                        track_id=_ftid,
+                        counted_as_fresh_arcface=False,
+                    )
+
+            # ArcFace cap can skip faces; webcam/screen had no track cache if stores were
+            # gated — force one recognize per face still missing t_e before swap/match.
+            for _w in _work_faces:
+                if _w["embedding"] is not None:
+                    continue
+                _e_em, _ = self.models_processor.run_recognize_direct(
+                    img,
+                    _w["kps_5"],
+                    _rec_sim,
+                    _recognition_arc_model,
+                )
+                _w["embedding"] = _e_em
+                if _e_em is not None:
+                    self.video_processor.store_recognition_embedding(
+                        self.frame_number,
+                        int(_w["i"]),
+                        _w["bbox"],
+                        _w["kps_5"],
+                        _e_em,
+                        _recognition_arc_model,
+                        _rec_sim,
+                        track_id=int(_w.get("track_id", -1)),
+                    )
 
             for _w in _work_faces:
                 det_faces_data_for_display.append(
@@ -6003,14 +6031,27 @@ class FrameWorker(threading.Thread):
         return swap, prev_face
 
     def get_border_mask(self, parameters):
-        """Creates the border fade mask based on sliders."""
-        border_mask = torch.ones(
-            (128, 128), dtype=torch.float32, device=self.models_processor.device
-        )
+        """Creates the border fade mask based on sliders (1×128×128 float32 on model device)."""
+        device = self.models_processor.device
+        border_mask = torch.ones((128, 128), dtype=torch.float32, device=device)
         border_mask = torch.unsqueeze(border_mask, 0)
 
         if not parameters.get("BordermaskEnableToggle", False):
-            return border_mask, border_mask.clone()
+            return border_mask
+
+        cache_key = (
+            str(device),
+            int(parameters["BorderTopSlider"]),
+            int(parameters["BorderLeftSlider"]),
+            int(parameters["BorderRightSlider"]),
+            int(parameters["BorderBottomSlider"]),
+            int(parameters["BorderBlurSlider"]),
+        )
+        _bmc = self._border_mask_128_cache
+        _hit = _bmc.get(cache_key)
+        if _hit is not None:
+            _bmc.move_to_end(cache_key)
+            return _hit
 
         top = parameters["BorderTopSlider"]
         left = parameters["BorderLeftSlider"]
@@ -6028,15 +6069,17 @@ class FrameWorker(threading.Thread):
         border_mask[:, :, :left] = 0
         border_mask[:, :, right:] = 0
 
-        border_mask_calc = border_mask.clone()
-
         blur_amount = parameters["BorderBlurSlider"]
         blur_kernel_size = blur_amount * 2 + 1
         if blur_kernel_size > 1:
             sigma_val = max(blur_amount * 0.15 + 0.1, 1e-6)
             gauss = self._get_cached_gaussian_blur(blur_kernel_size, sigma_val)
             border_mask = gauss(border_mask)
-        return border_mask, border_mask_calc
+
+        _bmc[cache_key] = border_mask
+        if len(_bmc) > self._BORDER_MASK_128_CACHE_MAX:
+            _bmc.popitem(last=False)
+        return border_mask
 
     def get_dynamic_side_mask(
         self, yaw_deg, pitch_deg, height, width, device, parameters, kps_5, tform
@@ -6886,7 +6929,7 @@ class FrameWorker(threading.Thread):
         # FW-PERF-09: skip get_border_mask entirely when the toggle is off;
         # when disabled it would just return all-ones, so the result equals side_mask.
         if parameters.get("BordermaskEnableToggle", False):
-            border_mask, border_mask_calc = self.get_border_mask(parameters)
+            border_mask = self.get_border_mask(parameters)
             if (
                 border_mask.shape[1] != current_swap_h
                 or border_mask.shape[2] != current_swap_w
@@ -6895,12 +6938,9 @@ class FrameWorker(threading.Thread):
                     current_swap_h, current_swap_w
                 )
                 border_mask = resizer(border_mask)
-                border_mask_calc = resizer(border_mask_calc)
             border_mask = border_mask * side_mask
-            border_mask_calc = border_mask_calc * side_mask
         else:
             border_mask = side_mask
-            border_mask_calc = side_mask
 
         swap_mask = torch.ones(
             (current_swap_h, current_swap_w),
