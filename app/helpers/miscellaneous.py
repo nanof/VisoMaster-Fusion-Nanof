@@ -316,6 +316,30 @@ def copy_mapping_data(value: object) -> dict[str, Any]:
     return {}
 
 
+def coerce_similarity_threshold(
+    raw: Any, default_params: Mapping[str, Any], *, fallback: float = 60.0
+) -> float:
+    """Coerce SimilarityThresholdSlider to float (UI / jobs may store str)."""
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        try:
+            return float(default_params["SimilarityThresholdSlider"])
+        except (TypeError, ValueError, KeyError):
+            return fallback
+
+
+def _embedding_ok_for_similarity_match(embedding: Any) -> bool:
+    if embedding is None:
+        return False
+    if not isinstance(embedding, np.ndarray):
+        return False
+    if embedding.size == 0:
+        return False
+    flat = np.ravel(embedding)
+    return bool(np.all(np.isfinite(flat)))
+
+
 def is_detected_face_eligible_for_matching(
     kps: np.ndarray | None,
     bbox: np.ndarray | None,
@@ -339,7 +363,7 @@ def is_detected_face_eligible_for_matching(
 
 
 def find_best_target_match(
-    detected_embedding: np.ndarray,
+    detected_embedding: Optional[np.ndarray],
     models_processor: Any,
     target_faces: Mapping[object, Any],
     face_parameters: Mapping[str, object],
@@ -357,16 +381,25 @@ def find_best_target_match(
     highest_sim = -1.0
     default_params_dict = dict(default_params)
 
+    if not _embedding_ok_for_similarity_match(detected_embedding):
+        return None, None, -1.0
+
     for target_id, target_face in target_faces.items():
         face_id_str = str(getattr(target_face, "face_id", target_id))
-        face_specific_params = copy_mapping_data(face_parameters.get(face_id_str))
+        raw_face_params = face_parameters.get(face_id_str)
+        if raw_face_params is None:
+            raw_face_params = face_parameters.get(str(target_id))
+        face_specific_params = copy_mapping_data(raw_face_params)
         current_params_pd = ParametersDict(face_specific_params, default_params_dict)
         target_embedding = target_face.get_embedding(recognition_model)
         if not isinstance(target_embedding, np.ndarray) or target_embedding.size == 0:
             continue
 
         sim = models_processor.findCosineDistance(detected_embedding, target_embedding)
-        if sim >= current_params_pd["SimilarityThresholdSlider"] and sim > highest_sim:
+        thr = coerce_similarity_threshold(
+            current_params_pd["SimilarityThresholdSlider"], default_params_dict
+        )
+        if sim >= thr and sim > highest_sim:
             highest_sim = sim
             best_target = target_face
             best_params_pd = current_params_pd

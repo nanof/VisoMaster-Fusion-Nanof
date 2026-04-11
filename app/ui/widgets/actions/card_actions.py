@@ -193,7 +193,9 @@ def find_target_faces(main_window: "MainWindow"):
                     # Check if this face has already been found
                     for face_id, target_face in main_window.target_faces.items():
                         parameters = main_window.parameters[target_face.face_id]
-                        threshhold = parameters.get("SimilarityThresholdSlider", 0.6)
+                        threshhold = float(
+                            parameters.get("SimilarityThresholdSlider", 60)
+                        )
                         if main_window.models_processor.findCosineDistance(
                             target_face.get_embedding(rec_model),
                             face[1],

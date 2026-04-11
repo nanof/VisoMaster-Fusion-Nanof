@@ -26,6 +26,7 @@ from app.processors.utils import faceutil
 
 from app.helpers.miscellaneous import (
     ParametersDict,
+    coerce_similarity_threshold,
     copy_mapping_data,
     detector_input_size_from_control,
     rgb_uint8_to_bgr_contiguous,
@@ -3795,6 +3796,10 @@ class FrameWorker(threading.Thread):
 
         # Swapping / Editing Loop
         if det_faces_data_for_display:
+            with self.lock:
+                _default_params_swap_loop = dict(
+                    self.main_window.default_parameters.data
+                )
             # Reuse source-side emap/swap latents when the same input embedding + model
             # applies to several detections on this frame (one source → N faces).
             _source_latent_cache: dict[tuple[int, str], torch.Tensor] = {}
@@ -3806,8 +3811,7 @@ class FrameWorker(threading.Thread):
                         break
 
                     # FW-ROBUST-04: use .get() with default_parameters as fallback
-                    with self.lock:
-                        _default_params = dict(self.main_window.default_parameters.data)
+                    _default_params = _default_params_swap_loop
                     # FIX: Force face_id as string to prevent silent parameter fallback
                     face_id_str = str(target_face.face_id)
                     params = ParametersDict(
@@ -3823,10 +3827,11 @@ class FrameWorker(threading.Thread):
                         )
                         fface["matched_target"] = tgt
                         if tgt and tgt.face_id == target_face.face_id:
-                            if (
-                                score >= tgt_params["SimilarityThresholdSlider"]
-                                and score > best_score
-                            ):
+                            _th_ob = coerce_similarity_threshold(
+                                tgt_params["SimilarityThresholdSlider"],
+                                _default_params,
+                            )
+                            if score >= _th_ob and score > best_score:
                                 best_score = score
                                 best_fface = fface
 
@@ -4151,18 +4156,31 @@ class FrameWorker(threading.Thread):
                         continue
 
                     # --- Similarity match (default Swap All) ---
-                    best_target, params, _ = self._find_best_target_match(
+                    best_target, params, match_score = self._find_best_target_match(
                         fface["embedding"], control, target_faces_snapshot
                     )
                     fface["matched_target"] = best_target
-                    if best_target:
+                    _thr_swap_all = (
+                        coerce_similarity_threshold(
+                            params["SimilarityThresholdSlider"],
+                            _default_params_swap_loop,
+                        )
+                        if params is not None
+                        else -1.0
+                    )
+                    _passes_thr = (
+                        best_target is not None
+                        and params is not None
+                        and match_score >= _thr_swap_all
+                    )
+                    if best_target and _passes_thr:
                         _mtid = int(fface.get("track_id", -1))
                         if _mtid >= 0:
                             self.video_processor.note_track_matched_for_recognition(
                                 _mtid, self.frame_number
                             )
 
-                    if best_target and params and (
+                    if _passes_thr and (
                         swap_button_is_checked_global or edit_button_is_checked_global
                     ):
                         denoiser_on = (

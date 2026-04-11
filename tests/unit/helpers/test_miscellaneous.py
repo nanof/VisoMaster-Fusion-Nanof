@@ -5,6 +5,7 @@ MISC-* tests for pure utility functions in app.helpers.miscellaneous
 import numpy as np
 import pytest
 from app.helpers.miscellaneous import (
+    coerce_similarity_threshold,
     count_issue_scan_frames,
     ParametersDict,
     detector_input_size_from_control,
@@ -258,6 +259,48 @@ def test_find_best_target_match_respects_parameters_dict_thresholds():
     assert best_params is not None
     assert best_params["SimilarityThresholdSlider"] == 70
     assert best_score == pytest.approx(80.0)
+
+
+def test_find_best_target_match_returns_none_for_invalid_embedding():
+    defaults = {"SimilarityThresholdSlider": 60}
+    targets = {
+        1: _DummyTargetFace(1, {"arcface_128": np.array([0.90], dtype=np.float32)}),
+    }
+    best_target, best_params, best_score = find_best_target_match(
+        None,
+        _DummyModelsProcessor(),
+        targets,
+        {},
+        defaults,
+        "arcface_128",
+    )
+    assert best_target is None
+    assert best_params is None
+    assert best_score == -1.0
+
+
+def test_find_best_target_match_coerces_string_threshold():
+    defaults = {"SimilarityThresholdSlider": 60}
+    face_params = {"1": {"SimilarityThresholdSlider": "85"}}
+    targets = {
+        1: _DummyTargetFace(1, {"arcface_128": np.array([1.0], dtype=np.float32)}),
+    }
+    best_target, best_params, best_score = find_best_target_match(
+        np.array([1.0], dtype=np.float32),
+        _DummyModelsProcessor(),
+        targets,
+        face_params,
+        defaults,
+        "arcface_128",
+    )
+    assert best_target is not None
+    assert best_params is not None
+    assert best_score == pytest.approx(100.0)
+
+
+def test_coerce_similarity_threshold_falls_back_to_defaults():
+    assert coerce_similarity_threshold("72", {"SimilarityThresholdSlider": 50}) == 72.0
+    assert coerce_similarity_threshold(None, {"SimilarityThresholdSlider": 55}) == 55.0
 
 
 def test_count_issue_scan_frames_excludes_dropped_frames():

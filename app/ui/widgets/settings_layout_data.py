@@ -761,7 +761,7 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "level": 1,
             "label": "Swap Input Face only once",
             "default": False,
-            "help": "only swap highest face match per face (not every match above treshold)",
+            "help": "When OFF (default), every detected face that meets its target card's Similarity Threshold can be swapped (several faces in one frame). When ON, at most one detection per target card is swapped — the highest similarity among those that pass the threshold. Similarity Threshold still applies in both modes.",
         },
         "VR180ModeEnableToggle": {
             "level": 1,
