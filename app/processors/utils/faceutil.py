@@ -2223,6 +2223,62 @@ def calc_eye_close_ratio(
         return np.concatenate([lefteye_close_ratio, righteye_close_ratio], axis=1)
 
 
+def laplacian_abs_mean_gray_patch_torch(
+    face_chw: torch.Tensor,
+    cx: int,
+    cy: int,
+    half_h: int,
+    half_w: int,
+) -> torch.Tensor:
+    """Mean |Laplacian| on a small grayscale patch (C,H,W tensor). Same device as input.
+
+    Iris/sclera usually yield higher energy than a smooth closed eyelid; used as a
+    blink hint alongside landmark ratios (see ``laplacian_eye_pair_energy_torch``).
+    """
+    device = face_chw.device
+    _, h, w = face_chw.shape
+    x0 = max(0, int(cx) - int(half_w))
+    x1 = min(w, int(cx) + int(half_w) + 1)
+    y0 = max(0, int(cy) - int(half_h))
+    y1 = min(h, int(cy) + int(half_h) + 1)
+    if x1 <= x0 + 2 or y1 <= y0 + 2:
+        return torch.zeros((), device=device, dtype=torch.float32)
+
+    patch = face_chw[:, y0:y1, x0:x1].float()
+    if patch.numel() > 0 and torch.max(patch).item() > 1.5:
+        patch = patch * (1.0 / 255.0)
+
+    gray = 0.2989 * patch[0] + 0.5870 * patch[1] + 0.1140 * patch[2]
+    g4 = gray.unsqueeze(0).unsqueeze(0)
+    kernel = torch.tensor(
+        [[[[0.0, 1.0, 0.0], [1.0, -4.0, 1.0], [0.0, 1.0, 0.0]]]],
+        device=device,
+        dtype=torch.float32,
+    )
+    lap = F.conv2d(g4, kernel, padding=1)
+    return lap.abs().mean()
+
+
+def laplacian_eye_pair_energy_torch(
+    face_chw: torch.Tensor,
+    kps_5_xy: np.ndarray,
+    half_h: int = 12,
+    half_w: int = 15,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Laplacian texture energy near left (0) and right (1) eye centers from 5-point kps."""
+    if kps_5_xy is None or len(kps_5_xy) < 2:
+        return (0.0, 0.0)
+    left = np.asarray(kps_5_xy[0], dtype=np.float64)
+    right = np.asarray(kps_5_xy[1], dtype=np.float64)
+    el = laplacian_abs_mean_gray_patch_torch(
+        face_chw, int(round(left[0])), int(round(left[1])), half_h, half_w
+    )
+    er = laplacian_abs_mean_gray_patch_torch(
+        face_chw, int(round(right[0])), int(round(right[1])), half_h, half_w
+    )
+    return (el, er)
+
+
 # imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/utils/live_portrait_wrapper.py
 def calc_lip_close_ratio(lmk: np.ndarray) -> np.ndarray:
     return calculate_distance_ratio(lmk, 90, 102, 48, 66)

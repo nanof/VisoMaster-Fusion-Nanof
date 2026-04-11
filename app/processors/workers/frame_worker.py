@@ -331,6 +331,12 @@ class FrameWorker(threading.Thread):
         # Q-QUAL-01: EMA-smoothed keypoints to reduce detection-interval flicker
         self._smoothed_kps: dict[int, np.ndarray] = {}
 
+        # Restore Eyes "smart close": temporal EMA on 203-pt eye aperture ratios (per track).
+        self._restore_eyes_close_ema: dict[int, tuple[float, float]] = {}
+        # Laplacian baseline per track for pixel-assisted blink detection on target crop.
+        self._restore_eyes_close_pix_max: dict[int, float] = {}
+        self._RESTORE_EYES_CLOSE_EMA_MAX: int = 64
+
         # Q-QUAL-03: EMA over per-face AutoColor reference statistics to reduce flicker.
         # Bounded LRU: keyed by embedding bytes (one entry per unique target face seen).
         # Typical usage: 1–10 entries.  Cap at 32 to handle large session edge cases.
@@ -6687,6 +6693,106 @@ class FrameWorker(threading.Thread):
 
         return params
 
+    def _effective_restore_eyes_blend_alpha(
+        self,
+        base_blend_alpha: float,
+        parameters: dict,
+        kps_all_crop: np.ndarray | None,
+        track_id: int,
+        original_face_512: torch.Tensor | None = None,
+        dst_kps_5: np.ndarray | None = None,
+    ) -> float:
+        """Reduce eyes blend alpha (favor target eyes) when blink is likely.
+
+        Combines (optional) 203-point LivePortrait-style ratios with (optional) Laplacian
+        texture on the **target** aligned face near kps_5 eye centers — helps when
+        landmarks miss a blink. No Expression Restorer required.
+        """
+        smart_on = parameters.get(
+            "RestoreEyesSmartCloseEnableToggle", False
+        ) or parameters.get("BlinkAwareEyeMaskEnableToggle", False)
+        if not smart_on:
+            return base_blend_alpha
+
+        tid = int(track_id)
+        ref = 0.34
+        close_lm = 0.0
+        r_sm: float | None = None
+
+        if kps_all_crop is not None and len(kps_all_crop) >= 203:
+            lm = np.asarray(kps_all_crop[:203], dtype=np.float32)
+            ratios = faceutil.calc_eye_close_ratio(lm[None])
+            raw_l = float(ratios[0, 0])
+            raw_r = float(ratios[0, 1])
+
+            sm = float(parameters.get("RestoreEyesSmartCloseSmoothSlider", 42))
+            sm = max(5.0, min(95.0, sm)) / 100.0
+
+            prev = self._restore_eyes_close_ema.get(tid)
+            if prev is None:
+                pair = (raw_l, raw_r)
+            else:
+                pl, pr = prev
+                pair = (sm * raw_l + (1.0 - sm) * pl, sm * raw_r + (1.0 - sm) * pr)
+            self._restore_eyes_close_ema[tid] = pair
+
+            r_sm = float(min(pair[0], pair[1]))
+            span = 0.13
+            close_lm = float(np.clip((ref - r_sm) / span, 0.0, 1.0))
+
+        w_px = float(parameters.get("RestoreEyesSmartClosePixelAssistSlider", 0))
+        w_px = max(0.0, min(100.0, w_px)) / 100.0
+        close_px = 0.0
+        if (
+            w_px > 0.0
+            and original_face_512 is not None
+            and dst_kps_5 is not None
+            and original_face_512.dim() == 3
+        ):
+            el_t, er_t = faceutil.laplacian_eye_pair_energy_torch(
+                original_face_512, dst_kps_5
+            )
+            e_l = float(el_t.item())
+            e_r = float(er_t.item())
+            e_dual = min(e_l, e_r)
+            e_max = max(e_l, e_r, 1e-6)
+            pm = self._restore_eyes_close_pix_max.get(tid)
+            if pm is None or pm < 1e-8:
+                pm = max(e_max, 1e-4)
+            if r_sm is not None and r_sm > ref:
+                pm = 0.88 * pm + 0.12 * e_max
+            else:
+                pm = 0.997 * pm + 0.003 * e_max
+            self._restore_eyes_close_pix_max[tid] = float(pm)
+            close_px = float(np.clip(1.0 - e_dual / (pm + 1e-6), 0.0, 1.0))
+
+        if close_lm <= 0.0 and close_px <= 0.0 and w_px <= 0.0:
+            if kps_all_crop is None or len(kps_all_crop) < 203:
+                return base_blend_alpha
+
+        close_k = max(close_lm, w_px * close_px)
+
+        if len(self._restore_eyes_close_ema) > self._RESTORE_EYES_CLOSE_EMA_MAX:
+            for k in list(self._restore_eyes_close_ema.keys()):
+                if k != tid:
+                    self._restore_eyes_close_ema.pop(k, None)
+                    self._restore_eyes_close_pix_max.pop(k, None)
+                    if len(self._restore_eyes_close_ema) <= self._RESTORE_EYES_CLOSE_EMA_MAX:
+                        break
+        if len(self._restore_eyes_close_pix_max) > self._RESTORE_EYES_CLOSE_EMA_MAX:
+            for k in list(self._restore_eyes_close_pix_max.keys()):
+                if k != tid:
+                    self._restore_eyes_close_pix_max.pop(k, None)
+                    self._restore_eyes_close_ema.pop(k, None)
+                    if len(self._restore_eyes_close_pix_max) <= self._RESTORE_EYES_CLOSE_EMA_MAX:
+                        break
+
+        strength = float(parameters.get("RestoreEyesSmartCloseAmountSlider", 65))
+        strength = max(0.0, min(100.0, strength)) / 100.0
+
+        out = base_blend_alpha * (1.0 - strength * close_k)
+        return float(max(0.001, min(1.0, out)))
+
     def swap_core(
         self,
         img: torch.Tensor,
@@ -6746,11 +6852,14 @@ class FrameWorker(threading.Thread):
 
         # OPTIMIZATION: Transform full-frame smoothed keypoints to the 512x512 crop space
         kps_all_crop = None
-        if (
-            kps_203 is not None and len(kps_203) == 203
-        ):  # Use the dedicated 203 variable
+        if kps_203 is not None and len(kps_203) == 203:
             raw_kps_crop = tform(kps_203)
             kps_all_crop = np.array(raw_kps_crop, dtype=np.float32)
+        elif kps is not None:
+            _kps_full = np.asarray(kps, dtype=np.float32)
+            if _kps_full.shape[0] >= 203:
+                raw_kps_crop = tform(_kps_full[:203])
+                kps_all_crop = np.array(raw_kps_crop, dtype=np.float32)
 
         # DMDNet: 68 pts in swap-crop space (from 106-pt target landmarks when available).
         dmd_lm68_crop: np.ndarray | None = None
@@ -7285,10 +7394,11 @@ class FrameWorker(threading.Thread):
                 )(swap_mask_noFP)
             swap_mask_noFP.mul_(mask_clip)
 
-        # Restore Eyes/Mouth
-        if parameters.get("RestoreMouthEnableToggle", False) or parameters.get(
-            "RestoreEyesEnableToggle", False
-        ):
+        # Restore Eyes/Mouth + blink-only eye mask (no full Restore Eyes)
+        _restore_mouth_on = parameters.get("RestoreMouthEnableToggle", False)
+        _restore_eyes_on = parameters.get("RestoreEyesEnableToggle", False)
+        _blink_eye_mask_on = parameters.get("BlinkAwareEyeMaskEnableToggle", False)
+        if _restore_mouth_on or _restore_eyes_on or _blink_eye_mask_on:
             M = cast(np.ndarray, tform.params)[0:2]
             ones_column = np.ones((kps_5.shape[0], 1), dtype=np.float32)
             dst_kps_5 = np.hstack([kps_5, ones_column]) @ M.T
@@ -7300,7 +7410,7 @@ class FrameWorker(threading.Thread):
                 (1, 512, 512), dtype=torch.float32, device=self.models_processor.device
             )
 
-            if parameters.get("RestoreMouthEnableToggle", False):
+            if _restore_mouth_on:
                 img_swap_mask = self.models_processor.restore_mouth(
                     img_orig_mask,
                     img_swap_mask,
@@ -7314,12 +7424,46 @@ class FrameWorker(threading.Thread):
                     parameters["RestoreYMouthOffsetSlider"],
                 ).clamp(0, 1)
 
-            if parameters.get("RestoreEyesEnableToggle", False):
+            if _restore_eyes_on:
+                _base_eye_blend = parameters["RestoreEyesBlendAmountSlider"] / 100.0
+                _eye_blend = self._effective_restore_eyes_blend_alpha(
+                    _base_eye_blend,
+                    parameters,
+                    kps_all_crop,
+                    swapper_autores_track_id,
+                    original_face_512,
+                    dst_kps_5,
+                )
                 img_swap_mask = self.models_processor.restore_eyes(
                     img_orig_mask,
                     img_swap_mask,
                     dst_kps_5,
-                    parameters["RestoreEyesBlendAmountSlider"] / 100.0,
+                    _eye_blend,
+                    parameters["RestoreEyesFeatherBlendSlider"],
+                    parameters["RestoreEyesSizeFactorDecimalSlider"],
+                    parameters["RestoreXEyesRadiusFactorDecimalSlider"],
+                    parameters["RestoreYEyesRadiusFactorDecimalSlider"],
+                    parameters["RestoreXEyesOffsetSlider"],
+                    parameters["RestoreYEyesOffsetSlider"],
+                    parameters["RestoreEyesSpacingOffsetSlider"],
+                ).clamp(0, 1)
+            elif _blink_eye_mask_on:
+                _base_blink = float(
+                    parameters.get("BlinkAwareEyeMaskBlendSlider", 52)
+                ) / 100.0
+                _eye_blend = self._effective_restore_eyes_blend_alpha(
+                    _base_blink,
+                    parameters,
+                    kps_all_crop,
+                    swapper_autores_track_id,
+                    original_face_512,
+                    dst_kps_5,
+                )
+                img_swap_mask = self.models_processor.restore_eyes(
+                    img_orig_mask,
+                    img_swap_mask,
+                    dst_kps_5,
+                    _eye_blend,
                     parameters["RestoreEyesFeatherBlendSlider"],
                     parameters["RestoreEyesSizeFactorDecimalSlider"],
                     parameters["RestoreXEyesRadiusFactorDecimalSlider"],
