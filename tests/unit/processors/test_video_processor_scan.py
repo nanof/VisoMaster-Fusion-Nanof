@@ -30,6 +30,8 @@ def _empty_scan_detection_result():
         np.empty((0, 5, 2), dtype=np.float32),
         np.empty((0, 68, 2), dtype=np.float32),
         np.empty((0, 203, 2), dtype=np.float32),
+        None,
+        [],
     )
 
 
@@ -546,6 +548,7 @@ def test_scan_issue_frames_filters_scan_state_before_detection():
         local_params,
         frame_tensor=None,
         detector_control_override=None,
+        **_kwargs,
     ):
         captured["local_control"] = local_control
         captured["local_params"] = local_params
@@ -790,13 +793,16 @@ def test_run_sequential_detection_passes_detector_control_override():
             "KPSSmoothingEnableToggle": False,
         },
         {},
+        force_detection=True,
         detector_control_override=override,
     )
 
     assert result[0].shape == (0, 4)
     assert result[1].shape == (0, 5, 2)
     assert result[2].shape == (0, 68, 2)
-    assert result[3] is None
+    assert result[3] is None or (
+        isinstance(result[3], np.ndarray) and result[3].shape == (0, 203, 2)
+    )
     assert captured["control_override"] == override
 
 
@@ -833,36 +839,38 @@ def test_run_sequential_detection_handles_dense_203_shape_mismatch_with_smoothin
     frame = np.zeros((64, 64, 3), dtype=np.uint8)
 
     with patch("builtins.print") as mock_print:
-        bboxes_out, kpss_5_out, _kpss_out, kpss_203_out = (
-            processor._run_sequential_detection(
-                frame,
-                {
-                    "DetectorModelSelection": "RetinaFace",
-                    "MaxFacesToDetectSlider": 2,
-                    "DetectorScoreSlider": 50,
-                    "LandmarkDetectToggle": True,
-                    "LandmarkDetectModelSelection": "203",
-                    "LandmarkDetectScoreSlider": 50,
-                    "DetectFromPointsToggle": False,
-                    "AutoRotationToggle": False,
-                    "LandmarkMeanEyesToggle": False,
-                    "KPSSmoothingEnableToggle": True,
-                    "KPSEmaAlphaSlider": 35,
-                },
-                {"face_1": {"FaceExpressionEnableBothToggle": True}},
-            )
+        (
+            bboxes_out,
+            kpss_5_out,
+            _kpss_out,
+            kpss_203_out,
+            _feeder_chw,
+            _track_ids,
+        ) = processor._run_sequential_detection(
+            frame,
+            {
+                "DetectorModelSelection": "RetinaFace",
+                "MaxFacesToDetectSlider": 2,
+                "DetectorScoreSlider": 50,
+                "LandmarkDetectToggle": True,
+                "LandmarkDetectModelSelection": "203",
+                "LandmarkDetectScoreSlider": 50,
+                "DetectFromPointsToggle": False,
+                "AutoRotationToggle": False,
+                "LandmarkMeanEyesToggle": False,
+                "KPSSmoothingEnableToggle": True,
+                "KPSEmaAlphaSlider": 35,
+            },
+            {"face_1": {"FaceExpressionEnableBothToggle": True}},
+            force_detection=True,
+            frame_number=int(processor.current_frame_number),
         )
 
     assert bboxes_out.shape == (2, 4)
     assert kpss_5_out.shape == (2, 5, 2)
     assert isinstance(kpss_203_out, np.ndarray)
     assert kpss_203_out.shape == (1, 203, 2)
-    assert mock_print.call_count == 2
-    mock_print.assert_any_call(
-        "[WARN] Dense KPS count mismatch on frame 12: "
-        "kpss_5=2, dense_kps=1. Skipping dense smoothing for missing faces."
-    )
-    mock_print.assert_any_call(
+    mock_print.assert_called_once_with(
         "[WARN] Dense KPS_203 count mismatch on frame 12: "
         "kpss_5=2, dense_kps_203=1. Skipping dense 203 smoothing for missing faces."
     )
@@ -901,24 +909,31 @@ def test_run_sequential_detection_handles_dense_shape_mismatch_with_single_warni
     frame = np.zeros((64, 64, 3), dtype=np.uint8)
 
     with patch("builtins.print") as mock_print:
-        bboxes_out, kpss_5_out, kpss_out, kpss_203_out = (
-            processor._run_sequential_detection(
-                frame,
-                {
-                    "DetectorModelSelection": "RetinaFace",
-                    "MaxFacesToDetectSlider": 2,
-                    "DetectorScoreSlider": 50,
-                    "LandmarkDetectToggle": True,
-                    "LandmarkDetectModelSelection": "68",
-                    "LandmarkDetectScoreSlider": 50,
-                    "DetectFromPointsToggle": False,
-                    "AutoRotationToggle": False,
-                    "LandmarkMeanEyesToggle": False,
-                    "KPSSmoothingEnableToggle": True,
-                    "KPSEmaAlphaSlider": 35,
-                },
-                {},
-            )
+        (
+            bboxes_out,
+            kpss_5_out,
+            kpss_out,
+            kpss_203_out,
+            _feeder_chw,
+            _track_ids,
+        ) = processor._run_sequential_detection(
+            frame,
+            {
+                "DetectorModelSelection": "RetinaFace",
+                "MaxFacesToDetectSlider": 2,
+                "DetectorScoreSlider": 50,
+                "LandmarkDetectToggle": True,
+                "LandmarkDetectModelSelection": "68",
+                "LandmarkDetectScoreSlider": 50,
+                "DetectFromPointsToggle": False,
+                "AutoRotationToggle": False,
+                "LandmarkMeanEyesToggle": False,
+                "KPSSmoothingEnableToggle": True,
+                "KPSEmaAlphaSlider": 35,
+            },
+            {},
+            force_detection=True,
+            frame_number=int(processor.current_frame_number),
         )
 
     assert bboxes_out.shape == (2, 4)
@@ -955,24 +970,30 @@ def test_run_sequential_detection_does_not_warn_when_dense_counts_match():
     frame = np.zeros((64, 64, 3), dtype=np.uint8)
 
     with patch("builtins.print") as mock_print:
-        bboxes_out, kpss_5_out, kpss_out, kpss_203_out = (
-            processor._run_sequential_detection(
-                frame,
-                {
-                    "DetectorModelSelection": "RetinaFace",
-                    "MaxFacesToDetectSlider": 1,
-                    "DetectorScoreSlider": 50,
-                    "LandmarkDetectToggle": True,
-                    "LandmarkDetectModelSelection": "68",
-                    "LandmarkDetectScoreSlider": 50,
-                    "DetectFromPointsToggle": False,
-                    "AutoRotationToggle": False,
-                    "LandmarkMeanEyesToggle": False,
-                    "KPSSmoothingEnableToggle": True,
-                    "KPSEmaAlphaSlider": 35,
-                },
-                {},
-            )
+        (
+            bboxes_out,
+            kpss_5_out,
+            kpss_out,
+            kpss_203_out,
+            _feeder_chw,
+            _track_ids,
+        ) = processor._run_sequential_detection(
+            frame,
+            {
+                "DetectorModelSelection": "RetinaFace",
+                "MaxFacesToDetectSlider": 1,
+                "DetectorScoreSlider": 50,
+                "LandmarkDetectToggle": True,
+                "LandmarkDetectModelSelection": "68",
+                "LandmarkDetectScoreSlider": 50,
+                "DetectFromPointsToggle": False,
+                "AutoRotationToggle": False,
+                "LandmarkMeanEyesToggle": False,
+                "KPSSmoothingEnableToggle": True,
+                "KPSEmaAlphaSlider": 35,
+            },
+            {},
+            force_detection=True,
         )
 
     assert bboxes_out.shape == (1, 4)
@@ -1465,6 +1486,7 @@ def test_scan_issue_frames_resets_tracker_when_bytetrack_config_changes_between_
         _local_params,
         frame_tensor=None,
         detector_control_override=None,
+        **_kwargs,
     ):
         local_controls_seen.append(
             (

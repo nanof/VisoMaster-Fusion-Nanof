@@ -123,6 +123,37 @@ _FEEDER_PLAYBACK_LIVE_CONTROL_KEYS = frozenset(
     }
 )
 
+# Issue-scan pipeline: only pass detector/landmark/tracking controls into scan workers
+# (excludes enhancers, face-editor toggles, and arbitrary marker payload keys).
+_ISSUE_SCAN_CONTROL_ALLOWLIST = frozenset(
+    {
+        "GlobalInputResizeToggle",
+        "GlobalInputResizeSizeSelection",
+        "DetectorModelSelection",
+        "MaxFacesToDetectSlider",
+        "DetectorScoreSlider",
+        "LandmarkDetectToggle",
+        "LandmarkDetectModelSelection",
+        "LandmarkDetectScoreSlider",
+        "DetectFromPointsToggle",
+        "AutoRotationToggle",
+        "LandmarkMeanEyesToggle",
+        "FaceTrackingEnableToggle",
+        "ByteTrackTrackThreshSlider",
+        "ByteTrackMatchThreshSlider",
+        "ByteTrackTrackBufferSlider",
+        "KPSSmoothingEnableToggle",
+        "KPSEmaAlphaSlider",
+        "RecognitionModelSelection",
+        "VR180ModeEnableToggle",
+        "PerformanceDetectTrackRoiEnableToggle",
+        "PerformanceDetectTrackRoiPadPercentSlider",
+        "FaceDetectionIntervalSlider",
+        # Legacy / snapshot: used only to pick precomputed embedding variant for issue scan
+        "SimilarityTypeSelection",
+    }
+)
+
 TAIL_TOLERANCE = 30  # BUG-07: 10 was too tight — codec trailing B-frames can cause read
 # failures in the last ~10 frames on H.264/H.265 content, dropping valid end frames.
 MAX_CONSECUTIVE_ERRORS = (
@@ -1259,19 +1290,18 @@ class VideoProcessor(QObject):
         Helper to determine the target input height if global resize is enabled.
         Returns None if resizing is disabled or invalid.
         """
-        resize_enabled = self.main_window.control.get("GlobalInputResizeToggle", False)
+        return VideoProcessor._preview_target_height_from_scan_control(
+            dict(getattr(self.main_window, "control", {}) or {})
+        )
 
-        if not resize_enabled:
+    @staticmethod
+    def _preview_target_height_from_scan_control(control: dict) -> Optional[int]:
+        if not control.get("GlobalInputResizeToggle", False):
             return None
-
         try:
-            # Get the selected resolution string (e.g., "720p")
-            size_str = self.main_window.control.get(
-                "GlobalInputResizeSizeSelection", "720p"
-            )
-            # Extract the number (e.g., 720)
+            size_str = control.get("GlobalInputResizeSizeSelection", "720p")
             return int(str(size_str).replace("p", ""))
-        except Exception as e:
+        except (TypeError, ValueError) as e:
             print(
                 f"[WARN] Could not parse global input resolution, defaulting to original size. Error: {e}"
             )
@@ -1600,9 +1630,13 @@ class VideoProcessor(QObject):
         local_params_for_worker: dict | None,
     ) -> bool:
         """True if the feeder must run GPU face detection for this frame."""
-        if self._feeder_ui_swap_enabled or self._feeder_ui_edit_enabled:
+        if getattr(self, "_feeder_ui_swap_enabled", False) or getattr(
+            self, "_feeder_ui_edit_enabled", False
+        ):
             return True
-        if self._feeder_ui_face_compare or self._feeder_ui_face_mask:
+        if getattr(self, "_feeder_ui_face_compare", False) or getattr(
+            self, "_feeder_ui_face_mask", False
+        ):
             return True
         if local_control_for_worker.get(
             "FaceEditorEnableToggle", False
@@ -1635,6 +1669,7 @@ class VideoProcessor(QObject):
         *,
         frame_number: int = 0,
         force_detection: bool = False,
+        detector_control_override: dict | None = None,
     ):
         """
         Runs face detection in strict frame order (feeder decode thread enqueues;
@@ -1661,8 +1696,10 @@ class VideoProcessor(QObject):
         # Only wrap detection in a dedicated CUDA stream when the user enables
         # "Separate CUDA streams". Otherwise torch.cuda.stream(current_stream()) was a
         # no-op that still added per-frame context overhead on the feeder hot path.
-        use_sep = self.main_window.control.get(
-            "PipelineSeparateCudaStreamsToggle", False
+        use_sep = (
+            dict(getattr(self.main_window, "control", {}) or {}).get(
+                "PipelineSeparateCudaStreamsToggle", False
+            )
         )
         if (
             use_sep
@@ -1685,7 +1722,12 @@ class VideoProcessor(QObject):
             from_points = local_control_for_worker.get("DetectFromPointsToggle", False)
 
             # Check if LivePortrait features are enabled (they strictly require 203 landmarks)
-            master_edit_button = self.main_window.editFacesButton.isChecked()
+            _efb = getattr(self.main_window, "editFacesButton", None)
+            master_edit_button = (
+                bool(_efb.isChecked())
+                if _efb is not None and hasattr(_efb, "isChecked")
+                else False
+            )
 
             requires_203 = False
             if local_params_for_worker:
@@ -1830,6 +1872,7 @@ class VideoProcessor(QObject):
                 ),
                 previous_detections=prev_for_detect,
                 out_track_ids=detect_track_ids,
+                control_override=detector_control_override,
             )
             bboxes, kpss_5, kpss = _offset_det_geometry(
                 bboxes,
@@ -1887,6 +1930,7 @@ class VideoProcessor(QObject):
                             ),
                             previous_detections=previous_faces_arg,
                             bypass_bytetrack=True,
+                            control_override=detector_control_override,
                         )
                     )
 
@@ -2036,14 +2080,38 @@ class VideoProcessor(QObject):
                 valid_kpss = cast(numpy.ndarray, kpss)
                 valid_kpss_203 = cast(numpy.ndarray, kpss_203)
 
-                has_dense_kps = isinstance(kpss, numpy.ndarray) and kpss.shape[0] > 0
+                has_dense_kps = (
+                    isinstance(kpss, numpy.ndarray)
+                    and kpss.ndim == 3
+                    and kpss.shape[0] > 0
+                    and int(kpss.shape[1]) == 68
+                )
+                if has_dense_kps and int(kpss.shape[0]) != int(n_faces):
+                    print(
+                        f"[WARN] Dense KPS count mismatch on frame {frame_number}: "
+                        f"kpss_5={n_faces}, dense_kps={int(kpss.shape[0])}. "
+                        "Skipping dense smoothing for missing faces."
+                    )
+                    has_dense_kps = False
+
+                has_dense_kps_203 = (
+                    isinstance(kpss_203, numpy.ndarray)
+                    and kpss_203.ndim == 3
+                    and kpss_203.shape[0] > 0
+                    and int(kpss_203.shape[1]) == 203
+                )
+                if has_dense_kps_203 and int(kpss_203.shape[0]) != int(n_faces):
+                    print(
+                        f"[WARN] Dense KPS_203 count mismatch on frame {frame_number}: "
+                        f"kpss_5={n_faces}, dense_kps_203={int(kpss_203.shape[0])}. "
+                        "Skipping dense 203 smoothing for missing faces."
+                    )
+                    has_dense_kps_203 = False
+
                 if has_dense_kps:
                     valid_kpss = valid_kpss.copy()
                     kpss = valid_kpss
 
-                has_dense_kps_203 = (
-                    isinstance(kpss_203, numpy.ndarray) and kpss_203.shape[0] > 0
-                )
                 if has_dense_kps_203:
                     valid_kpss_203 = valid_kpss_203.copy()
                     kpss_203 = valid_kpss_203
@@ -5182,6 +5250,71 @@ class VideoProcessor(QObject):
             previous_frame = frame_number
         return longest_issue_run
 
+    @staticmethod
+    def get_issue_scan_unavailable_reason(
+        live_control: dict,
+        scan_ranges: List[Tuple[int, int]],
+        markers: Optional[dict] = None,
+        *,
+        fallback_control: Optional[dict] = None,
+    ) -> Optional[str]:
+        """Return a short message if issue scan cannot run, else ``None``."""
+        markers = markers or {}
+        base = {**(fallback_control or {}), **(live_control or {})}
+        msg = "Issue scans are not supported while VR180 mode is enabled."
+
+        def _vr180_at_frame(frame: int) -> bool:
+            st = dict(base)
+            for mf in sorted(int(x) for x in markers.keys()):
+                if mf > frame:
+                    break
+                md = markers.get(mf) or {}
+                c = md.get("control") if isinstance(md, dict) else None
+                if isinstance(c, dict) and "VR180ModeEnableToggle" in c:
+                    st["VR180ModeEnableToggle"] = c["VR180ModeEnableToggle"]
+            return bool(st.get("VR180ModeEnableToggle", False))
+
+        for start_frame, end_frame in scan_ranges:
+            a, b = int(start_frame), int(end_frame)
+            if a > b:
+                continue
+            check_points = {a, b}
+            for mf in markers.keys():
+                mi = int(mf)
+                if a <= mi <= b:
+                    check_points.add(mi)
+            for f in sorted(check_points):
+                if _vr180_at_frame(f):
+                    return msg
+            span = b - a + 1
+            if span <= 4096:
+                for f in range(a, b + 1):
+                    if _vr180_at_frame(f):
+                        return msg
+        return None
+
+    @staticmethod
+    def _filter_scan_control(control: dict) -> dict:
+        if not isinstance(control, dict):
+            return {}
+        return {k: v for k, v in control.items() if k in _ISSUE_SCAN_CONTROL_ALLOWLIST}
+
+    @staticmethod
+    def _filter_scan_face_params(
+        params_by_face: dict, active_face_ids: list[str]
+    ) -> dict:
+        """Keep only ``SimilarityThresholdSlider`` for the listed face ids."""
+        if not isinstance(params_by_face, dict):
+            return {}
+        out: dict = {}
+        for fid in active_face_ids:
+            pdata = params_by_face.get(fid)
+            if isinstance(pdata, dict) and "SimilarityThresholdSlider" in pdata:
+                out[fid] = {
+                    "SimilarityThresholdSlider": pdata["SimilarityThresholdSlider"]
+                }
+        return out
+
     def _resolve_scan_state_for_frame(
         self,
         frame_number: int,
@@ -5196,18 +5329,56 @@ class VideoProcessor(QObject):
         before the frame, its parameter/control payload becomes the active state
         for that frame; otherwise the scan-start state remains active.
         """
+        _dp = getattr(self.main_window, "default_parameters", None)
+        default_data = getattr(_dp, "data", None) if _dp is not None else None
+        if not isinstance(default_data, dict):
+            default_data = {}
+
+        def _active_face_ids() -> list[str]:
+            if target_faces_snapshot is not None and isinstance(
+                target_faces_snapshot, dict
+            ):
+                ids = [str(k) for k in target_faces_snapshot.keys()]
+                if ids:
+                    return ids
+                if isinstance(base_params, dict) and base_params:
+                    return [str(k) for k in base_params.keys()]
+                return []
+            live = getattr(self.main_window, "target_faces", {}) or {}
+            ids = [str(k) for k in live.keys()]
+            if ids:
+                return ids
+            if isinstance(base_params, dict) and base_params:
+                return [str(k) for k in base_params.keys()]
+            return []
+
         marker_data = video_control_actions._get_marker_data_for_position(  # type: ignore[attr-defined]
             self.main_window, frame_number
         )
         if not marker_data:
-            return (
-                cast(ControlTypes, copy.deepcopy(base_control)),
-                cast(FacesParametersTypes, copy.deepcopy(base_params)),
+            ctrl = VideoProcessor._filter_scan_control(
+                cast(dict, copy.deepcopy(base_control))
             )
+            prm_raw = copy.deepcopy(base_params)
+            active_ids = _active_face_ids()
+            prm_out: dict = {}
+            if isinstance(prm_raw, dict):
+                for sid in active_ids:
+                    pdata = prm_raw.get(sid)
+                    if not isinstance(pdata, dict):
+                        pdata = {}
+                    th = pdata.get("SimilarityThresholdSlider")
+                    if th is None:
+                        th = default_data.get("SimilarityThresholdSlider", 50)
+                    prm_out[sid] = {"SimilarityThresholdSlider": th}
+            return cast(ControlTypes, ctrl), cast(FacesParametersTypes, prm_out)
 
-        local_params = cast(
-            FacesParametersTypes, copy.deepcopy(marker_data.get("parameters", {}))
-        )
+        local_params_raw = copy.deepcopy(marker_data.get("parameters", {}))
+        if isinstance(local_params_raw, dict):
+            local_params: dict = {str(k): v for k, v in local_params_raw.items()}
+        else:
+            local_params = {}
+
         local_control: ControlTypes = cast(ControlTypes, {})
         local_control.update(
             cast(
@@ -5224,22 +5395,23 @@ class VideoProcessor(QObject):
         if isinstance(control_data, dict):
             local_control.update(cast(ControlTypes, control_data).copy())
 
-        # Mirror the playback helper behavior by ensuring every current target
-        # face has a parameter dict, falling back to defaults when missing.
-        active_target_faces = (
-            target_faces_snapshot
-            if target_faces_snapshot is not None
-            else self.main_window.target_faces
+        local_control = cast(
+            ControlTypes,
+            VideoProcessor._filter_scan_control(cast(dict, local_control)),
         )
-        for face_id in active_target_faces.keys():
-            face_id_str = str(face_id)
-            if face_id_str not in local_params:
-                local_params[face_id_str] = cast(
-                    ParametersTypes,
-                    copy.deepcopy(self.main_window.default_parameters.data),
-                )
 
-        return local_control, local_params
+        active_ids = _active_face_ids()
+        prm_out: dict = {}
+        for sid in active_ids:
+            pdata = local_params.get(sid)
+            if not isinstance(pdata, dict):
+                pdata = {}
+            th = pdata.get("SimilarityThresholdSlider")
+            if th is None:
+                th = default_data.get("SimilarityThresholdSlider", 50)
+            prm_out[sid] = {"SimilarityThresholdSlider": th}
+
+        return local_control, cast(FacesParametersTypes, prm_out)
 
     def _build_issue_scan_state_segments(
         self,
@@ -5306,9 +5478,32 @@ class VideoProcessor(QObject):
         recognition_model = str(
             local_control.get("RecognitionModelSelection", "arcface_128")
         )
-        similarity_type = str("Auto")
+        similarity_type = str(
+            local_control.get("SimilarityTypeSelection", "Auto")
+        )
         default_params = dict(self.main_window.default_parameters.data)
         prepared_targets: list[tuple[str, float, numpy.ndarray]] = []
+
+        def _pick_scan_target_embedding(
+            model_emb: dict[str, Any],
+        ) -> Optional[numpy.ndarray]:
+            if not isinstance(model_emb, dict):
+                return None
+            if (
+                similarity_type in model_emb
+                and isinstance(model_emb[similarity_type], numpy.ndarray)
+                and model_emb[similarity_type].size > 0
+            ):
+                return cast(numpy.ndarray, model_emb[similarity_type])
+            if similarity_type == "Auto":
+                for key in ("Auto", "Opal", "Optimal", "Pearl"):
+                    arr = model_emb.get(key)
+                    if isinstance(arr, numpy.ndarray) and arr.size > 0:
+                        return arr
+                for arr in model_emb.values():
+                    if isinstance(arr, numpy.ndarray) and arr.size > 0:
+                        return cast(numpy.ndarray, arr)
+            return None
 
         for target_id, target_face_snapshot in target_faces_snapshot.items():
             face_id_str = str(target_face_snapshot.get("face_id", target_id))
@@ -5322,8 +5517,9 @@ class VideoProcessor(QObject):
                 IssueScanTargetEmbeddings,
                 target_face_snapshot.get("embeddings_by_model", {}),
             )
-            target_embedding = target_embeddings.get(recognition_model, {}).get(
-                similarity_type
+            model_emb = target_embeddings.get(recognition_model, {})
+            target_embedding = _pick_scan_target_embedding(
+                cast(dict[str, Any], model_emb)
             )
             if (
                 not isinstance(target_embedding, numpy.ndarray)
@@ -5422,7 +5618,7 @@ class VideoProcessor(QObject):
         required_embedding_modes = {
             (
                 str(local_control.get("RecognitionModelSelection", "arcface_128")),
-                str("Auto"),
+                str(local_control.get("SimilarityTypeSelection", "Auto")),
             )
             for _start_frame, _end_frame, local_control, _local_params in scan_segments
         }
@@ -5463,10 +5659,6 @@ class VideoProcessor(QObject):
         reset_frame_number: Optional[int] = None,
     ) -> Optional[dict]:
         """Run a full-frame detection scan and return issue-frame results."""
-        capture = cv2.VideoCapture(self.media_path)
-        if not capture or not capture.isOpened():
-            raise RuntimeError("Could not open the selected video for scanning.")
-
         scan_ranges = scan_ranges or self._get_issue_scan_ranges()
         dropped_frames_snapshot = {
             int(frame) for frame in getattr(self.main_window, "dropped_frames", set())
@@ -5474,11 +5666,36 @@ class VideoProcessor(QObject):
         total_frames = misc_helpers.count_issue_scan_frames(
             scan_ranges, dropped_frames_snapshot
         )
+        if total_frames <= 0:
+            if reset_frame_number is not None:
+                self.current_frame_number = int(reset_frame_number)
+            return {
+                "issue_frames_by_face": {},
+                "frames_scanned": 0,
+                "faces_with_issues": 0,
+                "cancelled": False,
+            }
+
+        live_ctrl = dict(getattr(self.main_window, "control", {}) or {})
+        unavailable = VideoProcessor.get_issue_scan_unavailable_reason(
+            live_ctrl,
+            scan_ranges,
+            getattr(self.main_window, "markers", None) or {},
+            fallback_control=live_ctrl,
+        )
+        if unavailable:
+            raise RuntimeError(unavailable)
+
+        scan_target_height_arg = target_height
         target_height = (
             target_height
             if target_height is not None
             else self._get_target_input_height()
         )
+
+        capture = cv2.VideoCapture(self.media_path)
+        if not capture or not capture.isOpened():
+            raise RuntimeError("Could not open the selected video for scanning.")
         base_control = cast(
             ControlTypes,
             copy.deepcopy(
@@ -5535,6 +5752,7 @@ class VideoProcessor(QObject):
             if tracking_enabled:
                 self.main_window.models_processor.face_detectors.reset_tracker()
             previous_segment_tracking_enabled: Optional[bool] = None
+            previous_bytetrack_sig: Optional[tuple[Any, ...]] = None
 
             def emit_progress(frame_number: int) -> None:
                 if progress_callback:
@@ -5568,9 +5786,24 @@ class VideoProcessor(QObject):
                 current_segment_tracking_enabled = bool(
                     local_control.get("FaceTrackingEnableToggle", False)
                 )
+                bt_sig: Optional[tuple[Any, ...]] = None
+                if current_segment_tracking_enabled:
+                    bt_sig = (
+                        local_control.get("ByteTrackTrackThreshSlider"),
+                        local_control.get("ByteTrackMatchThreshSlider"),
+                        local_control.get("ByteTrackTrackBufferSlider"),
+                    )
                 if (
                     current_segment_tracking_enabled
                     and previous_segment_tracking_enabled is False
+                ):
+                    self.main_window.models_processor.face_detectors.reset_tracker()
+                    self._reset_issue_scan_sequential_state()
+                elif (
+                    current_segment_tracking_enabled
+                    and previous_bytetrack_sig is not None
+                    and bt_sig is not None
+                    and bt_sig != previous_bytetrack_sig
                 ):
                     self.main_window.models_processor.face_detectors.reset_tracker()
                     self._reset_issue_scan_sequential_state()
@@ -5596,10 +5829,18 @@ class VideoProcessor(QObject):
                         frame_number = next_frame
                         continue
 
+                    seg_preview_h = VideoProcessor._preview_target_height_from_scan_control(
+                        cast(dict, local_control)
+                    )
+                    preview_for_read = (
+                        seg_preview_h
+                        if seg_preview_h is not None
+                        else scan_target_height_arg
+                    )
                     ret, frame_bgr = misc_helpers.read_frame(
                         capture,
                         self.media_rotation,
-                        preview_target_height=target_height,
+                        preview_target_height=preview_for_read,
                     )
                     if not ret or not isinstance(frame_bgr, numpy.ndarray):
                         for face_id in issue_frames_by_face:
@@ -5630,6 +5871,7 @@ class VideoProcessor(QObject):
                         frame_tensor=frame_tensor,
                         frame_number=frame_number,
                         force_detection=True,
+                        detector_control_override=dict(local_control),
                     )
                     detected_embeddings: list[numpy.ndarray] = []
                     if (
@@ -5681,6 +5923,8 @@ class VideoProcessor(QObject):
                     emit_progress(frame_number)
                     frame_number += 1
                 previous_segment_tracking_enabled = current_segment_tracking_enabled
+                if bt_sig is not None:
+                    previous_bytetrack_sig = bt_sig
 
             return build_result(False)
         finally:
