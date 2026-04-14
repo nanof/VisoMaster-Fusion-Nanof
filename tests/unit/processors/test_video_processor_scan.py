@@ -57,6 +57,7 @@ def test_filter_scan_control_keeps_only_allowlisted_keys():
     assert filtered == {
         "DetectorScoreSlider": 42,
         "FaceTrackingEnableToggle": True,
+        "SimilarityTypeSelection": "Pearl",
     }
 
 
@@ -435,14 +436,14 @@ def test_prepare_issue_scan_match_context_uses_auto_snapshot_embeddings():
     )
 
     assert match_context["recognition_model"] == "arcface_128"
-    assert match_context["similarity_type"] == "Auto"
+    assert match_context["similarity_type"] == "Pearl"
     prepared_targets = match_context["prepared_targets"]
     assert len(prepared_targets) == 1
     assert prepared_targets[0][0] == "face_1"
     assert prepared_targets[0][1] == 65.0
     np.testing.assert_array_equal(
         prepared_targets[0][2],
-        np.array([3.0], dtype=np.float32),
+        np.array([2.0], dtype=np.float32),
     )
 
 
@@ -504,9 +505,17 @@ def test_prepare_issue_scan_target_faces_snapshot_uses_auto_similarity_mode():
             {},
         )
 
-    assert run_recognize_calls == [("arcface_128", "Auto")]
+    assert run_recognize_calls == [
+        ("arcface_128", "Opal"),
+        ("arcface_128", "Pearl"),
+    ]
+    arc_emb = snapshot["face_1"]["embeddings_by_model"]["arcface_128"]
     np.testing.assert_array_equal(
-        snapshot["face_1"]["embeddings_by_model"]["arcface_128"]["Auto"],
+        arc_emb["Opal"],
+        np.array([3.0], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        arc_emb["Pearl"],
         np.array([3.0], dtype=np.float32),
     )
 
