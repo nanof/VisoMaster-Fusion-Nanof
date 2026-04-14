@@ -430,6 +430,11 @@ def initialize_media_list_widgets(main_window: "MainWindow"):
         listWidget.setFlow(QtWidgets.QListView.LeftToRight)
         listWidget.setResizeMode(QtWidgets.QListView.Adjust)
 
+    _set_up_panel_context_menu(
+        main_window, main_window.targetVideosList, "target_media"
+    )
+    _set_up_panel_context_menu(main_window, main_window.inputFacesList, "input_faces")
+
 
 def initialize_embeddings_list_widget(main_window: "MainWindow"):
     """One-time configuration for the inputEmbeddingsList widget."""
@@ -463,6 +468,7 @@ def initialize_embeddings_list_widget(main_window: "MainWindow"):
 
     inputEmbeddingsList.setLayoutDirection(QtCore.Qt.LeftToRight)
     inputEmbeddingsList.setLayoutMode(QtWidgets.QListView.Batched)
+    _set_up_panel_context_menu(main_window, inputEmbeddingsList, "embeddings")
 
 
 def create_and_add_embed_button_to_list(
@@ -489,16 +495,18 @@ def create_and_add_embed_button_to_list(
     main_window.merged_embeddings[embed_button.embedding_id] = embed_button
 
 
-def clear_stop_loading_target_media(main_window: "MainWindow"):
+def clear_stop_loading_target_media(main_window: "MainWindow", clear_list: bool = True):
     if main_window.video_loader_worker is not None:
         worker = main_window.video_loader_worker
+        worker.blockSignals(True)
         worker._running = False
         worker.quit()
         if not worker.wait(_WORKER_STOP_TIMEOUT_MS):
             worker.terminate()
             worker.wait()
         main_window.video_loader_worker = None
-        main_window.targetVideosList.clear()
+        if clear_list:
+            main_window.targetVideosList.clear()
 
 
 @QtCore.Slot()
@@ -619,17 +627,176 @@ def load_target_webcams(
         main_window.placeholder_update_signal.emit(main_window.targetVideosList, False)
 
 
-def clear_stop_loading_input_media(main_window: "MainWindow"):
+def clear_stop_loading_input_media(main_window: "MainWindow", clear_list: bool = True):
     if main_window.input_faces_loader_worker is not None:
         worker = main_window.input_faces_loader_worker
+        worker.blockSignals(True)
         worker._running = False
         worker.quit()
         if not worker.wait(_WORKER_STOP_TIMEOUT_MS):
             worker.terminate()
             worker.wait()
         main_window.input_faces_loader_worker = None
-        main_window.inputFacesList.clear()
-        main_window.inputFacesFavoritesList.clear()
+        if clear_list:
+            main_window.inputFacesList.clear()
+            main_window.inputFacesFavoritesList.clear()
+
+
+def _set_path_line_edit_value(line_edit: QtWidgets.QLineEdit, path: str) -> None:
+    line_edit.setText(path)
+    line_edit.setToolTip(path)
+
+
+def _confirm_panel_clear(main_window: "MainWindow", title: str, message: str) -> bool:
+    reply = QtWidgets.QMessageBox.question(
+        main_window,
+        title,
+        message,
+        QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+        QtWidgets.QMessageBox.No,
+    )
+    return reply == QtWidgets.QMessageBox.Yes
+
+
+def clear_all_target_media(main_window: "MainWindow") -> bool:
+    from app.ui.widgets.actions import video_control_actions
+
+    if video_control_actions.block_if_issue_scan_active(main_window, "clear all media"):
+        return False
+
+    if not main_window.target_videos:
+        return False
+
+    confirmed = _confirm_panel_clear(
+        main_window,
+        "Clear All Media",
+        "This will remove all target media, including webcams, and reset the "
+        "Target Media panel.\n\nFiles on disk will not be deleted.",
+    )
+    if not confirmed:
+        return False
+
+    clear_stop_loading_target_media(main_window, clear_list=False)
+
+    for target_media_button in list(main_window.target_videos.values()):
+        target_media_button.remove_target_media_from_list()
+
+    if main_window.target_faces:
+        card_actions.clear_target_faces(main_window, refresh_frame=False)
+
+    main_window.target_videos.clear()
+    main_window.selected_video_button = None
+    _set_path_line_edit_value(main_window.targetVideosPathLineEdit, "")
+    main_window.last_target_media_folder_path = ""
+    main_window.placeholder_update_signal.emit(main_window.targetVideosList, False)
+    return True
+
+
+def clear_all_input_faces(main_window: "MainWindow") -> bool:
+    from app.ui.widgets.actions import video_control_actions
+
+    if video_control_actions.block_if_issue_scan_active(main_window, "clear all faces"):
+        return False
+
+    if not main_window.input_faces:
+        return False
+
+    confirmed = _confirm_panel_clear(
+        main_window,
+        "Clear All Faces",
+        "This will remove all input faces and reset the Input Faces panel.\n\n"
+        "Files on disk will not be deleted.",
+    )
+    if not confirmed:
+        return False
+
+    clear_stop_loading_input_media(main_window, clear_list=False)
+
+    for input_face_button in list(main_window.input_faces.values()):
+        input_face_button.remove_kv_data_file()
+        input_face_button._remove_face_from_lists()
+        input_face_button.deleteLater()
+
+    common_widget_actions.refresh_frame(main_window)
+    _set_path_line_edit_value(main_window.inputFacesPathLineEdit, "")
+    main_window.last_input_media_folder_path = ""
+    main_window.placeholder_update_signal.emit(main_window.inputFacesList, False)
+    return True
+
+
+def clear_all_embeddings(main_window: "MainWindow") -> bool:
+    from app.ui.widgets.actions import video_control_actions
+
+    if video_control_actions.block_if_issue_scan_active(
+        main_window, "clear all embeddings"
+    ):
+        return False
+
+    if not main_window.merged_embeddings:
+        return False
+
+    confirmed = _confirm_panel_clear(
+        main_window,
+        "Clear All Embeddings",
+        "This will remove all embeddings and reset the Embeddings panel.\n\n"
+        "Files on disk will not be deleted.",
+    )
+    if not confirmed:
+        return False
+
+    card_actions.clear_merged_embeddings(main_window)
+    return True
+
+
+def _build_panel_context_menu(
+    main_window: "MainWindow",
+    list_widget: QtWidgets.QListWidget,
+    panel_type: str,
+) -> QtWidgets.QMenu:
+    from app.ui.widgets.actions import video_control_actions
+
+    scan_active = video_control_actions.is_issue_scan_active(main_window)
+    menu = QtWidgets.QMenu(list_widget)
+
+    if panel_type == "target_media":
+        clear_action = QtGui.QAction("Clear All Media", menu)
+        clear_action.setEnabled(bool(main_window.target_videos) and not scan_active)
+        clear_action.triggered.connect(partial(clear_all_target_media, main_window))
+    elif panel_type == "input_faces":
+        clear_action = QtGui.QAction("Clear All Faces", menu)
+        clear_action.setEnabled(bool(main_window.input_faces) and not scan_active)
+        clear_action.triggered.connect(partial(clear_all_input_faces, main_window))
+    else:
+        clear_action = QtGui.QAction("Clear All Embeddings", menu)
+        clear_action.setEnabled(bool(main_window.merged_embeddings) and not scan_active)
+        clear_action.triggered.connect(partial(clear_all_embeddings, main_window))
+
+    menu.addAction(clear_action)
+    return menu
+
+
+def _show_panel_context_menu(
+    main_window: "MainWindow",
+    list_widget: QtWidgets.QListWidget,
+    panel_type: str,
+    position: QtCore.QPoint,
+) -> None:
+    if list_widget.itemAt(position) is not None:
+        return
+
+    menu = _build_panel_context_menu(main_window, list_widget, panel_type)
+    menu.exec(list_widget.viewport().mapToGlobal(position))
+
+
+def _set_up_panel_context_menu(
+    main_window: "MainWindow",
+    list_widget: QtWidgets.QListWidget,
+    panel_type: str,
+) -> None:
+    list_widget.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+    list_widget.customContextMenuRequested.connect(
+        partial(_show_panel_context_menu, main_window, list_widget, panel_type)
+    )
 
 
 @QtCore.Slot()

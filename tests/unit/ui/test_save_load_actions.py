@@ -351,6 +351,178 @@ def test_embedding_preserves_shape():
     assert restored.shape == original.shape
 
 
+def _make_embedding_main_window(tmp_path: Path):
+    mw = SimpleNamespace()
+    mw.merged_embeddings = {}
+    mw.loaded_embedding_filename = ""
+    mw.project_root_path = tmp_path
+    return mw
+
+
+def _make_embedding_button(*, name="Embedding 1", kv_map=None):
+    return SimpleNamespace(
+        embedding_name=name,
+        embedding_store={"arcface": np.array([1.0, 2.0], dtype=np.float32)},
+        kv_map=kv_map,
+    )
+
+
+def test_save_embeddings_to_file_cancelled_confirmation_skips_writes(
+    tmp_path, monkeypatch
+):
+    target_file = tmp_path / "embeddings.json"
+    target_file.write_text("original")
+    main_window = _make_embedding_main_window(tmp_path)
+    main_window.loaded_embedding_filename = str(target_file)
+    main_window.merged_embeddings = {
+        "embed_1": _make_embedding_button(kv_map={"cache": "value"})
+    }
+
+    save_load_actions.common_widget_actions.create_and_show_toast_message.reset_mock()
+    save_load_actions.common_widget_actions.create_and_show_messagebox.reset_mock()
+
+    question_mock = MagicMock(return_value=0)
+    monkeypatch.setattr(
+        save_load_actions.QtWidgets,
+        "QMessageBox",
+        SimpleNamespace(Yes=1, No=0, question=question_mock),
+    )
+    get_save_file_name = MagicMock(return_value=(str(tmp_path / "unused.json"), ""))
+    monkeypatch.setattr(
+        save_load_actions.QtWidgets,
+        "QFileDialog",
+        SimpleNamespace(getSaveFileName=get_save_file_name),
+    )
+    torch_save = MagicMock()
+    monkeypatch.setattr(save_load_actions.torch, "save", torch_save)
+
+    save_load_actions.save_embeddings_to_file(main_window)
+
+    question_mock.assert_called_once()
+    get_save_file_name.assert_not_called()
+    torch_save.assert_not_called()
+    assert target_file.read_text() == "original"
+    assert main_window.loaded_embedding_filename == str(target_file)
+    save_load_actions.common_widget_actions.create_and_show_toast_message.assert_not_called()
+    save_load_actions.common_widget_actions.create_and_show_messagebox.assert_not_called()
+
+
+def test_save_embeddings_to_file_confirmed_confirmation_writes_file(
+    tmp_path, monkeypatch
+):
+    target_file = tmp_path / "embeddings.json"
+    target_file.write_text("original")
+    main_window = _make_embedding_main_window(tmp_path)
+    main_window.loaded_embedding_filename = str(target_file)
+    main_window.merged_embeddings = {"embed_1": _make_embedding_button()}
+
+    save_load_actions.common_widget_actions.create_and_show_toast_message.reset_mock()
+    save_load_actions.common_widget_actions.create_and_show_messagebox.reset_mock()
+
+    question_mock = MagicMock(return_value=1)
+    monkeypatch.setattr(
+        save_load_actions.QtWidgets,
+        "QMessageBox",
+        SimpleNamespace(Yes=1, No=0, question=question_mock),
+    )
+    get_save_file_name = MagicMock(return_value=(str(tmp_path / "unused.json"), ""))
+    monkeypatch.setattr(
+        save_load_actions.QtWidgets,
+        "QFileDialog",
+        SimpleNamespace(getSaveFileName=get_save_file_name),
+    )
+    torch_save = MagicMock()
+    monkeypatch.setattr(save_load_actions.torch, "save", torch_save)
+
+    save_load_actions.save_embeddings_to_file(main_window)
+
+    question_mock.assert_called_once()
+    get_save_file_name.assert_not_called()
+    torch_save.assert_not_called()
+    written = json.loads(target_file.read_text())
+    assert written == [
+        {
+            "name": "Embedding 1",
+            "embedding_store": {"arcface": [1.0, 2.0]},
+            "kv_map": None,
+        }
+    ]
+    assert main_window.loaded_embedding_filename == str(target_file)
+    save_load_actions.common_widget_actions.create_and_show_toast_message.assert_called_once()
+    save_load_actions.common_widget_actions.create_and_show_messagebox.assert_not_called()
+
+
+def test_save_embeddings_to_file_save_as_skips_confirmation(tmp_path, monkeypatch):
+    existing_file = tmp_path / "embeddings.json"
+    existing_file.write_text("original")
+    save_as_file = tmp_path / "save_as.json"
+    main_window = _make_embedding_main_window(tmp_path)
+    main_window.loaded_embedding_filename = str(existing_file)
+    main_window.merged_embeddings = {"embed_1": _make_embedding_button()}
+
+    save_load_actions.common_widget_actions.create_and_show_toast_message.reset_mock()
+    save_load_actions.common_widget_actions.create_and_show_messagebox.reset_mock()
+
+    question_mock = MagicMock(return_value=1)
+    monkeypatch.setattr(
+        save_load_actions.QtWidgets,
+        "QMessageBox",
+        SimpleNamespace(Yes=1, No=0, question=question_mock),
+    )
+    get_save_file_name = MagicMock(return_value=(str(save_as_file), ""))
+    monkeypatch.setattr(
+        save_load_actions.QtWidgets,
+        "QFileDialog",
+        SimpleNamespace(getSaveFileName=get_save_file_name),
+    )
+    torch_save = MagicMock()
+    monkeypatch.setattr(save_load_actions.torch, "save", torch_save)
+
+    save_load_actions.save_embeddings_to_file(main_window, save_as=True)
+
+    question_mock.assert_not_called()
+    get_save_file_name.assert_called_once()
+    assert json.loads(save_as_file.read_text()) == [
+        {
+            "name": "Embedding 1",
+            "embedding_store": {"arcface": [1.0, 2.0]},
+            "kv_map": None,
+        }
+    ]
+    assert main_window.loaded_embedding_filename == str(save_as_file)
+    save_load_actions.common_widget_actions.create_and_show_toast_message.assert_called_once()
+    save_load_actions.common_widget_actions.create_and_show_messagebox.assert_not_called()
+
+
+def test_save_embeddings_to_file_with_no_embeddings_shows_existing_messagebox(
+    tmp_path, monkeypatch
+):
+    main_window = _make_embedding_main_window(tmp_path)
+
+    save_load_actions.common_widget_actions.create_and_show_toast_message.reset_mock()
+    save_load_actions.common_widget_actions.create_and_show_messagebox.reset_mock()
+
+    question_mock = MagicMock(return_value=1)
+    monkeypatch.setattr(
+        save_load_actions.QtWidgets,
+        "QMessageBox",
+        SimpleNamespace(Yes=1, No=0, question=question_mock),
+    )
+    get_save_file_name = MagicMock(return_value=(str(tmp_path / "unused.json"), ""))
+    monkeypatch.setattr(
+        save_load_actions.QtWidgets,
+        "QFileDialog",
+        SimpleNamespace(getSaveFileName=get_save_file_name),
+    )
+
+    save_load_actions.save_embeddings_to_file(main_window)
+
+    save_load_actions.common_widget_actions.create_and_show_messagebox.assert_called_once()
+    save_load_actions.common_widget_actions.create_and_show_toast_message.assert_not_called()
+    question_mock.assert_not_called()
+    get_save_file_name.assert_not_called()
+
+
 class _FakeGeometry:
     def __init__(self, x: int, y: int, width: int, height: int):
         self._x = x

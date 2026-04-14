@@ -802,7 +802,7 @@
             <item>
              <widget class="QPushButton" name="saveEmbeddingButton">
               <property name="toolTip">
-               <string>Save Embedding</string>
+               <string>Save all embeddings to the current file</string>
               </property>
               <property name="text">
                <string/>

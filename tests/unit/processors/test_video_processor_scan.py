@@ -49,6 +49,7 @@ def test_filter_scan_control_keeps_only_allowlisted_keys():
         {
             "DetectorScoreSlider": 42,
             "FaceTrackingEnableToggle": True,
+            "SimilarityTypeSelection": "Pearl",
             "IgnoredControl": "skip",
         }
     )
@@ -408,7 +409,7 @@ def test_resolve_scan_state_filters_non_scan_face_params_and_fills_defaults():
     }
 
 
-def test_prepare_issue_scan_match_context_uses_snapshot_embeddings_for_segment_settings():
+def test_prepare_issue_scan_match_context_uses_auto_snapshot_embeddings():
     processor = VideoProcessor.__new__(VideoProcessor)
     processor.main_window = SimpleNamespace(
         default_parameters=SimpleNamespace(data={"SimilarityThresholdSlider": 50}),
@@ -417,6 +418,7 @@ def test_prepare_issue_scan_match_context_uses_snapshot_embeddings_for_segment_s
         "face_1",
         {
             "arcface_128": {
+                "Auto": np.array([3.0], dtype=np.float32),
                 "Opal": np.array([1.0], dtype=np.float32),
                 "Pearl": np.array([2.0], dtype=np.float32),
             }
@@ -432,17 +434,19 @@ def test_prepare_issue_scan_match_context_uses_snapshot_embeddings_for_segment_s
         target_faces_snapshot,
     )
 
+    assert match_context["recognition_model"] == "arcface_128"
+    assert match_context["similarity_type"] == "Auto"
     prepared_targets = match_context["prepared_targets"]
     assert len(prepared_targets) == 1
     assert prepared_targets[0][0] == "face_1"
     assert prepared_targets[0][1] == 65.0
     np.testing.assert_array_equal(
         prepared_targets[0][2],
-        np.array([2.0], dtype=np.float32),
+        np.array([3.0], dtype=np.float32),
     )
 
 
-def test_prepare_issue_scan_target_faces_snapshot_uses_segment_recognition_settings():
+def test_prepare_issue_scan_target_faces_snapshot_uses_auto_similarity_mode():
     processor = VideoProcessor.__new__(VideoProcessor)
     run_recognize_calls = []
 
@@ -458,9 +462,7 @@ def test_prepare_issue_scan_target_faces_snapshot_uses_segment_recognition_setti
 
     def fake_run_recognize_direct(_img, _kps, similarity_type, recognition_model):
         run_recognize_calls.append((recognition_model, similarity_type))
-        if similarity_type == "Pearl":
-            return np.array([2.0], dtype=np.float32), None
-        return np.array([1.0], dtype=np.float32), None
+        return np.array([3.0], dtype=np.float32), None
 
     processor.main_window = SimpleNamespace(
         target_faces={"face_1": _TargetFaceWithoutEmbeddingAccess()},
@@ -502,17 +504,10 @@ def test_prepare_issue_scan_target_faces_snapshot_uses_segment_recognition_setti
             {},
         )
 
-    assert run_recognize_calls == [
-        ("arcface_128", "Opal"),
-        ("arcface_128", "Pearl"),
-    ]
+    assert run_recognize_calls == [("arcface_128", "Auto")]
     np.testing.assert_array_equal(
-        snapshot["face_1"]["embeddings_by_model"]["arcface_128"]["Opal"],
-        np.array([1.0], dtype=np.float32),
-    )
-    np.testing.assert_array_equal(
-        snapshot["face_1"]["embeddings_by_model"]["arcface_128"]["Pearl"],
-        np.array([2.0], dtype=np.float32),
+        snapshot["face_1"]["embeddings_by_model"]["arcface_128"]["Auto"],
+        np.array([3.0], dtype=np.float32),
     )
 
 
