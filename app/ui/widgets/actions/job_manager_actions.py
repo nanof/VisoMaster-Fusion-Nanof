@@ -441,6 +441,9 @@ def _load_job_target_faces_and_params(main_window: "MainWindow", data: dict):
                         main_window.merged_embeddings[assigned_id].embedding_store
                     )
 
+            # use TargetFaceCardButton widget to load existing target_face_button hooks
+            target_face_obj.load_target_face()
+
             # Load assigned input faces
             target_face_obj.assigned_input_faces.clear()
             for assigned_id in target_face_data.get("assigned_input_faces", []):
@@ -849,6 +852,9 @@ def load_job_workspace(main_window: "MainWindow", job_name: str):
                 main_window.cur_selected_target_face_button = first_face_button
                 save_load_actions._sync_input_and_embedding_checkboxes_from_target_face(
                     main_window, first_face_button
+                )
+                print(
+                    f"[INFO] Loaded Job target_face {main_window.cur_selected_target_face_button}"
                 )
 
             print(

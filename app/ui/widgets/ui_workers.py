@@ -372,11 +372,12 @@ class InputFacesLoaderWorker(qtc.QThread):
                 selected_recognition_model = control.get(
                     "RecognitionModelSelection", "Inswapper128ArcFace"
                 )
+                similarity_type = str("Auto")
                 face_emb, cropped_img = (
                     self.main_window.models_processor.run_recognize_direct(
                         img,
                         face_kps,
-                        control.get("SimilarityTypeSelection", "Optimal"),
+                        similarity_type,
                         selected_recognition_model,  # Use selected model
                     )
                 )

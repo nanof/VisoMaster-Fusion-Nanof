@@ -102,6 +102,24 @@ _FEEDER_PLAYBACK_LIVE_CONTROL_KEYS = frozenset(
         "FrameEnhancerBlendSlider",
         "FrameEnhancerTemporalSmoothSlider",
         "FrameEnhancerDownToggle",
+        "GlobalInputResizeToggle",
+        "GlobalInputResizeSizeSelection",
+        "DetectorModelSelection",
+        "MaxFacesToDetectSlider",
+        "DetectorScoreSlider",
+        "LandmarkDetectToggle",
+        "LandmarkDetectModelSelection",
+        "LandmarkDetectScoreSlider",
+        "DetectFromPointsToggle",
+        "AutoRotationToggle",
+        "LandmarkMeanEyesToggle",
+        "FaceTrackingEnableToggle",
+        "ByteTrackTrackThreshSlider",
+        "ByteTrackMatchThreshSlider",
+        "ByteTrackTrackBufferSlider",
+        "KPSSmoothingEnableToggle",
+        "KPSEmaAlphaSlider",
+        "RecognitionModelSelection",
     }
 )
 
@@ -5288,7 +5306,7 @@ class VideoProcessor(QObject):
         recognition_model = str(
             local_control.get("RecognitionModelSelection", "arcface_128")
         )
-        similarity_type = str(local_control.get("SimilarityTypeSelection", "Opal"))
+        similarity_type = str("Auto")
         default_params = dict(self.main_window.default_parameters.data)
         prepared_targets: list[tuple[str, float, numpy.ndarray]] = []
 
@@ -5404,12 +5422,12 @@ class VideoProcessor(QObject):
         required_embedding_modes = {
             (
                 str(local_control.get("RecognitionModelSelection", "arcface_128")),
-                str(local_control.get("SimilarityTypeSelection", "Opal")),
+                str("Auto"),
             )
             for _start_frame, _end_frame, local_control, _local_params in scan_segments
         }
         if not required_embedding_modes:
-            required_embedding_modes = {("arcface_128", "Opal")}
+            required_embedding_modes = {("arcface_128", "Auto")}
 
         target_faces_snapshot: IssueScanTargetSnapshot = {}
         for target_id, target_face in live_target_faces.items():

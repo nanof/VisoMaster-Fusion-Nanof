@@ -41,3 +41,4 @@ tensorrt-engines/
 test_frames*/
 test_videos*/
 presets/
+temp_files/
