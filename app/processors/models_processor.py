@@ -2224,6 +2224,7 @@ class ModelsProcessor(QtCore.QObject):
         denoiser_ddim_eta: float = 0.0,
         base_seed: int = 220,
         latent_sharpening_strength: float = 0.0,
+        color_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Runs the Diffusion-based Denoiser/Restorer (ReF-LDM).
@@ -2630,19 +2631,25 @@ class ModelsProcessor(QtCore.QObject):
         # Applied before sharpening so that histogram normalisation does not
         # undo the local-contrast enhancement added by the unsharp mask.
         if ENABLE_COLOR_MATCH:
-            # DFL_Orig expects inputs in [0..255] range.
-            # Ref is already uint8 [0..255] (but tensor)
             ref_tensor = image_to_process_cxhxw_uint8
-            # Res (denoised) is float [0..1], scale to [0..255]
             res_tensor = image_after_postproc_float_0_1 * 255.0
 
-            # Create a mask to exclude black padding from stats (Sum of channels > 0)
-            # This is critical for DFL_Orig to calculate correct Mean/Std
-            mask = (ref_tensor.sum(dim=0) > 0).float()
+            if color_mask is not None:
+                mask = color_mask.clone()
+                if mask.dim() == 2:
+                    mask = mask.unsqueeze(0)
+                if mask.shape[-1] != ref_tensor.shape[-1]:
+                    mask = v2.functional.resize(
+                        mask,
+                        [ref_tensor.shape[-2], ref_tensor.shape[-1]],
+                        antialias=True,
+                    ).squeeze(0)
+                else:
+                    mask = mask.squeeze(0)
+            else:
+                mask = (ref_tensor.sum(dim=0) > 0).float()
 
             try:
-                # Apply DFL_Orig Transfer
-                # blend=100 means full transfer. DFL_Orig uses LAB space and is robust.
                 matched_result = faceutil.histogram_matching_DFL_Orig(
                     ref_tensor,
                     res_tensor,
@@ -2650,7 +2657,6 @@ class ModelsProcessor(QtCore.QObject):
                     100,  # Blend strength 100%
                 )
 
-                # Convert back to [0..1] for consistency
                 image_after_postproc_float_0_1 = matched_result / 255.0
 
             except Exception as e:

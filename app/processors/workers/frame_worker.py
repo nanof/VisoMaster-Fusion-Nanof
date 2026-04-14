@@ -789,6 +789,7 @@ class FrameWorker(threading.Thread):
         control: dict,
         pass_suffix: str,
         kv_map: Dict | None,
+        color_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Helper to run the diffusion-based denoiser (Ref-LDM).
 
@@ -833,6 +834,7 @@ class FrameWorker(threading.Thread):
             denoiser_ddim_steps=ddim_steps_val,
             denoiser_cfg_scale=cfg_scale_val,
             latent_sharpening_strength=sharpen_val,
+            color_mask=color_mask,
         )
         return torch.clamp(denoised_image, 0, 255)
 
@@ -7710,7 +7712,9 @@ class FrameWorker(threading.Thread):
 
         # Second Denoiser pass - After First Restorer
         if control.get("DenoiserAfterFirstRestorerToggle", False):
-            swap = self._apply_denoiser_pass(swap, control, "AfterFirst", kv_map)
+            swap = self._apply_denoiser_pass(
+                swap, control, "AfterFirst", kv_map, color_mask=mask_forcalc_512
+            )
 
         swap = swap.float()
 
@@ -8321,7 +8325,9 @@ class FrameWorker(threading.Thread):
         # ending colour transfer.  Placed last so no subsequent colour operation
         # can undo the denoiser's normalisation and cause a visible colour shift.
         if control.get("DenoiserAfterRestorersToggle", False):
-            swap = self._apply_denoiser_pass(swap, control, "After", kv_map)
+            swap = self._apply_denoiser_pass(
+                swap, control, "After", kv_map, color_mask=mask_forcalc_512
+            )
 
         if _swap_core_perf is not None:
             _swap_core_perf.mark("sc_restore_color_fx")
