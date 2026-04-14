@@ -21,6 +21,10 @@ from app.ui.widgets.actions import card_actions
 from app.ui.widgets.actions import save_load_actions
 import app.helpers.miscellaneous as misc_helpers
 from app.helpers.miscellaneous import get_video_rotation
+from app.helpers.screen_capture import (
+    create_screen_capture_from_control,
+    mss_available,
+)
 
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
@@ -177,16 +181,22 @@ class TargetMediaCardButton(CardButton):
         is_webcam=False,
         webcam_index=-1,
         webcam_backend=-1,
+        is_screen_capture=False,
         *args,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.media_id = media_id
         self.file_type = file_type
-        self.media_path = os.path.normpath(media_path)
+        self.media_path = (
+            media_path
+            if is_screen_capture
+            else os.path.normpath(media_path)
+        )
         self.is_webcam = is_webcam
         self.webcam_index = webcam_index
         self.webcam_backend = webcam_backend
+        self.is_screen_capture = is_screen_capture
         self.media_capture: cv2.VideoCapture | bool = False
         self._thumbnail_pixmap = QtGui.QPixmap()
         self.setCheckable(True)
@@ -368,6 +378,30 @@ class TargetMediaCardButton(CardButton):
             self.media_capture = media_capture
             main_window.video_processor.fps = media_capture.get(cv2.CAP_PROP_FPS)
             main_window.video_processor.max_frame_number = max_frames_number
+
+        elif self.file_type == "screen":
+            if not mss_available():
+                print("[ERROR] mss is not installed; cannot use screen capture.")
+                return
+            main_window.video_processor.media_rotation = 0
+            try:
+                media_capture = create_screen_capture_from_control(main_window.control)
+            except Exception as e:
+                print(f"[ERROR] Failed to open screen capture: {e}")
+                return
+            if not media_capture.isOpened():
+                print("[ERROR] Screen capture failed to open.")
+                return
+            max_frames_number = 999999
+            _, frame = misc_helpers.read_frame(media_capture, 0)
+            main_window.video_processor.media_capture = media_capture
+            self.media_capture = media_capture
+            main_window.video_processor.fps = float(
+                media_capture.get(cv2.CAP_PROP_FPS) or 30.0
+            )
+            main_window.video_processor.max_frame_number = max_frames_number
+            main_window.video_processor.current_frame_number = 0
+            main_window.video_processor.next_frame_to_display = 0
 
         if frame is not None:
             main_window.scene.clear()

@@ -113,6 +113,38 @@ def apply_wheel_zoom_to_thumbnail_list(
     return True
 
 
+def apply_face_thumbnail_size(
+    main_window: "MainWindow", button_size_tuple: tuple[int, int]
+) -> None:
+    """Fixed presets (small/large) for face lists; keeps zoom state in sync for input faces."""
+    main_window.face_thumbnail_button_size = button_size_tuple
+    tw = button_size_tuple[0]
+    bw = _FACE_BUTTON_SIZE[0]
+    z = max(_THUMB_ZOOM_MIN, min(_THUMB_ZOOM_MAX, tw / float(bw)))
+    main_window.input_faces_thumbnail_zoom = z
+    refresh_thumbnail_sizes_for_list(main_window, main_window.inputFacesList)
+    refresh_thumbnail_sizes_for_list(main_window, main_window.inputFacesFavoritesList)
+
+    button_size = QtCore.QSize(*button_size_tuple)
+    grid_size_with_padding = button_size + QtCore.QSize(4, 4)
+    icon_size = button_size - QtCore.QSize(8, 8)
+    for list_widget in (main_window.targetFacesList,):
+        list_widget.setGridSize(grid_size_with_padding)
+        for i in range(list_widget.count()):
+            list_item = list_widget.item(i)
+            button = list_widget.itemWidget(list_item)
+            if button is None:
+                continue
+            button.setFixedSize(button_size)
+            if getattr(button, "_thumbnail_base_pixmap", None) is not None:
+                _apply_scaled_list_thumbnail_icon(button, icon_size)
+            else:
+                button.setIconSize(icon_size)
+            list_item.setSizeHint(button_size)
+        list_widget.doItemsLayout()
+        list_widget.viewport().update()
+
+
 # Functions to add Buttons with thumbnail for selecting videos/images and faces
 @QtCore.Slot(str, QtGui.QImage, str, str)
 def add_media_thumbnail_to_target_videos_list(
@@ -408,6 +440,8 @@ def add_media_thumbnail_button(
 
 def initialize_media_list_widgets(main_window: "MainWindow"):
     """One-time configuration for target/input media and face list widgets."""
+    if not hasattr(main_window, "face_thumbnail_button_size"):
+        main_window.face_thumbnail_button_size = _FACE_BUTTON_SIZE
     for listWidget, button_size_tuple, zoom_attr in [
         (main_window.targetVideosList, _TARGET_BUTTON_SIZE, "target_videos_thumbnail_zoom"),
         (main_window.targetFacesList, _FACE_BUTTON_SIZE, None),

@@ -4016,6 +4016,29 @@ class VideoProcessor(QObject):
 
         self._current_single_frame_worker = None
 
+    def _clear_single_frame_preview_caches(self) -> None:
+        """
+        Invalidate single-frame / seek preview state when switching target media (UI).
+        Cancels async single-frame workers and clears seek-peek / legacy preview fields.
+        """
+        cancel = getattr(self, "_cancel_single_frame_preview_state", None)
+        if callable(cancel):
+            cancel()
+        if hasattr(self, "_seek_cached_frame"):
+            self._seek_cached_frame = None
+        for attr in (
+            "_last_requested_frame_num",
+            "_cached_raw_frame_media_path",
+            "_cached_raw_frame_number",
+            "_cached_raw_frame_target_height",
+            "_cached_raw_frame_bgr",
+            "_cached_raw_image_path",
+            "_cached_raw_image_target_height",
+            "_cached_raw_image_bgr",
+        ):
+            if hasattr(self, attr):
+                setattr(self, attr, None)
+
     def start_frame_worker(
         self,
         frame_number,
