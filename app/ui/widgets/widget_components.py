@@ -628,10 +628,7 @@ class TargetFaceCardButton(CardButton):
                     dtype=np.float32,
                 )
 
-                # Get the similarity type from global controls
-                similarity_type = self.main_window.control.get(
-                    "SimilarityTypeSelection", "Opal"
-                )
+                similarity_type = str("Auto")
 
                 # Call run_recognize_direct (which expects CHW tensor)
                 new_embedding, _ = (
@@ -1002,9 +999,7 @@ class InputFaceCardButton(CardButton):
         frame_rgb = misc_helpers.bgr_uint8_to_rgb_contiguous(frame)
         img = torch.from_numpy(frame_rgb).to(self.main_window.models_processor.device)
         img = img.permute(2, 0, 1)
-        similarity_type = self.main_window.control.get(
-            "SimilarityTypeSelection", "Optimal"
-        )
+        similarity_type = str("Auto")
         face_emb, _ = self.main_window.models_processor.run_recognize_direct(
             img,
             kps_5,
@@ -1473,16 +1468,18 @@ class CreateEmbeddingDialog(QtWidgets.QDialog):
                 self,
             )
         else:
-            # Estrai tutti gli embedding per ogni embedding_swap_model
-            merged_embedding_store = {}
+            merged_embedding_store: dict = {}
+            kps_5_list: list = []
 
             for embedding_store in self.embedding_stores:
                 for embedding_swap_model, embedding in embedding_store.items():
+                    if embedding_swap_model == "kps_5":
+                        kps_5_list.append(embedding)
+                        continue
                     if embedding_swap_model not in merged_embedding_store:
                         merged_embedding_store[embedding_swap_model] = []
                     merged_embedding_store[embedding_swap_model].append(embedding)
 
-            # Calcola l'embedding unito per ciascun embedding_swap_model
             final_embedding_store = {}
             for swap_model, embeddings in merged_embedding_store.items():
                 if self.merge_type == "Mean":
@@ -1497,6 +1494,9 @@ class CreateEmbeddingDialog(QtWidgets.QDialog):
                     merged_emb = merged_emb / norm
 
                 final_embedding_store[swap_model] = merged_emb
+
+            if kps_5_list:
+                final_embedding_store["kps_5"] = np.mean(kps_5_list, axis=0)
 
             # Crea e aggiungi il nuovo embedding_store con tutti i modelli di swap
             from app.ui.widgets.actions import list_view_actions

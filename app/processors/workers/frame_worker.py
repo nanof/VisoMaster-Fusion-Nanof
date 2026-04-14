@@ -1238,11 +1238,24 @@ class FrameWorker(threading.Thread):
             )
         ) or edit_button_is_checked_global:
             source_kps = None
-            if target_face_button and target_face_button.assigned_input_faces:
-                first_input_id = list(target_face_button.assigned_input_faces.keys())[0]
-                store = target_face_button.assigned_input_faces[first_input_id]
-                if "kps_5" in store:
-                    source_kps = store["kps_5"]
+            if target_face_button:
+                if target_face_button.assigned_input_faces:
+                    first_input_id = list(
+                        target_face_button.assigned_input_faces.keys()
+                    )[0]
+                    store = target_face_button.assigned_input_faces[first_input_id]
+                    source_kps = store.get("kps_5")
+                elif (
+                    hasattr(target_face_button, "assigned_merged_embeddings")
+                    and target_face_button.assigned_merged_embeddings
+                ):
+                    first_embed_id = list(
+                        target_face_button.assigned_merged_embeddings.keys()
+                    )[0]
+                    store = target_face_button.assigned_merged_embeddings[
+                        first_embed_id
+                    ]
+                    source_kps = store.get("kps_5")
 
             kps_5_on_crop_param = keypoints_adjustments(
                 kps_5_on_crop_param,
@@ -2435,7 +2448,7 @@ class FrameWorker(threading.Thread):
 
             _vr_recognize_rows.append(_fd)
 
-        _rec_sim_vr = control["SimilarityTypeSelection"]
+        _rec_sim_vr = str("Auto")
         _rec_model_vr = str(control["RecognitionModelSelection"])
         _arcface_batch_vr = control.get("ArcFaceBatchInferenceToggle", True)
         _emb_by_idx: list[np.ndarray | None] = [None] * len(_vr_recognize_rows)
@@ -3461,7 +3474,7 @@ class FrameWorker(threading.Thread):
         if perf_stages is not None:
             perf_stages.mark("std_detect_feeder_or_fallback")
 
-        _rec_sim = control["SimilarityTypeSelection"]
+        _rec_sim = str("Auto")
         _recognition_arc_model = self._arc_model_for_detected_embeddings(control)
         _use_recognition_cache = (
             self.is_pool_worker
@@ -3869,13 +3882,24 @@ class FrameWorker(threading.Thread):
 
                         # --- MORPHING: Swap Only Best Match ---
                         source_kps = None
-                        if target_face and target_face.assigned_input_faces:
-                            first_input_id = list(
-                                target_face.assigned_input_faces.keys()
-                            )[0]
-                            store = target_face.assigned_input_faces[first_input_id]
-                            if "kps_5" in store:
-                                source_kps = store["kps_5"]
+                        if target_face:
+                            if target_face.assigned_input_faces:
+                                first_input_id = list(
+                                    target_face.assigned_input_faces.keys()
+                                )[0]
+                                store = target_face.assigned_input_faces[first_input_id]
+                                source_kps = store.get("kps_5")
+                            elif (
+                                hasattr(target_face, "assigned_merged_embeddings")
+                                and target_face.assigned_merged_embeddings
+                            ):
+                                first_embed_id = list(
+                                    target_face.assigned_merged_embeddings.keys()
+                                )[0]
+                                store = target_face.assigned_merged_embeddings[
+                                    first_embed_id
+                                ]
+                                source_kps = store.get("kps_5")
 
                         best_fface["kps_5"] = keypoints_adjustments(
                             best_fface["kps_5"],
@@ -4209,13 +4233,24 @@ class FrameWorker(threading.Thread):
 
                         # --- MORPHING: Branch Swap All Matches ---
                         source_kps = None
-                        if best_target and best_target.assigned_input_faces:
-                            first_input_id = list(
-                                best_target.assigned_input_faces.keys()
-                            )[0]
-                            store = best_target.assigned_input_faces[first_input_id]
-                            if "kps_5" in store:
-                                source_kps = store["kps_5"]
+                        if best_target:
+                            if best_target.assigned_input_faces:
+                                first_input_id = list(
+                                    best_target.assigned_input_faces.keys()
+                                )[0]
+                                store = best_target.assigned_input_faces[first_input_id]
+                                source_kps = store.get("kps_5")
+                            elif (
+                                hasattr(best_target, "assigned_merged_embeddings")
+                                and best_target.assigned_merged_embeddings
+                            ):
+                                first_embed_id = list(
+                                    best_target.assigned_merged_embeddings.keys()
+                                )[0]
+                                store = best_target.assigned_merged_embeddings[
+                                    first_embed_id
+                                ]
+                                source_kps = store.get("kps_5")
 
                         fface["kps_5"] = keypoints_adjustments(
                             fface["kps_5"], params, source_kps=source_kps

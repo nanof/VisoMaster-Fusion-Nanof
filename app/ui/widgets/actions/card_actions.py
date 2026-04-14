@@ -172,14 +172,12 @@ def find_target_faces(main_window: "MainWindow"):
             rec_model = str(
                 control.get("RecognitionModelSelection", _DEFAULT_RECOGNITION_MODEL)
             )
-            sim_type = control.get("SimilarityTypeSelection", "Optimal")
-
             faces_list: list = []
             for face_kps in kpss_5:
                 face_emb, cropped_img = main_window.models_processor.run_recognize_direct(
                     img,
                     face_kps,
-                    sim_type,
+                    str("Auto"),
                     rec_model,
                 )
                 if face_emb is None or cropped_img is None:
