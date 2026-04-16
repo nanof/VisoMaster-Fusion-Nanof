@@ -39,6 +39,7 @@ from app.helpers.miscellaneous import (
     get_grid_for_pasting,
     read_image_file,
 )
+from app.helpers.sequential_rr_order import rr_spatial_order_key
 from app.helpers.cuda_timeline import nvtx_range
 from app.helpers.typing_helper import ParametersTypes
 from app.processors.frame_enhancers import FrameEnhancers
@@ -1007,7 +1008,7 @@ class FrameWorker(threading.Thread):
                     if dist_v <= centroid_max:
                         scored.append((1, dist_v, ci, mj))
 
-        scored.sort(key=lambda t: (t[0], t[1]))
+        scored.sort(key=lambda t: (t[0], t[1], t[2], t[3]))
         assigned_c: set[int] = set()
         assigned_m: set[int] = set()
         for _tier, _sec, ci, mj in scored:
@@ -1050,6 +1051,10 @@ class FrameWorker(threading.Thread):
         first: new track IDs are seeded from that (not round-robin), and if a track's
         mapped input disagrees with a spatial memory match, memory wins to avoid one-frame
         identity flips when track state toggles.
+
+        Without valid unique ByteTrack IDs, IoU+memory matching can lock the wrong person
+        to an input for many frames; pausing often clears that via a large frame gap reset.
+        In that case we use only left-to-right order and round-robin (no ghost memory).
         """
         n_in = len(checked_inputs_ordered)
         if n_in == 0:
@@ -1081,16 +1086,12 @@ class FrameWorker(threading.Thread):
         if not det_faces:
             return
 
-        img_w, img_h = int(frame_wh[0]), int(frame_wh[1])
-        centroid_max = max(
-            self._RR_CENTROID_DIST_MIN_PX,
-            self._RR_CENTROID_DIST_FRAC * float(min(img_w, img_h)),
-        )
-
-        def _sort_key(fi: int) -> tuple[float, float]:
-            bb = det_faces[fi]["bbox"]
-            cy = float((float(bb[1]) + float(bb[3])) * 0.5)
-            return (self._bbox_center_x(bb), cy)
+        def _sort_key(fi: int) -> tuple[float, float, int]:
+            return rr_spatial_order_key(
+                det_faces[fi]["bbox"],
+                fi,
+                int(det_faces[fi].get("track_id", -1)),
+            )
 
         order = sorted(range(len(det_faces)), key=_sort_key)
 
@@ -1102,20 +1103,31 @@ class FrameWorker(threading.Thread):
             if tid < 0:
                 all_tracks_ok = False
 
-        curr_boxes = [
-            np.asarray(det_faces[fi]["bbox"], dtype=np.float64).copy() for fi in order
-        ]
-
-        mem = self._rr_memory_slots
-        base_assign, spatially_matched = self._rr_greedy_assign_from_memory(
-            curr_boxes, mem, n_in, centroid_max
-        )
-
         use_tracks = (
             all_tracks_ok
             and ordered_tids
             and len(set(ordered_tids)) == len(ordered_tids)
         )
+
+        curr_boxes = [
+            np.asarray(det_faces[fi]["bbox"], dtype=np.float64).copy() for fi in order
+        ]
+
+        n_curr = len(order)
+        if use_tracks:
+            img_w, img_h = int(frame_wh[0]), int(frame_wh[1])
+            centroid_max = max(
+                self._RR_CENTROID_DIST_MIN_PX,
+                self._RR_CENTROID_DIST_FRAC * float(min(img_w, img_h)),
+            )
+            base_assign, spatially_matched = self._rr_greedy_assign_from_memory(
+                curr_boxes, self._rr_memory_slots, n_in, centroid_max
+            )
+        else:
+            # Sin tracking: no persistir emparejamientos IoU/memoria (se equivocan y
+            # solo se limpian con seek/pausa larga). Solo orden espacial + round-robin.
+            base_assign = [ci % n_in for ci in range(n_curr)]
+            spatially_matched = [False] * n_curr
         if use_tracks:
             final_assign = list(base_assign)
             for ci, fi in enumerate(order):
@@ -1146,9 +1158,12 @@ class FrameWorker(threading.Thread):
             )
             for fi in order
         ]
-        self._rr_memory_slots = self._rr_merge_ghost_memory(
-            curr_boxes, frame_number, fresh_mem
-        )
+        if use_tracks:
+            self._rr_memory_slots = self._rr_merge_ghost_memory(
+                curr_boxes, frame_number, fresh_mem
+            )
+        else:
+            self._rr_memory_slots = self._rr_cap_memory_slots(fresh_mem)
 
     def _parameters_for_input_rotate_mode(self) -> ParametersDict:
         """Face swap toggles/sliders (restorers, masks, etc.) use data_type *parameter*,
