@@ -20,6 +20,11 @@ from app.helpers.miscellaneous import get_video_rotation
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
 import app.helpers.miscellaneous as misc_helpers
+
+
+def _perf_seek_logging_enabled() -> bool:
+    v = os.environ.get("VISIOMASTER_PERF_SEEK", "").strip().lower()
+    return v in ("1", "true", "yes", "on")
 from app.ui.widgets.actions import common_actions as common_widget_actions
 from app.ui.widgets.actions import graphics_view_actions
 import app.ui.widgets.actions.layout_actions as layout_actions
@@ -2208,10 +2213,17 @@ def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
     Stops any active processing, seeks the capture to the new position, reads the
     raw frame for immediate preview, and defers heavy post-seek work (marker
     application, AutoSwap) until the slider is released.
+
+    During playback, cooperative scrub uses ``_video_seek_slider_gesture_active``
+    (sliderPressed/Released) so groove clicks are not mistaken for non-drag seeks.
+    Set ``VISIOMASTER_PERF_SEEK=1`` for stderr timing/branch logs.
     """
     # print("Called on_change_video_seek_slider()")
     video_processor = main_window.video_processor
     slider_down = main_window.videoSeekSlider.isSliderDown()
+    # Groove/page clicks move the slider without isSliderDown() == True (thumb drag only).
+    # sliderPressed/sliderReleased still bracket the gesture — use that for cooperative seek.
+    seek_slider_gesture = getattr(main_window, "_video_seek_slider_gesture_active", False)
 
     playback_was_active_before_seek = (
         video_processor.file_type == "video"
@@ -2222,12 +2234,20 @@ def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
 
     # Scrubbing during file playback: seek cooperatively (feeder clears buffers + CAP seek)
     # instead of stop_processing() per tick (feeder join, capture release, reopen, gc).
-    interactive_playback_scrub = playback_was_active_before_seek and slider_down
+    interactive_playback_scrub = playback_was_active_before_seek and (
+        slider_down or seek_slider_gesture
+    )
+    if _perf_seek_logging_enabled():
+        print(
+            "[VISIOMASTER_PERF_SEEK] on_change "
+            f"fn={new_position} slider_down={slider_down} seek_gesture={seek_slider_gesture} "
+            f"interactive_scrub={interactive_playback_scrub} playback={playback_was_active_before_seek}"
+        )
     if interactive_playback_scrub:
         use_av1_light_scrub = (
             video_processor.is_av1_codec
             and video_processor.file_type == "video"
-            and slider_down
+            and (slider_down or seek_slider_gesture)
         )
         with video_processor.state_lock:
             video_processor._interactive_playback_seek_pending = new_position
@@ -2246,6 +2266,7 @@ def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
             video_processor._av1_scrub_preview_last_t = now
 
         if video_processor.media_capture:
+            _t_read0 = time.perf_counter() if _perf_seek_logging_enabled() else 0.0
             ret, frame = misc_helpers.read_frame(
                 video_processor.media_capture,
                 video_processor.media_rotation,
@@ -2256,6 +2277,12 @@ def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
                 ),
                 seek_keypoint_fps=float(video_processor.fps or 0.0),
             )
+            if _perf_seek_logging_enabled():
+                print(
+                    "[VISIOMASTER_PERF_SEEK] interactive read_frame "
+                    f"fn={new_position} ok={ret} "
+                    f"{(time.perf_counter() - _t_read0) * 1000.0:.1f} ms"
+                )
             if ret:
                 if use_av1_light_scrub:
                     video_processor._seek_cached_frame = None
@@ -2293,6 +2320,11 @@ def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
                 video_processor.stop_processing()
         return
 
+    if _perf_seek_logging_enabled():
+        print(
+            "[VISIOMASTER_PERF_SEEK] stop_processing path "
+            f"(interactive_scrub was false) fn={new_position}"
+        )
     was_processing = video_processor.stop_processing()
     if was_processing:
         print("[WARN] Processing in progress. Stopping current processing.")
@@ -2489,6 +2521,7 @@ def on_slider_moved(main_window: "MainWindow"):
 
 def on_slider_pressed(main_window: "MainWindow"):
     """Slot connected to sliderPressed; records whether playback was active before a drag seek."""
+    main_window._video_seek_slider_gesture_active = True
     vp = main_window.video_processor
     main_window._seek_gesture_had_playback = (
         vp.file_type == "video"
@@ -2546,16 +2579,36 @@ def on_slider_released(main_window: "MainWindow"):
     # print(f"\nSlider released. New position: {new_position}\n")
 
     video_processor = main_window.video_processor
-    if video_processor.media_capture:
-        # Execute post seek (Markers, Autoswap)
-        # Run post-seek actions ONCE on slider release to apply
-        # the parameters for the final frame position.
-        run_post_seek_actions(main_window, new_position)
+    # Cooperative timeline scrub leaves file playback running; avoid
+    # process_current_frame() here — it calls stop_processing() and forces a
+    # one-shot worker (swap + models) before resume, which feels very slow with
+    # swap on. The feeder already seeks to the slider; next frames carry swap.
+    seek_playback_continuation = (
+        getattr(main_window, "_seek_gesture_had_playback", False)
+        and video_processor.processing
+        and video_processor.file_type == "video"
+        and not video_processor.recording
+        and not video_processor.is_processing_segments
+    )
+    try:
+        if video_processor.media_capture:
+            # Execute post seek (Markers, Autoswap)
+            # Run post-seek actions ONCE on slider release to apply
+            # the parameters for the final frame position.
+            run_post_seek_actions(main_window, new_position)
 
-        # This is the heavy processing call that runs the AI models (swap, etc.)
-        # It will now use the correct faces and parameters from the functions above.
-        video_processor.process_current_frame()
-    resume_playback_after_seek_if_applicable(main_window)
+            if seek_playback_continuation:
+                video_processor.sync_feeder_ui_face_flags_from_main_window()
+                main_window._seek_gesture_had_playback = False
+                main_window._resume_playback_after_seek_pending = False
+            else:
+                # This is the heavy processing call that runs the AI models (swap, etc.)
+                # It will now use the correct faces and parameters from the functions above.
+                video_processor.process_current_frame()
+        if not seek_playback_continuation:
+            resume_playback_after_seek_if_applicable(main_window)
+    finally:
+        main_window._video_seek_slider_gesture_active = False
 
 
 def process_swap_faces(main_window: "MainWindow"):

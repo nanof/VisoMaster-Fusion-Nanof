@@ -2530,6 +2530,16 @@ class VideoProcessor(QObject):
                         pending_interactive_seek = self._interactive_playback_seek_pending
                         self._interactive_playback_seek_pending = None
                 if pending_interactive_seek is not None:
+                    if os.environ.get("VISIOMASTER_PERF_SEEK", "").strip().lower() in (
+                        "1",
+                        "true",
+                        "yes",
+                        "on",
+                    ):
+                        print(
+                            "[VISIOMASTER_PERF_SEEK] feeder applied "
+                            f"interactive_pending fn={pending_interactive_seek}"
+                        )
                     with self.state_lock:
                         self._clear_frames_to_display_and_profiles()
                         self.current_frame_number = pending_interactive_seek
