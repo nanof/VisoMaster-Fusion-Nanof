@@ -133,9 +133,9 @@ VisoMaster Fusion includes all the great features of the original plus major enh
 
 ### Portable Version
 
-Download only the `Start_Portable.bat` file from this repo using the link below and place it in a new directory where you want to run VisoMaster. Then execute the batch file to start VisoMaster. Portable dependencies will be installed on the first run into the portable files directory.
+Download **ONLY** the `Start_Portable.bat` file from this repo release page using the link below and place it in a new directory where you want to run VisoMaster. Then execute the batch file to start VisoMaster. Portable dependencies will be installed on the first run into the portable files directory.
 
-- [Download - Start_Portable.bat](Start_Portable.bat)
+- [Download - Start_Portable.bat](https://github.com/VisoMasterFusion/VisoMaster-Fusion/releases/download/v2.0.0/start_portable.bat)
 
 You do not need any of the non-portable steps below for the portable version. Always start VisoMaster with `Start_Portable.bat`.
 

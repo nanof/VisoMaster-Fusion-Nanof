@@ -1,0 +1,75 @@
+name: Bump Version on Merge
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [dev, main]
+
+concurrency:
+  group: bump-version
+  cancel-in-progress: false
+
+jobs:
+  bump-version:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Use a token with write access so the push triggers downstream workflows.
+          # GITHUB_TOKEN is sufficient for writing to the same repo.
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.event.pull_request.base.ref }}
+
+      - name: Determine bump type from PR labels
+        id: bump
+        run: |
+          LABELS=$(echo '${{ toJSON(github.event.pull_request.labels.*.name) }}')
+          if echo "$LABELS" | grep -qi '"major"'; then
+            echo "type=major" >> "$GITHUB_OUTPUT"
+          elif echo "$LABELS" | grep -qi '"minor"'; then
+            echo "type=minor" >> "$GITHUB_OUTPUT"
+          elif echo "$LABELS" | grep -qi '"patch"'; then
+            echo "type=patch" >> "$GITHUB_OUTPUT"
+          else
+            echo "type=none" >> "$GITHUB_OUTPUT"
+            echo "No version label found — skipping bump."
+          fi
+
+      - name: Bump version.json
+        if: steps.bump.outputs.type != 'none'
+        id: version
+        shell: python
+        env:
+          BUMP: ${{ steps.bump.outputs.type }}
+        run: |
+          import json, os
+          bump = os.environ["BUMP"]
+          with open("version.json") as f:
+              data = json.load(f)
+          major, minor, patch = map(int, data["version"].split("."))
+          if bump == "major":
+              major += 1; minor = 0; patch = 0
+          elif bump == "minor":
+              minor += 1; patch = 0
+          else:
+              patch += 1
+          data["version"] = f"{major}.{minor}.{patch}"
+          with open("version.json", "w") as f:
+              json.dump(data, f, indent=2)
+              f.write("\n")
+          print(f"Bumped to {data['version']}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"new_version={data['version']}\n")
+
+      - name: Commit and push version bump
+        if: steps.bump.outputs.type != 'none'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add version.json
+          git commit -m "chore: bump version to ${{ steps.version.outputs.new_version }} [skip ci]"
+          git push

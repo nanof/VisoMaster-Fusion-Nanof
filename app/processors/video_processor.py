@@ -4884,6 +4884,207 @@ class VideoProcessor(QObject):
 
     # --- FFmpeg and Finalization ---
 
+    @staticmethod
+    def _parse_ffprobe_fps(rate_text: Any) -> float | None:
+        """Parse ffprobe frame-rate strings such as "30000/1001" safely."""
+        if rate_text is None:
+            return None
+        try:
+            text = str(rate_text).strip()
+            if not text:
+                return None
+            if "/" in text:
+                num_s, den_s = text.split("/", 1)
+                num = float(num_s)
+                den = float(den_s)
+                if den == 0:
+                    return None
+                value = num / den
+            else:
+                value = float(text)
+            return value if value > 0 else None
+        except Exception:
+            return None
+
+    def _probe_source_video_metrics(self, file_path: str) -> Dict[str, Any] | None:
+        """Probe source video metrics needed for quality matching.
+
+        Returns a dictionary with keys: bit_rate, width, height, fps.
+        """
+        if not file_path or not os.path.isfile(file_path):
+            return None
+
+        try:
+            import json
+
+            args = [
+                "ffprobe",
+                "-v",
+                "quiet",
+                "-print_format",
+                "json",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_type,codec_name,width,height,bit_rate,avg_frame_rate,r_frame_rate:format=bit_rate",
+                file_path,
+            ]
+            result = subprocess.run(args, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                return None
+
+            probe_data = json.loads(result.stdout)
+            video_stream = next(
+                (
+                    s
+                    for s in probe_data.get("streams", [])
+                    if s.get("codec_type") == "video"
+                ),
+                None,
+            )
+            if not isinstance(video_stream, dict):
+                return None
+
+            width = int(video_stream.get("width") or 0)
+            height = int(video_stream.get("height") or 0)
+
+            bit_rate_raw = video_stream.get("bit_rate")
+            if not bit_rate_raw:
+                bit_rate_raw = probe_data.get("format", {}).get("bit_rate")
+            bit_rate = float(bit_rate_raw) if bit_rate_raw else 0.0
+
+            fps = self._parse_ffprobe_fps(video_stream.get("avg_frame_rate"))
+            if not fps:
+                fps = self._parse_ffprobe_fps(video_stream.get("r_frame_rate"))
+
+            if width <= 0 or height <= 0 or not fps or bit_rate <= 0:
+                return None
+
+            return {
+                "bit_rate": bit_rate,
+                "width": float(width),
+                "height": float(height),
+                "fps": float(fps),
+                "codec_name": str(video_stream.get("codec_name") or "").lower(),
+            }
+        except Exception:
+            return None
+
+    @staticmethod
+    def _source_codec_to_hevc_factor(codec_name: str) -> float:
+        """Map source codec efficiency relative to HEVC for quality matching."""
+        codec = (codec_name or "").lower()
+        if codec in {"hevc", "h265"}:
+            return 1.00
+        if codec in {"h264", "avc"}:
+            return 0.78
+        if codec == "av1":
+            return 1.28
+        if codec == "vp9":
+            return 1.18
+        if codec in {"mpeg2video", "mpeg4", "msmpeg4v3"}:
+            return 0.68
+        # Unknown codecs: use a conservative middle-ground.
+        return 0.90
+
+    def _get_adaptive_recording_quality(
+        self,
+        control: Mapping[str, Any],
+        quality_value: int,
+        output_width: int,
+        output_height: int,
+        source_metrics: Mapping[str, Any] | None = None,
+        output_fps: float | None = None,
+    ) -> int:
+        """Auto-compute CQ/CRF from source metrics to keep perceived quality close.
+
+        When auto-match is enabled, this method computes an absolute target quality
+        from source bitrate density instead of applying a small delta to the manual
+        slider value. This keeps behavior robust even if manual FFQualitySlider is
+        set to an unreasonable value.
+        """
+        if not (
+            bool(control.get("FFMpegOptionsToggle", False))
+            and bool(control.get("FFAutoMatchSourceQualityToggle", False))
+        ):
+            return quality_value
+
+        if source_metrics is None:
+            source_metrics = self._probe_source_video_metrics(self.media_path or "")
+        if not source_metrics:
+            print(
+                "[INFO] Source-quality auto match enabled, but probe failed. Using manual Quality unchanged."
+            )
+            return quality_value
+
+        src_w = max(1.0, source_metrics["width"])
+        src_h = max(1.0, source_metrics["height"])
+        src_fps = max(0.001, source_metrics["fps"])
+        src_bitrate = max(1.0, source_metrics["bit_rate"])
+        src_codec = str(source_metrics.get("codec_name", "") or "").lower()
+        out_fps = float(output_fps) if output_fps and output_fps > 0 else src_fps
+
+        # Bits-per-pixel-per-frame (bpppf) is a lightweight content/quality proxy.
+        src_bpppf = src_bitrate / (src_w * src_h * src_fps)
+
+        src_pixels = src_w * src_h
+        out_pixels = float(max(1, output_width) * max(1, output_height))
+        scale_ratio = out_pixels / src_pixels
+
+        # Convert source density to a HEVC-equivalent density baseline.
+        codec_factor = self._source_codec_to_hevc_factor(src_codec)
+        target_bpppf = src_bpppf * codec_factor
+
+        # Temporal adjustment for output fps changes. Keep it intentionally gentle
+        # so fps differences do not dominate quality estimation.
+        temporal_ratio = max(0.5, min(2.0, out_fps / src_fps))
+        target_bpppf *= temporal_ratio**0.35
+
+        # Resolution-aware density adjustment:
+        # - Upscale: allow more density to preserve restored detail.
+        # - Downscale: allow less density to avoid wasting bits.
+        if scale_ratio > 1.0:
+            up_steps = math.log2(scale_ratio)
+            target_bpppf *= min(1.35, 1.0 + 0.15 * up_steps)
+        elif scale_ratio < 1.0:
+            down_steps = math.log2(1.0 / max(scale_ratio, 1e-6))
+            target_bpppf *= max(0.70, 1.0 - 0.20 * down_steps)
+
+        # Map target bpppf to an absolute CQ/CRF target (lower is higher quality).
+        # Tuned to stay in a practical range for SDR NVENC CQ and HDR x265 CRF.
+        if target_bpppf >= 0.25:
+            auto_quality = 14
+        elif target_bpppf >= 0.16:
+            auto_quality = 16
+        elif target_bpppf >= 0.11:
+            auto_quality = 18
+        elif target_bpppf >= 0.08:
+            auto_quality = 20
+        elif target_bpppf >= 0.055:
+            auto_quality = 22
+        elif target_bpppf >= 0.038:
+            auto_quality = 24
+        elif target_bpppf >= 0.028:
+            auto_quality = 26
+        elif target_bpppf >= 0.020:
+            auto_quality = 28
+        elif target_bpppf >= 0.014:
+            auto_quality = 30
+        else:
+            auto_quality = 33
+
+        adapted_quality = max(12, min(36, int(auto_quality)))
+
+        print(
+            "[INFO] Source-quality auto match: "
+            f"source={src_w:.0f}x{src_h:.0f}@{src_fps:.3f} "
+            f"codec={src_codec or 'unknown'} bitrate={src_bitrate / 1_000_000:.3f}Mbps "
+            f"src_bpppf={src_bpppf:.5f} target_bpppf={target_bpppf:.5f} "
+            f"out_fps={out_fps:.3f} temporal_ratio={temporal_ratio:.3f}, "
+            f"manual_quality={quality_value} auto_quality={adapted_quality}"
+        )
+        return adapted_quality
+
     def create_ffmpeg_subprocess(self, output_filename: str):
         """
         Creates the FFmpeg subprocess for recording.
@@ -5052,9 +5253,37 @@ class VideoProcessor(QObject):
         # 4. Build FFmpeg Arguments
         hdrpreset = control["FFPresetsHDRSelection"]
         sdrpreset = control["FFPresetsSDRSelection"]
-        ffquality = control["FFQualitySlider"]
+        ffquality = int(control["FFQualitySlider"])
         ffspatial = int(control["FFSpatialAQToggle"])
         fftemporal = int(control["FFTemporalAQToggle"])
+
+        output_width_for_quality = (
+            frame_width_down if control["FrameEnhancerDownToggle"] else frame_width
+        )
+        output_height_for_quality = (
+            frame_height_down if control["FrameEnhancerDownToggle"] else frame_height
+        )
+
+        source_metrics: Mapping[str, Any] | None = None
+        if bool(control.get("FFAutoMatchSourceQualityToggle", False)):
+            media_path = self.media_path or ""
+            source_metrics_cache = getattr(self, "_source_metrics_cache", None)
+            if source_metrics_cache is None:
+                source_metrics_cache = {}
+                setattr(self, "_source_metrics_cache", source_metrics_cache)
+            source_metrics = source_metrics_cache.get(media_path)
+            if source_metrics is None:
+                source_metrics = self._probe_source_video_metrics(media_path)
+                source_metrics_cache[media_path] = source_metrics
+
+        ffquality = self._get_adaptive_recording_quality(
+            control,
+            ffquality,
+            output_width_for_quality,
+            output_height_for_quality,
+            source_metrics=source_metrics,
+            output_fps=self.fps,
+        )
 
         # Base args: read raw video from stdin.
         # VP-12: Frames written to stdin are in BGR24 byte order.
@@ -5112,7 +5341,7 @@ class VideoProcessor(QObject):
                     "-pix_fmt",
                     "yuv420p10le",
                     "-x265-params",
-                    f"crf={ffquality}:vbv-bufsize=10000:vbv-maxrate=10000:selective-sao=0:no-sao=1:strong-intra-smoothing=0:rect=0:aq-mode={ffspatial}:t-aq={fftemporal}:hdr-opt=1:repeat-headers=1:colorprim=bt2020:range=limited:transfer=smpte2084:colormatrix=bt2020nc:range=limited:master-display='G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1)':max-cll=1000,400",
+                    f"crf={ffquality}:vbv-bufsize=10000:vbv-maxrate=10000:selective-sao=0:no-sao=1:strong-intra-smoothing=0:rect=0:aq-mode={ffspatial}:t-aq={fftemporal}:hdr-opt=1:repeat-headers=1:colorprim=bt2020:range=limited:transfer=smpte2084:colormatrix=bt2020nc:master-display='G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1)':max-cll=1000,400",
                 ]
             )
         else:

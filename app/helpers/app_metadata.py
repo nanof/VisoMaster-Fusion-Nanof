@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
+import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-import subprocess
 
 
 @dataclass(frozen=True)
@@ -23,6 +25,20 @@ def _strip_hash_suffix(title: str) -> str:
     return title
 
 
+def _strip_version_suffix(title: str) -> str:
+    """Remove a trailing ' - X.Y.Z' semver segment, if present."""
+    return re.sub(r"\s*-\s*\d+\.\d+\.\d+\s*$", "", title)
+
+
+def _read_version_from_file(project_root: Path) -> str | None:
+    try:
+        data = json.loads((project_root / "version.json").read_text(encoding="utf-8"))
+        version = data.get("version", "").strip()
+        return version or None
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+
 def _extract_base_version(base_title: str) -> str:
     if " - " not in base_title:
         return "Unknown"
@@ -40,7 +56,6 @@ def _resolve_short_commit_hash(project_root_path: str | Path) -> str | None:
         )
     except (subprocess.SubprocessError, FileNotFoundError, OSError):
         return None
-
     commit_hash = result.stdout.strip()
     return commit_hash or None
 
@@ -48,19 +63,28 @@ def _resolve_short_commit_hash(project_root_path: str | Path) -> str | None:
 def get_app_display_metadata(
     project_root_path: str | Path, base_title: str
 ) -> AppDisplayMetadata:
+    root = Path(project_root_path)
     clean_base_title = _strip_hash_suffix(base_title.strip()) or "VisoMaster Fusion"
-    base_version = _extract_base_version(clean_base_title)
-    short_commit_hash = _resolve_short_commit_hash(project_root_path)
+
+    # Strip any stale version suffix from the Qt title, then get version
+    # from version.json (falls back to parsing the title for old installs).
+    name_part = _strip_version_suffix(clean_base_title)
+    base_version = _read_version_from_file(root) or _extract_base_version(
+        clean_base_title
+    )
+
+    short_commit_hash = _resolve_short_commit_hash(root)
+    base_title_with_version = f"{name_part} - {base_version}"
 
     if short_commit_hash:
-        window_title = f"{clean_base_title} ({short_commit_hash})"
+        window_title = f"{base_title_with_version} ({short_commit_hash})"
         about_version_text = f"Version {base_version} ({short_commit_hash})"
     else:
-        window_title = clean_base_title
+        window_title = base_title_with_version
         about_version_text = f"Version {base_version}"
 
     return AppDisplayMetadata(
-        base_title=clean_base_title,
+        base_title=base_title_with_version,
         base_version=base_version,
         short_commit_hash=short_commit_hash,
         window_title=window_title,
