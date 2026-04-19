@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Optional, Dict, Any, cast, TypedDict
 import os
 import shutil
 import time
-from PySide6.QtCore import QThread, Signal, Slot, QMetaObject, Qt, QEventLoop
+from PySide6.QtCore import QThread, Signal, Slot, QMetaObject, Qt, QEventLoop, QTimer
 from PySide6 import QtWidgets
 from PySide6.QtWidgets import QMessageBox
 import numpy as np
@@ -316,6 +316,14 @@ def _load_job_target_media(main_window: "MainWindow", data: dict):
     selected_media_id = data.get("selected_media_id", False)
     if selected_media_id and main_window.target_videos.get(selected_media_id):
         main_window.target_videos[selected_media_id].click()
+        QTimer.singleShot(
+            0,
+            partial(
+                list_view_actions.scroll_target_videos_list_to_media_id,
+                main_window,
+                selected_media_id,
+            ),
+        )
 
 
 def _load_job_input_faces(main_window: "MainWindow", data: dict):
@@ -1502,6 +1510,7 @@ def load_job_settings(main_window: "MainWindow", job_data: dict):
         # frame sees fully restored controls instead of stale pre-load state.
 
         # 1. Select the media.
+        scroll_to_media_id: str | None = None
         selected_media_id = job_data.get("selected_media_id", False)
         if (
             selected_media_id
@@ -1510,6 +1519,7 @@ def load_job_settings(main_window: "MainWindow", job_data: dict):
         ):
             print(f"[INFO] Clicking target media: {selected_media_id}")
             main_window.target_videos[selected_media_id].click()
+            scroll_to_media_id = selected_media_id
         else:
             print(f"[WARN] Could not select media_id {selected_media_id} for job.")
             # Try to select the first available media
@@ -1519,9 +1529,20 @@ def load_job_settings(main_window: "MainWindow", job_data: dict):
                     f"[WARN] Selecting first available media instead: {first_media.media_id}"
                 )
                 first_media.click()
+                scroll_to_media_id = first_media.media_id
             else:
                 print("[ERROR] No target media loaded, cannot proceed.")
                 # This job will likely fail, but we must continue
+
+        if scroll_to_media_id:
+            QTimer.singleShot(
+                0,
+                partial(
+                    list_view_actions.scroll_target_videos_list_to_media_id,
+                    main_window,
+                    scroll_to_media_id,
+                ),
+            )
 
         # 2. Load target faces and parameters.
         _load_job_target_faces_and_params(main_window, job_data)

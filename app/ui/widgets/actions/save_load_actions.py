@@ -592,6 +592,14 @@ def load_saved_workspace(
             selected_media_id = data.get("selected_media_id", False)
             if selected_media_id and main_window.target_videos.get(selected_media_id):
                 main_window.target_videos[selected_media_id].click()
+                QtCore.QTimer.singleShot(
+                    0,
+                    partial(
+                        list_view_actions.scroll_target_videos_list_to_media_id,
+                        main_window,
+                        selected_media_id,
+                    ),
+                )
 
             # Add input faces (imgs)
             input_media_paths, input_face_ids = [], []

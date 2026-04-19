@@ -188,6 +188,26 @@ def add_webcam_thumbnail_to_target_videos_list(
     )
 
 
+def scroll_target_videos_list_to_media_id(
+    main_window: "MainWindow", media_id: str | bool
+) -> None:
+    """Scroll ``targetVideosList`` so the card for ``media_id`` is visible (e.g. after workspace restore)."""
+    if not media_id or not isinstance(media_id, str):
+        return
+    button = main_window.target_videos.get(media_id)
+    if button is None:
+        return
+    list_item = getattr(button, "list_item", None)
+    if list_item is None:
+        return
+    list_w = main_window.targetVideosList
+    list_w.doItemsLayout()
+    list_w.scrollToItem(
+        list_item,
+        QtWidgets.QAbstractItemView.ScrollHint.PositionAtCenter,
+    )
+
+
 def add_screen_capture_thumbnail_to_target_videos_list(main_window: "MainWindow"):
     if not mss_available():
         print("[WARN] mss is not installed; screen capture is unavailable.")
