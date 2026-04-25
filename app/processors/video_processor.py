@@ -2,7 +2,7 @@ import contextlib
 import threading
 import queue
 from collections import OrderedDict
-from typing import TYPE_CHECKING, Any, Dict, Tuple, Optional, cast, List
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Tuple, cast
 import time
 import subprocess
 from pathlib import Path

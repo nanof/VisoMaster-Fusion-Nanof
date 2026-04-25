@@ -2327,7 +2327,7 @@ def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
         )
     was_processing = video_processor.stop_processing()
     if was_processing:
-        print("[WARN] Processing in progress. Stopping current processing.")
+        print("[INFO] Processing in progress. Stopping current processing.")
 
     video_processor.current_frame_number = new_position
     video_processor.next_frame_to_display = new_position
