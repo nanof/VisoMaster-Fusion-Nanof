@@ -11,6 +11,8 @@ from PySide6 import QtWidgets
 
 from app.helpers.console_color import install_colored_console_streams
 
+from app.ui.widgets.tooltip_utils import install_tooltip_vertical_wrap
+
 from .core import PATHS, must_exist, apply_theme_to_app
 from .launcher_window import LauncherWindow
 
@@ -35,6 +37,7 @@ def main():
         # --- Create and run UI ---
         app = QtWidgets.QApplication(sys.argv)
         apply_theme_to_app(app)
+        install_tooltip_vertical_wrap(app)
 
         win = LauncherWindow()
         win.show()
