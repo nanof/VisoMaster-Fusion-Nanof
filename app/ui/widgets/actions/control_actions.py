@@ -78,6 +78,26 @@ def change_execution_provider(main_window: "MainWindow", new_provider):
     common_widget_actions.update_gpu_memory_progressbar(main_window)
 
 
+def change_gpu_index(main_window: "MainWindow", new_gpu_index):
+    try:
+        requested = int(new_gpu_index)
+    except (TypeError, ValueError):
+        requested = 0
+    resolved = main_window.models_processor.clamp_gpu_index(requested)
+    if resolved == main_window.models_processor.gpu_index:
+        common_widget_actions.update_gpu_memory_progressbar(main_window)
+        return
+    main_window.video_processor.stop_processing()
+    main_window.models_processor.set_gpu_index(resolved)
+    main_window.models_processor.switch_providers_priority(
+        main_window.models_processor.provider_name
+    )
+    main_window.models_processor.clear_gpu_memory()
+    main_window.models_processor.face_detectors.clear_declared_input_side_cache()
+    detector_internal_size_ui.sync_detector_internal_size_combo(main_window)
+    common_widget_actions.update_gpu_memory_progressbar(main_window)
+
+
 def apply_saved_execution_provider(main_window: "MainWindow") -> None:
     """Sync ONNX/custom provider from control before any preview runs (e.g. workspace load).
 
@@ -104,6 +124,12 @@ def apply_saved_execution_provider(main_window: "MainWindow") -> None:
     # on first use and a build-progress dialog is shown at that point.  Do NOT
     # pre-warm all models here — that would load every model into VRAM at once
     # regardless of which ones the user actually needs, wasting GPU memory.
+
+
+def apply_saved_gpu_index(main_window: "MainWindow") -> None:
+    from app.ui.widgets.actions import gpu_settings_actions
+
+    gpu_settings_actions.apply_saved_gpu_settings(main_window)
 
 
 def warm_up_active_models_for_custom(main_window: "MainWindow") -> None:

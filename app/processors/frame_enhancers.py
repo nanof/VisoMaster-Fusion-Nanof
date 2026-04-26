@@ -147,11 +147,7 @@ class FrameEnhancers:
 
         ph = (h0 + _RIFE_ALIGN - 1) // _RIFE_ALIGN * _RIFE_ALIGN
         pw = (w0 + _RIFE_ALIGN - 1) // _RIFE_ALIGN * _RIFE_ALIGN
-        device_torch = torch.device(
-            self.models_processor.device
-            if self.models_processor.device == "cuda"
-            else "cpu"
-        )
+        device_torch = torch.device(self.models_processor.get_effective_torch_device())
 
         try:
             t0 = self._bgr_hwc_uint8_to_rgb01_nchw(img0_bgr, device_torch)
@@ -174,14 +170,14 @@ class FrameEnhancers:
             n_ts = in_meta[2].name
             n_out = out_meta[0].name
 
-            if self.models_processor.device == "cuda" and torch.cuda.is_available():
+            if self.models_processor.uses_cuda_ep_for_thread():
                 io_binding = ort_session.io_binding()
                 torch.cuda.current_stream().synchronize()
-                dt = self.models_processor.device
+                dt = self.models_processor.get_ort_bind_device_type()
                 io_binding.bind_input(
                     name=n_img0,
                     device_type=dt,
-                    device_id=0,
+                    device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
                     element_type=np.float32,
                     shape=tuple(t0.shape),
                     buffer_ptr=t0.data_ptr(),
@@ -189,7 +185,7 @@ class FrameEnhancers:
                 io_binding.bind_input(
                     name=n_img1,
                     device_type=dt,
-                    device_id=0,
+                    device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
                     element_type=np.float32,
                     shape=tuple(t1.shape),
                     buffer_ptr=t1.data_ptr(),
@@ -197,7 +193,7 @@ class FrameEnhancers:
                 io_binding.bind_input(
                     name=n_ts,
                     device_type=dt,
-                    device_id=0,
+                    device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
                     element_type=np.float32,
                     shape=tuple(ts.shape),
                     buffer_ptr=ts.data_ptr(),
@@ -205,7 +201,7 @@ class FrameEnhancers:
                 io_binding.bind_output(
                     name=n_out,
                     device_type=dt,
-                    device_id=0,
+                    device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
                     element_type=np.float32,
                     shape=tuple(out_t.shape),
                     buffer_ptr=out_t.data_ptr(),
@@ -312,7 +308,7 @@ class FrameEnhancers:
         output = torch.zeros(
             (b, c, h * scale, w * scale),
             dtype=torch.float32,
-            device=self.models_processor.device,
+            device=self.models_processor.get_effective_torch_device(),
         ).contiguous()
 
         # Select the upscaling function based on the enhancer_type
@@ -342,7 +338,7 @@ class FrameEnhancers:
         output_tile = torch.zeros(
             (b, c, tile_size * scale, tile_size * scale),
             dtype=torch.float32,
-            device=self.models_processor.device,
+            device=self.models_processor.get_effective_torch_device(),
         ).contiguous()
 
         with torch.no_grad():  # Disable gradient calculation for inference
@@ -433,8 +429,8 @@ class FrameEnhancers:
         # Bind input tensor
         io_binding.bind_input(
             name=input_name,
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=image.size(),
             buffer_ptr=image.data_ptr(),
@@ -442,8 +438,8 @@ class FrameEnhancers:
         # Bind output tensor
         io_binding.bind_output(
             name=output_name,
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=output.size(),
             buffer_ptr=output.data_ptr(),
@@ -718,7 +714,7 @@ class FrameEnhancers:
                 output = torch.zeros(
                     (image_input.shape),
                     dtype=torch.float32,
-                    device=self.models_processor.device,
+                    device=self.models_processor.get_effective_torch_device(),
                 ).contiguous()
 
                 match enhancer_type:
@@ -792,7 +788,7 @@ class FrameEnhancers:
                 output_ab = torch.zeros(
                     (1, 2, render_factor, render_factor),
                     dtype=torch.float32,
-                    device=self.models_processor.device,
+                    device=self.models_processor.get_effective_torch_device(),
                 ).contiguous()
 
                 # Esegui il modello

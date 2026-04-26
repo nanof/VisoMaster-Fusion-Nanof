@@ -180,6 +180,7 @@ class FrameWorker(threading.Thread):
         # Pool worker args (frame_queue is a task queue)
         frame_queue: queue.Queue | None = None,
         worker_id: int = -1,
+        assigned_gpu_index: int | None = None,
         # Single-frame worker args
         frame: np.ndarray | None = None,
         frame_number: int = -1,
@@ -262,6 +263,7 @@ class FrameWorker(threading.Thread):
         # Mode-specific args
         self.frame_queue = frame_queue  # This is now the TASK queue
         self.worker_id = worker_id
+        self.assigned_gpu_index = assigned_gpu_index
 
         # Single-frame data
         self.frame = frame  # Will be None in pool mode until a task is dequeued
@@ -366,7 +368,7 @@ class FrameWorker(threading.Thread):
         # --- OPTIMIZATION: Cached Convolution Kernels (VRAM) ---
         # Pre-allocating mathematical filters prevents massive CPU-to-GPU
         # allocation overheads during the binary search loops (sharpness_score).
-        device = self.models_processor.device
+        device = self.models_processor.get_effective_torch_device()
         self.kernel_lap = torch.tensor(
             [[0, 1, 0], [1, -4, 1], [0, 1, 0]], device=device, dtype=torch.float32
         ).view(1, 1, 3, 3)
@@ -518,6 +520,9 @@ class FrameWorker(threading.Thread):
                             self._feeder_chw_tensor,
                             self.precomputed_track_ids,
                         ) = task[:11]
+                        self.assigned_gpu_index = (
+                            task[11] if len(task) >= 12 else self.assigned_gpu_index
+                        )
                     elif len(task) >= 10:
                         (
                             self.frame_number,
@@ -532,6 +537,9 @@ class FrameWorker(threading.Thread):
                             self.precomputed_track_ids,
                         ) = task[:10]
                         self.precomputed_kpss_203 = None
+                        self.assigned_gpu_index = (
+                            task[10] if len(task) >= 11 else self.assigned_gpu_index
+                        )
                     elif len(task) >= 9:
                         (
                             self.frame_number,
@@ -546,6 +554,9 @@ class FrameWorker(threading.Thread):
                         ) = task[:9]
                         self.precomputed_kpss_203 = None
                         self.precomputed_track_ids = None
+                        self.assigned_gpu_index = (
+                            task[9] if len(task) >= 10 else self.assigned_gpu_index
+                        )
                     else:
                         (
                             self.frame_number,
@@ -635,6 +646,21 @@ class FrameWorker(threading.Thread):
             import contextlib
 
             self._pipeline_profile_merged = None
+            if self.assigned_gpu_index is not None:
+                self.models_processor.set_thread_gpu_index(self.assigned_gpu_index)
+            logical_gpu = self.models_processor.get_active_ort_device_id()
+            if (
+                _env_flag("VISIOMASTER_MULTI_GPU_LOG")
+                or self.models_processor.emulate_multi_gpu
+                or getattr(self.models_processor, "ui_multi_gpu_routing_enabled", False)
+            ):
+                print(
+                    "[MULTI-GPU] "
+                    f"frame={self.frame_number} worker={self.name} logical_gpu={logical_gpu} "
+                    f"compute_device={self.models_processor.get_effective_torch_device()} "
+                    f"provider={self.models_processor.provider_name}",
+                    flush=True,
+                )
 
             # Setup the dedicated asynchronous context for HPC parallel processing
             stream_context = (
@@ -783,6 +809,8 @@ class FrameWorker(threading.Thread):
                         f"[WARN] Fallback emit also failed for frame "
                         f"{self.frame_number}: {fb_err}"
                     )
+        finally:
+            self.models_processor.clear_thread_gpu_index()
 
     def _apply_denoiser_pass(
         self,
@@ -1543,7 +1571,7 @@ class FrameWorker(threading.Thread):
         perf_stages = _PerfStageCollector(_cuda_stage_sync) if _collect else None
 
         # Prepare the base tensor: reuse feeder CHW upload when sequential detect already H2D'd.
-        _dev = self.models_processor.device
+        _dev = self.models_processor.get_effective_torch_device()
         _nb = torch.cuda.is_available() and str(_dev).startswith("cuda")
         _handoff = self._feeder_chw_tensor
         self._feeder_chw_tensor = None
@@ -1935,7 +1963,7 @@ class FrameWorker(threading.Thread):
         _cur_frame_size = (img_numpy_rgb_uint8.shape[0], img_numpy_rgb_uint8.shape[1])
         if self._vr_converter is None or self._vr_frame_size != _cur_frame_size:
             self._vr_converter = EquirectangularConverter(
-                img_numpy_rgb_uint8, device=self.models_processor.device
+                img_numpy_rgb_uint8, device=self.models_processor.get_effective_torch_device()
             )
             self._vr_frame_size = _cur_frame_size
         else:
@@ -2126,7 +2154,7 @@ class FrameWorker(threading.Thread):
                 if _tile_arr.ndim == 1 and _tile_arr.shape[0] in (4, 5):
                     _tile_arr = _tile_arr.reshape(1, -1)
                 if _tile_arr.ndim == 2 and _tile_arr.shape[0] > 0:
-                    _dev = self.models_processor.device
+                    _dev = self.models_processor.get_effective_torch_device()
                     _tile_boxes_t = torch.from_numpy(
                         _tile_arr[:, :4].astype(np.float32)
                     ).to(_dev)
@@ -2213,13 +2241,13 @@ class FrameWorker(threading.Thread):
         # falling back to bbox area only when scores are not present.
         if bboxes_eq_np.ndim == 2 and bboxes_eq_np.shape[0] > 1:
             _boxes_t = torch.from_numpy(bboxes_eq_np[:, :4].astype(np.float32)).to(
-                self.models_processor.device
+                self.models_processor.get_effective_torch_device()
             )
             if bboxes_eq_np.shape[1] >= 5:
                 # Use detector confidence score — keeps the highest-confidence detection
                 _scores_t = (
                     torch.from_numpy(bboxes_eq_np[:, 4].astype(np.float32))
-                    .to(self.models_processor.device)
+                    .to(self.models_processor.get_effective_torch_device())
                     .clamp(min=1e-6)
                 )
             else:
@@ -2647,7 +2675,7 @@ class FrameWorker(threading.Thread):
         # P2E converter is properly recreated when the frame resolution changes.
         if self._vr_p2e_converter is None or self._vr_p2e_frame_size != _cur_frame_size:
             self._vr_p2e_converter = PerspectiveConverter(
-                img_numpy_rgb_uint8, device=self.models_processor.device
+                img_numpy_rgb_uint8, device=self.models_processor.get_effective_torch_device()
             )
             self._vr_p2e_frame_size = _cur_frame_size
         p2e_converter = self._vr_p2e_converter
@@ -2908,7 +2936,7 @@ class FrameWorker(threading.Thread):
         edit_button_is_checked_global: bool,
     ) -> torch.Tensor:
         ordered = sorted(specs, key=lambda x: x["det_index"])
-        device = self.models_processor.device
+        device = self.models_processor.get_effective_torch_device()
         chw_tiles: list[torch.Tensor] = []
         lat_rows: list[torch.Tensor] = []
 
@@ -3071,7 +3099,7 @@ class FrameWorker(threading.Thread):
     ) -> torch.Tensor:
         """GhostFace / HyperSwap: one ORT batch B×256² when the engine accepts dynamic N."""
         ordered = sorted(specs, key=lambda x: x["det_index"])
-        device = self.models_processor.device
+        device = self.models_processor.get_effective_torch_device()
         chw_tiles: list[torch.Tensor] = []
         lat_rows: list[torch.Tensor] = []
 
@@ -4975,9 +5003,9 @@ class FrameWorker(threading.Thread):
         # --- Inswapper128 Logic ---
         if swapper_model == "Inswapper128":
             # FS-ROBUST-01: calc_inswapper_latent may return None on emap failure
-            _device = self.models_processor.device
+            _device = self.models_processor.get_effective_torch_device()
             if cached_source_latent_torch is not None:
-                latent_s = cached_source_latent_torch
+                latent_s = cached_source_latent_torch.to(_device)
             else:
                 _s_latent_np = self.models_processor.calc_inswapper_latent(s_e)
                 if _s_latent_np is None:
@@ -5067,9 +5095,9 @@ class FrameWorker(threading.Thread):
             "InStyleSwapper256 Version C",
         ):
             version = swapper_model[-1]
-            _device = self.models_processor.device
+            _device = self.models_processor.get_effective_torch_device()
             if cached_source_latent_torch is not None:
-                latent_s = cached_source_latent_torch
+                latent_s = cached_source_latent_torch.to(_device)
             else:
                 _s_iss = self.models_processor.calc_swapper_latent_iss(s_e, version)
                 if _s_iss is None:
@@ -5115,9 +5143,9 @@ class FrameWorker(threading.Thread):
 
         # --- SimSwap Logic ---
         elif swapper_model in ("SimSwap512", "SimSwap512-CrossFace"):
-            _device = self.models_processor.device
+            _device = self.models_processor.get_effective_torch_device()
             if cached_source_latent_torch is not None:
-                latent_s = cached_source_latent_torch
+                latent_s = cached_source_latent_torch.to(_device)
             else:
                 if swapper_model == "SimSwap512-CrossFace":
                     _src_np = self.models_processor.calc_crossface_simswap_latent(s_e)
@@ -5151,9 +5179,9 @@ class FrameWorker(threading.Thread):
         # --- GhostFace Logic ---
         # FW-QUAL-10: use GHOSTFACE_MODELS frozenset
         elif swapper_model in self.GHOSTFACE_MODELS:
-            _device = self.models_processor.device
+            _device = self.models_processor.get_effective_torch_device()
             if cached_source_latent_torch is not None:
-                latent_s = cached_source_latent_torch
+                latent_s = cached_source_latent_torch.to(_device)
             else:
                 latent_s = (
                     torch.from_numpy(
@@ -5178,9 +5206,9 @@ class FrameWorker(threading.Thread):
 
         # --- HyperSwap (FaceFusion 3.3, 256 px, arcface_128 crop + L2-normalized w600k embedding) ---
         elif swapper_model in self.HYPERSWAP_MODELS:
-            _device = self.models_processor.device
+            _device = self.models_processor.get_effective_torch_device()
             if cached_source_latent_torch is not None:
-                latent_s = cached_source_latent_torch
+                latent_s = cached_source_latent_torch.to(_device)
             else:
                 _s_lat = self.models_processor.calc_hyperswap_latent(s_e)
                 if _s_lat is None:
@@ -5207,9 +5235,9 @@ class FrameWorker(threading.Thread):
 
         # --- ReHiFace-S (FaceFusion hififace_unofficial_256 + crossface_hififace, mtcnn_512 crop) ---
         elif swapper_model in self.REHIFACE_MODELS:
-            _device = self.models_processor.device
+            _device = self.models_processor.get_effective_torch_device()
             if cached_source_latent_torch is not None:
-                latent_s = cached_source_latent_torch
+                latent_s = cached_source_latent_torch.to(_device)
             else:
                 _s_lat = self.models_processor.calc_rehiface_source_latent(s_e)
                 if _s_lat is None:
@@ -5236,9 +5264,9 @@ class FrameWorker(threading.Thread):
 
         # --- CSCS Logic ---
         elif swapper_model == "CSCS":
-            _device = self.models_processor.device
+            _device = self.models_processor.get_effective_torch_device()
             if cached_source_latent_torch is not None:
-                latent_s = cached_source_latent_torch
+                latent_s = cached_source_latent_torch.to(_device)
             else:
                 latent_s = (
                     torch.from_numpy(
@@ -5263,9 +5291,9 @@ class FrameWorker(threading.Thread):
 
         # --- BlendSwap-256 (FaceFusion blendswap_256: ArcFace-112 source image + FFHQ target) ---
         elif swapper_model in self.BLENDSWAP_MODELS:
-            _device = self.models_processor.device
+            _device = self.models_processor.get_effective_torch_device()
             if cached_source_latent_torch is not None:
-                latent_s = cached_source_latent_torch
+                latent_s = cached_source_latent_torch.to(_device)
             else:
                 if blendswap_source_rgb112 is None:
                     print(
@@ -5286,9 +5314,9 @@ class FrameWorker(threading.Thread):
 
         # --- UniFace-256 (FaceFusion: FFHQ 256² source RGB [0,1] + normalized target) ---
         elif swapper_model in self.UNIFACE_MODELS:
-            _device = self.models_processor.device
+            _device = self.models_processor.get_effective_torch_device()
             if cached_source_latent_torch is not None:
-                latent_s = cached_source_latent_torch
+                latent_s = cached_source_latent_torch.to(_device)
             else:
                 if uniface_source_rgb256 is None:
                     print(
@@ -5708,7 +5736,7 @@ class FrameWorker(threading.Thread):
                 swapper_output = torch.empty(
                     (1, 3, 512, 512),
                     dtype=torch.float32,
-                    device=self.models_processor.device,
+                    device=self.models_processor.get_effective_torch_device(),
                 ).contiguous()
 
                 self.models_processor.run_swapper_simswap512(
@@ -5759,7 +5787,7 @@ class FrameWorker(threading.Thread):
                 swapper_output = torch.empty(
                     (1, 3, 256, 256),
                     dtype=torch.float32,
-                    device=self.models_processor.device,
+                    device=self.models_processor.get_effective_torch_device(),
                 ).contiguous()
 
                 self.models_processor.run_swapper_ghostface(
@@ -5816,7 +5844,7 @@ class FrameWorker(threading.Thread):
                 swapper_output = torch.empty(
                     (1, 3, 256, 256),
                     dtype=torch.float32,
-                    device=self.models_processor.device,
+                    device=self.models_processor.get_effective_torch_device(),
                 ).contiguous()
 
                 self.models_processor.run_hyperswap(
@@ -5871,7 +5899,7 @@ class FrameWorker(threading.Thread):
                 swapper_output = torch.empty(
                     (1, 3, 256, 256),
                     dtype=torch.float32,
-                    device=self.models_processor.device,
+                    device=self.models_processor.get_effective_torch_device(),
                 ).contiguous()
                 self.models_processor.run_blendswap(t_rgb, src_rgb, swapper_output)
                 swapper_output = swapper_output[0]
@@ -5915,7 +5943,7 @@ class FrameWorker(threading.Thread):
                 swapper_output = torch.empty(
                     (1, 3, 256, 256),
                     dtype=torch.float32,
-                    device=self.models_processor.device,
+                    device=self.models_processor.get_effective_torch_device(),
                 ).contiguous()
                 self.models_processor.run_uniface(t_norm, src_rgb, swapper_output)
                 swapper_output = torch.squeeze(swapper_output)
@@ -5953,7 +5981,7 @@ class FrameWorker(threading.Thread):
                 swapper_output = torch.empty(
                     (1, 3, 256, 256),
                     dtype=torch.float32,
-                    device=self.models_processor.device,
+                    device=self.models_processor.get_effective_torch_device(),
                 ).contiguous()
 
                 self.models_processor.run_rehiface(
@@ -6007,7 +6035,7 @@ class FrameWorker(threading.Thread):
                 swapper_output = torch.empty(
                     (1, 3, 256, 256),
                     dtype=torch.float32,
-                    device=self.models_processor.device,
+                    device=self.models_processor.get_effective_torch_device(),
                 ).contiguous()
 
                 self.models_processor.run_swapper_cscs(
@@ -6145,7 +6173,7 @@ class FrameWorker(threading.Thread):
 
     def get_border_mask(self, parameters):
         """Creates the border fade mask based on sliders (1×128×128 float32 on model device)."""
-        device = self.models_processor.device
+        device = self.models_processor.get_effective_torch_device()
         border_mask = torch.ones((128, 128), dtype=torch.float32, device=device)
         border_mask = torch.unsqueeze(border_mask, 0)
 
@@ -6552,7 +6580,7 @@ class FrameWorker(threading.Thread):
         frame_bgr = read_image_file(ib.media_path)
         if frame_bgr is None or frame_bgr.size == 0:
             return None
-        dev = self.models_processor.device
+        dev = self.models_processor.get_effective_torch_device()
         chw_bgr = (
             torch.from_numpy(np.ascontiguousarray(frame_bgr.transpose(2, 0, 1)))
             .to(dev)
@@ -6606,7 +6634,7 @@ class FrameWorker(threading.Thread):
         frame_bgr = read_image_file(ib.media_path)
         if frame_bgr is None or frame_bgr.size == 0:
             return None
-        dev = self.models_processor.device
+        dev = self.models_processor.get_effective_torch_device()
         chw_bgr = (
             torch.from_numpy(np.ascontiguousarray(frame_bgr.transpose(2, 0, 1)))
             .to(dev)
@@ -6878,6 +6906,25 @@ class FrameWorker(threading.Thread):
         valid_t_e = t_e if isinstance(t_e, np.ndarray) else None
         parameters = parameters if parameters is not None else {}
         control = control if control is not None else {}
+        # Multi-GPU routing (incl. CPU logical slot): keep all swap inputs on the same
+        # device as ORT/torch for this thread — latent cache may come from another worker.
+        _swap_dev = torch.device(self.models_processor.get_effective_torch_device())
+        if img.device != _swap_dev:
+            img = img.to(_swap_dev, non_blocking=False)
+        if alignment_img is not None and alignment_img.device != _swap_dev:
+            alignment_img = alignment_img.to(_swap_dev, non_blocking=False)
+        if prefetched_swap_chw_uint8 is not None and prefetched_swap_chw_uint8.device != _swap_dev:
+            prefetched_swap_chw_uint8 = prefetched_swap_chw_uint8.to(
+                _swap_dev, non_blocking=False
+            )
+        if blendswap_source_rgb112 is not None and blendswap_source_rgb112.device != _swap_dev:
+            blendswap_source_rgb112 = blendswap_source_rgb112.to(
+                _swap_dev, non_blocking=False
+            )
+        if uniface_source_rgb256 is not None and uniface_source_rgb256.device != _swap_dev:
+            uniface_source_rgb256 = uniface_source_rgb256.to(
+                _swap_dev, non_blocking=False
+            )
         swapper_model = parameters["SwapModelSelection"]
         itex = 1  # FW-BUG-10: default before any branching to prevent NameError
         _swap_core_perf: _PerfStageCollector | None = None
@@ -7051,7 +7098,7 @@ class FrameWorker(threading.Thread):
                 output = torch.zeros(
                     (output_size, output_size, 3),
                     dtype=torch.float32,
-                    device=self.models_processor.device,
+                    device=self.models_processor.get_effective_torch_device(),
                 )
                 input_face_affined = input_face_affined.permute(1, 2, 0).contiguous()
                 input_face_affined = torch.div(input_face_affined, 255.0)
@@ -7124,7 +7171,7 @@ class FrameWorker(threading.Thread):
                     pitch_deg,
                     current_swap_h,
                     current_swap_w,
-                    self.models_processor.device,
+                    self.models_processor.get_effective_torch_device(),
                     parameters,
                     kps_5,
                     tform,
@@ -7136,7 +7183,7 @@ class FrameWorker(threading.Thread):
                 pitch_deg,
                 current_swap_h,
                 current_swap_w,
-                self.models_processor.device,
+                self.models_processor.get_effective_torch_device(),
                 parameters,
                 kps_5,
                 tform,
@@ -7161,7 +7208,7 @@ class FrameWorker(threading.Thread):
         swap_mask = torch.ones(
             (current_swap_h, current_swap_w),
             dtype=torch.float32,
-            device=self.models_processor.device,
+            device=self.models_processor.get_effective_torch_device(),
         )
         swap_mask = torch.unsqueeze(swap_mask, 0)
         swap_mask_noFP = border_mask.clone()
@@ -7170,7 +7217,7 @@ class FrameWorker(threading.Thread):
         # be unconditionally overwritten before first read; only deep-clone where the
         # initial all-ones value is truly consumed before the mask is reassigned.
         BgExclude = torch.ones(
-            (1, 512, 512), dtype=torch.float32, device=self.models_processor.device
+            (1, 512, 512), dtype=torch.float32, device=self.models_processor.get_effective_torch_device()
         )
         diff_mask = BgExclude
         texture_mask_view = BgExclude
@@ -7456,10 +7503,10 @@ class FrameWorker(threading.Thread):
             dst_kps_5 = np.hstack([kps_5, ones_column]) @ M.T
 
             img_swap_mask = torch.ones(
-                (1, 512, 512), dtype=torch.float32, device=self.models_processor.device
+                (1, 512, 512), dtype=torch.float32, device=self.models_processor.get_effective_torch_device()
             )
             img_orig_mask = torch.zeros(
-                (1, 512, 512), dtype=torch.float32, device=self.models_processor.device
+                (1, 512, 512), dtype=torch.float32, device=self.models_processor.get_effective_torch_device()
             )
 
             if _restore_mouth_on:
@@ -7910,7 +7957,7 @@ class FrameWorker(threading.Thread):
 
             mask_input_vgg = t128_mask(calc_mask.clone())
             mask_vgg_512 = torch.ones(
-                (1, 512, 512), dtype=torch.float32, device=self.models_processor.device
+                (1, 512, 512), dtype=torch.float32, device=self.models_processor.get_effective_torch_device()
             )
 
             TextureFeatureLayerTypeSelection = "combo_relu3_3_relu3_1"
@@ -8193,7 +8240,7 @@ class FrameWorker(threading.Thread):
                     parameters["ColorGreenSlider"],
                     parameters["ColorBlueSlider"],
                 ],
-                device=self.models_processor.device,
+                device=self.models_processor.get_effective_torch_device(),
             )
             swap += del_color
             swap = torch.clamp(swap, min=0.0, max=255.0)

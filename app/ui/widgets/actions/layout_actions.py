@@ -12,6 +12,7 @@ from app.ui.widgets.actions import list_view_actions
 from app.ui.widgets.actions import save_load_actions
 from app.ui.widgets.actions import video_control_actions
 from app.ui.widgets.actions import control_actions
+from app.ui.widgets.actions import gpu_settings_actions
 from app.ui.widgets import widget_components
 
 # from app.UI.Widgets.WidgetComponents import *
@@ -240,6 +241,53 @@ def add_widgets_to_tab_layout(
                 widget.toggled.connect(
                     partial(onchange_toggle, widget, widget_name, widget_data)
                 )
+
+            elif widget_name == "GpuPrimaryDeviceSelection":
+                widget = widget_components.SelectionBox(
+                    label=cast(str, widget_data["label"]),
+                    widget_name=widget_name,
+                    group_layout_data=widgets,
+                    label_widget=label,
+                    main_window=main_window,
+                    default_value=widget_data["default"],
+                    selection_values=[],
+                )
+                gpu_settings_actions.fill_primary_gpu_combo(widget, main_window)
+                if "GpuPrimaryPhysicalIndex" not in main_window.control:
+                    common_widget_actions.create_control(
+                        main_window,
+                        "GpuPrimaryPhysicalIndex",
+                        int(widget_data.get("default", 0)),
+                    )
+                widget.reset_default_button = (
+                    widget_components.ParameterResetDefaultButton(related_widget=widget)
+                )
+                row_widget, horizontal_layout = add_horizontal_layout_to_category(
+                    category_layout, label, widget, widget.reset_default_button
+                )
+
+            elif widget_name == "GpuRoutingTargetsPicker":
+                widget = widget_components.GpuRoutingTargetsPicker(
+                    label_widget=label,
+                    widget_name=widget_name,
+                    group_layout_data=widgets,
+                    main_window=main_window,
+                )
+                stub_reset = QtWidgets.QWidget()
+                stub_reset.setFixedSize(0, 0)
+                widget.reset_default_button = (
+                    widget_components.ParameterResetDefaultButton(
+                        related_widget=widget  # type: ignore[arg-type]
+                    )
+                )
+                row_widget, horizontal_layout = add_horizontal_layout_to_category(
+                    category_layout, label, widget, widget.reset_default_button
+                )
+                if "GpuRoutingTargetsJson" not in main_window.control:
+                    common_widget_actions.create_control(
+                        main_window, "GpuRoutingTargetsJson", "[0]"
+                    )
+                widget.rebuild_from_models()
 
             elif "Selection" in widget_name:
                 options = widget_data["options"]

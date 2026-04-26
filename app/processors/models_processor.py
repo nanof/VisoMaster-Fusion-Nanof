@@ -178,6 +178,16 @@ def _env_truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 def _providers_without_tensorrt_execution_provider(providers_for_model):
     """Drop TensorrtExecutionProvider entries for ORT fallback (CUDA EP still fast on Windows)."""
     out = []
@@ -232,6 +242,12 @@ def _trt_options_liveportrait_motion_extractor(base: dict) -> dict:
     return o
 
 
+# TensorRT EP + trt_dump_ep_context_model: paths under trt_ep_context_file_path must be
+# non-empty relative segments (ORT rejects trt_engine_cache_path == "").
+_TRT_REL_ENGINE_CACHE_DIR = "engines"
+_TRT_REL_TIMING_CACHE_FILE = "trt_timing.cache"
+
+
 class ModelsProcessor(QtCore.QObject):
     """
     Central hub for managing AI models (ONNX, TensorRT, PyTorch).
@@ -277,6 +293,14 @@ class ModelsProcessor(QtCore.QObject):
         self.internal_kv_map_source_filename: str | None = None
         self.kv_extractor: Optional[KVExtractor] = None
         self.kv_extraction_lock = threading.Lock()
+        self.gpu_index = 0
+        self._thread_gpu_context = threading.local()
+        self.emulate_multi_gpu = _env_truthy("VISIOMASTER_EMULATE_MULTI_GPU")
+        self.emulated_gpu_count = max(
+            1, _env_int("VISIOMASTER_EMULATED_GPU_COUNT", default=2)
+        )
+        self.ui_multi_gpu_routing_enabled = False
+        self.ui_routing_targets: list[int] = [0]
         self.device = device
         self.model_lock = threading.RLock()  # Reentrant lock for model access
 
@@ -285,6 +309,8 @@ class ModelsProcessor(QtCore.QObject):
         # runs (e.g. RIFE preview + face landmarks on different threads) can trigger
         # CUDA error 906 (legacy stream sync vs. peer graph capture).
         self.ort_cuda_inference_lock = threading.Lock()
+        self._ort_cuda_device_locks: dict[int, threading.Lock] = {}
+        self._ort_cuda_device_locks_mutex = threading.Lock()
         # Optional: one lock per InferenceSession when VISIOMASTER_ORT_PER_SESSION_LOCK=1
         # (experimental — may improve overlap across workers; test for CUDA instability).
         self._ort_session_inference_locks: "weakref.WeakKeyDictionary" = (
@@ -308,8 +334,12 @@ class ModelsProcessor(QtCore.QObject):
         FALLBACK_WORKSPACE_SIZE = 4294967296  # 4 GB
 
         try:
-            # Get total GPU memory in bytes
-            total_vram = torch.cuda.get_device_properties(0).total_memory
+            # Total VRAM for TRT workspace: use a valid physical ordinal (emulation may use logical > 0).
+            _phys = 0
+            if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+                _ng = int(torch.cuda.device_count())
+                _phys = max(0, min(int(self.gpu_index), _ng - 1))
+            total_vram = torch.cuda.get_device_properties(_phys).total_memory
 
             # Safely allocate 40% of total VRAM for TensorRT workspace
             calculated_workspace = int(total_vram * 0.40)
@@ -335,11 +365,26 @@ class ModelsProcessor(QtCore.QObject):
         # A set to keep track of models that have been loaded but
         # have not had their engine built (lazy build).
         self.models_pending_build: set = set()
-        self.providers = [
-            ("TensorrtExecutionProvider", self.trt_ep_options),
-            ("CUDAExecutionProvider"),
-            ("CPUExecutionProvider"),
-        ]
+        self.providers = []
+        self._refresh_trt_options_for_gpu()
+        self.providers = self._build_providers_for_name(self.provider_name)
+        self._sync_torch_cuda_device()
+        if self.emulate_multi_gpu:
+            print(
+                "[MULTI-GPU] Emulation enabled "
+                f"(logical_gpus={self.emulated_gpu_count}, active_logical_gpu={self.gpu_index}).",
+                flush=True,
+            )
+        if self.device == "cuda" and torch.cuda.is_available():
+            try:
+                names = [
+                    torch.cuda.get_device_name(i)
+                    for i in range(int(torch.cuda.device_count()))
+                ]
+                listed = ", ".join(f"{i}: {n}" for i, n in enumerate(names))
+                print(f"[INFO] CUDA devices: {listed}", flush=True)
+            except Exception:
+                pass
         self.syncvec = torch.empty((1, 1), dtype=torch.float32, device=self.device)
         self.nThreads = 1
 
@@ -601,32 +646,45 @@ class ModelsProcessor(QtCore.QObject):
         Returns True if a valid cache is found, False otherwise.
         """
         try:
-            cache_dir = "tensorrt-engines"
             base_onnx_name = os.path.splitext(os.path.basename(onnx_path))[0]
             ctx_file_name = f"{base_onnx_name}_ctx.onnx"
+            # Per-GPU cache root (matches _refresh_trt_options_for_gpu).
+            cache_dir = self._tensorrt_gpu_cache_root()
             ctx_file_path = os.path.join(cache_dir, ctx_file_name)
-
-            if os.path.exists(ctx_file_path):
-                with open(ctx_file_path, "rb") as f:
-                    content = f.read()
-
-                # Look for the engine name embedded in the context file
-                match = re.search(b"TensorrtExecutionProvider_.*?\\.engine", content)
-                if not match:
-                    return False
-
-                engine_name = match.group(0).decode("utf-8")
-                engine_subdirectory_name = os.path.basename(cache_dir)
-                engine_file_path = os.path.join(
-                    cache_dir, engine_subdirectory_name, engine_name
-                )
-
-                if os.path.exists(engine_file_path):
-                    return True
+            # Legacy layout before per-GPU dirs: ctx under tensorrt-engines/
+            if not os.path.exists(ctx_file_path):
+                legacy_root = os.path.abspath("tensorrt-engines")
+                legacy_ctx = os.path.join(legacy_root, ctx_file_name)
+                if os.path.exists(legacy_ctx):
+                    cache_dir = legacy_root
+                    ctx_file_path = legacy_ctx
                 else:
                     return False
-            else:
+
+            with open(ctx_file_path, "rb") as f:
+                content = f.read()
+
+            # Look for the engine name embedded in the context file
+            match = re.search(b"TensorrtExecutionProvider_.*?\\.engine", content)
+            if not match:
                 return False
+
+            engine_name = match.group(0).decode("utf-8")
+            # Engines under ctx dir / engines / (relative trt_engine_cache_path).
+            engine_file_path = os.path.join(
+                cache_dir, _TRT_REL_ENGINE_CACHE_DIR, engine_name
+            )
+            if os.path.exists(engine_file_path):
+                return True
+            # Flat next to _ctx.onnx (legacy or brief empty-string experiment).
+            flat = os.path.join(cache_dir, engine_name)
+            if os.path.exists(flat):
+                return True
+            # Older ORT layout: tensorrt-engines/tensorrt-engines/<engine>
+            nested = os.path.join(
+                cache_dir, os.path.basename(cache_dir), engine_name
+            )
+            return bool(os.path.exists(nested))
 
         except Exception as e:
             print(f"[ERROR] Failed TensorRT cache check: {e}")
@@ -761,6 +819,7 @@ class ModelsProcessor(QtCore.QObject):
             build_was_triggered = (
                 False  # MP-05: flag to track if build dialog was shown
             )
+            trt_session_loading_dialog_shown = False
 
             # --- DYNAMIC PRECISION CONFIGURATION (WHITELIST FP16) ---
             model_trt_options = dict(self.trt_ep_options)
@@ -920,6 +979,19 @@ class ModelsProcessor(QtCore.QObject):
                     )
                     return self.models.get(model_name)
 
+                if is_tensorrt_load and not build_was_triggered:
+                    self.show_build_dialog.emit(
+                        "Loading TensorRT Engine",
+                        f"Loading TensorRT engine for:\n"
+                        f"{os.path.basename(onnx_path)}\n\n"
+                        f"This can take time on first run after startup.\n"
+                        f"Please wait...",
+                    )
+                    trt_session_loading_dialog_shown = True
+                    print(
+                        f"[INFO] {model_name}: creating ONNX Runtime session with TensorRT EP...",
+                        flush=True,
+                    )
                 try:
                     if session_options is None:
                         model_instance = onnxruntime.InferenceSession(
@@ -931,6 +1003,11 @@ class ModelsProcessor(QtCore.QObject):
                             self.models_path[model_name],
                             sess_options=session_options,
                             providers=ort_providers,
+                        )
+                    if is_tensorrt_load:
+                        print(
+                            f"[INFO] {model_name}: TensorRT ONNX Runtime session created.",
+                            flush=True,
                         )
                 except Exception as e_ort_first:
                     fb_providers = _providers_without_tensorrt_execution_provider(
@@ -1017,8 +1094,8 @@ class ModelsProcessor(QtCore.QObject):
                 return None
 
             finally:
-                # MP-05: Only emit hide_build_dialog when a build was triggered.
-                if build_was_triggered:
+                # MP-05: Hide only if we showed build/loading dialog in this load path.
+                if build_was_triggered or trt_session_loading_dialog_shown:
                     self.hide_build_dialog.emit()
 
     def check_and_clear_pending_build(self, model_name: str) -> bool:
@@ -1267,6 +1344,200 @@ class ModelsProcessor(QtCore.QObject):
         except Exception:
             pass  # compile_utils not available or Qt import failed
 
+    def _tensorrt_gpu_cache_root(self) -> str:
+        """Absolute TRT EP context + engines directory (per physical GPU when CUDA is visible)."""
+        logical = self.get_active_ort_device_id()
+        phys = self._logical_to_physical_cuda_index(logical)
+        try:
+            n = (
+                int(torch.cuda.device_count())
+                if torch.cuda.is_available()
+                else 0
+            )
+        except Exception:
+            n = 0
+        # With real GPUs, name cache dirs by physical ordinal so emulated logical GPUs
+        # that map to the same hardware share one engine tree.
+        gpu_idx = phys if n > 0 else logical
+        return os.path.abspath(os.path.join("tensorrt-engines", f"gpu{gpu_idx}"))
+
+    def _refresh_trt_options_for_gpu(self) -> None:
+        # ORT TensorRT EP + trt_dump_ep_context_model: engine cache path must be *relative*
+        # to trt_ep_context_file_path (context model directory). Setting both to the same
+        # relative string produces tensorrt-engines\gpu0\tensorrt-engines\gpu0 and mkdir fails.
+        ctx_dir = self._tensorrt_gpu_cache_root()
+        try:
+            os.makedirs(ctx_dir, exist_ok=True)
+            os.makedirs(os.path.join(ctx_dir, _TRT_REL_ENGINE_CACHE_DIR), exist_ok=True)
+        except OSError:
+            pass
+        self.trt_ep_options["device_id"] = self.get_compute_cuda_device_id()
+        self.trt_ep_options["trt_ep_context_file_path"] = ctx_dir
+        self.trt_ep_options["trt_engine_cache_path"] = _TRT_REL_ENGINE_CACHE_DIR
+        self.trt_ep_options["trt_timing_cache_path"] = _TRT_REL_TIMING_CACHE_FILE
+
+    def _physical_cuda_device_count(self) -> int:
+        if not torch.cuda.is_available():
+            return 0
+        try:
+            return max(0, int(torch.cuda.device_count()))
+        except Exception:
+            return 0
+
+    def _routing_cpu_logical_id(self) -> int:
+        """Synthetic routing slot: run ORT IOBinding on CPU (logical == physical_count + 1)."""
+        n = self._physical_cuda_device_count()
+        return (n + 1) if n > 0 else 1
+
+    def _is_thread_cpu_routing(self) -> bool:
+        if self.device != "cuda" or not torch.cuda.is_available():
+            return False
+        return int(self.get_active_ort_device_id()) == int(self._routing_cpu_logical_id())
+
+    def get_ort_bind_device_type(self) -> str:
+        """ORT IOBinding device string: cuda or cpu (per-thread when multi-GPU routes to CPU)."""
+        if self.device != "cuda":
+            return "cpu"
+        if self._is_thread_cpu_routing():
+            return "cpu"
+        return "cuda"
+
+    def get_ort_bind_input_cuda_device_id(self) -> int:
+        """CUDA ordinal for bind_input when device_type is cuda; 0 when routing to CPU ORT."""
+        if self._is_thread_cpu_routing():
+            return 0
+        return int(self.get_compute_cuda_device_id())
+
+    def uses_cuda_ep_for_thread(self) -> bool:
+        """Whether this thread should synchronize/use CUDA EP (not CPU-routed ORT)."""
+        return (
+            self.device == "cuda"
+            and torch.cuda.is_available()
+            and not self._is_thread_cpu_routing()
+        )
+
+    def get_ui_routing_targets_sorted(self) -> list[int]:
+        phy = self._physical_cuda_device_count()
+        prim = (
+            max(0, min(int(self.gpu_index), max(0, phy - 1)))
+            if phy > 0
+            else 0
+        )
+        raw = getattr(self, "ui_routing_targets", None) or [prim]
+        tg = [int(x) for x in raw]
+        allowed_max = (phy + 1) if phy > 0 else 1
+        tg = [x for x in tg if x >= 0 and x <= allowed_max]
+        if not tg:
+            return [prim]
+        if prim not in tg:
+            tg.append(prim)
+        return sorted(set(tg))
+
+    def get_configured_gpu_count(self) -> int:
+        if self.device != "cuda":
+            return 1
+        phy = self._physical_cuda_device_count()
+        if getattr(self, "ui_multi_gpu_routing_enabled", False):
+            tg = self.get_ui_routing_targets_sorted()
+            if tg:
+                return max(tg) + 1
+        if self.emulate_multi_gpu:
+            return max(1, int(self.emulated_gpu_count))
+        return max(1, phy) if phy > 0 else 1
+
+    def clamp_gpu_index(self, requested_index: int) -> int:
+        count = self.get_configured_gpu_count()
+        return max(0, min(int(requested_index), count - 1))
+
+    def get_active_ort_device_id(self) -> int:
+        """Logical GPU index (emulation-aware) for routing and logs — not always a valid torch ordinal."""
+        if self.device != "cuda":
+            return 0
+        thread_idx = getattr(self._thread_gpu_context, "gpu_index", None)
+        if thread_idx is not None:
+            return self.clamp_gpu_index(thread_idx)
+        return self.clamp_gpu_index(self.gpu_index)
+
+    def _logical_to_physical_cuda_index(self, logical_index: int) -> int:
+        """Map a logical GPU index to a valid CUDA device ordinal for torch/ONNXRuntime."""
+        if self.device != "cuda":
+            return 0
+        try:
+            n = (
+                int(torch.cuda.device_count())
+                if torch.cuda.is_available()
+                else 0
+            )
+        except Exception:
+            n = 0
+        if n <= 0:
+            return int(logical_index)
+        phys_cap = n - 1
+        li = int(logical_index)
+        if li < n:
+            return max(0, min(li, phys_cap))
+        pb = max(0, min(int(self.gpu_index), phys_cap))
+        return pb
+
+    def get_compute_cuda_device_id(self) -> int:
+        """CUDA device ordinal for bindings, torch.cuda.device, and TRT/CUDA EP device_id."""
+        return self._logical_to_physical_cuda_index(self.get_active_ort_device_id())
+
+    def get_effective_torch_device(self) -> str:
+        if self.device != "cuda" or not torch.cuda.is_available():
+            return "cpu"
+        if self._is_thread_cpu_routing():
+            return "cpu"
+        return f"cuda:{self.get_compute_cuda_device_id()}"
+
+    def set_thread_gpu_index(self, gpu_index: int) -> None:
+        self._thread_gpu_context.gpu_index = self.clamp_gpu_index(gpu_index)
+
+    def clear_thread_gpu_index(self) -> None:
+        if hasattr(self._thread_gpu_context, "gpu_index"):
+            delattr(self._thread_gpu_context, "gpu_index")
+
+    def _sync_torch_cuda_device(self) -> None:
+        if self.device != "cuda" or not torch.cuda.is_available():
+            return
+        try:
+            torch.cuda.set_device(self.get_compute_cuda_device_id())
+        except Exception:
+            pass
+
+    def _build_providers_for_name(self, provider_name: str):
+        cuda_dev = self._logical_to_physical_cuda_index(
+            self.clamp_gpu_index(self.gpu_index)
+        )
+        cuda_provider = ("CUDAExecutionProvider", {"device_id": cuda_dev})
+        if provider_name in ("TensorRT", "TensorRT-Engine"):
+            return [
+                ("TensorrtExecutionProvider", self.trt_ep_options),
+                cuda_provider,
+                ("CPUExecutionProvider"),
+            ]
+        if provider_name == "CUDA":
+            return [cuda_provider, ("CPUExecutionProvider")]
+        if provider_name == "CPU":
+            return [("CPUExecutionProvider")]
+        raise ValueError(f"Unknown provider: {provider_name}")
+
+    def set_gpu_index(self, gpu_index: int, *, reconfigure_providers: bool = True) -> int:
+        resolved = self.clamp_gpu_index(gpu_index)
+        self.gpu_index = resolved
+        self._refresh_trt_options_for_gpu()
+        self._sync_torch_cuda_device()
+        if reconfigure_providers:
+            self.providers = self._build_providers_for_name(self.provider_name)
+        if self.emulate_multi_gpu:
+            print(
+                "[MULTI-GPU] Switched active logical GPU "
+                f"to {resolved} (provider={self.provider_name}, "
+                f"compute_device={self.get_effective_torch_device()}).",
+                flush=True,
+            )
+        return resolved
+
     def switch_providers_priority(self, provider_name):
         """
         Reconfigures the ONNX Runtime provider list and the active device.
@@ -1292,11 +1563,8 @@ class ModelsProcessor(QtCore.QObject):
                 # MP-04: guard against TensorRT not being installed
                 if not TENSORRT_AVAILABLE or trt is None:
                     raise RuntimeError("TensorRT is not installed.")
-                providers = [
-                    ("TensorrtExecutionProvider", self.trt_ep_options),
-                    ("CUDAExecutionProvider"),
-                    ("CPUExecutionProvider"),
-                ]
+                self._refresh_trt_options_for_gpu()
+                providers = self._build_providers_for_name(provider_name)
                 self.device = "cuda"
                 if (
                     version.parse(trt.__version__) < version.parse("10.2.0")
@@ -1306,12 +1574,13 @@ class ModelsProcessor(QtCore.QObject):
                         "[WARN] TensorRT-Engine provider cannot be used when TensorRT version is lower than 10.2.0."
                     )
                     provider_name = "TensorRT"
+                    providers = self._build_providers_for_name(provider_name)
 
             case "CPU":
-                providers = [("CPUExecutionProvider")]
+                providers = self._build_providers_for_name("CPU")
                 self.device = "cpu"
             case "CUDA":
-                providers = [("CUDAExecutionProvider"), ("CPUExecutionProvider")]
+                providers = self._build_providers_for_name("CUDA")
                 self.device = "cuda"
             case _:
                 # MP-22: raise on unknown provider name
@@ -1319,6 +1588,7 @@ class ModelsProcessor(QtCore.QObject):
 
         self.providers = providers
         self.provider_name = provider_name
+        self._sync_torch_cuda_device()
         self.lp_mask_crop = self.lp_mask_crop.to(self.device)
         # Also move auxiliary tensors that are used alongside lp_mask_crop so
         # they remain on the same device and do not cause device-mismatch errors.
@@ -1343,6 +1613,14 @@ class ModelsProcessor(QtCore.QObject):
             if lk is None:
                 lk = threading.Lock()
                 self._ort_session_inference_locks[session] = lk
+            return lk
+
+    def _get_ort_cuda_lock_for_device(self, device_id: int) -> threading.Lock:
+        with self._ort_cuda_device_locks_mutex:
+            lk = self._ort_cuda_device_locks.get(device_id)
+            if lk is None:
+                lk = threading.Lock()
+                self._ort_cuda_device_locks[device_id] = lk
             return lk
 
     def _log_ort_pipeline_metrics(self) -> None:
@@ -1382,6 +1660,14 @@ class ModelsProcessor(QtCore.QObject):
         if self.device != "cuda":
             session.run_with_iobinding(io_binding)
             return
+        if self._is_thread_cpu_routing():
+            lock = self._get_ort_cuda_lock_for_session(session)
+            lock.acquire()
+            try:
+                session.run_with_iobinding(io_binding)
+            finally:
+                lock.release()
+            return
         metrics_on = _env_truthy("VISIOMASTER_PIPELINE_METRICS")
         try:
             interval = max(
@@ -1389,7 +1675,12 @@ class ModelsProcessor(QtCore.QObject):
             )
         except ValueError:
             interval = 200
-        lock = self._get_ort_cuda_lock_for_session(session)
+        active_gpu_id = self.get_compute_cuda_device_id()
+        lock = (
+            self._get_ort_cuda_lock_for_device(active_gpu_id)
+            if _env_truthy("VISIOMASTER_ORT_PER_GPU_LOCK")
+            else self._get_ort_cuda_lock_for_session(session)
+        )
         t0 = time.perf_counter()
         lock.acquire()
         t1 = time.perf_counter()
@@ -1397,7 +1688,8 @@ class ModelsProcessor(QtCore.QObject):
             with self._ort_metrics_lock:
                 self._ort_lock_wait_s_accum += t1 - t0
         try:
-            session.run_with_iobinding(io_binding)
+            with torch.cuda.device(active_gpu_id):
+                session.run_with_iobinding(io_binding)
         finally:
             t2 = time.perf_counter()
             if metrics_on:
@@ -1427,7 +1719,11 @@ class ModelsProcessor(QtCore.QObject):
             command = "nvidia-smi --query-gpu=memory.total,memory.free --format=csv,noheader,nounits"
             output = sp.check_output(command.split()).decode("ascii").strip()
             # Output format: "total, free" (one line per GPU)
-            first_line = output.split("\n")[0]
+            lines = [ln for ln in output.split("\n") if ln.strip()]
+            idx = self._logical_to_physical_cuda_index(
+                self.clamp_gpu_index(self.gpu_index)
+            )
+            first_line = lines[idx] if idx < len(lines) else lines[0]
             parts = first_line.split(",")
             memory_total_val = int(parts[0].strip())
             memory_free_val = int(parts[1].strip())
@@ -1436,10 +1732,13 @@ class ModelsProcessor(QtCore.QObject):
         except Exception:
             # Fallback to torch.cuda if nvidia-smi is unavailable
             if torch.cuda.is_available():
-                props = torch.cuda.get_device_properties(0)
+                idx = self._logical_to_physical_cuda_index(
+                    self.clamp_gpu_index(self.gpu_index)
+                )
+                props = torch.cuda.get_device_properties(idx)
                 memory_total_val = props.total_memory // (1024 * 1024)
                 memory_free_val = (
-                    props.total_memory - torch.cuda.memory_reserved(0)
+                    props.total_memory - torch.cuda.memory_reserved(idx)
                 ) // (1024 * 1024)
                 memory_used = memory_total_val - memory_free_val
                 return memory_used, memory_total_val

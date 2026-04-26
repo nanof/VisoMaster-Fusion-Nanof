@@ -300,8 +300,8 @@ class FaceLandmarkDetectors:
         for name, tensor in input_bindings.items():
             io_binding.bind_input(
                 name=name,
-                device_type=self.models_processor.device,
-                device_id=0,
+                device_type=self.models_processor.get_ort_bind_device_type(),
+                device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
                 element_type=np.float32,
                 shape=tensor.size(),
                 buffer_ptr=tensor.data_ptr(),
@@ -309,7 +309,7 @@ class FaceLandmarkDetectors:
 
         # Bind outputs. The device will allocate memory for them.
         for name in output_names:
-            io_binding.bind_output(name, self.models_processor.device)
+            io_binding.bind_output(name, self.models_processor.get_ort_bind_device_type())
 
         # --- LAZY BUILD CHECK ---
         is_lazy_build = self.models_processor.check_and_clear_pending_build(model_name)
@@ -323,7 +323,7 @@ class FaceLandmarkDetectors:
         try:
             # PRE-INFERENCE SYNC: Ensure PyTorch has finished preparing the memory
             # before ONNX Runtime starts reading from the IOBinding pointers.
-            if self.models_processor.device == "cuda":
+            if self.models_processor.uses_cuda_ep_for_thread():
                 torch.cuda.current_stream().synchronize()
             elif self.models_processor.device != "cpu":
                 self.models_processor.syncvec.cpu()
@@ -334,7 +334,7 @@ class FaceLandmarkDetectors:
             # POST-INFERENCE SYNC : Ensure the GPU has completed all
             # calculations before ONNX Runtime attempts to copy the result back to CPU RAM.
             # Without this, copy_outputs_to_cpu() might grab an incomplete tensor.
-            if self.models_processor.device == "cuda":
+            if self.models_processor.uses_cuda_ep_for_thread():
                 torch.cuda.current_stream().synchronize()
             elif self.models_processor.device != "cpu":
                 self.models_processor.syncvec.cpu()

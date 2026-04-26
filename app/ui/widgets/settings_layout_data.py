@@ -1,4 +1,5 @@
 from app.ui.widgets.actions import control_actions
+from app.ui.widgets.actions import gpu_settings_actions
 from app.ui.widgets.actions import graphics_view_actions
 from app.ui.widgets.actions import pipeline_profile_actions as pprofile_settings
 import cv2
@@ -44,6 +45,27 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "help": "Execution providers: try TensorRT vs Custom and measure with VISIOMASTER_PERF_BUNDLE=1. FP16/mixed precision: profile with ORT or Nsight before changing builds. Engine cache: set VISIOMASTER_LOG_TRT_CACHE=1 on load to print cache-hit lines.",
             "exec_function": control_actions.change_execution_provider,
             "exec_function_args": [],
+        },
+        "MultiGpuRoutingEnableToggle": {
+            "level": 1,
+            "label": "Use multiple GPUs for frame routing",
+            "default": False,
+            "help": "When on, the pipeline can assign frames across the GPUs selected below (round-robin). The primary GPU (next control) is always included. When off, every frame uses the primary GPU only (environment variable VISIOMASTER_EMULATE_MULTI_GPU still enables extra logical devices for testing).",
+            "exec_function": gpu_settings_actions.on_multi_gpu_routing_toggle,
+            "exec_function_args": [],
+        },
+        "GpuPrimaryDeviceSelection": {
+            "level": 1,
+            "label": "Primary GPU",
+            "default": 0,
+            "help": "Main CUDA device for TensorRT/CUDA providers and cache paths. Shown by device name; this GPU always participates in routing and cannot be unchecked below.",
+        },
+        "GpuRoutingTargetsPicker": {
+            "level": 2,
+            "label": "Additional GPUs for routing",
+            "help": "Visible when “Use multiple GPUs…” is on. Check extra physical GPUs, “Emulated GPU”, and/or “CPU” to mix CUDA and CPU ORT in the round-robin. The primary GPU row stays checked and disabled. CPU is slower but can offload some frames from the GPU.",
+            "parentToggle": "MultiGpuRoutingEnableToggle",
+            "requiredToggleValue": True,
         },
         "nThreadsSlider": {
             "level": 1,

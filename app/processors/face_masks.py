@@ -108,7 +108,7 @@ class FaceMasks:
                         )
                         m = (
                             FaceParserResnet34Torch.from_onnx(onnx_path)
-                            .to(self.models_processor.device)
+                            .to(self.models_processor.get_effective_torch_device())
                             .eval()
                         )
                         self._faceparser_torch = m
@@ -157,7 +157,7 @@ class FaceMasks:
                         )
                         m = (
                             XSegTorch.from_onnx(onnx_path)
-                            .to(self.models_processor.device)
+                            .to(self.models_processor.get_effective_torch_device())
                             .eval()
                         )
                         self._xseg_torch = m
@@ -202,7 +202,7 @@ class FaceMasks:
                         )
                         m = (
                             OccluderTorch.from_onnx(onnx_path)
-                            .to(self.models_processor.device)
+                            .to(self.models_processor.get_effective_torch_device())
                             .eval()
                         )
                         self._occluder_torch = m
@@ -251,7 +251,7 @@ class FaceMasks:
                         )
                         m = (
                             VggComboTorch.from_onnx(onnx_path)
-                            .to(self.models_processor.device)
+                            .to(self.models_processor.get_effective_torch_device())
                             .eval()
                         )
                         self._vgg_combo_torch = m
@@ -304,7 +304,7 @@ class FaceMasks:
                     with self._get_runner_lock(runner):
                         out = runner(x)
                         labels_512 = out.argmax(dim=1).squeeze(0).to(torch.long)
-                        if self.models_processor.device == "cuda":
+                        if self.models_processor.uses_cuda_ep_for_thread():
                             torch.cuda.current_stream().synchronize()
                 return labels_512
             # Custom runner unavailable — fall through to ORT
@@ -321,12 +321,14 @@ class FaceMasks:
             )
 
         # Binding I/O
-        out = torch.empty((1, 19, 512, 512), device=self.models_processor.device)
+        out = torch.empty(
+            (1, 19, 512, 512), device=self.models_processor.get_effective_torch_device()
+        )
         io = ort_session.io_binding()
         in0 = ort_session.get_inputs()[0].name
         io.bind_input(
             in0,
-            self.models_processor.device,
+            self.models_processor.get_effective_torch_device(),
             0,
             np.float32,
             (1, 3, 512, 512),
@@ -336,14 +338,14 @@ class FaceMasks:
             if ometa.name == "output":
                 io.bind_output(
                     "output",
-                    self.models_processor.device,
+                    self.models_processor.get_effective_torch_device(),
                     0,
                     np.float32,
                     (1, 19, 512, 512),
                     out.data_ptr(),
                 )
             else:
-                io.bind_output(ometa.name, self.models_processor.device)
+                io.bind_output(ometa.name, self.models_processor.get_ort_bind_device_type())
 
         # Handle Lazy TensorRT Build
         is_lazy_build = self.models_processor.check_and_clear_pending_build(model_name)
@@ -355,7 +357,7 @@ class FaceMasks:
 
         try:
             # PRE-INFERENCE SYNC: Ensure PyTorch memory is ready
-            if self.models_processor.device == "cuda":
+            if self.models_processor.uses_cuda_ep_for_thread():
                 torch.cuda.current_stream().synchronize()
             elif self.models_processor.device != "cpu":
                 self.models_processor.syncvec.cpu()
@@ -376,7 +378,7 @@ class FaceMasks:
         Estado recurrente en cero (calidad de vídeo completo requeriría estado entre frames).
         """
         model_name = "RvmPortraitMatting"
-        dev = self.models_processor.device
+        dev = self.models_processor.get_effective_torch_device()
         H, W = int(face_chw_float_rgb_0_255.shape[1]), int(
             face_chw_float_rgb_0_255.shape[2]
         )
@@ -404,12 +406,12 @@ class FaceMasks:
                 f"Performing first-run inference for:\n{model_name}\n\nThis may take several minutes.",
             )
         try:
-            if dev == "cuda" and torch.cuda.is_available():
+            if str(dev).startswith("cuda") and torch.cuda.is_available():
                 io = ort_session.io_binding()
                 io.bind_input(
                     name=ins["src"].name,
                     device_type=dev,
-                    device_id=0,
+                    device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
                     element_type=np.float32,
                     shape=tuple(src.shape),
                     buffer_ptr=src.data_ptr(),
@@ -417,7 +419,7 @@ class FaceMasks:
                 io.bind_input(
                     name=ins["r1i"].name,
                     device_type=dev,
-                    device_id=0,
+                    device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
                     element_type=np.float32,
                     shape=tuple(r1.shape),
                     buffer_ptr=r1.data_ptr(),
@@ -425,7 +427,7 @@ class FaceMasks:
                 io.bind_input(
                     name=ins["r2i"].name,
                     device_type=dev,
-                    device_id=0,
+                    device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
                     element_type=np.float32,
                     shape=tuple(r2.shape),
                     buffer_ptr=r2.data_ptr(),
@@ -433,7 +435,7 @@ class FaceMasks:
                 io.bind_input(
                     name=ins["r3i"].name,
                     device_type=dev,
-                    device_id=0,
+                    device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
                     element_type=np.float32,
                     shape=tuple(r3.shape),
                     buffer_ptr=r3.data_ptr(),
@@ -441,7 +443,7 @@ class FaceMasks:
                 io.bind_input(
                     name=ins["r4i"].name,
                     device_type=dev,
-                    device_id=0,
+                    device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
                     element_type=np.float32,
                     shape=tuple(r4.shape),
                     buffer_ptr=r4.data_ptr(),
@@ -449,7 +451,7 @@ class FaceMasks:
                 io.bind_input(
                     name=ins["downsample_ratio"].name,
                     device_type=dev,
-                    device_id=0,
+                    device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
                     element_type=np.float32,
                     shape=(1,),
                     buffer_ptr=dr.data_ptr(),
@@ -461,7 +463,7 @@ class FaceMasks:
                 io.bind_output(
                     name="pha",
                     device_type=dev,
-                    device_id=0,
+                    device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
                     element_type=np.float32,
                     shape=tuple(pha.shape),
                     buffer_ptr=pha.data_ptr(),
@@ -492,7 +494,7 @@ class FaceMasks:
     ) -> torch.Tensor:
         """u2netp (rembg): máscara saliente 1xHxW, entrada 320."""
         model_name = "U2NetpSalientSeg"
-        dev = self.models_processor.device
+        dev = self.models_processor.get_effective_torch_device()
         H, W = int(face_chw_float_rgb_0_255.shape[1]), int(
             face_chw_float_rgb_0_255.shape[2]
         )
@@ -511,12 +513,12 @@ class FaceMasks:
         out_names = [o.name for o in ort_session.get_outputs()]
         last_name = out_names[-1]
 
-        if dev == "cuda" and torch.cuda.is_available():
+        if str(dev).startswith("cuda") and torch.cuda.is_available():
             io = ort_session.io_binding()
             io.bind_input(
                 name=in_name,
                 device_type=dev,
-                device_id=0,
+                device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
                 element_type=np.float32,
                 shape=tuple(x.shape),
                 buffer_ptr=x.data_ptr(),
@@ -529,7 +531,7 @@ class FaceMasks:
                     io.bind_output(
                         name=name,
                         device_type=dev,
-                        device_id=0,
+                        device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
                         element_type=np.float32,
                         shape=tuple(out_t.shape),
                         buffer_ptr=out_t.data_ptr(),
@@ -902,7 +904,7 @@ class FaceMasks:
         Returns:
             Dictionary containing the generated masks.
         """
-        device = self.models_processor.device
+        device = self.models_processor.get_effective_torch_device()
         mode = control.get("DilatationTypeSelection", "conv")
         result = {"swap_formask": swap_restorecalc}
 
@@ -1226,7 +1228,9 @@ class FaceMasks:
 
         # Output initialisation
         outpred = torch.ones(
-            (256, 256), dtype=torch.float32, device=self.models_processor.device
+            (256, 256),
+            dtype=torch.float32,
+            device=self.models_processor.get_effective_torch_device(),
         ).contiguous()
 
         self.run_occluder(img, outpred)
@@ -1268,7 +1272,7 @@ class FaceMasks:
                     self._kernel_cache["3x3"] = torch.ones(
                         (1, 1, 3, 3),
                         dtype=torch.float32,
-                        device=self.models_processor.device,
+                        device=self.models_processor.get_effective_torch_device(),
                     )
                 kernel = self._kernel_cache["3x3"]
 
@@ -1282,7 +1286,9 @@ class FaceMasks:
             outpred = torch.neg(outpred)
             outpred = torch.add(outpred, 1)
             kernel = torch.ones(
-                (1, 1, 3, 3), dtype=torch.float32, device=self.models_processor.device
+                (1, 1, 3, 3),
+                dtype=torch.float32,
+                device=self.models_processor.get_effective_torch_device(),
             )
 
             for _ in range(int(-amount)):
@@ -1318,16 +1324,16 @@ class FaceMasks:
         io_binding = ort_session.io_binding()
         io_binding.bind_input(
             name="img",
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=(1, 3, 256, 256),
             buffer_ptr=image.data_ptr(),
         )
         io_binding.bind_output(
             name="output",
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=(1, 1, 256, 256),
             buffer_ptr=output.data_ptr(),
@@ -1342,7 +1348,7 @@ class FaceMasks:
 
         try:
             # PRE-INFERENCE SYNC
-            if self.models_processor.device == "cuda":
+            if self.models_processor.uses_cuda_ep_for_thread():
                 torch.cuda.current_stream().synchronize()
             elif self.models_processor.device != "cpu":
                 self.models_processor.syncvec.cpu()
@@ -1399,7 +1405,9 @@ class FaceMasks:
         img = torch.div(img, 255)
         img = torch.unsqueeze(img, 0).contiguous()
         outpred = torch.ones(
-            (256, 256), dtype=torch.float32, device=self.models_processor.device
+            (256, 256),
+            dtype=torch.float32,
+            device=self.models_processor.get_effective_torch_device(),
         ).contiguous()
 
         self.run_dfl_xseg(img, outpred)
@@ -1532,16 +1540,16 @@ class FaceMasks:
         io_binding = ort_session.io_binding()
         io_binding.bind_input(
             name="in_face:0",
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=image.size(),
             buffer_ptr=image.data_ptr(),
         )
         io_binding.bind_output(
             name="out_mask:0",
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=(1, 1, 256, 256),
             buffer_ptr=output.data_ptr(),
@@ -1556,7 +1564,7 @@ class FaceMasks:
 
         try:
             # PRE-INFERENCE SYNC
-            if self.models_processor.device == "cuda":
+            if self.models_processor.uses_cuda_ep_for_thread():
                 torch.cuda.current_stream().synchronize()
             elif self.models_processor.device != "cpu":
                 self.models_processor.syncvec.cpu()
@@ -1585,16 +1593,16 @@ class FaceMasks:
 
         io_binding.bind_input(
             name=input_name,
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=image_tensor.shape,
             buffer_ptr=image_tensor.data_ptr(),
         )
         io_binding.bind_output(
             name=output_name,
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=output_tensor.shape,
             buffer_ptr=output_tensor.data_ptr(),
@@ -1609,7 +1617,7 @@ class FaceMasks:
 
         try:
             # PRE-INFERENCE SYNC
-            if self.models_processor.device == "cuda":
+            if self.models_processor.uses_cuda_ep_for_thread():
                 torch.cuda.current_stream().synchronize()
             elif self.models_processor.device != "cpu":
                 self.models_processor.syncvec.cpu()
@@ -1685,7 +1693,11 @@ class FaceMasks:
             feather_radius = max(radius_x, radius_y) // 2
 
         # FM-09: include device in the cache key and create tensors on the correct device
-        _device = device if device is not None else self.models_processor.device
+        _device = (
+            device
+            if device is not None
+            else self.models_processor.get_effective_torch_device()
+        )
         cache_key = (height, width, str(_device))
 
         # Thread-safe read and write

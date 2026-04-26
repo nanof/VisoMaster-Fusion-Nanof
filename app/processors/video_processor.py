@@ -276,7 +276,7 @@ class VideoProcessor(QObject):
         )  # Max frames allowed "in flight" (queued + being displayed)
         self.max_frames_to_display_size = 8  # VP-22: Hard cap on frames_to_display dict
 
-        # Pool tasks: (frame#, rgb, params, control, bboxes, kpss_5, kpss, feeder_perf, feeder_chw_uint8?)
+        # Pool tasks: (..., precomputed_track_ids?, assigned_gpu_index?)
         self.frame_queue: queue.Queue[Any] = queue.Queue(
             maxsize=self.max_display_buffer_size
         )
@@ -1704,7 +1704,7 @@ class VideoProcessor(QObject):
         if (
             use_sep
             and torch.cuda.is_available()
-            and self.main_window.models_processor.device == "cuda"
+            and str(self.main_window.models_processor.device).startswith("cuda")
         ):
             if self._feeder_cuda_stream is None:
                 self._feeder_cuda_stream = torch.cuda.Stream()
@@ -2390,7 +2390,7 @@ class VideoProcessor(QObject):
                 feeder_perf = {k: float(v) for k, v in perf_pre.items()}
             _sync_det = (
                 perf_on
-                and self.main_window.models_processor.device == "cuda"
+                and str(self.main_window.models_processor.device).startswith("cuda")
                 and torch.cuda.is_available()
                 and (
                     _env_flag("VISIOMASTER_PERF_STAGES")
@@ -2458,7 +2458,9 @@ class VideoProcessor(QObject):
                 feeder_perf,
                 feeder_chw_uint8,
                 detect_track_ids,
+                self._resolve_assigned_gpu_index(int(logical_fn)),
             )
+            self._log_multi_gpu_route(int(logical_fn), task[-1])
             self.frame_queue.put(task)
 
         nw = len(self.worker_threads)
@@ -2475,6 +2477,67 @@ class VideoProcessor(QObject):
         for key in _FEEDER_PLAYBACK_LIVE_CONTROL_KEYS:
             if key in mw:
                 local_control[key] = mw[key]
+
+    def _resolve_assigned_gpu_index(
+        self, frame_number: int, worker_id: int | None = None
+    ) -> int:
+        mp = self.main_window.models_processor
+        if mp.device != "cuda":
+            return mp.clamp_gpu_index(mp.gpu_index)
+        phy_n = mp._physical_cuda_device_count()
+        primary = (
+            max(0, min(int(mp.gpu_index), max(0, phy_n - 1)))
+            if phy_n > 0
+            else 0
+        )
+        if getattr(mp, "ui_multi_gpu_routing_enabled", False):
+            tg = mp.get_ui_routing_targets_sorted()
+            if len(tg) >= 2:
+                if (
+                    worker_id is not None
+                    and _env_flag("VISIOMASTER_MULTI_GPU_ASSIGN_PER_WORKER")
+                ):
+                    slot = int(worker_id) % len(tg)
+                else:
+                    slot = int(frame_number) % len(tg)
+                return int(tg[slot])
+            if tg:
+                return int(tg[0])
+            return primary
+        if mp.emulate_multi_gpu:
+            logical_gpus = max(1, mp.get_configured_gpu_count())
+            if logical_gpus <= 1:
+                return primary
+            if (
+                worker_id is not None
+                and _env_flag("VISIOMASTER_MULTI_GPU_ASSIGN_PER_WORKER")
+            ):
+                return int(worker_id) % logical_gpus
+            return int(frame_number) % logical_gpus
+        return primary
+
+    def _log_multi_gpu_route(self, frame_number: int, assigned_gpu: int) -> None:
+        mp = self.main_window.models_processor
+        if not (
+            _env_flag("VISIOMASTER_MULTI_GPU_LOG")
+            or mp.emulate_multi_gpu
+            or getattr(mp, "ui_multi_gpu_routing_enabled", False)
+        ):
+            return
+        logical = int(assigned_gpu)
+        phys = mp._logical_to_physical_cuda_index(mp.clamp_gpu_index(logical))
+        compute = (
+            "cpu_ort"
+            if logical == mp._routing_cpu_logical_id()
+            else str(phys)
+        )
+        print(
+            "[MULTI-GPU] "
+            f"frame={frame_number} logical_gpu={logical} "
+            f"provider={mp.provider_name} global_logical_gpu={mp.gpu_index} "
+            f"compute_cuda={compute}",
+            flush=True,
+        )
 
     def _feed_video_loop(self):
         """
@@ -3974,6 +4037,8 @@ class VideoProcessor(QObject):
     def _launch_async_single_frame_worker(
         self, frame_number: int, frame: numpy.ndarray, generation: int
     ):
+        assigned_gpu = self._resolve_assigned_gpu_index(int(frame_number))
+        self._log_multi_gpu_route(int(frame_number), assigned_gpu)
         worker = FrameWorker(
             frame=frame,
             main_window=self.main_window,
@@ -3981,6 +4046,7 @@ class VideoProcessor(QObject):
             frame_queue=None,
             is_single_frame=True,
             worker_id=-1,
+            assigned_gpu_index=assigned_gpu,
         )
         worker.preview_generation = generation
         self._current_single_frame_worker = worker
@@ -4075,6 +4141,8 @@ class VideoProcessor(QObject):
                 prev.stop_event.set()
                 prev.join()
             self._current_single_frame_worker = None
+            assigned_gpu = self._resolve_assigned_gpu_index(int(frame_number))
+            self._log_multi_gpu_route(int(frame_number), assigned_gpu)
             worker = FrameWorker(
                 frame=frame,  # Pass frame directly
                 main_window=self.main_window,
@@ -4082,6 +4150,7 @@ class VideoProcessor(QObject):
                 frame_queue=None,  # No queue for single frame
                 is_single_frame=is_single_frame,
                 worker_id=-1,  # Indicates single-frame mode
+                assigned_gpu_index=assigned_gpu,
             )
             if fit_on_complete:
                 self._fit_on_single_frame_request_generation = 0

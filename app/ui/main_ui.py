@@ -25,6 +25,7 @@ from app.ui.widgets.actions import job_manager_actions
 from app.ui.widgets.actions import preset_actions
 from app.ui.widgets.advanced_embedding_editor import EmbeddingGUI
 import app.ui.widgets.actions.control_actions as control_actions
+from app.ui.widgets.actions import gpu_settings_actions
 from app.processors.video_processor import VideoProcessor
 from app.processors.models_processor import ModelsProcessor
 from app.ui.widgets import widget_components
@@ -606,6 +607,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             layoutWidget=self.settingsWidgetsLayout,
             data_type="control",
         )
+        gpu_settings_actions.finalize_gpu_widgets_after_settings_layout(self)
         layout_actions.add_widgets_to_tab_layout(
             self,
             LAYOUT_DATA=ESSENTIALS_CONTROL_LAYOUT_DATA,

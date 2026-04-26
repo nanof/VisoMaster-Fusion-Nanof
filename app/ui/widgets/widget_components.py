@@ -1,4 +1,5 @@
 # pylint: disable=keyword-arg-before-vararg
+import json
 import os
 import traceback
 from functools import partial
@@ -2156,6 +2157,153 @@ class ParametersWidget:
         )
         self.reset_default_button: QPushButton = False
         self.enable_refresh_frame = True  # This flag can be used to temporarily disable refreshing the frame when the widget value is changed
+
+
+class GpuRoutingTargetsPicker(QtWidgets.QWidget, ParametersWidget):
+    """Physical GPUs + optional emulated logical slot + optional CPU ORT slot (multi-GPU routing)."""
+
+    def __init__(
+        self,
+        *,
+        label_widget: QtWidgets.QLabel,
+        widget_name: str,
+        group_layout_data: Dict[str, Dict[str, Any]],
+        main_window: "MainWindow",
+    ):
+        QtWidgets.QWidget.__init__(self)
+        ParametersWidget.__init__(
+            self,
+            label_widget=label_widget,
+            widget_name=widget_name,
+            group_layout_data=group_layout_data,
+            main_window=main_window,
+        )
+        self.enable_refresh_frame = False
+        self._outer = QtWidgets.QVBoxLayout(self)
+        self._outer.setContentsMargins(0, 0, 0, 0)
+        self._boxes: dict[int, QtWidgets.QCheckBox] = {}
+        self._emulated_logical: int | None = None
+
+    def reset_to_default_value(self) -> None:
+        mw = self.main_window
+        phy = self._phy_count()
+        prim = self._primary_physical(phy)
+        mw.control["GpuRoutingTargetsJson"] = json.dumps([prim])
+        from app.ui.widgets.actions import gpu_settings_actions
+
+        gpu_settings_actions.sync_routing_json_to_models_processor(mw)
+        self.rebuild_from_models()
+
+    def _phy_count(self) -> int:
+        if not torch.cuda.is_available():
+            return 0
+        try:
+            return max(0, int(torch.cuda.device_count()))
+        except Exception:
+            return 0
+
+    def _primary_physical(self, phy: int) -> int:
+        mp = self.main_window.models_processor
+        if phy <= 0:
+            return 0
+        return max(0, min(int(mp.gpu_index), phy - 1))
+
+    def rebuild_from_models(self) -> None:
+        while self._outer.count():
+            item = self._outer.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._boxes.clear()
+        self._emulated_logical = None
+
+        phy = self._phy_count()
+        prim = self._primary_physical(phy)
+        em_slot = phy if phy > 0 else None
+        self._emulated_logical = em_slot
+
+        raw = self.main_window.control.get("GpuRoutingTargetsJson", "[0]")
+        try:
+            enabled = [int(x) for x in json.loads(str(raw))]
+        except (json.JSONDecodeError, TypeError, ValueError):
+            enabled = [prim]
+        if prim not in enabled:
+            enabled.append(prim)
+        enabled_set = set(enabled)
+
+        if phy <= 0:
+            cb = QtWidgets.QCheckBox("GPU 0 (CUDA not available)")
+            cb.setChecked(True)
+            cb.setEnabled(False)
+            self._outer.addWidget(cb)
+            self._boxes[0] = cb
+            cpu_slot = 1
+            cb_c = QtWidgets.QCheckBox(
+                "CPU (ORT on CPU — logical device for routing; slower than CUDA)"
+            )
+            cb_c.blockSignals(True)
+            cb_c.setChecked(cpu_slot in enabled_set)
+            cb_c.setEnabled(self.main_window.models_processor.ui_multi_gpu_routing_enabled)
+            cb_c.blockSignals(False)
+            cb_c.toggled.connect(self._on_any_toggled)
+            self._outer.addWidget(cb_c)
+            self._boxes[cpu_slot] = cb_c
+            return
+
+        for i in range(phy):
+            try:
+                nm = torch.cuda.get_device_name(i)
+            except Exception:
+                nm = "Unknown"
+            cb = QtWidgets.QCheckBox(f"{i}: {nm}")
+            cb.blockSignals(True)
+            cb.setChecked(i in enabled_set or i == prim)
+            if i == prim:
+                cb.setChecked(True)
+                cb.setEnabled(False)
+            cb.blockSignals(False)
+            cb.toggled.connect(self._on_any_toggled)
+            self._outer.addWidget(cb)
+            self._boxes[i] = cb
+
+        if em_slot is not None:
+            cb_e = QtWidgets.QCheckBox(
+                "Emulated GPU (extra logical device, same hardware as primary)"
+            )
+            cb_e.blockSignals(True)
+            cb_e.setChecked(em_slot in enabled_set)
+            cb_e.setEnabled(self.main_window.models_processor.ui_multi_gpu_routing_enabled)
+            cb_e.blockSignals(False)
+            cb_e.toggled.connect(self._on_any_toggled)
+            self._outer.addWidget(cb_e)
+            self._boxes[em_slot] = cb_e
+
+        cpu_slot = (phy + 1) if phy > 0 else 1
+        cb_c = QtWidgets.QCheckBox(
+            "CPU (ORT on CPU — logical device for routing; slower than CUDA)"
+        )
+        cb_c.blockSignals(True)
+        cb_c.setChecked(cpu_slot in enabled_set)
+        cb_c.setEnabled(self.main_window.models_processor.ui_multi_gpu_routing_enabled)
+        cb_c.blockSignals(False)
+        cb_c.toggled.connect(self._on_any_toggled)
+        self._outer.addWidget(cb_c)
+        self._boxes[cpu_slot] = cb_c
+
+    def _on_any_toggled(self) -> None:
+        from app.ui.widgets.actions import gpu_settings_actions
+
+        phy = self._phy_count()
+        prim = self._primary_physical(phy)
+        selected: list[int] = []
+        for logical, cb in sorted(self._boxes.items()):
+            if cb.isChecked():
+                selected.append(logical)
+        if prim not in selected:
+            selected.append(prim)
+        selected = sorted(set(selected))
+        self.main_window.control["GpuRoutingTargetsJson"] = json.dumps(selected)
+        gpu_settings_actions.sync_routing_json_to_models_processor(self.main_window)
 
 
 class SelectionBox(QtWidgets.QComboBox, ParametersWidget):

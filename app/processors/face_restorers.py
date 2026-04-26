@@ -549,7 +549,7 @@ class FaceRestorers:
                         print("[RFP++Torch] Loading RestoreFormerPlusPlus model...")
                         m = (
                             RestoreFormerPlusPlusTorch.from_onnx(onnx_path)
-                            .to(self.models_processor.device)
+                            .to(self.models_processor.get_effective_torch_device())
                             .eval()
                         )
                         self._restoreformer_torch = m
@@ -602,7 +602,7 @@ class FaceRestorers:
                     )
                     self._codeformer_torch = (
                         CodeFormerTorch.from_onnx(onnx_path)
-                        .to(self.models_processor.device)
+                        .to(self.models_processor.get_effective_torch_device())
                         .eval()
                     )
                 except Exception as e:
@@ -696,7 +696,7 @@ class FaceRestorers:
 
         net_outs: list = []
         try:
-            if self.models_processor.device == "cuda":
+            if self.models_processor.uses_cuda_ep_for_thread():
                 torch.cuda.current_stream().synchronize()
             elif self.models_processor.device != "cpu":
                 self.models_processor.syncvec.cpu()
@@ -709,7 +709,7 @@ class FaceRestorers:
                 "yes",
                 "on",
             ):
-                if self.models_processor.device == "cuda":
+                if self.models_processor.uses_cuda_ep_for_thread():
                     torch.cuda.current_stream().synchronize()
                 elif self.models_processor.device != "cpu":
                     self.models_processor.syncvec.cpu()
@@ -825,7 +825,7 @@ class FaceRestorers:
             outpred = torch.empty(
                 (1, 3, 512, 512),
                 dtype=torch.float32,
-                device=self.models_processor.device,
+                device=self.models_processor.get_effective_torch_device(),
             ).contiguous()
             self.run_GFPGAN(temp, outpred)
 
@@ -833,7 +833,7 @@ class FaceRestorers:
             outpred = torch.empty(
                 (1, 3, 1024, 1024),
                 dtype=torch.float32,
-                device=self.models_processor.device,
+                device=self.models_processor.get_effective_torch_device(),
             ).contiguous()
             self.run_GFPGAN1024(temp, outpred)
 
@@ -841,7 +841,7 @@ class FaceRestorers:
             outpred = torch.empty(
                 (1, 3, 512, 512),
                 dtype=torch.float32,
-                device=self.models_processor.device,
+                device=self.models_processor.get_effective_torch_device(),
             ).contiguous()
             self.run_codeformer(temp, outpred, fidelity_weight)
 
@@ -849,7 +849,7 @@ class FaceRestorers:
             outpred = torch.empty(
                 (1, 3, 256, 256),
                 dtype=torch.float32,
-                device=self.models_processor.device,
+                device=self.models_processor.get_effective_torch_device(),
             ).contiguous()
             self.run_GPEN_256(temp, outpred)
 
@@ -857,7 +857,7 @@ class FaceRestorers:
             outpred = torch.empty(
                 (1, 3, 256, 256),
                 dtype=torch.float32,
-                device=self.models_processor.device,
+                device=self.models_processor.get_effective_torch_device(),
             ).contiguous()
             self.run_GPEN_256(
                 temp, outpred, model_name="GPENBFR256FP16", gpen_variant="fp16hf"
@@ -867,7 +867,7 @@ class FaceRestorers:
             outpred = torch.empty(
                 (1, 3, 256, 256),
                 dtype=torch.float32,
-                device=self.models_processor.device,
+                device=self.models_processor.get_effective_torch_device(),
             ).contiguous()
             self.run_GPEN_256(temp, outpred)
 
@@ -875,7 +875,7 @@ class FaceRestorers:
             outpred = torch.empty(
                 (1, 3, 256, 256),
                 dtype=torch.float32,
-                device=self.models_processor.device,
+                device=self.models_processor.get_effective_torch_device(),
             ).contiguous()
             self.run_GPEN_256(
                 temp, outpred, model_name="GPENBFR256FP16", gpen_variant="fp16hf"
@@ -885,7 +885,7 @@ class FaceRestorers:
             outpred = torch.empty(
                 (1, 3, 512, 512),
                 dtype=torch.float32,
-                device=self.models_processor.device,
+                device=self.models_processor.get_effective_torch_device(),
             ).contiguous()
             self.run_GPEN_512(temp, outpred)
 
@@ -894,7 +894,7 @@ class FaceRestorers:
             outpred = torch.empty(
                 (1, 3, 1024, 1024),
                 dtype=torch.float32,
-                device=self.models_processor.device,
+                device=self.models_processor.get_effective_torch_device(),
             ).contiguous()
             self.run_GPEN_1024(temp, outpred)
 
@@ -903,7 +903,7 @@ class FaceRestorers:
             outpred = torch.empty(
                 (1, 3, 2048, 2048),
                 dtype=torch.float32,
-                device=self.models_processor.device,
+                device=self.models_processor.get_effective_torch_device(),
             ).contiguous()
             self.run_GPEN_2048(temp, outpred)
 
@@ -911,7 +911,7 @@ class FaceRestorers:
             outpred = torch.empty(
                 (1, 3, 512, 512),
                 dtype=torch.float32,
-                device=self.models_processor.device,
+                device=self.models_processor.get_effective_torch_device(),
             ).contiguous()
             self.run_RestoreFormerPlusPlus(temp, outpred)
 
@@ -919,7 +919,7 @@ class FaceRestorers:
             outpred = torch.empty(
                 (1, 3, 512, 512),
                 dtype=torch.float32,
-                device=self.models_processor.device,
+                device=self.models_processor.get_effective_torch_device(),
             ).contiguous()
             self.run_RestoreFormer(temp, outpred)
 
@@ -927,7 +927,7 @@ class FaceRestorers:
             outpred = torch.empty(
                 (1, 3, 512, 512),
                 dtype=torch.float32,
-                device=self.models_processor.device,
+                device=self.models_processor.get_effective_torch_device(),
             ).contiguous()
             self.run_VQFR_v2(temp, outpred, fidelity_weight)
 
@@ -935,7 +935,7 @@ class FaceRestorers:
             outpred = torch.empty(
                 (1, 3, 512, 512),
                 dtype=torch.float32,
-                device=self.models_processor.device,
+                device=self.models_processor.get_effective_torch_device(),
             ).contiguous()
             if dmd_landmarks_68_crop is None or np.asarray(dmd_landmarks_68_crop).size < 136:
                 if "DMDNetLm" not in self._warned_models:
@@ -1033,16 +1033,16 @@ class FaceRestorers:
         io_binding = ort_session.io_binding()
         io_binding.bind_input(
             name=input_name,
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=tuple(image_input_tensor.shape),
             buffer_ptr=image_input_tensor.data_ptr(),
         )
         io_binding.bind_output(
             name=output_name,
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=tuple(output_latent_tensor.shape),
             buffer_ptr=output_latent_tensor.data_ptr(),
@@ -1085,16 +1085,16 @@ class FaceRestorers:
         io_binding = ort_session.io_binding()
         io_binding.bind_input(
             name=input_name,
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=tuple(latent_input_tensor.shape),
             buffer_ptr=latent_input_tensor.data_ptr(),
         )
         io_binding.bind_output(
             name=output_name,
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=tuple(output_image_tensor.shape),
             buffer_ptr=output_image_tensor.data_ptr(),
@@ -1130,8 +1130,8 @@ class FaceRestorers:
         onnx_output_name = "unet_output"
 
         io_binding = ort_session.io_binding()
-        bind_device_type = self.models_processor.device
-        bind_device_id = 0
+        bind_device_type = self.models_processor.get_ort_bind_device_type()
+        bind_device_id = self.models_processor.get_ort_bind_input_cuda_device_id()
 
         # Bind standard inputs
         io_binding.bind_input(
@@ -1254,16 +1254,16 @@ class FaceRestorers:
         io_binding = ort_session.io_binding()
         io_binding.bind_input(
             name="input",
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=(1, 3, 512, 512),
             buffer_ptr=image.data_ptr(),
         )
         io_binding.bind_output(
             name="output",
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=(1, 3, 512, 512),
             buffer_ptr=output.data_ptr(),
@@ -1282,16 +1282,16 @@ class FaceRestorers:
         io_binding = ort_session.io_binding()
         io_binding.bind_input(
             name="input",
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=(1, 3, 512, 512),
             buffer_ptr=image.data_ptr(),
         )
         io_binding.bind_output(
             name="output",
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=(1, 3, 1024, 1024),
             buffer_ptr=output.data_ptr(),
@@ -1326,16 +1326,16 @@ class FaceRestorers:
             ).contiguous()
             io_binding.bind_input(
                 name="input",
-                device_type=self.models_processor.device,
-                device_id=0,
+                device_type=self.models_processor.get_ort_bind_device_type(),
+                device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
                 element_type=np.float16,
                 shape=(1, 3, 256, 256),
                 buffer_ptr=img16.data_ptr(),
             )
             io_binding.bind_output(
                 name="output",
-                device_type=self.models_processor.device,
-                device_id=0,
+                device_type=self.models_processor.get_ort_bind_device_type(),
+                device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
                 element_type=np.float16,
                 shape=(1, 3, 256, 256),
                 buffer_ptr=out16.data_ptr(),
@@ -1346,16 +1346,16 @@ class FaceRestorers:
 
         io_binding.bind_input(
             name="input",
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=(1, 3, 256, 256),
             buffer_ptr=image.data_ptr(),
         )
         io_binding.bind_output(
             name="output",
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=(1, 3, 256, 256),
             buffer_ptr=output.data_ptr(),
@@ -1378,16 +1378,16 @@ class FaceRestorers:
         io_binding = ort_session.io_binding()
         io_binding.bind_input(
             name="input",
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=(1, 3, 512, 512),
             buffer_ptr=image.data_ptr(),
         )
         io_binding.bind_output(
             name="output",
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=(1, 3, 512, 512),
             buffer_ptr=output.data_ptr(),
@@ -1410,16 +1410,16 @@ class FaceRestorers:
         io_binding = ort_session.io_binding()
         io_binding.bind_input(
             name="input",
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=(1, 3, 1024, 1024),
             buffer_ptr=image.data_ptr(),
         )
         io_binding.bind_output(
             name="output",
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=(1, 3, 1024, 1024),
             buffer_ptr=output.data_ptr(),
@@ -1442,16 +1442,16 @@ class FaceRestorers:
         io_binding = ort_session.io_binding()
         io_binding.bind_input(
             name="input",
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=(1, 3, 2048, 2048),
             buffer_ptr=image.data_ptr(),
         )
         io_binding.bind_output(
             name="output",
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=(1, 3, 2048, 2048),
             buffer_ptr=output.data_ptr(),
@@ -1497,8 +1497,8 @@ class FaceRestorers:
         io_binding = ort_session.io_binding()
         io_binding.bind_input(
             name="x",
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=(1, 3, 512, 512),
             buffer_ptr=image.data_ptr(),
@@ -1507,8 +1507,8 @@ class FaceRestorers:
         io_binding.bind_cpu_input("w", w)
         io_binding.bind_output(
             name="y",
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=(1, 3, 512, 512),
             buffer_ptr=output.data_ptr(),
@@ -1529,33 +1529,33 @@ class FaceRestorers:
                 f"fidelity_ratio_value must be in [0,1], got {fidelity_ratio_value}"
             )
         fidelity_ratio = torch.tensor(fidelity_ratio_value, dtype=torch.float32).to(
-            self.models_processor.device
+            self.models_processor.get_effective_torch_device()
         )
 
         io_binding = ort_session.io_binding()
         io_binding.bind_input(
             name="x_lq",
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=image.size(),
             buffer_ptr=image.data_ptr(),
         )
         io_binding.bind_input(
             name="fidelity_ratio",
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=fidelity_ratio.size(),
             buffer_ptr=fidelity_ratio.data_ptr(),
         )
-        io_binding.bind_output("enc_feat", self.models_processor.device)
-        io_binding.bind_output("quant_logit", self.models_processor.device)
-        io_binding.bind_output("texture_dec", self.models_processor.device)
+        io_binding.bind_output("enc_feat", self.models_processor.get_ort_bind_device_type())
+        io_binding.bind_output("quant_logit", self.models_processor.get_ort_bind_device_type())
+        io_binding.bind_output("texture_dec", self.models_processor.get_ort_bind_device_type())
         io_binding.bind_output(
             name="main_dec",
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=(1, 3, 512, 512),
             buffer_ptr=output.data_ptr(),
@@ -1574,21 +1574,21 @@ class FaceRestorers:
         out16 = torch.empty(
             (1, 3, 512, 512),
             dtype=torch.float16,
-            device=self.models_processor.device,
+            device=self.models_processor.get_effective_torch_device(),
         ).contiguous()
         io_binding = ort_session.io_binding()
         io_binding.bind_input(
             name="input",
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float16,
             shape=tuple(x16.shape),
             buffer_ptr=x16.data_ptr(),
         )
         io_binding.bind_output(
             name="output",
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float16,
             shape=tuple(out16.shape),
             buffer_ptr=out16.data_ptr(),
@@ -1605,34 +1605,34 @@ class FaceRestorers:
         io_binding = ort_session.io_binding()
         io_binding.bind_input(
             name="input",
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=image.size(),
             buffer_ptr=image.data_ptr(),
         )
         io_binding.bind_output(
             name="2359",
-            device_type=self.models_processor.device,
-            device_id=0,
+            device_type=self.models_processor.get_ort_bind_device_type(),
+            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
             element_type=np.float32,
             shape=output.size(),
             buffer_ptr=output.data_ptr(),
         )
-        io_binding.bind_output("1228", self.models_processor.device)
-        io_binding.bind_output("1238", self.models_processor.device)
-        io_binding.bind_output("onnx::MatMul_1198", self.models_processor.device)
-        io_binding.bind_output("onnx::Shape_1184", self.models_processor.device)
-        io_binding.bind_output("onnx::ArgMin_1182", self.models_processor.device)
-        io_binding.bind_output("input.1", self.models_processor.device)
-        io_binding.bind_output("x", self.models_processor.device)
-        io_binding.bind_output("x.3", self.models_processor.device)
-        io_binding.bind_output("x.7", self.models_processor.device)
-        io_binding.bind_output("x.11", self.models_processor.device)
-        io_binding.bind_output("x.15", self.models_processor.device)
-        io_binding.bind_output("input.252", self.models_processor.device)
-        io_binding.bind_output("input.280", self.models_processor.device)
-        io_binding.bind_output("input.288", self.models_processor.device)
+        io_binding.bind_output("1228", self.models_processor.get_ort_bind_device_type())
+        io_binding.bind_output("1238", self.models_processor.get_ort_bind_device_type())
+        io_binding.bind_output("onnx::MatMul_1198", self.models_processor.get_ort_bind_device_type())
+        io_binding.bind_output("onnx::Shape_1184", self.models_processor.get_ort_bind_device_type())
+        io_binding.bind_output("onnx::ArgMin_1182", self.models_processor.get_ort_bind_device_type())
+        io_binding.bind_output("input.1", self.models_processor.get_ort_bind_device_type())
+        io_binding.bind_output("x", self.models_processor.get_ort_bind_device_type())
+        io_binding.bind_output("x.3", self.models_processor.get_ort_bind_device_type())
+        io_binding.bind_output("x.7", self.models_processor.get_ort_bind_device_type())
+        io_binding.bind_output("x.11", self.models_processor.get_ort_bind_device_type())
+        io_binding.bind_output("x.15", self.models_processor.get_ort_bind_device_type())
+        io_binding.bind_output("input.252", self.models_processor.get_ort_bind_device_type())
+        io_binding.bind_output("input.280", self.models_processor.get_ort_bind_device_type())
+        io_binding.bind_output("input.288", self.models_processor.get_ort_bind_device_type())
 
         # Run the model with lazy build handling
         self._run_model_with_lazy_build_check(model_name, ort_session, io_binding)

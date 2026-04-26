@@ -921,6 +921,8 @@ def run_parameter_layout_exec_functions(main_window: "MainWindow") -> None:
 
 def migrate_interpolation_control_keys(control: dict) -> None:
     """Map removed/renamed settings keys (workspace JSON compatibility)."""
+    from app.ui.widgets.actions import gpu_settings_actions
+
     fm = "FrameInterpolationMethodSelection"
     if str(control.get(fm, "")).strip() == "Linear (CPU)":
         control[fm] = "Linear (GPU)"
@@ -928,6 +930,7 @@ def migrate_interpolation_control_keys(control: dict) -> None:
     control.pop("PreviewSmoothDisplayDecoupledToggle", None)
     _migrate_preview_smooth_display_multiplier_keys(control)
     _migrate_unified_interpolation_steps_per_frame(control)
+    gpu_settings_actions.migrate_legacy_gpu_slider_key(control)
 
 
 def _migrate_unified_interpolation_steps_per_frame(control: dict) -> None:

@@ -540,7 +540,8 @@ def load_saved_workspace(
 
             common_widget_actions.migrate_interpolation_control_keys(main_window.control)
 
-            # Match provider before thumbnails / refresh_frame load the wrong stack
+            # Sync GPU index/provider before thumbnails / refresh_frame load the wrong stack
+            control_actions.apply_saved_gpu_index(main_window)
             control_actions.apply_saved_execution_provider(main_window)
 
             ws_preview = data.get("window_state_data") or {}
