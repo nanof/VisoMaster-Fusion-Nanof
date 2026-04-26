@@ -850,6 +850,13 @@ def load_saved_workspace(
 
             common_widget_actions.run_parameter_layout_exec_functions(main_window)
 
+            raw_section_states = data.get("parameter_section_states")
+            if isinstance(raw_section_states, dict):
+                section_states: dict[str, bool] = {
+                    str(sid): bool(val) for sid, val in raw_section_states.items()
+                }
+                main_window.apply_parameter_section_states(section_states)
+
             # Restore Window State
             window_state = data.get("window_state_data", {})
             needs_post_restore_frame_clamp = _apply_workspace_window_state(
@@ -1166,6 +1173,10 @@ def save_current_workspace(
         "current_widget_parameters": current_params_to_save,  # Use the safely prepared dict
         "tab_state": tab_state,  # Add the tab state to the saved data
         "window_state_data": window_state_data,
+        "parameter_section_states": {
+            sid: bool(expanded)
+            for sid, expanded in main_window.parameter_section_states.items()
+        },
     }
     if data_filename is False:
         data_filename, _ = QtWidgets.QFileDialog.getSaveFileName(

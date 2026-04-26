@@ -3328,11 +3328,12 @@ class SectionHeaderButton(QtWidgets.QPushButton):
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
 
         background_rect = self.rect().adjusted(0, 0, -1, -1)
-        background_color = self.palette().buttonText().color()
-        background_color.setAlpha(20 if self.underMouse() else 10)
-        painter.setPen(QtCore.Qt.PenStyle.NoPen)
-        painter.setBrush(background_color)
-        painter.drawRoundedRect(background_rect, 4, 4)
+        if self.underMouse():
+            background_color = self.palette().buttonText().color()
+            background_color.setAlpha(18)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(background_color)
+            painter.drawRoundedRect(background_rect, 4, 4)
 
         painter.setPen(QtCore.Qt.PenStyle.NoPen)
         painter.setBrush(self.palette().buttonText())
@@ -3366,21 +3367,67 @@ class SectionHeaderButton(QtWidgets.QPushButton):
 class CollapsibleSection(QtWidgets.QWidget):
     _expanded_layout_spacing = 2
     _collapsed_layout_spacing = 0
-    _expanded_bottom_margin = 2
-    _collapsed_bottom_margin = 2
+    _card_padding_lr = 8
+    _card_padding_top = 6
+    _card_padding_bottom_expanded = 8
+    _card_padding_bottom_collapsed = 6
+    _card_corner_radius = 8.0
+
+    @staticmethod
+    def _color_luma(c: QtGui.QColor) -> float:
+        return (
+            0.2126 * c.redF() + 0.7152 * c.greenF() + 0.0722 * c.blueF()
+        )
+
+    def _card_fill_and_border(self) -> tuple[QtGui.QColor, QtGui.QColor]:
+        """Fill + border that stay visible even when QSS paints flat black (OLED themes)."""
+        pal = self.palette()
+        window_c = QtGui.QColor(pal.color(QtGui.QPalette.ColorRole.Window))
+        base_c = QtGui.QColor(pal.color(QtGui.QPalette.ColorRole.Base))
+        fill = QtGui.QColor(base_c)
+        if abs(self._color_luma(fill) - self._color_luma(window_c)) < 0.035:
+            if self._color_luma(window_c) < 0.42:
+                fill = fill.lighter(120)
+            else:
+                fill = fill.darker(106)
+        if fill.red() + fill.green() + fill.blue() < 18:
+            fill = QtGui.QColor(22, 26, 30)
+        mid_c = QtGui.QColor(pal.color(QtGui.QPalette.ColorRole.Mid))
+        border = QtGui.QColor(mid_c)
+        if abs(self._color_luma(border) - self._color_luma(fill)) < 0.08:
+            ml = QtGui.QColor(pal.color(QtGui.QPalette.ColorRole.Midlight))
+            dk = QtGui.QColor(pal.color(QtGui.QPalette.ColorRole.Dark))
+            border = (
+                ml
+                if abs(self._color_luma(ml) - self._color_luma(fill))
+                > abs(self._color_luma(dk) - self._color_luma(fill))
+                else dk
+            )
+        if abs(self._color_luma(border) - self._color_luma(fill)) < 0.05:
+            if self._color_luma(fill) < 0.45:
+                border = QtGui.QColor(72, 84, 96)
+            else:
+                border = QtGui.QColor(140, 150, 160)
+        # Partial / platform palettes can leave Midlight/Dark at extremes (e.g. near white).
+        if self._color_luma(fill) < 0.35 and self._color_luma(border) > 0.65:
+            border = QtGui.QColor(72, 84, 96)
+        return fill, border
 
     def __init__(
         self,
         main_window: "MainWindow",
         title: str,
         section_id: str,
-        expanded: bool = True,
+        expanded: bool = False,
         parent=None,
     ):
         super().__init__(parent)
         self.main_window = main_window
         self.section_id = section_id
         self._expanded = expanded
+
+        safe_obj = "".join(c if c.isalnum() else "_" for c in section_id)
+        self.setObjectName(f"CollapsibleSection_{safe_obj}")
 
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
@@ -3406,11 +3453,49 @@ class CollapsibleSection(QtWidgets.QWidget):
         self.indicator_animation.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
 
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, self._expanded_bottom_margin)
         layout.setSpacing(self._expanded_layout_spacing)
         layout.addWidget(self.header_button)
         layout.addWidget(self.content_widget)
         self._apply_layout_mode(expanded)
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        painter.setClipRegion(event.region())
+        fill, border = self._card_fill_and_border()
+        rect = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        r = self._card_corner_radius
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(rect, r, r)
+        painter.fillPath(path, fill)
+        pen = QtGui.QPen(border)
+        pen.setWidthF(1.0)
+        pen.setJoinStyle(QtCore.Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+        painter.end()
+
+    def changeEvent(self, event: QtCore.QEvent) -> None:
+        if event.type() in (
+            QtCore.QEvent.Type.PaletteChange,
+            QtCore.QEvent.Type.ApplicationPaletteChange,
+        ):
+            self.update()
+        super().changeEvent(event)
+
+    def _card_contents_margins(self, expanded: bool) -> QtCore.QMargins:
+        b = (
+            self._card_padding_bottom_expanded
+            if expanded
+            else self._card_padding_bottom_collapsed
+        )
+        return QtCore.QMargins(
+            self._card_padding_lr,
+            self._card_padding_top,
+            self._card_padding_lr,
+            b,
+        )
 
     def content_layout(self) -> QtWidgets.QVBoxLayout:
         existing_layout = self.content_widget.layout()
@@ -3434,13 +3519,13 @@ class CollapsibleSection(QtWidgets.QWidget):
     def _apply_layout_mode(self, expanded: bool) -> None:
         layout = self.layout()
         if expanded:
-            layout.setContentsMargins(0, 0, 0, self._expanded_bottom_margin)
+            layout.setContentsMargins(self._card_contents_margins(True))
             layout.setSpacing(self._expanded_layout_spacing)
             self.content_widget.setVisible(True)
             self.content_widget.setMinimumHeight(0)
             self.content_widget.setMaximumHeight(16777215)
         else:
-            layout.setContentsMargins(0, 0, 0, self._collapsed_bottom_margin)
+            layout.setContentsMargins(self._card_contents_margins(False))
             layout.setSpacing(self._collapsed_layout_spacing)
             self.content_widget.setVisible(False)
             self.content_widget.setMinimumHeight(0)

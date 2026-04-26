@@ -827,7 +827,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         section_widget: widget_components.CollapsibleSection,
     ):
         self.parameter_sections[section_id] = section_widget
-        expanded = self.parameter_section_states.get(section_id, True)
+        expanded = self.parameter_section_states.get(section_id, False)
         self.parameter_section_states[section_id] = expanded
         section_widget.set_expanded(expanded, animate=False, update_state=False)
 
@@ -836,15 +836,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
     ):
         if section_states is None:
             for section_id, section_widget in self.parameter_sections.items():
-                self.parameter_section_states[section_id] = True
-                section_widget.set_expanded(True, animate=False, update_state=False)
+                self.parameter_section_states[section_id] = False
+                section_widget.set_expanded(False, animate=False, update_state=False)
             return
 
         for section_id, expanded in section_states.items():
             self.parameter_section_states[section_id] = bool(expanded)
 
         for section_id, section_widget in self.parameter_sections.items():
-            expanded = bool(section_states.get(section_id, True))
+            expanded = bool(section_states.get(section_id, False))
             self.parameter_section_states[section_id] = expanded
             section_widget.set_expanded(expanded, animate=False, update_state=False)
 

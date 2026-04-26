@@ -27,7 +27,8 @@ def add_widgets_to_tab_layout(
     section_namespace: str = "default",
 ):
     layout = QtWidgets.QVBoxLayout()
-    layout.setContentsMargins(0, 0, 10, 0)
+    layout.setContentsMargins(6, 4, 10, 4)
+    layout.setSpacing(8)
     scroll_area = QtWidgets.QScrollArea()
     scroll_area.setWidgetResizable(True)
     scroll_area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -83,7 +84,7 @@ def add_widgets_to_tab_layout(
             main_window,
             title=display_title,
             section_id=section_id,
-            expanded=main_window.parameter_section_states.get(section_id, True),
+            expanded=main_window.parameter_section_states.get(section_id, False),
         )
         category_layout = QtWidgets.QFormLayout()
         group_box.content_widget.setLayout(category_layout)
