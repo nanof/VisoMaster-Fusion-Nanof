@@ -93,6 +93,108 @@ def on_multi_gpu_routing_toggle(main_window: MainWindow, enabled: bool) -> None:
     picker = main_window.parameter_widgets.get("GpuRoutingTargetsPicker")
     if picker is not None and hasattr(picker, "rebuild_from_models"):
         picker.rebuild_from_models()
+    # When the set of routing targets changes, weight / thread editors must
+    # refresh their row list; the GpuLiveMetricsPanel refreshes itself via
+    # the GpuLoadMetrics signal once processing starts.
+    for key in ("GpuWeightsEditor", "GpuThreadsPerGpuEditor"):
+        w = main_window.parameter_widgets.get(key)
+        if w is not None and hasattr(w, "rebuild_from_models"):
+            w.rebuild_from_models()
+    _sync_scheduler_config(main_window)
+
+
+# ---------------------------------------------------------------------------
+# Load-balancing mode / weights / threads-per-gpu plumbing
+# ---------------------------------------------------------------------------
+
+
+_MODE_LABEL_TO_KEY = {
+    "Round-Robin": "round_robin",
+    "Weighted Manual": "weighted_manual",
+    "Weighted Auto": "weighted_auto",
+    "Hybrid": "hybrid",
+}
+
+
+def _normalize_mode_label(label: object) -> str:
+    s = str(label or "").strip()
+    if s in _MODE_LABEL_TO_KEY:
+        return _MODE_LABEL_TO_KEY[s]
+    from app.processors.gpu_scheduler import normalize_mode
+
+    return normalize_mode(s)
+
+
+def _parse_int_dict(raw: object) -> dict[int, int]:
+    try:
+        data = raw if isinstance(raw, dict) else json.loads(str(raw))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[int, int] = {}
+    for k, v in data.items():
+        try:
+            out[int(k)] = int(v)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _sync_scheduler_config(main_window: MainWindow) -> None:
+    """Push mode / weights / threads into ModelsProcessor and VideoProcessor.
+
+    Also re-seeds the live ``WeightedScheduler`` so that changes take effect
+    immediately without having to stop and restart processing (except for the
+    worker pool size, which is bound to the pool lifetime — that still needs
+    a new run to apply).
+    """
+    mp = main_window.models_processor
+    mp.load_balancing_mode = _normalize_mode_label(
+        main_window.control.get("GpuLoadBalancingModeSelection", "Round-Robin")
+    )
+    mp.gpu_weights = _parse_int_dict(
+        main_window.control.get("GpuWeightsJson", "{}")
+    )
+    mp.threads_per_gpu = _parse_int_dict(
+        main_window.control.get("GpuThreadsPerGpuJson", "{}")
+    )
+    try:
+        mp.gpu_auto_reweight_every_n_frames = int(
+            main_window.control.get("GpuAutoWeightsReweightEveryNFramesSlider", 0)
+        )
+    except (TypeError, ValueError):
+        mp.gpu_auto_reweight_every_n_frames = 0
+    mp.gpu_auto_benchmark_on_start = bool(
+        main_window.control.get("GpuAutoBenchmarkOnStartToggle", False)
+    )
+    vp = getattr(main_window, "video_processor", None)
+    if vp is None:
+        return
+    try:
+        targets = list(mp.get_ui_routing_targets_sorted())
+        weights = mp.resolve_effective_weights()
+        vp.scheduler.set_targets(targets, weights)
+    except Exception:
+        pass
+
+
+def on_gpu_weights_changed(main_window: MainWindow, data: dict[int, int]) -> None:
+    main_window.control["GpuWeightsJson"] = json.dumps(
+        {int(k): int(v) for k, v in dict(data or {}).items()}
+    )
+    _sync_scheduler_config(main_window)
+
+
+def on_threads_per_gpu_changed(main_window: MainWindow, data: dict[int, int]) -> None:
+    main_window.control["GpuThreadsPerGpuJson"] = json.dumps(
+        {int(k): int(v) for k, v in dict(data or {}).items()}
+    )
+    _sync_scheduler_config(main_window)
+
+
+def on_load_balancing_mode_changed(main_window: MainWindow, *_args) -> None:
+    _sync_scheduler_config(main_window)
 
 
 def _parse_routing_json(raw: object) -> list[int]:
@@ -148,6 +250,7 @@ def apply_saved_gpu_settings(main_window: MainWindow) -> None:
     main_window.models_processor.ui_multi_gpu_routing_enabled = multi
 
     sync_routing_json_to_models_processor(main_window)
+    _sync_scheduler_config(main_window)
 
     combo = main_window.parameter_widgets.get("GpuPrimaryDeviceSelection")
     if combo is not None:
@@ -166,6 +269,13 @@ def apply_saved_gpu_settings(main_window: MainWindow) -> None:
         picker.blockSignals(True)
         picker.rebuild_from_models()
         picker.blockSignals(False)
+
+    for key in ("GpuWeightsEditor", "GpuThreadsPerGpuEditor"):
+        w = main_window.parameter_widgets.get(key)
+        if w is not None and hasattr(w, "rebuild_from_models"):
+            w.blockSignals(True)
+            w.rebuild_from_models()
+            w.blockSignals(False)
 
     main_window.models_processor.set_gpu_index(pri)
 
@@ -191,6 +301,20 @@ def finalize_gpu_widgets_after_settings_layout(main_window: MainWindow) -> None:
         main_window.control["GpuRoutingTargetsJson"] = json.dumps([0])
     if "MultiGpuRoutingEnableToggle" not in main_window.control:
         main_window.control["MultiGpuRoutingEnableToggle"] = False
+    if "MultiGpuAdvancedToggle" not in main_window.control:
+        main_window.control["MultiGpuAdvancedToggle"] = False
+    if "GpuLoadBalancingModeSelection" not in main_window.control:
+        main_window.control["GpuLoadBalancingModeSelection"] = "Round-Robin"
+    if "GpuWeightsJson" not in main_window.control:
+        main_window.control["GpuWeightsJson"] = "{}"
+    if "GpuThreadsPerGpuJson" not in main_window.control:
+        main_window.control["GpuThreadsPerGpuJson"] = "{}"
+    if "GpuAutoBenchmarkOnStartToggle" not in main_window.control:
+        main_window.control["GpuAutoBenchmarkOnStartToggle"] = False
+    if "GpuAutoWeightsReweightEveryNFramesSlider" not in main_window.control:
+        main_window.control["GpuAutoWeightsReweightEveryNFramesSlider"] = 600
+    if "GpuLiveMetricsOverlayToggle" not in main_window.control:
+        main_window.control["GpuLiveMetricsOverlayToggle"] = False
 
     combo = main_window.parameter_widgets.get("GpuPrimaryDeviceSelection")
     if combo is not None:

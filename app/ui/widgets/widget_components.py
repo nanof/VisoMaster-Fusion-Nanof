@@ -2306,6 +2306,268 @@ class GpuRoutingTargetsPicker(QtWidgets.QWidget, ParametersWidget):
         gpu_settings_actions.sync_routing_json_to_models_processor(self.main_window)
 
 
+class _PerGpuSpinTable(QtWidgets.QWidget, ParametersWidget):
+    """Base helper: one labelled QSpinBox per active routing GPU.
+
+    Concrete subclasses wire up ``control_key``, ``default_value``, min/max
+    bounds and the action called on every change. Rebuilds itself from the
+    current ``GpuRoutingTargetsJson`` and the ``ModelsProcessor`` device
+    inventory, so toggling/changing the routing picker updates this widget's
+    row set without manual refreshes.
+    """
+
+    control_key: str = ""
+    default_value: int = 1
+    min_value: int = 0
+    max_value: int = 64
+    row_suffix: str = ""
+
+    def __init__(
+        self,
+        *,
+        label_widget: QtWidgets.QLabel,
+        widget_name: str,
+        group_layout_data: Dict[str, Dict[str, Any]],
+        main_window: "MainWindow",
+    ):
+        QtWidgets.QWidget.__init__(self)
+        ParametersWidget.__init__(
+            self,
+            label_widget=label_widget,
+            widget_name=widget_name,
+            group_layout_data=group_layout_data,
+            main_window=main_window,
+        )
+        self.enable_refresh_frame = False
+        self._outer = QtWidgets.QVBoxLayout(self)
+        self._outer.setContentsMargins(0, 0, 0, 0)
+        self._spins: Dict[int, QtWidgets.QSpinBox] = {}
+
+    def reset_to_default_value(self) -> None:
+        self.main_window.control[self.control_key] = "{}"
+        self._on_changed()
+        self.rebuild_from_models()
+
+    def _active_targets(self) -> list[int]:
+        mp = self.main_window.models_processor
+        try:
+            return [int(x) for x in mp.get_ui_routing_targets_sorted()]
+        except Exception:
+            return [0]
+
+    def _label_for(self, logical: int) -> str:
+        mp = self.main_window.models_processor
+        phy = 0
+        if torch.cuda.is_available():
+            try:
+                phy = max(0, int(torch.cuda.device_count()))
+            except Exception:
+                phy = 0
+        if phy <= 0:
+            if logical == 0:
+                return "GPU 0"
+            return f"Logical {logical}"
+        if 0 <= logical < phy:
+            try:
+                name = torch.cuda.get_device_name(logical)
+            except Exception:
+                name = "CUDA"
+            return f"{logical}: {name}"
+        if logical == phy:
+            return "Emulated GPU"
+        if logical == phy + 1:
+            return "CPU (ORT)"
+        return f"Logical {logical}"
+
+    def _load_stored(self) -> Dict[int, int]:
+        raw = self.main_window.control.get(self.control_key, "{}")
+        try:
+            data = json.loads(str(raw))
+            if not isinstance(data, dict):
+                return {}
+            out: Dict[int, int] = {}
+            for k, v in data.items():
+                try:
+                    out[int(k)] = int(v)
+                except (TypeError, ValueError):
+                    continue
+            return out
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return {}
+
+    def rebuild_from_models(self) -> None:
+        while self._outer.count():
+            item = self._outer.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._spins.clear()
+
+        stored = self._load_stored()
+        for logical in self._active_targets():
+            row = QtWidgets.QWidget()
+            h = QtWidgets.QHBoxLayout(row)
+            h.setContentsMargins(0, 0, 0, 0)
+            lbl = QtWidgets.QLabel(self._label_for(logical))
+            spin = QtWidgets.QSpinBox()
+            spin.setMinimum(self.min_value)
+            spin.setMaximum(self.max_value)
+            spin.setValue(int(stored.get(int(logical), self.default_value)))
+            if self.row_suffix:
+                spin.setSuffix(self.row_suffix)
+            spin.valueChanged.connect(self._on_changed)
+            h.addWidget(lbl, 1)
+            h.addWidget(spin, 0)
+            self._outer.addWidget(row)
+            self._spins[int(logical)] = spin
+
+    def _on_changed(self, *_args) -> None:
+        data = {int(gid): int(sp.value()) for gid, sp in self._spins.items()}
+        self.main_window.control[self.control_key] = json.dumps(data)
+        self._apply_to_models_processor(data)
+
+    def _apply_to_models_processor(self, data: Dict[int, int]) -> None:
+        raise NotImplementedError
+
+
+class GpuWeightsEditor(_PerGpuSpinTable):
+    """Per-GPU integer weights (DRR). Ignored in Round-Robin mode."""
+
+    control_key = "GpuWeightsJson"
+    default_value = 1
+    min_value = 1
+    max_value = 16
+
+    def _apply_to_models_processor(self, data: Dict[int, int]) -> None:
+        from app.ui.widgets.actions import gpu_settings_actions
+
+        gpu_settings_actions.on_gpu_weights_changed(self.main_window, data)
+
+
+class GpuThreadsPerGpuEditor(_PerGpuSpinTable):
+    """Optional hard override for FrameWorker count per GPU (0 = auto)."""
+
+    control_key = "GpuThreadsPerGpuJson"
+    default_value = 0
+    min_value = 0
+    max_value = 32
+
+    def _apply_to_models_processor(self, data: Dict[int, int]) -> None:
+        from app.ui.widgets.actions import gpu_settings_actions
+
+        gpu_settings_actions.on_threads_per_gpu_changed(self.main_window, data)
+
+
+class GpuLiveMetricsPanel(QtWidgets.QWidget, ParametersWidget):
+    """Small read-only panel that reflects ``gpu_load_metrics_signal``.
+
+    The panel is fed by ``VideoProcessor.gpu_load_metrics_signal`` which emits
+    a ``dict[int, dict[str, float]]`` every ~500 ms. The layout rebuilds
+    itself when the set of GPUs changes (e.g. toggling routing targets), so
+    the same widget covers the single-GPU / multi-GPU / CPU-slot cases
+    without special casing.
+    """
+
+    def __init__(
+        self,
+        *,
+        label_widget: QtWidgets.QLabel,
+        widget_name: str,
+        group_layout_data: Dict[str, Dict[str, Any]],
+        main_window: "MainWindow",
+    ):
+        QtWidgets.QWidget.__init__(self)
+        ParametersWidget.__init__(
+            self,
+            label_widget=label_widget,
+            widget_name=widget_name,
+            group_layout_data=group_layout_data,
+            main_window=main_window,
+        )
+        self.enable_refresh_frame = False
+        self._outer = QtWidgets.QVBoxLayout(self)
+        self._outer.setContentsMargins(0, 0, 0, 0)
+        self._rows: Dict[int, Dict[str, QtWidgets.QLabel]] = {}
+        self._hint = QtWidgets.QLabel("No data yet — start playback or recording.")
+        self._hint.setWordWrap(True)
+        self._outer.addWidget(self._hint)
+        self._connected = False
+        self._connect_video_processor()
+
+    def reset_to_default_value(self) -> None:
+        self._clear_rows()
+        self._rebuild_hint("No data yet — start playback or recording.")
+
+    def _connect_video_processor(self) -> None:
+        if self._connected:
+            return
+        vp = getattr(self.main_window, "video_processor", None)
+        if vp is None:
+            return
+        try:
+            vp.gpu_load_metrics_signal.connect(self._on_metrics)
+            self._connected = True
+        except Exception:
+            pass
+
+    def _clear_rows(self) -> None:
+        while self._outer.count():
+            item = self._outer.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._rows.clear()
+        self._hint = QtWidgets.QLabel("")
+        self._outer.addWidget(self._hint)
+
+    def _rebuild_hint(self, text: str) -> None:
+        if self._hint is not None:
+            self._hint.setText(text)
+
+    def _ensure_row(self, gpu_id: int) -> Dict[str, QtWidgets.QLabel]:
+        if gpu_id in self._rows:
+            return self._rows[gpu_id]
+        row = QtWidgets.QWidget()
+        h = QtWidgets.QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        title = QtWidgets.QLabel(f"GPU {gpu_id}")
+        title.setMinimumWidth(80)
+        fps = QtWidgets.QLabel("fps: —")
+        avg = QtWidgets.QLabel("ms: —")
+        qz = QtWidgets.QLabel("queue: —")
+        for w in (title, fps, avg, qz):
+            h.addWidget(w, 1)
+        self._outer.addWidget(row)
+        self._rows[gpu_id] = {"title": title, "fps": fps, "ms": avg, "q": qz, "row": row}
+        return self._rows[gpu_id]
+
+    def _on_metrics(self, snap: Any) -> None:
+        if not isinstance(snap, dict) or not snap:
+            return
+        self._rebuild_hint("")
+        known = set(self._rows.keys())
+        for gpu_id, stats in snap.items():
+            if not isinstance(stats, dict):
+                continue
+            gid = int(gpu_id)
+            row = self._ensure_row(gid)
+            fps = float(stats.get("fps", 0.0) or 0.0)
+            ms = float(stats.get("ema_ms", stats.get("avg_ms", 0.0)) or 0.0)
+            qsize = float(stats.get("qsize", 0.0) or 0.0)
+            qmax = float(stats.get("qmax", 0.0) or 0.0)
+            row["fps"].setText(f"fps: {fps:.1f}")
+            row["ms"].setText(f"ms: {ms:.1f}")
+            if qmax > 0:
+                row["q"].setText(f"queue: {int(qsize)}/{int(qmax)}")
+            else:
+                row["q"].setText(f"queue: {int(qsize)}")
+        stale = known.difference(int(g) for g in snap.keys())
+        for gid in list(stale):
+            row = self._rows.pop(int(gid), None)
+            if row is not None and "row" in row:
+                row["row"].deleteLater()
+
+
 class SelectionBox(QtWidgets.QComboBox, ParametersWidget):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

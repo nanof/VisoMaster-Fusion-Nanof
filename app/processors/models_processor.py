@@ -301,6 +301,19 @@ class ModelsProcessor(QtCore.QObject):
         )
         self.ui_multi_gpu_routing_enabled = False
         self.ui_routing_targets: list[int] = [0]
+        # --- Proportional multi-GPU scheduling (advanced panel) ---
+        # Mode drives how per-frame routing picks a target and whether workers
+        # can steal frames from busy peers. Default keeps the historical
+        # round-robin behaviour so no weights are needed.
+        self.load_balancing_mode: str = "round_robin"
+        # Integer per-logical-GPU weights (DRR). Default {} -> all 1.
+        self.gpu_weights: Dict[int, int] = {}
+        # Optional override for worker count per logical GPU; empty means the
+        # VideoProcessor auto-distributes ``nThreadsSlider`` by weight.
+        self.threads_per_gpu: Dict[int, int] = {}
+        # Auto-calibration knobs (Weighted Auto / Hybrid modes).
+        self.gpu_auto_benchmark_on_start: bool = False
+        self.gpu_auto_reweight_every_n_frames: int = 0
         self.device = device
         self.model_lock = threading.RLock()  # Reentrant lock for model access
 
@@ -1444,6 +1457,70 @@ class ModelsProcessor(QtCore.QObject):
         if self.emulate_multi_gpu:
             return max(1, int(self.emulated_gpu_count))
         return max(1, phy) if phy > 0 else 1
+
+    def resolve_effective_weights(self) -> Dict[int, int]:
+        """Integer weights keyed by every active routing target.
+
+        Every target receives at least weight=1 so the DRR scheduler never
+        starves a GPU. ``round_robin`` mode forces all weights to 1 no matter
+        what the UI has stored, so changing to and from weighted modes is a
+        pure toggle with no stale data.
+        """
+        from app.processors.gpu_scheduler import normalize_mode
+
+        targets = self.get_ui_routing_targets_sorted()
+        mode = normalize_mode(getattr(self, "load_balancing_mode", "round_robin"))
+        if mode == "round_robin" or not targets:
+            return {int(t): 1 for t in targets}
+        raw = getattr(self, "gpu_weights", None) or {}
+        out: Dict[int, int] = {}
+        for t in targets:
+            v = 1
+            try:
+                v = int(raw.get(int(t), raw.get(t, 1)))
+            except (TypeError, ValueError):
+                v = 1
+            out[int(t)] = max(1, min(1024, v))
+        return out
+
+    def resolve_threads_per_gpu(self, total_threads: int) -> Dict[int, int]:
+        """Distribute ``total_threads`` across active routing targets.
+
+        Honors a non-empty ``threads_per_gpu`` override from the UI (values
+        are clamped to ``>= 1``). Falls back to a weight-proportional split
+        (largest-remainder) with a minimum of 1 thread per GPU so every
+        logical device has its own worker.
+        """
+        from app.processors.gpu_scheduler import distribute_threads_by_weights
+
+        targets = self.get_ui_routing_targets_sorted()
+        if not targets:
+            return {}
+        override = getattr(self, "threads_per_gpu", None) or {}
+        if override:
+            out: Dict[int, int] = {}
+            claimed = 0
+            for t in targets:
+                try:
+                    v = int(override.get(int(t), override.get(t, 0)))
+                except (TypeError, ValueError):
+                    v = 0
+                if v > 0:
+                    out[int(t)] = max(1, min(64, v))
+                    claimed += out[int(t)]
+            missing = [t for t in targets if int(t) not in out]
+            if missing:
+                remaining = max(len(missing), int(total_threads) - claimed)
+                weights = self.resolve_effective_weights()
+                filled = distribute_threads_by_weights(
+                    remaining,
+                    {t: weights.get(int(t), 1) for t in missing},
+                    missing,
+                )
+                out.update(filled)
+            return out
+        weights = self.resolve_effective_weights()
+        return distribute_threads_by_weights(int(total_threads), weights, targets)
 
     def clamp_gpu_index(self, requested_index: int) -> int:
         count = self.get_configured_gpu_count()

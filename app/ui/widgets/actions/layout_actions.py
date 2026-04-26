@@ -289,6 +289,45 @@ def add_widgets_to_tab_layout(
                     )
                 widget.rebuild_from_models()
 
+            elif widget_name in ("GpuWeightsEditor", "GpuThreadsPerGpuEditor"):
+                editor_cls = getattr(widget_components, widget_name)
+                widget = editor_cls(
+                    label_widget=label,
+                    widget_name=widget_name,
+                    group_layout_data=widgets,
+                    main_window=main_window,
+                )
+                widget.reset_default_button = (
+                    widget_components.ParameterResetDefaultButton(
+                        related_widget=widget  # type: ignore[arg-type]
+                    )
+                )
+                row_widget, horizontal_layout = add_horizontal_layout_to_category(
+                    category_layout, label, widget, widget.reset_default_button
+                )
+                ctrl_key = editor_cls.control_key
+                if ctrl_key not in main_window.control:
+                    common_widget_actions.create_control(
+                        main_window, ctrl_key, "{}"
+                    )
+                widget.rebuild_from_models()
+
+            elif widget_name == "GpuLiveMetricsPanel":
+                widget = widget_components.GpuLiveMetricsPanel(
+                    label_widget=label,
+                    widget_name=widget_name,
+                    group_layout_data=widgets,
+                    main_window=main_window,
+                )
+                widget.reset_default_button = (
+                    widget_components.ParameterResetDefaultButton(
+                        related_widget=widget  # type: ignore[arg-type]
+                    )
+                )
+                row_widget, horizontal_layout = add_horizontal_layout_to_category(
+                    category_layout, label, widget, widget.reset_default_button
+                )
+
             elif "Selection" in widget_name:
                 options = widget_data["options"]
                 default = widget_data["default"]

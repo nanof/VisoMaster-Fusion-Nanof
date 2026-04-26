@@ -482,6 +482,73 @@ class FrameWorker(threading.Thread):
             x = x.cpu()
         return np.ascontiguousarray(x.numpy())
 
+    def _fetch_task_with_stealing(self):
+        """Return ``(task, source_queue, stolen)`` respecting GPU affinity.
+
+        Behavior:
+        - Worker without affinity (``assigned_gpu_index is None``) or when
+          multi-GPU routing is off: plain ``self.frame_queue.get(timeout=1.0)``
+          on the legacy shared queue.
+        - Worker with affinity and the VideoProcessor in "hybrid" mode: try a
+          short blocking get on our own subqueue; if empty, peek at every
+          peer subqueue ordered by ``qsize`` (descending) and try
+          ``get_nowait()``; if none had work, block again on the own queue.
+          A stolen task is returned with ``stolen=True`` so the run loop
+          knows to keep **our** ``assigned_gpu_index`` instead of the one
+          encoded in the task.
+        - Any other weighted mode (manual / auto without hybrid): strict
+          affinity, no stealing — keeps load exactly at the configured
+          weights.
+        """
+        vp = getattr(self.main_window, "video_processor", None)
+        queues = None
+        stealing = False
+        if vp is not None and getattr(vp, "_queue_affinity_enabled", False):
+            queues = getattr(vp, "frame_queues_by_gpu", None)
+            mode = vp.main_window.models_processor.load_balancing_mode
+            try:
+                from app.processors.gpu_scheduler import mode_enables_stealing as _mes
+                stealing = bool(_mes(mode)) and self.assigned_gpu_index is not None
+            except Exception:
+                stealing = False
+        own_q = (
+            queues.get(int(self.assigned_gpu_index))
+            if (queues and self.assigned_gpu_index is not None)
+            else self.frame_queue
+        )
+        if own_q is None:
+            own_q = self.frame_queue
+        if not stealing or queues is None or len(queues) < 2:
+            task = own_q.get(timeout=1.0)
+            return task, own_q, False
+        try:
+            task = own_q.get(timeout=0.05)
+            return task, own_q, False
+        except queue.Empty:
+            pass
+        # Peer scan, ordered by qsize descending — steal from the busiest.
+        peers = [
+            (int(gid), q)
+            for gid, q in queues.items()
+            if int(gid) != int(self.assigned_gpu_index)
+        ]
+        peers.sort(key=lambda gq: gq[1].qsize(), reverse=True)
+        for _gid, peer_q in peers:
+            try:
+                task = peer_q.get_nowait()
+                if task is None:
+                    # Don't swallow a sibling's poison pill — put it back.
+                    try:
+                        peer_q.put_nowait(None)
+                    except queue.Full:
+                        pass
+                    continue
+                return task, peer_q, True
+            except queue.Empty:
+                continue
+        task = own_q.get(timeout=0.2)
+        return task, own_q, False
+
     def run(self):
         """
         Main thread execution loop.
@@ -492,10 +559,10 @@ class FrameWorker(threading.Thread):
             # --- Pool Worker Mode ---
             while not self.stop_event.is_set():
                 task = None  # Ensure task is defined for 'finally'
+                task_queue = self.frame_queue
+                stolen = False
                 try:
-                    # Block until a task is available or a poison pill is received
-                    # Use a timeout to periodically check the stop_event
-                    task = self.frame_queue.get(timeout=1.0)
+                    task, task_queue, stolen = self._fetch_task_with_stealing()
 
                     if task is None:
                         # Poison pill received: Exit the loop
@@ -520,9 +587,10 @@ class FrameWorker(threading.Thread):
                             self._feeder_chw_tensor,
                             self.precomputed_track_ids,
                         ) = task[:11]
-                        self.assigned_gpu_index = (
-                            task[11] if len(task) >= 12 else self.assigned_gpu_index
-                        )
+                        if not stolen:
+                            self.assigned_gpu_index = (
+                                task[11] if len(task) >= 12 else self.assigned_gpu_index
+                            )
                     elif len(task) >= 10:
                         (
                             self.frame_number,
@@ -537,9 +605,10 @@ class FrameWorker(threading.Thread):
                             self.precomputed_track_ids,
                         ) = task[:10]
                         self.precomputed_kpss_203 = None
-                        self.assigned_gpu_index = (
-                            task[10] if len(task) >= 11 else self.assigned_gpu_index
-                        )
+                        if not stolen:
+                            self.assigned_gpu_index = (
+                                task[10] if len(task) >= 11 else self.assigned_gpu_index
+                            )
                     elif len(task) >= 9:
                         (
                             self.frame_number,
@@ -554,9 +623,10 @@ class FrameWorker(threading.Thread):
                         ) = task[:9]
                         self.precomputed_kpss_203 = None
                         self.precomputed_track_ids = None
-                        self.assigned_gpu_index = (
-                            task[9] if len(task) >= 10 else self.assigned_gpu_index
-                        )
+                        if not stolen:
+                            self.assigned_gpu_index = (
+                                task[9] if len(task) >= 10 else self.assigned_gpu_index
+                            )
                     else:
                         (
                             self.frame_number,
@@ -581,8 +651,30 @@ class FrameWorker(threading.Thread):
                     self.parameters = local_params_from_feeder
                     self.local_control_state_from_feeder = local_control_from_feeder
 
+                    if stolen:
+                        print(
+                            "[MULTI-GPU] "
+                            f"frame={self.frame_number} worker={self.name} "
+                            f"stolen_by_gpu={self.assigned_gpu_index} (hybrid steal)",
+                            flush=True,
+                        )
+
                     # Process the frame
+                    _t_frame0 = time.perf_counter()
                     self.process_and_emit_task()
+                    _elapsed_ms_frame = (time.perf_counter() - _t_frame0) * 1000.0
+                    try:
+                        vp_metrics = getattr(self.main_window, "video_processor", None)
+                        if (
+                            vp_metrics is not None
+                            and self.assigned_gpu_index is not None
+                            and hasattr(vp_metrics, "gpu_metrics")
+                        ):
+                            vp_metrics.gpu_metrics.record(
+                                int(self.assigned_gpu_index), _elapsed_ms_frame
+                            )
+                    except Exception:
+                        pass
 
                 except queue.Empty:
                     # Timeout occurred, just loop again to check stop_event
@@ -596,9 +688,9 @@ class FrameWorker(threading.Thread):
 
                 finally:
                     # This block executes *no matter what* (success, exception, or break)
-                    if task is not None and self.frame_queue is not None:
+                    if task is not None and task_queue is not None:
                         try:
-                            self.frame_queue.task_done()
+                            task_queue.task_done()
                         except ValueError:
                             # Safe to ignore if queue was cleared externally
                             pass
