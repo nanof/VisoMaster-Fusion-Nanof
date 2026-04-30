@@ -1,0 +1,21 @@
+---
+description: Load agent context docs before editing app or tests
+globs:
+  - app/**/*.py
+  - tests/**/*.py
+alwaysApply: false
+---
+
+# VisoMaster Fusion — agent context
+
+When editing files under `app/` or `tests/`, **read first**:
+
+1. **`AGENTS.md`** (repo root) — entry points (`MainWindow`, `VideoProcessor`, `FrameWorker`, `ModelsProcessor`), `control` / layout-data conventions, large-file warnings, pytest markers.
+2. **`docs/agent-architecture.md`** — deeper detail for multi-GPU queues and stealing, ORT/TRT/model loading, VR/OpenGL preview, and `VISIOMASTER_*` env vars.
+
+## Practices
+
+- New controls: add IDs in the relevant `*_layout_data.py` and handlers in `app/ui/widgets/actions/` (often `control_actions.py`).
+- `frame_worker.py`, `video_processor.py`, `main_ui.py`, `models_processor.py` are huge — search for the symbol, respect locks/queues, keep changes localized.
+- Do not block the GUI thread with ONNX load; follow existing async/subprocess patterns (e.g. TRT probe).
+- Match style of the file you touch; user docs live in `README.md` / `docs/` — do not duplicate unless asked.
