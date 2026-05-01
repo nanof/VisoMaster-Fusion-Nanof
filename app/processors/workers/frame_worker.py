@@ -1161,6 +1161,8 @@ class FrameWorker(threading.Thread):
         checked_inputs_ordered: list,
         frame_number: int,
         frame_wh: tuple[int, int],
+        *,
+        memory_without_tracking: bool = True,
     ) -> None:
         """Assign stable _rr_input_idx per detection (ByteTrack, IoU, or screen position + TTL).
 
@@ -1172,9 +1174,8 @@ class FrameWorker(threading.Thread):
         mapped input disagrees with a spatial memory match, memory wins to avoid one-frame
         identity flips when track state toggles.
 
-        Without valid unique ByteTrack IDs, IoU+memory matching can lock the wrong person
-        to an input for many frames; pausing often clears that via a large frame gap reset.
-        In that case we use only left-to-right order and round-robin (no ghost memory).
+        Without valid unique ByteTrack IDs, optional IoU+ghost memory (``memory_without_tracking``)
+        keeps assignments coherent; if disabled, uses only per-frame left-to-right round-robin.
         """
         n_in = len(checked_inputs_ordered)
         if n_in == 0:
@@ -1234,18 +1235,20 @@ class FrameWorker(threading.Thread):
         ]
 
         n_curr = len(order)
+        img_w, img_h = int(frame_wh[0]), int(frame_wh[1])
+        centroid_max = max(
+            self._RR_CENTROID_DIST_MIN_PX,
+            self._RR_CENTROID_DIST_FRAC * float(min(img_w, img_h)),
+        )
         if use_tracks:
-            img_w, img_h = int(frame_wh[0]), int(frame_wh[1])
-            centroid_max = max(
-                self._RR_CENTROID_DIST_MIN_PX,
-                self._RR_CENTROID_DIST_FRAC * float(min(img_w, img_h)),
+            base_assign, spatially_matched = self._rr_greedy_assign_from_memory(
+                curr_boxes, self._rr_memory_slots, n_in, centroid_max
             )
+        elif memory_without_tracking:
             base_assign, spatially_matched = self._rr_greedy_assign_from_memory(
                 curr_boxes, self._rr_memory_slots, n_in, centroid_max
             )
         else:
-            # Sin tracking: no persistir emparejamientos IoU/memoria (se equivocan y
-            # solo se limpian con seek/pausa larga). Solo orden espacial + round-robin.
             base_assign = [ci % n_in for ci in range(n_curr)]
             spatially_matched = [False] * n_curr
         if use_tracks:
@@ -1278,7 +1281,7 @@ class FrameWorker(threading.Thread):
             )
             for fi in order
         ]
-        if use_tracks:
+        if use_tracks or memory_without_tracking:
             self._rr_memory_slots = self._rr_merge_ghost_memory(
                 curr_boxes, frame_number, fresh_mem
             )
@@ -3948,6 +3951,9 @@ class FrameWorker(threading.Thread):
                 _checked_inputs_ordered,
                 self.frame_number,
                 (int(img.shape[-1]), int(img.shape[-2])),
+                memory_without_tracking=control.get(
+                    "SequentialStabilizeWithoutTrackingToggle", True
+                ),
             )
 
         # Swapping / Editing Loop

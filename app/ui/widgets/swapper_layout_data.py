@@ -122,7 +122,15 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "level": 1,
             "label": "Swap all by index",
             "default": False,
-            "help": "No Find Faces required. Uses only checked Input Faces in list order: detection 0 gets input 0, detection 1 gets input 1, and if there are more detections than inputs, wraps to input 0 again (round-robin). Cosine similarity is not used. When Face Tracking is on and ByteTrack IDs are valid and unique, assignments are stabilized with IoU + remembered slots (each slot expires after ~90 frames of not seeing that face) so brief dropouts do not reshuffle. When Face Tracking is off, assignment is by left-to-right / top-to-bottom order each frame only (no IoU memory), avoiding wrong long-lived matches. Large timeline jumps or backward seeks clear tracking state. Swap/restorer/mask settings use the same parameter set as normal swap: the selected Find Faces card if any, otherwise the current face-parameter panel (current_widget_parameters). Recognition uses the active swapper's ArcFace model for the target embedding. Ignored when 'Swap Input Face only once' is enabled (Settings → Swap settings). Use 'Input rotate start offset' (or window keys comma / full stop) to shift which checked input is treated as index 0 for the first detection.",
+            "help": "No Find Faces required. Uses only checked Input Faces in list order: detection 0 gets input 0, detection 1 gets input 1, and if there are more detections than inputs, wraps to input 0 again (round-robin). Cosine similarity is not used. When Face Tracking is on and ByteTrack IDs are valid and unique, assignments are further stabilized per track. IoU + remembered bounding boxes (TTL ~90 frames, ghost slots when a face briefly disappears) keep the same input on the same physical face when 'Stabilize without Face Tracking' is on; turn that off for pure per-frame left-to-right round-robin with no memory (can reshuffle when faces appear/disappear). Large timeline jumps or backward seeks clear stabilization state. Swap/restorer/mask settings use the same parameter set as normal swap: the selected Find Faces card if any, otherwise the current face-parameter panel (current_widget_parameters). Recognition uses the active swapper's ArcFace model for the target embedding. Ignored when 'Swap Input Face only once' is enabled (Settings → Swap settings). Use 'Input rotate start offset' (or window keys comma / full stop) to shift which checked input is treated as index 0 for the first detection.",
+        },
+        "SequentialStabilizeWithoutTrackingToggle": {
+            "level": 2,
+            "label": "Stabilize without Face Tracking",
+            "default": True,
+            "parentToggle": "SequentialTargetMatchEnableToggle",
+            "requiredToggleValue": True,
+            "help": "When Face Tracking is off, still match detections to recent positions (IoU / centroid, same memory budget as with ByteTrack) so the same person keeps the same checked input when faces briefly drop out or the count changes. Disable only if you prefer strict per-frame spatial round-robin with no temporal memory (may avoid rare wrong locks in chaotic scenes at the cost of shuffling).",
         },
         "SequentialInputRotateOffsetSlider": {
             "level": 2,
