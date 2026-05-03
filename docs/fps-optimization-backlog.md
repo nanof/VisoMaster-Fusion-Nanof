@@ -25,7 +25,7 @@ Valores sugeridos en **Estado**: `Pendiente` | `En curso` | `Hecho` | `Descartad
 | PERF-002 | Pendiente | |
 | PERF-003 | Hecho | FaceParser ORT en CUDA: IOBinding directo (sin ``img.cpu().numpy()`` + ``session.run``). |
 | PERF-004 | Hecho | ``rgb_hwc_uint8_numpy_to_torch_chw`` en ``miscellaneous.py`` (pinned + ``non_blocking``); usado en detección secuencial, issue scan y ``FrameWorker`` cuando no hay handoff CHW. ``VISIOMASTER_DISABLE_PINNED_H2D=1`` para desactivar. |
-| PERF-005 | Pendiente | |
+| PERF-005 | Hecho | UI: `TrtDynamicBatchTuningToggle` + sliders en General; lógica en `trt_dynamic_batch_profiles.py`. Tests `test_trt_dynamic_batch_profiles.py`. |
 | PERF-006 | Pendiente | |
 | PERF-007 | Pendiente | |
 | PERF-008 | Pendiente | |
@@ -189,6 +189,9 @@ S (solo env + medición) a M (si hace falta lógica de selección de perfil) | *
 **Criterios de decisión**  
 - Hacer después de PERF-001.  
 - Si el usuario casi nunca supera 2 caras, capar `opt` puede acelerar builds y runtime.
+
+**Implementación (Fusion)**  
+Ajustes → General → **Tune TensorRT dynamic batch profiles** + sliders (`TrtMaxBatchSwapSlider`, …). Con el toggle **off**, solo cuentan las variables de entorno documentadas. Con toggle **on**, los valores de UI sustituyen a esos defaults al fusionar perfiles en `load_model`; hay que **recargar** los ONNX afectados. Código: `app/processors/trt_dynamic_batch_profiles.py` (`tensorrt_dynamic_shape_profile_opts`, `merge_tensorrt_dynamic_shape_profiles`); tests: `tests/unit/processors/test_trt_dynamic_batch_profiles.py`.
 
 ---
 
