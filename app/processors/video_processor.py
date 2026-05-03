@@ -1331,6 +1331,68 @@ class VideoProcessor(QObject):
             )
             return None
 
+    @staticmethod
+    def _parse_selection_height_lines(size_str: object) -> Optional[int]:
+        """Parse '720p' → 720. Returns None on failure."""
+        try:
+            return int(str(size_str).replace("p", ""))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _record_decouple_resize_enabled(control: Mapping[str, Any]) -> bool:
+        """PERF-018: record file resolution differs from pipeline output (preview) resolution."""
+        return bool(control.get("GlobalInputResizeToggle")) and bool(
+            control.get("RecordOutputDecoupleResizeToggle", False)
+        )
+
+    @staticmethod
+    def apply_record_output_resize_decouple_to_dims(
+        control: Mapping[str, Any],
+        *,
+        frame_height: int,
+        frame_width: int,
+    ) -> Tuple[int, int]:
+        """
+        PERF-018: after pipeline (and frame-enhancer) output size is known, optionally
+        scale to the user-selected record height while preserving aspect ratio.
+
+        Returns (height, width) for rawvideo / numpy frame, with even dimensions.
+        """
+        if not VideoProcessor._record_decouple_resize_enabled(control):
+            return frame_height, frame_width
+        if frame_height <= 0 or frame_width <= 0:
+            return frame_height, frame_width
+        rh = VideoProcessor._parse_selection_height_lines(
+            control.get("RecordOutputResizeSizeSelection", "1080p")
+        )
+        if rh is None or rh < 2:
+            return frame_height, frame_width
+        nh = int(rh) & ~1
+        nw = max(2, int(round(frame_width * (nh / float(frame_height))))) & ~1
+        return nh, nw
+
+    @staticmethod
+    def resize_numpy_bgr_for_recording_stdin(
+        control: Mapping[str, Any], frame: numpy.ndarray
+    ) -> numpy.ndarray:
+        """
+        PERF-018: resize processed BGR frame to FFmpeg rawvideo -s when decouple is enabled.
+        No-op when disabled or dimensions already match.
+        """
+        if not VideoProcessor._record_decouple_resize_enabled(control):
+            return frame
+        if frame.ndim != 3 or frame.shape[2] != 3:
+            return frame
+        fh, fw = int(frame.shape[0]), int(frame.shape[1])
+        th, tw = VideoProcessor.apply_record_output_resize_decouple_to_dims(
+            control, frame_height=fh, frame_width=fw
+        )
+        if th == fh and tw == fw:
+            return frame
+        out = cv2.resize(frame, (tw, th), interpolation=cv2.INTER_LANCZOS4)
+        return numpy.ascontiguousarray(out)
+
     def sync_feeder_ui_face_flags_from_main_window(self) -> None:
         """Call from the Qt main thread only. Updates flags read by the feeder detection fast-path."""
         mw = self.main_window
@@ -3619,7 +3681,11 @@ class VideoProcessor(QObject):
                 and not self.recording_sp.stdin.closed
             ):
                 try:
-                    self.recording_sp.stdin.write(frame.tobytes())
+                    _rec_ctrl = self.main_window.control
+                    _enc_frame = VideoProcessor.resize_numpy_bgr_for_recording_stdin(
+                        _rec_ctrl, frame
+                    )
+                    self.recording_sp.stdin.write(_enc_frame.tobytes())
                     # update counters for duration calculation
                     self.frames_written += 1
                     self.last_displayed_frame = frame_number_to_display
@@ -5466,6 +5532,11 @@ class VideoProcessor(QObject):
                 frame_height = frame_height * 4
                 frame_width = frame_width * 4
 
+        # PERF-018: optional record resolution ≠ pipeline output (after enhancer mult)
+        frame_height, frame_width = VideoProcessor.apply_record_output_resize_decouple_to_dims(
+            control, frame_height=frame_height, frame_width=frame_width
+        )
+
         # Calculate downscale dimensions
         frame_height_down = frame_height
         frame_width_down = frame_width
@@ -5607,8 +5678,8 @@ class VideoProcessor(QObject):
         # Base args: read raw video from stdin.
         # VP-12: Frames written to stdin are in BGR24 byte order.
         # FrameWorker returns numpy arrays in BGR channel order (OpenCV convention).
-        # display_next_frame writes frame.tobytes() directly, so the pixel format
-        # passed to FFmpeg MUST remain "bgr24" to match the raw bytes.
+        # display_next_frame writes bytes after optional PERF-018 Lanczos resize to -s.
+        # Pixel format MUST remain "bgr24" to match the raw bytes.
         args = [
             "ffmpeg",
             "-hide_banner",
@@ -7935,8 +8006,8 @@ class VideoProcessor(QObject):
         self._spawn_worker_pool()
 
         # 6. Setup FFmpeg subprocess for this segment
-        # create_ffmpeg_subprocess uses self.current_frame.shape, so it will automatically
-        # pick up the resized dimensions we set in step 4.
+        # create_ffmpeg_subprocess uses self.current_frame.shape (and PERF-018 decouple)
+        # so stdin -s matches the resized dimensions from step 4 + enhancer + record target.
         temp_segment_filename = f"segment_{self.current_segment_index:03d}.mp4"
         temp_segment_path = os.path.join(self.segment_temp_dir, temp_segment_filename)
         self.temp_segment_files.append(temp_segment_path)

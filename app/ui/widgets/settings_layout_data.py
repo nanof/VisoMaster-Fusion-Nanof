@@ -186,6 +186,35 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "requiredToggleValue": True,
             "help": "Target height in lines (240p–2160p). The aspect ratio is preserved.",
         },
+        "RecordOutputDecoupleResizeToggle": {
+            "level": 2,
+            "label": "Record output at different resolution (preview vs file)",
+            "default": False,
+            "parentToggle": "GlobalInputResizeToggle",
+            "requiredToggleValue": True,
+            "help": "When on, preview and AI still use Input Resolution Target above; each encoded frame is "
+            "resized (Lanczos) to Record output resolution before FFmpeg. Improves preview FPS while keeping "
+            "a higher-resolution file. Virtual camera and on-screen preview stay at preview resolution.",
+        },
+        "RecordOutputResizeSizeSelection": {
+            "level": 3,
+            "label": "Record output resolution (height)",
+            "options": [
+                "240p",
+                "360p",
+                "480p",
+                "540p",
+                "720p",
+                "1080p",
+                "1440p",
+                "2160p",
+            ],
+            "default": "1080p",
+            "parentToggle": "RecordOutputDecoupleResizeToggle",
+            "requiredToggleValue": True,
+            "help": "Target height in lines for the recorded MP4 (aspect ratio matches the pipeline frame). "
+            "Typically set higher than Input Resolution Target (e.g. preview 540p, record 1080p).",
+        },
         "FrameWorkerDelayDecimalSlider": {
             "level": 1,
             "label": "Frame Worker Delay",

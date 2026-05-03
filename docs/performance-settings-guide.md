@@ -27,6 +27,7 @@ In-app help text aligns with the keys in `app/ui/widgets/settings_layout_data.py
 | **Low** | **Keep Controls Active** | Keeps controls active while recording. | Convenient for live tweaking. | **Off** if you do not need it. |
 | **Low** | **Track Markers on Video Seek** | When scrubbing, syncs controls to the timeline position. | Better for frame-accurate editing. | **Off** if you prioritize fast scrubbing. |
 | **High** | **Resize Input Source** | Rescales input **before** the pipeline and sets output resolution (aspect ratio preserved). | **On** at **1080p** or native resolution for maximum detail (more compute). | **On** at **720p / 540p** or performance presets. |
+| **Medium** | **Record output at different resolution** (sub-toggle under resize) | Preview/AI stay at **Input Resolution Target**; each recorded frame is Lanczos-upscaled (or downscaled) to **Record output resolution** before FFmpeg. Virtual cam / on-screen preview stay at preview size. | Set record height **≥** preview height for sharper files; same value = no extra resize. | **On** when you want fast preview (e.g. 540p) and a higher-res export (e.g. 1080p). See [`fps-optimization-backlog.md`](fps-optimization-backlog.md) PERF-018. |
 | **Low** | **Frame Worker Delay** | Seconds to wait before AI work after a **seek**; reduces GPU overload. | **Low (0.1–0.2 s)** if the GPU can keep up. | **Higher (0.2–0.5 s)** if scrubbing causes hitches or VRAM spikes. |
 | **High** | **Performance preset (video)** | Applies a coordinated bundle (resize, detection interval, detector, ArcFace, Inswapper 128, etc.). | **“Single face @ 1080p — quality”** or fine-grained **Custom**. | **“High FPS”**, **“Light”**, or **“Webcam / baja latencia — …”** (UI label). |
 | **Low** | **Pipeline profile (timing)** | Shows per-stage timings (overlay/dock); diagnostic only. | **On** while tuning. | **Off** for long renders. |
@@ -137,3 +138,9 @@ Ballpark values for **maximum FPS / minimum time per frame**. Assumes **one GPU*
 Useful environment variables for measurement: `VISIOMASTER_PERF_BUNDLE=1`, and as needed `VISIOMASTER_PERF_STAGES`, `VISIOMASTER_PIPELINE_METRICS`, `VISIOMASTER_PIPELINE_PROFILE_CSV` (see the *Pipeline profile* control help and `docs/agent-architecture.md`).
 
 **TensorRT (ORT EP) — perfiles de batch dinámico:** al cargar modelos con el proveedor TensorRT, Fusion puede fusionar `trt_profile_min_shapes` / `opt` / `max` para rutas que usan **batch variable** (LivePortrait motion/stitch/eye/lip, Inswapper128 batched, GhostFace/HyperSwap batched, ArcFace batched). Si la compilación TRT falla (nombre de input distinto en tu ONNX), usa `VISIOMASTER_TRT_NO_DYNAMIC_PROFILES=1` o ajusta los `VISIOMASTER_TRT_MAX_BATCH_*`. Detalle en `docs/agent-architecture.md` (tabla de variables).
+
+---
+
+## 8. Backlog de optimización (código / pipeline)
+
+Las tablas de arriba cubren **controles ya expuestos en la app**. Para ideas que implican cambios de implementación (batch de restaurador, sync GPU, etc.), priorización por fases y **tabla de estado** editable en el repo, ver [`fps-optimization-backlog.md`](fps-optimization-backlog.md) (IDs **PERF-001** … **PERF-019**).
