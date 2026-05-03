@@ -135,3 +135,5 @@ Ballpark values for **maximum FPS / minimum time per frame**. Assumes **one GPU*
 - **Maximum FPS:** tune **High**-impact rows first: input resize / preset, **Detectors** tab (interval, detector size, ArcFace caps, lazy stride), **Providers**, **swapper tier**; then **Medium**: threads, inflight, streams, batch ArcFace, track-guided ROI when interval > 1.
 
 Useful environment variables for measurement: `VISIOMASTER_PERF_BUNDLE=1`, and as needed `VISIOMASTER_PERF_STAGES`, `VISIOMASTER_PIPELINE_METRICS`, `VISIOMASTER_PIPELINE_PROFILE_CSV` (see the *Pipeline profile* control help and `docs/agent-architecture.md`).
+
+**TensorRT (ORT EP) — perfiles de batch dinámico:** al cargar modelos con el proveedor TensorRT, Fusion puede fusionar `trt_profile_min_shapes` / `opt` / `max` para rutas que usan **batch variable** (LivePortrait motion/stitch/eye/lip, Inswapper128 batched, GhostFace/HyperSwap batched, ArcFace batched). Si la compilación TRT falla (nombre de input distinto en tu ONNX), usa `VISIOMASTER_TRT_NO_DYNAMIC_PROFILES=1` o ajusta los `VISIOMASTER_TRT_MAX_BATCH_*`. Detalle en `docs/agent-architecture.md` (tabla de variables).

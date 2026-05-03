@@ -131,6 +131,15 @@ Vendored code (YOLOX, partial CLIP, VR, …). **Excluded from mypy** in `pyproje
 | `VISIOMASTER_FEEDER_POST_DETECT_SYNC` | Explicit sync (debug only) |
 | `VISIOMASTER_TORCH_COMPILE` | Disable Inductor compile if boot fails |
 | `VISIOMASTER_ORT_IOBINDING_POST_SYNC` | IOBinding post-sync behavior |
+| `VISIOMASTER_TRT_NO_DYNAMIC_PROFILES` | Disables all ORT TRT EP ``trt_profile_*`` entries from ``_tensorrt_dynamic_shape_profile_opts`` (plain TRT build). |
+| `VISIOMASTER_LP_MOTION_TRT_STATIC_BATCH` | Omit **only** ``LivePortraitMotionExtractor`` dynamic batch profile (batch-1 engine cache). |
+| `VISIOMASTER_TRT_MAX_BATCH_SWAP` / `VISIOMASTER_TRT_OPT_BATCH_SWAP` | Caps for Inswapper128 / GhostFace / HyperSwap batched I/O (default max 16, opt 4). |
+| `VISIOMASTER_TRT_MAX_BATCH_LP_MOTION` / `VISIOMASTER_TRT_OPT_BATCH_LP_MOTION` | LivePortrait motion ``img`` profile (default max 8, opt 2). |
+| `VISIOMASTER_TRT_MAX_BATCH_LP_STITCH` / `VISIOMASTER_TRT_OPT_BATCH_LP_STITCH` | Stitching / eye / lip ``input`` profile (defaults max 12, opt 4). |
+| `VISIOMASTER_TRT_MAX_BATCH_ARCFACE` / `VISIOMASTER_TRT_OPT_BATCH_ARCFACE` | ``Inswapper128ArcFace`` ``input`` profile (defaults max 16, opt 8). |
+| `VISIOMASTER_LOG_TRT_PROFILE` | Print merged min/opt/max shape lines when loading a model with a profile. |
+
+Implementation: ``app/processors/models_processor.py`` — ``_merge_tensorrt_dynamic_shape_profiles`` runs for every ONNX load that uses TensorRT EP options.
 
 Live list in code: search `VISIOMASTER_` under `app/`.
 
