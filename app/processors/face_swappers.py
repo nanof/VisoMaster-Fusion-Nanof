@@ -260,13 +260,11 @@ class FaceSwappers:
                 output_names = self._session_io_name_cache[session_id]["outputs"]
 
             io_binding = ort_session.io_binding()
-            io_binding.bind_input(
-                name=input_name,
-                device_type=self.models_processor.get_ort_bind_device_type(),
-                device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                element_type=np.float32,
-                shape=tuple(batch.shape),
-                buffer_ptr=batch.data_ptr(),
+            batch = self.models_processor.bind_ort_io_input(
+                io_binding,
+                arcface_model,
+                input_name,
+                batch,
             )
             for name in output_names:
                 io_binding.bind_output(name, self.models_processor.get_ort_bind_device_type())
@@ -373,13 +371,8 @@ class FaceSwappers:
             output_names = self._session_io_name_cache[session_id]["outputs"]
 
         io_binding = ort_session.io_binding()
-        io_binding.bind_input(
-            name=input_name,
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=img.size(),
-            buffer_ptr=img.data_ptr(),
+        img = self.models_processor.bind_ort_io_input(
+            io_binding, arcface_model, input_name, img
         )
 
         for name in output_names:
@@ -440,13 +433,8 @@ class FaceSwappers:
         io_binding.clear_binding_inputs()
         io_binding.clear_binding_outputs()
 
-        io_binding.bind_input(
-            name="input",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=img.size(),
-            buffer_ptr=img.data_ptr(),
+        img = self.models_processor.bind_ort_io_input(
+            io_binding, model_name, "input", img
         )
         io_binding.bind_output(name="output", device_type=self.models_processor.get_ort_bind_device_type())
 
@@ -485,13 +473,8 @@ class FaceSwappers:
         io_binding.clear_binding_inputs()
         io_binding.clear_binding_outputs()
 
-        io_binding.bind_input(
-            name="input",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=img.size(),
-            buffer_ptr=img.data_ptr(),
+        img = self.models_processor.bind_ort_io_input(
+            io_binding, model_name, "input", img
         )
         io_binding.bind_output(name="output", device_type=self.models_processor.get_ort_bind_device_type())
 
@@ -531,29 +514,14 @@ class FaceSwappers:
         io_binding.clear_binding_outputs()
 
         # Hardcoded IO names validated by standard CSCS export
-        io_binding.bind_input(
-            name="input_1",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 3, 256, 256),
-            buffer_ptr=image.data_ptr(),
+        image = self.models_processor.bind_ort_io_input(
+            io_binding, model_name, "input_1", image
         )
-        io_binding.bind_input(
-            name="input_2",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 512),
-            buffer_ptr=embedding.data_ptr(),
+        embedding = self.models_processor.bind_ort_io_input(
+            io_binding, model_name, "input_2", embedding
         )
-        io_binding.bind_output(
-            name="output",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 3, 256, 256),
-            buffer_ptr=output.data_ptr(),
+        self.models_processor.bind_ort_io_output(
+            io_binding, model_name, "output", output
         )
 
         self._run_model_with_lazy_build_check(model_name, model, io_binding)
@@ -618,29 +586,14 @@ class FaceSwappers:
         io_binding.clear_binding_inputs()
         io_binding.clear_binding_outputs()
 
-        io_binding.bind_input(
-            name="target",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 3, 128, 128),
-            buffer_ptr=image.data_ptr(),
+        image = self.models_processor.bind_ort_io_input(
+            io_binding, model_name, "target", image
         )
-        io_binding.bind_input(
-            name="source",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 512),
-            buffer_ptr=embedding.data_ptr(),
+        embedding = self.models_processor.bind_ort_io_input(
+            io_binding, model_name, "source", embedding
         )
-        io_binding.bind_output(
-            name="output",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 3, 128, 128),
-            buffer_ptr=output.data_ptr(),
+        self.models_processor.bind_ort_io_output(
+            io_binding, model_name, "output", output
         )
 
         # Run the model with lazy build handling
@@ -689,8 +642,11 @@ class FaceSwappers:
         out = output if output.is_contiguous() else output.contiguous()
 
         emb = embedding
-        if emb.dtype != torch.float32:
-            emb = emb.float()
+        td_src = self.models_processor.get_ort_io_torch_dtype(
+            model_name, "source", is_output=False
+        )
+        if emb.dtype != td_src:
+            emb = emb.to(dtype=td_src)
         if emb.dim() == 1:
             emb = emb.unsqueeze(0)
         if emb.shape[-1] != 512:
@@ -707,29 +663,14 @@ class FaceSwappers:
             io_binding.clear_binding_inputs()
             io_binding.clear_binding_outputs()
 
-            io_binding.bind_input(
-                name="target",
-                device_type=self.models_processor.get_ort_bind_device_type(),
-                device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                element_type=np.float32,
-                shape=tuple(inp.shape),
-                buffer_ptr=inp.data_ptr(),
+            inp = self.models_processor.bind_ort_io_input(
+                io_binding, model_name, "target", inp
             )
-            io_binding.bind_input(
-                name="source",
-                device_type=self.models_processor.get_ort_bind_device_type(),
-                device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                element_type=np.float32,
-                shape=tuple(emb_b.shape),
-                buffer_ptr=emb_b.data_ptr(),
+            emb_b = self.models_processor.bind_ort_io_input(
+                io_binding, model_name, "source", emb_b
             )
-            io_binding.bind_output(
-                name="output",
-                device_type=self.models_processor.get_ort_bind_device_type(),
-                device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                element_type=np.float32,
-                shape=tuple(out.shape),
-                buffer_ptr=out.data_ptr(),
+            self.models_processor.bind_ort_io_output(
+                io_binding, model_name, "output", out
             )
             self._run_model_with_lazy_build_check(model_name, model, io_binding)
             return True
@@ -796,29 +737,14 @@ class FaceSwappers:
             return
 
         io_binding = model.io_binding()
-        io_binding.bind_input(
-            name="target",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 3, 256, 256),
-            buffer_ptr=image.data_ptr(),
+        image = self.models_processor.bind_ort_io_input(
+            io_binding, model_name, "target", image
         )
-        io_binding.bind_input(
-            name="source",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 512),
-            buffer_ptr=embedding.data_ptr(),
+        embedding = self.models_processor.bind_ort_io_input(
+            io_binding, model_name, "source", embedding
         )
-        io_binding.bind_output(
-            name="output",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 3, 256, 256),
-            buffer_ptr=output.data_ptr(),
+        self.models_processor.bind_ort_io_output(
+            io_binding, model_name, "output", output
         )
 
         # Run the model with lazy build handling
@@ -838,29 +764,14 @@ class FaceSwappers:
             return
 
         io_binding = model.io_binding()
-        io_binding.bind_input(
-            name="input",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 3, 512, 512),
-            buffer_ptr=image.data_ptr(),
+        image = self.models_processor.bind_ort_io_input(
+            io_binding, model_name, "input", image
         )
-        io_binding.bind_input(
-            name="onnx::Gemm_1",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 512),
-            buffer_ptr=embedding.data_ptr(),
+        embedding = self.models_processor.bind_ort_io_input(
+            io_binding, model_name, "onnx::Gemm_1", embedding
         )
-        io_binding.bind_output(
-            name="output",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 3, 512, 512),
-            buffer_ptr=output.data_ptr(),
+        self.models_processor.bind_ort_io_output(
+            io_binding, model_name, "output", output
         )
 
         # Run the model with lazy build handling
@@ -897,29 +808,14 @@ class FaceSwappers:
             output_name = self._session_io_name_cache[session_id]["outputs"][0]
 
         io_binding = ghostfaceswap_model.io_binding()
-        io_binding.bind_input(
-            name="target",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 3, 256, 256),
-            buffer_ptr=image.data_ptr(),
+        image = self.models_processor.bind_ort_io_input(
+            io_binding, model_name, "target", image
         )
-        io_binding.bind_input(
-            name="source",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 512),
-            buffer_ptr=embedding.data_ptr(),
+        embedding = self.models_processor.bind_ort_io_input(
+            io_binding, model_name, "source", embedding
         )
-        io_binding.bind_output(
-            name=output_name,
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 3, 256, 256),
-            buffer_ptr=output.data_ptr(),
+        self.models_processor.bind_ort_io_output(
+            io_binding, model_name, output_name, output
         )
 
         # Run the model with lazy build handling
@@ -972,29 +868,14 @@ class FaceSwappers:
 
         io_binding = ghostfaceswap_model.io_binding()
         try:
-            io_binding.bind_input(
-                name="target",
-                device_type=self.models_processor.get_ort_bind_device_type(),
-                device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                element_type=np.float32,
-                shape=(B, 3, 256, 256),
-                buffer_ptr=inp.data_ptr(),
+            inp = self.models_processor.bind_ort_io_input(
+                io_binding, model_name, "target", inp
             )
-            io_binding.bind_input(
-                name="source",
-                device_type=self.models_processor.get_ort_bind_device_type(),
-                device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                element_type=np.float32,
-                shape=(B, 512),
-                buffer_ptr=emb.data_ptr(),
+            emb = self.models_processor.bind_ort_io_input(
+                io_binding, model_name, "source", emb
             )
-            io_binding.bind_output(
-                name=output_name,
-                device_type=self.models_processor.get_ort_bind_device_type(),
-                device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                element_type=np.float32,
-                shape=(B, 3, 256, 256),
-                buffer_ptr=out.data_ptr(),
+            self.models_processor.bind_ort_io_output(
+                io_binding, model_name, output_name, out
             )
             self._run_model_with_lazy_build_check(
                 model_name, ghostfaceswap_model, io_binding
@@ -1036,29 +917,14 @@ class FaceSwappers:
             return
 
         io_binding = model.io_binding()
-        io_binding.bind_input(
-            name="target",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 3, 256, 256),
-            buffer_ptr=image.data_ptr(),
+        image = self.models_processor.bind_ort_io_input(
+            io_binding, model_name, "target", image
         )
-        io_binding.bind_input(
-            name="source",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 512),
-            buffer_ptr=embedding.data_ptr(),
+        embedding = self.models_processor.bind_ort_io_input(
+            io_binding, model_name, "source", embedding
         )
-        io_binding.bind_output(
-            name="output",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 3, 256, 256),
-            buffer_ptr=output.data_ptr(),
+        self.models_processor.bind_ort_io_output(
+            io_binding, model_name, "output", output
         )
 
         self._run_model_with_lazy_build_check(model_name, model, io_binding)
@@ -1097,29 +963,14 @@ class FaceSwappers:
 
         io_binding = model.io_binding()
         try:
-            io_binding.bind_input(
-                name="target",
-                device_type=self.models_processor.get_ort_bind_device_type(),
-                device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                element_type=np.float32,
-                shape=(B, 3, 256, 256),
-                buffer_ptr=inp.data_ptr(),
+            inp = self.models_processor.bind_ort_io_input(
+                io_binding, model_name, "target", inp
             )
-            io_binding.bind_input(
-                name="source",
-                device_type=self.models_processor.get_ort_bind_device_type(),
-                device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                element_type=np.float32,
-                shape=(B, 512),
-                buffer_ptr=emb.data_ptr(),
+            emb = self.models_processor.bind_ort_io_input(
+                io_binding, model_name, "source", emb
             )
-            io_binding.bind_output(
-                name="output",
-                device_type=self.models_processor.get_ort_bind_device_type(),
-                device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                element_type=np.float32,
-                shape=(B, 3, 256, 256),
-                buffer_ptr=out.data_ptr(),
+            self.models_processor.bind_ort_io_output(
+                io_binding, model_name, "output", out
             )
             self._run_model_with_lazy_build_check(model_name, model, io_binding)
             return True
@@ -1148,29 +999,14 @@ class FaceSwappers:
         io_binding = model.io_binding()
         io_binding.clear_binding_inputs()
         io_binding.clear_binding_outputs()
-        io_binding.bind_input(
-            name="target",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 3, 256, 256),
-            buffer_ptr=target_rgb_256.data_ptr(),
+        target_rgb_256 = self.models_processor.bind_ort_io_input(
+            io_binding, model_name, "target", target_rgb_256
         )
-        io_binding.bind_input(
-            name="source",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 3, 112, 112),
-            buffer_ptr=source_rgb_112.data_ptr(),
+        source_rgb_112 = self.models_processor.bind_ort_io_input(
+            io_binding, model_name, "source", source_rgb_112
         )
-        io_binding.bind_output(
-            name="output",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 3, 256, 256),
-            buffer_ptr=output.data_ptr(),
+        self.models_processor.bind_ort_io_output(
+            io_binding, model_name, "output", output
         )
         self._run_model_with_lazy_build_check(model_name, model, io_binding)
 
@@ -1192,29 +1028,14 @@ class FaceSwappers:
         io_binding = model.io_binding()
         io_binding.clear_binding_inputs()
         io_binding.clear_binding_outputs()
-        io_binding.bind_input(
-            name="target",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 3, 256, 256),
-            buffer_ptr=target_norm_256.data_ptr(),
+        target_norm_256 = self.models_processor.bind_ort_io_input(
+            io_binding, model_name, "target", target_norm_256
         )
-        io_binding.bind_input(
-            name="source",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 3, 256, 256),
-            buffer_ptr=source_rgb_256.data_ptr(),
+        source_rgb_256 = self.models_processor.bind_ort_io_input(
+            io_binding, model_name, "source", source_rgb_256
         )
-        io_binding.bind_output(
-            name="output",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 3, 256, 256),
-            buffer_ptr=output.data_ptr(),
+        self.models_processor.bind_ort_io_output(
+            io_binding, model_name, "output", output
         )
         self._run_model_with_lazy_build_check(model_name, model, io_binding)
 
@@ -1229,32 +1050,25 @@ class FaceSwappers:
             print("[ERROR] CrossFaceHiFaceS model not loaded.")
             return None
 
+        dev = self.models_processor.get_effective_torch_device()
+        td_in = self.models_processor.get_ort_io_torch_dtype(
+            "CrossFaceHiFaceS", "input", is_output=False
+        )
         emb = (
             torch.from_numpy(np.asarray(source_embedding, dtype=np.float32).reshape(1, -1))
+            .to(dtype=td_in, device=dev)
             .contiguous()
-            .to(self.models_processor.get_effective_torch_device())
         )
-        out_t = torch.empty(
-            (1, 512),
-            dtype=torch.float32,
-            device=self.models_processor.get_effective_torch_device(),
-        ).contiguous()
+        td_out = self.models_processor.get_ort_io_torch_dtype(
+            "CrossFaceHiFaceS", "output", is_output=True
+        )
+        out_t = torch.empty((1, 512), dtype=td_out, device=dev).contiguous()
         io_binding = cross.io_binding()
-        io_binding.bind_input(
-            name="input",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 512),
-            buffer_ptr=emb.data_ptr(),
+        emb = self.models_processor.bind_ort_io_input(
+            io_binding, "CrossFaceHiFaceS", "input", emb
         )
-        io_binding.bind_output(
-            name="output",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 512),
-            buffer_ptr=out_t.data_ptr(),
+        self.models_processor.bind_ort_io_output(
+            io_binding, "CrossFaceHiFaceS", "output", out_t
         )
         self._run_model_with_lazy_build_check("CrossFaceHiFaceS", cross, io_binding)
 
@@ -1275,32 +1089,25 @@ class FaceSwappers:
             print("[ERROR] CrossFaceSimSwap model not loaded.")
             return None
 
+        dev = self.models_processor.get_effective_torch_device()
+        td_in = self.models_processor.get_ort_io_torch_dtype(
+            "CrossFaceSimSwap", "input", is_output=False
+        )
         emb = (
             torch.from_numpy(np.asarray(source_embedding, dtype=np.float32).reshape(1, -1))
+            .to(dtype=td_in, device=dev)
             .contiguous()
-            .to(self.models_processor.get_effective_torch_device())
         )
-        out_t = torch.empty(
-            (1, 512),
-            dtype=torch.float32,
-            device=self.models_processor.get_effective_torch_device(),
-        ).contiguous()
+        td_out = self.models_processor.get_ort_io_torch_dtype(
+            "CrossFaceSimSwap", "output", is_output=True
+        )
+        out_t = torch.empty((1, 512), dtype=td_out, device=dev).contiguous()
         io_binding = cross.io_binding()
-        io_binding.bind_input(
-            name="input",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 512),
-            buffer_ptr=emb.data_ptr(),
+        emb = self.models_processor.bind_ort_io_input(
+            io_binding, "CrossFaceSimSwap", "input", emb
         )
-        io_binding.bind_output(
-            name="output",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 512),
-            buffer_ptr=out_t.data_ptr(),
+        self.models_processor.bind_ort_io_output(
+            io_binding, "CrossFaceSimSwap", "output", out_t
         )
         self._run_model_with_lazy_build_check("CrossFaceSimSwap", cross, io_binding)
 
@@ -1319,29 +1126,14 @@ class FaceSwappers:
             return
 
         io_binding = model.io_binding()
-        io_binding.bind_input(
-            name="target",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 3, 256, 256),
-            buffer_ptr=image.data_ptr(),
+        image = self.models_processor.bind_ort_io_input(
+            io_binding, model_name, "target", image
         )
-        io_binding.bind_input(
-            name="source",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 512),
-            buffer_ptr=embedding.data_ptr(),
+        embedding = self.models_processor.bind_ort_io_input(
+            io_binding, model_name, "source", embedding
         )
-        io_binding.bind_output(
-            name="output",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 3, 256, 256),
-            buffer_ptr=output.data_ptr(),
+        self.models_processor.bind_ort_io_output(
+            io_binding, model_name, "output", output
         )
 
         self._run_model_with_lazy_build_check(model_name, model, io_binding)

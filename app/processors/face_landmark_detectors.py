@@ -296,15 +296,10 @@ class FaceLandmarkDetectors:
 
         io_binding = model.io_binding()
 
-        # Bind inputs to the model.
-        for name, tensor in input_bindings.items():
-            io_binding.bind_input(
-                name=name,
-                device_type=self.models_processor.get_ort_bind_device_type(),
-                device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                element_type=np.float32,
-                shape=tensor.size(),
-                buffer_ptr=tensor.data_ptr(),
+        # Bind inputs to the model (dtype matches ONNX-declared I/O).
+        for name, tensor in list(input_bindings.items()):
+            input_bindings[name] = self.models_processor.bind_ort_io_input(
+                io_binding, model_name, name, tensor
             )
 
         # Bind outputs. The device will allocate memory for them.

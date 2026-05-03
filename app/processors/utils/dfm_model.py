@@ -4,6 +4,11 @@ import numpy as np
 from typing import Any, Callable, Optional
 
 from app.processors.utils import faceutil
+from app.processors.ort_io_dtype_utils import (
+    _numpy_scalar_type_to_torch_dtype,
+    _ort_warmup_numpy_dtype_for_input,
+    session_declared_numpy_dtype_for_name,
+)
 
 onnxruntime.set_default_logger_severity(4)
 onnxruntime.log_verbosity_level = -1
@@ -97,22 +102,21 @@ class DFMModel:
         elif len(inputs) > 2:
             raise ValueError(f"Invalid model {model_path}")
 
-        # Mapping function from ONNX Runtime data types to PyTorch dtypes (you may need to adjust based on your actual usage)
+        # Legacy maps (prefer ``_ort_warmup_numpy_dtype_for_input`` / ``_numpy_scalar_type_to_torch_dtype``).
         self.onnx_to_torch_dtype = {
             "tensor(float)": torch.float32,
+            "tensor(float16)": torch.float16,
             "tensor(double)": torch.float64,
             "tensor(int32)": torch.int32,
             "tensor(int64)": torch.int64,
-            # Add other necessary dtype mappings as needed
         }
 
-        # Mapping function from ONNX Runtime data types to NumPy dtypes for binding
         self.onnx_to_numpy_dtype = {
             "tensor(float)": np.float32,
+            "tensor(float16)": np.float16,
             "tensor(double)": np.float64,
             "tensor(int32)": np.int32,
             "tensor(int64)": np.int64,
-            # Add other necessary dtype mappings as needed
         }
 
     def get_model_path(self):
@@ -157,55 +161,55 @@ class DFMModel:
 
         io_binding = self._sess.io_binding()
 
-        # Bind input image tensor
+        exp_np_in = session_declared_numpy_dtype_for_name(
+            self._sess, "in_face:0", is_output=False
+        )
+        exp_td_in = _numpy_scalar_type_to_torch_dtype(exp_np_in)
+        img = img.to(dtype=exp_td_in).contiguous()
         io_binding.bind_input(
             name="in_face:0",
             device_type=self.device,
             device_id=0,
-            element_type=np.float32,
+            element_type=np.dtype(exp_np_in),
             shape=img.shape,
             buffer_ptr=img.data_ptr(),
         )
 
-        # Bind morph factor if the model supports it
         if self._model_type == 2:
-            morph_factor_t = torch.tensor(
-                [morph_factor], dtype=torch.float32, device=self.device
+            exp_np_m = session_declared_numpy_dtype_for_name(
+                self._sess, "morph_value:0", is_output=False
             )
+            exp_td_m = _numpy_scalar_type_to_torch_dtype(exp_np_m)
+            morph_factor_t = torch.tensor(
+                [morph_factor], dtype=exp_td_m, device=self.device
+            ).contiguous()
             io_binding.bind_input(
                 name="morph_value:0",
                 device_type=self.device,
                 device_id=0,
-                element_type=np.float32,
+                element_type=np.dtype(exp_np_m),
                 shape=morph_factor_t.shape,
                 buffer_ptr=morph_factor_t.data_ptr(),
             )
 
-        # Prepare output tensors and bind them
         outputs = self._sess.get_outputs()
         binding_outputs = []
 
         for idx, output in enumerate(outputs):
-            # Convert shape to a valid tuple of integers
             shape = self.convert_shape(output.shape)
-
-            # Create a torch tensor with the shape and dtype of the output
-            torch_dtype = self.onnx_to_torch_dtype[output.type]
+            np_kind = _ort_warmup_numpy_dtype_for_input(output)
+            torch_dtype = _numpy_scalar_type_to_torch_dtype(np_kind)
             tensor_output = torch.empty(
                 shape, dtype=torch_dtype, device=self.device
             ).contiguous()
 
-            # Append the tensor to the list
             binding_outputs.append(tensor_output)
 
-            # Bind the output using ONNX Runtime's io_binding
             io_binding.bind_output(
                 name=output.name,
                 device_type=self.device,
                 device_id=0,
-                element_type=self.onnx_to_numpy_dtype[
-                    output.type
-                ],  # Use NumPy dtype for element_type
+                element_type=np.dtype(np_kind),
                 shape=shape,
                 buffer_ptr=binding_outputs[idx].data_ptr(),
             )

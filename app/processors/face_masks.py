@@ -391,14 +391,37 @@ class FaceMasks:
         if ort_session is None:
             return torch.ones((1, H, W), dtype=torch.float32, device=dev)
 
-        r1 = torch.zeros((1, 16, H // 4, W // 4), dtype=torch.float32, device=dev)
-        r2 = torch.zeros((1, 20, H // 8, W // 8), dtype=torch.float32, device=dev)
-        r3 = torch.zeros((1, 40, H // 16, W // 16), dtype=torch.float32, device=dev)
-        r4 = torch.zeros((1, 64, H // 32, W // 32), dtype=torch.float32, device=dev)
-        dr = torch.tensor([0.5], dtype=torch.float32, device=dev).contiguous()
-        pha = torch.empty((1, 1, H, W), dtype=torch.float32, device=dev).contiguous()
-
         ins = {i.name: i for i in ort_session.get_inputs()}
+        td_src = self.models_processor.get_ort_io_torch_dtype(
+            model_name, ins["src"].name, is_output=False
+        )
+        td_r1 = self.models_processor.get_ort_io_torch_dtype(
+            model_name, ins["r1i"].name, is_output=False
+        )
+        td_r2 = self.models_processor.get_ort_io_torch_dtype(
+            model_name, ins["r2i"].name, is_output=False
+        )
+        td_r3 = self.models_processor.get_ort_io_torch_dtype(
+            model_name, ins["r3i"].name, is_output=False
+        )
+        td_r4 = self.models_processor.get_ort_io_torch_dtype(
+            model_name, ins["r4i"].name, is_output=False
+        )
+        td_dr = self.models_processor.get_ort_io_torch_dtype(
+            model_name, ins["downsample_ratio"].name, is_output=False
+        )
+        td_pha = self.models_processor.get_ort_io_torch_dtype(
+            model_name, "pha", is_output=True
+        )
+
+        src = src.to(dtype=td_src).contiguous()
+        r1 = torch.zeros((1, 16, H // 4, W // 4), dtype=td_r1, device=dev)
+        r2 = torch.zeros((1, 20, H // 8, W // 8), dtype=td_r2, device=dev)
+        r3 = torch.zeros((1, 40, H // 16, W // 16), dtype=td_r3, device=dev)
+        r4 = torch.zeros((1, 64, H // 32, W // 32), dtype=td_r4, device=dev)
+        dr = torch.tensor([0.5], dtype=td_dr, device=dev).contiguous()
+        pha = torch.empty((1, 1, H, W), dtype=td_pha, device=dev).contiguous()
+
         is_lazy = self.models_processor.check_and_clear_pending_build(model_name)
         if is_lazy:
             self.models_processor.show_build_dialog.emit(
@@ -408,65 +431,37 @@ class FaceMasks:
         try:
             if str(dev).startswith("cuda") and torch.cuda.is_available():
                 io = ort_session.io_binding()
-                io.bind_input(
-                    name=ins["src"].name,
-                    device_type=dev,
-                    device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                    element_type=np.float32,
-                    shape=tuple(src.shape),
-                    buffer_ptr=src.data_ptr(),
+                dt = str(dev)
+                cuda_id = self.models_processor.get_ort_bind_input_cuda_device_id()
+                src = self.models_processor.bind_ort_io_input(
+                    io, model_name, ins["src"].name, src, device_type=dt, device_id=cuda_id
                 )
-                io.bind_input(
-                    name=ins["r1i"].name,
-                    device_type=dev,
-                    device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                    element_type=np.float32,
-                    shape=tuple(r1.shape),
-                    buffer_ptr=r1.data_ptr(),
+                r1 = self.models_processor.bind_ort_io_input(
+                    io, model_name, ins["r1i"].name, r1, device_type=dt, device_id=cuda_id
                 )
-                io.bind_input(
-                    name=ins["r2i"].name,
-                    device_type=dev,
-                    device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                    element_type=np.float32,
-                    shape=tuple(r2.shape),
-                    buffer_ptr=r2.data_ptr(),
+                r2 = self.models_processor.bind_ort_io_input(
+                    io, model_name, ins["r2i"].name, r2, device_type=dt, device_id=cuda_id
                 )
-                io.bind_input(
-                    name=ins["r3i"].name,
-                    device_type=dev,
-                    device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                    element_type=np.float32,
-                    shape=tuple(r3.shape),
-                    buffer_ptr=r3.data_ptr(),
+                r3 = self.models_processor.bind_ort_io_input(
+                    io, model_name, ins["r3i"].name, r3, device_type=dt, device_id=cuda_id
                 )
-                io.bind_input(
-                    name=ins["r4i"].name,
-                    device_type=dev,
-                    device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                    element_type=np.float32,
-                    shape=tuple(r4.shape),
-                    buffer_ptr=r4.data_ptr(),
+                r4 = self.models_processor.bind_ort_io_input(
+                    io, model_name, ins["r4i"].name, r4, device_type=dt, device_id=cuda_id
                 )
-                io.bind_input(
-                    name=ins["downsample_ratio"].name,
-                    device_type=dev,
-                    device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                    element_type=np.float32,
-                    shape=(1,),
-                    buffer_ptr=dr.data_ptr(),
+                dr = self.models_processor.bind_ort_io_input(
+                    io,
+                    model_name,
+                    ins["downsample_ratio"].name,
+                    dr,
+                    device_type=dt,
+                    device_id=cuda_id,
                 )
                 outs_meta = ort_session.get_outputs()
                 for o in outs_meta:
                     if o.name != "pha":
                         io.bind_output(o.name, dev)
-                io.bind_output(
-                    name="pha",
-                    device_type=dev,
-                    device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                    element_type=np.float32,
-                    shape=tuple(pha.shape),
-                    buffer_ptr=pha.data_ptr(),
+                self.models_processor.bind_ort_io_output(
+                    io, model_name, "pha", pha, device_type=dt, device_id=cuda_id
                 )
                 torch.cuda.current_stream().synchronize()
                 self.models_processor.run_session_with_iobinding(ort_session, io)
@@ -512,29 +507,28 @@ class FaceMasks:
         in_name = ort_session.get_inputs()[0].name
         out_names = [o.name for o in ort_session.get_outputs()]
         last_name = out_names[-1]
+        td_in = self.models_processor.get_ort_io_torch_dtype(
+            model_name, in_name, is_output=False
+        )
+        td_last = self.models_processor.get_ort_io_torch_dtype(
+            model_name, last_name, is_output=True
+        )
+        x = x.to(dtype=td_in).contiguous()
 
         if str(dev).startswith("cuda") and torch.cuda.is_available():
             io = ort_session.io_binding()
-            io.bind_input(
-                name=in_name,
-                device_type=dev,
-                device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                element_type=np.float32,
-                shape=tuple(x.shape),
-                buffer_ptr=x.data_ptr(),
+            dt = str(dev)
+            cuda_id = self.models_processor.get_ort_bind_input_cuda_device_id()
+            x = self.models_processor.bind_ort_io_input(
+                io, model_name, in_name, x, device_type=dt, device_id=cuda_id
             )
             out_t = torch.empty(
-                (1, 1, 320, 320), dtype=torch.float32, device=dev
+                (1, 1, 320, 320), dtype=td_last, device=dev
             ).contiguous()
             for name in out_names:
                 if name == last_name:
-                    io.bind_output(
-                        name=name,
-                        device_type=dev,
-                        device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                        element_type=np.float32,
-                        shape=tuple(out_t.shape),
-                        buffer_ptr=out_t.data_ptr(),
+                    self.models_processor.bind_ort_io_output(
+                        io, model_name, name, out_t, device_type=dt, device_id=cuda_id
                     )
                 else:
                     io.bind_output(name, dev)
@@ -1226,10 +1220,12 @@ class FaceMasks:
         img = torch.div(img, 255)
         img = torch.unsqueeze(img, 0).contiguous()
 
-        # Output initialisation
+        td_occ = self.models_processor.get_ort_io_torch_dtype(
+            "Occluder", "output", is_output=True
+        )
         outpred = torch.ones(
-            (256, 256),
-            dtype=torch.float32,
+            (1, 1, 256, 256),
+            dtype=td_occ,
             device=self.models_processor.get_effective_torch_device(),
         ).contiguous()
 
@@ -1322,21 +1318,11 @@ class FaceMasks:
             return
 
         io_binding = ort_session.io_binding()
-        io_binding.bind_input(
-            name="img",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 3, 256, 256),
-            buffer_ptr=image.data_ptr(),
+        image = self.models_processor.bind_ort_io_input(
+            io_binding, model_name, "img", image
         )
-        io_binding.bind_output(
-            name="output",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 1, 256, 256),
-            buffer_ptr=output.data_ptr(),
+        self.models_processor.bind_ort_io_output(
+            io_binding, model_name, "output", output
         )
 
         is_lazy_build = self.models_processor.check_and_clear_pending_build(model_name)
@@ -1404,13 +1390,17 @@ class FaceMasks:
         img = img.type(torch.float32)
         img = torch.div(img, 255)
         img = torch.unsqueeze(img, 0).contiguous()
-        outpred = torch.ones(
-            (256, 256),
-            dtype=torch.float32,
-            device=self.models_processor.get_effective_torch_device(),
-        ).contiguous()
+        if self.models_processor.models.get("XSeg") is None:
+            self.models_processor.load_model("XSeg")
+        td_xseg = self.models_processor.get_ort_io_torch_dtype(
+            "XSeg", "out_mask:0", is_output=True
+        )
+        dev = self.models_processor.get_effective_torch_device()
+        outbuf = torch.ones((1, 1, 256, 256), dtype=td_xseg, device=dev).contiguous()
 
-        self.run_dfl_xseg(img, outpred)
+        self.run_dfl_xseg(img, outbuf)
+
+        outpred = outbuf.squeeze().float()
 
         outpred = torch.clamp(outpred, min=0.0, max=1.0)
         outpred[outpred < 0.1] = 0
@@ -1538,21 +1528,11 @@ class FaceMasks:
             return
 
         io_binding = ort_session.io_binding()
-        io_binding.bind_input(
-            name="in_face:0",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=image.size(),
-            buffer_ptr=image.data_ptr(),
+        image = self.models_processor.bind_ort_io_input(
+            io_binding, model_name, "in_face:0", image
         )
-        io_binding.bind_output(
-            name="out_mask:0",
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=(1, 1, 256, 256),
-            buffer_ptr=output.data_ptr(),
+        self.models_processor.bind_ort_io_output(
+            io_binding, model_name, "out_mask:0", output
         )
 
         is_lazy_build = self.models_processor.check_and_clear_pending_build(model_name)
@@ -1591,21 +1571,11 @@ class FaceMasks:
         input_name = sess.get_inputs()[0].name
         output_name = sess.get_outputs()[0].name
 
-        io_binding.bind_input(
-            name=input_name,
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=image_tensor.shape,
-            buffer_ptr=image_tensor.data_ptr(),
+        image_tensor = self.models_processor.bind_ort_io_input(
+            io_binding, model_key, input_name, image_tensor
         )
-        io_binding.bind_output(
-            name=output_name,
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=output_tensor.shape,
-            buffer_ptr=output_tensor.data_ptr(),
+        self.models_processor.bind_ort_io_output(
+            io_binding, model_key, output_name, output_tensor
         )
 
         is_lazy_build = self.models_processor.check_and_clear_pending_build(model_key)
@@ -1957,13 +1927,23 @@ class FaceMasks:
         swapped = preprocess(swapped_face)
         original = preprocess(original_face)
 
+        sess = self.models_processor.models.get(model_key)
+        if sess is None:
+            return (
+                torch.zeros_like(swap_mask, dtype=torch.float32),
+                torch.zeros_like(swap_mask, dtype=torch.float32),
+            )
+        out0 = sess.get_outputs()[0].name
+        td_feat = self.models_processor.get_ort_io_torch_dtype(
+            model_key, out0, is_output=True
+        )
         shape = feature_shapes[feature_layer]
-        outpred = torch.empty(shape, dtype=torch.float32, device=swapped.device)
+        outpred = torch.empty(shape, dtype=td_feat, device=swapped.device)
         outpred2 = torch.empty_like(outpred)
         swapped_feat = self.run_onnx(swapped, outpred, model_key)
         original_feat = self.run_onnx(original, outpred2, model_key)
 
-        diff_map = torch.abs(swapped_feat - original_feat).mean(dim=1)[0]
+        diff_map = torch.abs(swapped_feat.float() - original_feat.float()).mean(dim=1)[0]
         diff_map = diff_map * swap_mask.squeeze(0)
 
         # OPTIMIZED: Deterministic strided slicing instead of random sampling.

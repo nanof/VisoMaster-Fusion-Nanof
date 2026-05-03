@@ -96,6 +96,21 @@ class FrameEnhancers:
                     self.models_processor.unload_model(name)
             self.current_rife_preview_model = None
 
+    def _enhancer_output_ort_dtype(self, internal_model_key: str) -> torch.dtype:
+        """First ONNX output dtype for an enhancer internal key, or float32 if unavailable."""
+        key = self.model_map.get(internal_model_key, internal_model_key)
+        if key is None:
+            return torch.float32
+        mp = self.models_processor
+        with mp.model_lock:
+            if not mp.models.get(key):
+                mp.models[key] = mp.load_model(key)
+            sess = mp.models.get(key)
+        if not sess or not sess.get_outputs():
+            return torch.float32
+        outn = sess.get_outputs()[0].name
+        return mp.get_ort_io_torch_dtype(key, outn, is_output=True)
+
     @staticmethod
     def _bgr_hwc_uint8_to_rgb01_nchw(
         arr: np.ndarray, device: torch.device
@@ -156,55 +171,33 @@ class FrameEnhancers:
                 t0 = F.pad(t0, (0, pw - w0, 0, ph - h0), mode="reflect")
                 t1 = F.pad(t1, (0, pw - w0, 0, ph - h0), mode="reflect")
 
-            out_t = torch.empty(
-                (1, 3, ph, pw), dtype=torch.float32, device=device_torch
-            ).contiguous()
-            ts = torch.tensor(
-                [timestep], dtype=torch.float32, device=device_torch
-            ).contiguous()
-
             in_meta = ort_session.get_inputs()
             out_meta = ort_session.get_outputs()
             n_img0 = in_meta[0].name
             n_img1 = in_meta[1].name
             n_ts = in_meta[2].name
             n_out = out_meta[0].name
+            td_ts = self.models_processor.get_ort_io_torch_dtype(mk, n_ts, is_output=False)
+            td_out = self.models_processor.get_ort_io_torch_dtype(mk, n_out, is_output=True)
+            out_t = torch.empty((1, 3, ph, pw), dtype=td_out, device=device_torch).contiguous()
+            ts = torch.tensor([timestep], dtype=td_ts, device=device_torch).contiguous()
 
             if self.models_processor.uses_cuda_ep_for_thread():
                 io_binding = ort_session.io_binding()
                 torch.cuda.current_stream().synchronize()
                 dt = self.models_processor.get_ort_bind_device_type()
-                io_binding.bind_input(
-                    name=n_img0,
-                    device_type=dt,
-                    device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                    element_type=np.float32,
-                    shape=tuple(t0.shape),
-                    buffer_ptr=t0.data_ptr(),
+                cuda_id = self.models_processor.get_ort_bind_input_cuda_device_id()
+                t0 = self.models_processor.bind_ort_io_input(
+                    io_binding, mk, n_img0, t0, device_type=dt, device_id=cuda_id
                 )
-                io_binding.bind_input(
-                    name=n_img1,
-                    device_type=dt,
-                    device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                    element_type=np.float32,
-                    shape=tuple(t1.shape),
-                    buffer_ptr=t1.data_ptr(),
+                t1 = self.models_processor.bind_ort_io_input(
+                    io_binding, mk, n_img1, t1, device_type=dt, device_id=cuda_id
                 )
-                io_binding.bind_input(
-                    name=n_ts,
-                    device_type=dt,
-                    device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                    element_type=np.float32,
-                    shape=tuple(ts.shape),
-                    buffer_ptr=ts.data_ptr(),
+                ts = self.models_processor.bind_ort_io_input(
+                    io_binding, mk, n_ts, ts, device_type=dt, device_id=cuda_id
                 )
-                io_binding.bind_output(
-                    name=n_out,
-                    device_type=dt,
-                    device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                    element_type=np.float32,
-                    shape=tuple(out_t.shape),
-                    buffer_ptr=out_t.data_ptr(),
+                self.models_processor.bind_ort_io_output(
+                    io_binding, mk, n_out, out_t, device_type=dt, device_id=cuda_id
                 )
                 self._run_model_with_lazy_build_check(mk, ort_session, io_binding)
                 torch.cuda.current_stream().synchronize()
@@ -305,11 +298,6 @@ class FrameEnhancers:
 
         # Create an empty output tensor with the new scaled dimensions
         b, c, h, w = img.shape  # Get new padded dimensions
-        output = torch.zeros(
-            (b, c, h * scale, w * scale),
-            dtype=torch.float32,
-            device=self.models_processor.get_effective_torch_device(),
-        ).contiguous()
 
         # Select the upscaling function based on the enhancer_type
         upscaler_functions = {
@@ -332,12 +320,20 @@ class FrameEnhancers:
                 img = v2.functional.crop(img, 0, 0, height, width)
             return img
 
+        internal_key = self.model_map[enhancer_type]
+        td_out = self._enhancer_output_ort_dtype(internal_key)
+        output = torch.zeros(
+            (b, c, h * scale, w * scale),
+            dtype=td_out,
+            device=self.models_processor.get_effective_torch_device(),
+        ).contiguous()
+
         # --- 3. Process Tiles ---
         # Pre-allocate a single reusable output tile (all tiles have the same size
         # because the image was padded to an exact multiple of tile_size above).
         output_tile = torch.zeros(
             (b, c, tile_size * scale, tile_size * scale),
-            dtype=torch.float32,
+            dtype=td_out,
             device=self.models_processor.get_effective_torch_device(),
         ).contiguous()
 
@@ -370,6 +366,8 @@ class FrameEnhancers:
             if pad_right != 0 or pad_bottom != 0:
                 output = v2.functional.crop(output, 0, 0, height * scale, width * scale)
 
+        if td_out != torch.float32:
+            output = output.float()
         return output
 
     def _run_enhancer_model(
@@ -426,23 +424,11 @@ class FrameEnhancers:
         input_name = ort_session.get_inputs()[0].name
         output_name = ort_session.get_outputs()[0].name
 
-        # Bind input tensor
-        io_binding.bind_input(
-            name=input_name,
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=image.size(),
-            buffer_ptr=image.data_ptr(),
+        image = self.models_processor.bind_ort_io_input(
+            io_binding, model_name, input_name, image
         )
-        # Bind output tensor
-        io_binding.bind_output(
-            name=output_name,
-            device_type=self.models_processor.get_ort_bind_device_type(),
-            device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-            element_type=np.float32,
-            shape=output.size(),
-            buffer_ptr=output.data_ptr(),
+        self.models_processor.bind_ort_io_output(
+            io_binding, model_name, output_name, output
         )
 
         # Nota: no sincronizar aquí por tesela — run_with_iobinding ya bloquea al completar
@@ -711,9 +697,15 @@ class FrameEnhancers:
 
                 image_input = torch.unsqueeze(image_bw, 0)
 
+                _de_key = {
+                    "DeOldify-Artistic": "DeoldifyArt",
+                    "DeOldify-Stable": "DeoldifyStable",
+                    "DeOldify-Video": "DeoldifyVideo",
+                }[enhancer_type]
+                td_de = self._enhancer_output_ort_dtype(_de_key)
                 output = torch.zeros(
                     (image_input.shape),
-                    dtype=torch.float32,
+                    dtype=td_de,
                     device=self.models_processor.get_effective_torch_device(),
                 ).contiguous()
 
@@ -725,7 +717,7 @@ class FrameEnhancers:
                     case "DeOldify-Video":
                         self.run_deoldify_video(image_input, output)
 
-                output = torch.squeeze(output)
+                output = torch.squeeze(output.float())
                 t_resize_o = self._get_cached_resize_enhance(
                     h,
                     w,
@@ -784,10 +776,14 @@ class FrameEnhancers:
                     img_gray_rgb.type(torch.float32), 0
                 ).contiguous()
 
+                _dd_key = (
+                    "DDColorArt" if enhancer_type == "DDColor-Artistic" else "DDcolor"
+                )
+                td_ab = self._enhancer_output_ort_dtype(_dd_key)
                 # Prepara il tensore per il modello (Added contiguous for safe VRAM binding)
                 output_ab = torch.zeros(
                     (1, 2, render_factor, render_factor),
-                    dtype=torch.float32,
+                    dtype=td_ab,
                     device=self.models_processor.get_effective_torch_device(),
                 ).contiguous()
 
@@ -800,7 +796,7 @@ class FrameEnhancers:
                     case "DDColor":
                         self.run_ddcolor(tensor_gray_rgb, output_ab)  # Safe wrapper
 
-                output_ab = output_ab.squeeze(0)  # (2, render_factor, render_factor)
+                output_ab = output_ab.squeeze(0).float()  # (2, render_factor, render_factor)
 
                 t_resize_o = self._get_cached_resize_enhance(
                     img.size(1),

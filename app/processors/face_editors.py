@@ -209,72 +209,10 @@ class FaceEditors:
         inputs: Dict[str, torch.Tensor],
         output_spec: Dict[str, torch.Tensor],
     ) -> Dict[str, torch.Tensor]:
-        """
-        A private helper to run inference using ONNX Runtime with I/O binding.
-        This method centralizes the logic for the ONNX backend, providing an efficient
-        way to run inference by binding memory directly, avoiding data copy overhead.
-
-        Args:
-            model_name (str): The name of the model to run (key in self.models_processor.models).
-            inputs (Dict[str, torch.Tensor]): A dictionary mapping input names to their corresponding tensors.
-            output_spec (Dict[str, torch.Tensor]): A dictionary mapping output names to pre-allocated empty tensors.
-
-        Returns:
-            Dict[str, torch.Tensor]: The output_spec dictionary, now populated with the model's output.
-        """
-        # FE-13: use .get() with an explicit error instead of direct dict access
-        session = self.models_processor.models.get(model_name)
-        if session is None:
-            raise RuntimeError(f"Model {model_name} not loaded")
-        model = session
-        io_binding = model.io_binding()
-
-        # Bind model inputs by mapping tensor names to their memory pointers.
-        for name, tensor in inputs.items():
-            io_binding.bind_input(
-                name=name,
-                device_type=self.models_processor.device,
-                device_id=0,
-                element_type=np.float32,
-                shape=tensor.size(),
-                buffer_ptr=tensor.data_ptr(),
-            )
-
-        # Bind model outputs to pre-allocated tensors.
-        for name, tensor in output_spec.items():
-            io_binding.bind_output(
-                name=name,
-                device_type=self.models_processor.device,
-                device_id=0,
-                element_type=np.float32,
-                shape=tensor.size(),
-                buffer_ptr=tensor.data_ptr(),
-            )
-
-        # --- LAZY BUILD CHECK ---
-        is_lazy_build = self.models_processor.check_and_clear_pending_build(model_name)
-        if is_lazy_build:
-            # Use the 'model_name' variable for a reliable dialog message
-            self.models_processor.show_build_dialog.emit(
-                "Finalizing TensorRT Build",
-                f"Performing first-run inference for:\n{model_name}\n\nThis may take several minutes.",
-            )
-
-        try:
-            # PRE-INFERENCE SYNC: Ensure PyTorch has finished preparing the memory
-            # before ONNX Runtime starts reading from the IOBinding pointers.
-            if self.models_processor.device == "cuda":
-                torch.cuda.current_stream().synchronize()
-            elif self.models_processor.device != "cpu":
-                self.models_processor.syncvec.cpu()
-
-            self.models_processor.run_session_with_iobinding(model, io_binding)
-
-        finally:
-            if is_lazy_build:
-                self.models_processor.hide_build_dialog.emit()
-
-        return output_spec
+        """Delegates to ``ModelsProcessor.run_onnx_io_binding`` (graph-aligned dtypes, multi-GPU bind ids)."""
+        return self.models_processor.run_onnx_io_binding(
+            model_name, inputs, output_spec
+        )
 
     def lp_motion_extractor(self, img, face_editor_type="Human-Face", **kwargs) -> dict:
         """
@@ -293,8 +231,18 @@ class FaceEditors:
         self._manage_editor_models(face_editor_type)
         kp_info = {}
         with torch.no_grad():
-            I_s = torch.div(img.type(torch.float32), 255.0)
-            I_s = torch.clamp(I_s, 0, 1)
+            model_name = "LivePortraitMotionExtractor"
+
+            if face_editor_type == "Human-Face":
+                if not self.models_processor.models.get(model_name):
+                    self.models_processor.models[model_name] = (
+                        self.models_processor.load_model(model_name)
+                    )
+
+            td_in = self.models_processor.get_ort_io_torch_dtype(
+                model_name, "img", is_output=False
+            )
+            I_s = img.float().mul(1.0 / 255.0).clamp(0, 1).to(td_in)
             if I_s.dim() == 3:
                 I_s = I_s.unsqueeze(0)
             elif I_s.dim() != 4:
@@ -307,37 +255,19 @@ class FaceEditors:
                 raise ValueError(f"lp_motion_extractor batch size must be 1..8, got {bs}")
             I_s = I_s.contiguous()
 
-            model_name = "LivePortraitMotionExtractor"
-
-            if face_editor_type == "Human-Face":
-                if not self.models_processor.models.get(model_name):
-                    self.models_processor.models[model_name] = (
-                        self.models_processor.load_model(model_name)
-                    )
-
+            dev = self.models_processor.device
+            _od = lambda n: self.models_processor.get_ort_io_torch_dtype(
+                model_name, n, is_output=True
+            )
             inputs = {"img": I_s}
             output_spec = {
-                "pitch": torch.empty(
-                    (bs, 66), dtype=torch.float32, device=self.models_processor.device
-                ).contiguous(),
-                "yaw": torch.empty(
-                    (bs, 66), dtype=torch.float32, device=self.models_processor.device
-                ).contiguous(),
-                "roll": torch.empty(
-                    (bs, 66), dtype=torch.float32, device=self.models_processor.device
-                ).contiguous(),
-                "t": torch.empty(
-                    (bs, 3), dtype=torch.float32, device=self.models_processor.device
-                ).contiguous(),
-                "exp": torch.empty(
-                    (bs, 63), dtype=torch.float32, device=self.models_processor.device
-                ).contiguous(),
-                "scale": torch.empty(
-                    (bs, 1), dtype=torch.float32, device=self.models_processor.device
-                ).contiguous(),
-                "kp": torch.empty(
-                    (bs, 63), dtype=torch.float32, device=self.models_processor.device
-                ).contiguous(),
+                "pitch": torch.empty((bs, 66), dtype=_od("pitch"), device=dev).contiguous(),
+                "yaw": torch.empty((bs, 66), dtype=_od("yaw"), device=dev).contiguous(),
+                "roll": torch.empty((bs, 66), dtype=_od("roll"), device=dev).contiguous(),
+                "t": torch.empty((bs, 3), dtype=_od("t"), device=dev).contiguous(),
+                "exp": torch.empty((bs, 63), dtype=_od("exp"), device=dev).contiguous(),
+                "scale": torch.empty((bs, 1), dtype=_od("scale"), device=dev).contiguous(),
+                "kp": torch.empty((bs, 63), dtype=_od("kp"), device=dev).contiguous(),
             }
 
             kp_info = self._run_onnx_io_binding(model_name, inputs, output_spec)
@@ -375,10 +305,6 @@ class FaceEditors:
         """
         self._manage_editor_models(face_editor_type)
         with torch.no_grad():
-            I_s = torch.div(img.type(torch.float32), 255.0)
-            I_s = torch.clamp(I_s, 0, 1)
-            I_s = torch.unsqueeze(I_s, 0).contiguous()
-
             model_name = "LivePortraitAppearanceFeatureExtractor"
 
             if face_editor_type == "Human-Face":
@@ -387,11 +313,20 @@ class FaceEditors:
                         self.models_processor.load_model(model_name)
                     )
 
+            td_in = self.models_processor.get_ort_io_torch_dtype(
+                model_name, "img", is_output=False
+            )
+            td_out = self.models_processor.get_ort_io_torch_dtype(
+                model_name, "output", is_output=True
+            )
+            I_s = img.float().mul(1.0 / 255.0).clamp(0, 1).to(td_in)
+            I_s = torch.unsqueeze(I_s, 0).contiguous()
+
             inputs = {"img": I_s}
             output_spec = {
                 "output": torch.empty(
                     (1, 32, 16, 64, 64),
-                    dtype=torch.float32,
+                    dtype=td_out,
                     device=self.models_processor.device,
                 ).contiguous()
             }
@@ -419,9 +354,6 @@ class FaceEditors:
         """
         self._manage_editor_models(face_editor_type)
         with torch.no_grad():
-            # Concatenate features for the model input.
-            feat_eye = faceutil.concat_feat(kp_source, eye_close_ratio).contiguous()
-
             model_name = "LivePortraitStitchingEye"
 
             if face_editor_type == "Human-Face":
@@ -430,11 +362,19 @@ class FaceEditors:
                         self.models_processor.load_model(model_name)
                     )
 
+            td_in = self.models_processor.get_ort_io_torch_dtype(
+                model_name, "input", is_output=False
+            )
+            td_out = self.models_processor.get_ort_io_torch_dtype(
+                model_name, "output", is_output=True
+            )
+            feat_eye = faceutil.concat_feat(kp_source, eye_close_ratio).to(td_in).contiguous()
+
             inputs = {"input": feat_eye}
             output_spec = {
                 "output": torch.empty(
                     (1, 63),
-                    dtype=torch.float32,
+                    dtype=td_out,
                     device=self.models_processor.device,
                 ).contiguous()
             }
@@ -463,8 +403,6 @@ class FaceEditors:
         """
         self._manage_editor_models(face_editor_type)
         with torch.no_grad():
-            feat_lip = faceutil.concat_feat(kp_source, lip_close_ratio).contiguous()
-
             model_name = "LivePortraitStitchingLip"
 
             if face_editor_type == "Human-Face":
@@ -473,11 +411,19 @@ class FaceEditors:
                         self.models_processor.load_model(model_name)
                     )
 
+            td_in = self.models_processor.get_ort_io_torch_dtype(
+                model_name, "input", is_output=False
+            )
+            td_out = self.models_processor.get_ort_io_torch_dtype(
+                model_name, "output", is_output=True
+            )
+            feat_lip = faceutil.concat_feat(kp_source, lip_close_ratio).to(td_in).contiguous()
+
             inputs = {"input": feat_lip}
             output_spec = {
                 "output": torch.empty(
                     (1, 63),
-                    dtype=torch.float32,
+                    dtype=td_out,
                     device=self.models_processor.device,
                 ).contiguous()
             }
@@ -508,9 +454,6 @@ class FaceEditors:
         prof = getattr(tls, "expr_profile", False)
         t0 = time.perf_counter() if prof and liveportrait_wall_ms_enabled() else None
         with torch.no_grad():
-            # FE-12: fix typo feat_stiching -> feat_stitching
-            feat_stitching = faceutil.concat_feat(kp_source, kp_driving).contiguous()
-
             model_name = "LivePortraitStitching"
 
             if face_editor_type == "Human-Face":
@@ -519,11 +462,19 @@ class FaceEditors:
                         self.models_processor.load_model(model_name)
                     )
 
+            td_in = self.models_processor.get_ort_io_torch_dtype(
+                model_name, "input", is_output=False
+            )
+            td_out = self.models_processor.get_ort_io_torch_dtype(
+                model_name, "output", is_output=True
+            )
+            feat_stitching = faceutil.concat_feat(kp_source, kp_driving).to(td_in).contiguous()
+
             inputs = {"input": feat_stitching}
             output_spec = {
                 "output": torch.empty(
                     (1, 65),
-                    dtype=torch.float32,
+                    dtype=td_out,
                     device=self.models_processor.device,
                 ).contiguous()
             }
@@ -621,10 +572,6 @@ class FaceEditors:
         prof = getattr(tls, "expr_profile", False)
         t0 = time.perf_counter() if prof and liveportrait_wall_ms_enabled() else None
         with torch.no_grad():
-            feature_3d = feature_3d.contiguous()
-            kp_source = kp_source.contiguous()
-            kp_driving = kp_driving.contiguous()
-
             model_name = "LivePortraitWarpingSpade"
 
             if face_editor_type == "Human-Face":
@@ -632,6 +579,22 @@ class FaceEditors:
                     self.models_processor.models[model_name] = (
                         self.models_processor.load_model(model_name)
                     )
+
+            t_f = self.models_processor.get_ort_io_torch_dtype(
+                model_name, "feature_3d", is_output=False
+            )
+            t_kd = self.models_processor.get_ort_io_torch_dtype(
+                model_name, "kp_driving", is_output=False
+            )
+            t_ks = self.models_processor.get_ort_io_torch_dtype(
+                model_name, "kp_source", is_output=False
+            )
+            t_out = self.models_processor.get_ort_io_torch_dtype(
+                model_name, "out", is_output=True
+            )
+            feature_3d = feature_3d.to(t_f).contiguous()
+            kp_source = kp_source.to(t_ks).contiguous()
+            kp_driving = kp_driving.to(t_kd).contiguous()
 
             inputs = {
                 "feature_3d": feature_3d,
@@ -641,7 +604,7 @@ class FaceEditors:
             output_spec = {
                 "out": torch.empty(
                     (1, 3, 512, 512),
-                    dtype=torch.float32,
+                    dtype=t_out,
                     device=self.models_processor.device,
                 ).contiguous()
             }
@@ -655,6 +618,9 @@ class FaceEditors:
         if prof:
             tls.warp_count = int(getattr(tls, "warp_count", 0)) + 1
 
+        # Paste-back (Kornia) in FrameEdits is exercised in FP32 in practice.
+        if out.dtype == torch.float16:
+            out = out.float()
         return out
 
     def _get_faceparser_labels_via_facemasks(

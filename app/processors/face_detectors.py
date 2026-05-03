@@ -1195,13 +1195,8 @@ class FaceDetectors:
                 IM, aimg = None, torch.unsqueeze(det_img, 0).contiguous()
 
             io_binding = ort_session.io_binding()
-            io_binding.bind_input(
-                name="input.1",
-                device_type=self.models_processor.get_ort_bind_device_type(),
-                device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                element_type=np.float32,
-                shape=aimg.size(),
-                buffer_ptr=aimg.data_ptr(),
+            aimg = self.models_processor.bind_ort_io_input(
+                io_binding, model_name, "input.1", aimg
             )
             for i in [
                 "448",
@@ -1385,13 +1380,8 @@ class FaceDetectors:
 
             io_binding = ort_session.io_binding()
 
-            io_binding.bind_input(
-                name=input_name,
-                device_type=self.models_processor.get_ort_bind_device_type(),
-                device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                element_type=np.float32,
-                shape=aimg.size(),
-                buffer_ptr=aimg.data_ptr(),
+            aimg = self.models_processor.bind_ort_io_input(
+                io_binding, model_name, input_name, aimg
             )
             for name in output_names:
                 io_binding.bind_output(name, self.models_processor.get_ort_bind_device_type())
@@ -1568,13 +1558,8 @@ class FaceDetectors:
             ).contiguous()  # Add batch dim
 
             io_binding = ort_session.io_binding()
-            io_binding.bind_input(
-                name="images",
-                device_type=self.models_processor.get_ort_bind_device_type(),
-                device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                element_type=np.float32,
-                shape=aimg_prepared.size(),  # Use shape of prepared tensor
-                buffer_ptr=aimg_prepared.data_ptr(),  # Use data_ptr of prepared tensor
+            aimg_prepared = self.models_processor.bind_ort_io_input(
+                io_binding, model_name, "images", aimg_prepared
             )
             io_binding.bind_output("output0", self.models_processor.get_ort_bind_device_type())
             # Run the model with lazy build handling
@@ -1736,13 +1721,8 @@ class FaceDetectors:
 
             io_binding = ort_session.io_binding()
 
-            io_binding.bind_input(
-                name=input_name,
-                device_type=self.models_processor.get_ort_bind_device_type(),
-                device_id=self.models_processor.get_ort_bind_input_cuda_device_id(),
-                element_type=np.float32,
-                shape=aimg_prepared.size(),  # Use shape of prepared tensor
-                buffer_ptr=aimg_prepared.data_ptr(),  # Use data_ptr of prepared tensor
+            aimg_prepared = self.models_processor.bind_ort_io_input(
+                io_binding, model_name, input_name, aimg_prepared
             )
             for name in output_names:
                 io_binding.bind_output(name, self.models_processor.get_ort_bind_device_type())

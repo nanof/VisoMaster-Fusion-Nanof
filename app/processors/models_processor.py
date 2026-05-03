@@ -7,7 +7,7 @@ import traceback
 import multiprocessing
 import re
 import time
-from typing import Dict, TYPE_CHECKING, Optional
+from typing import Any, Dict, TYPE_CHECKING, Optional, Tuple
 from PIL import Image
 from packaging import version
 import numpy as np
@@ -17,6 +17,10 @@ import onnx
 from torchvision.transforms import v2
 
 from app.processors.utils import faceutil
+from app.processors.ort_io_dtype_utils import (
+    _numpy_scalar_type_to_torch_dtype,
+    _ort_warmup_numpy_dtype_for_input,
+)
 
 # --- Optional Imports & Fallbacks ---
 
@@ -199,20 +203,6 @@ def _providers_without_tensorrt_execution_provider(providers_for_model):
     if not out:
         return [("CUDAExecutionProvider"), ("CPUExecutionProvider")]
     return out
-
-
-def _ort_warmup_numpy_dtype_for_input(inp) -> type:
-    """Match ORT declared input element type for session.run warmup (avoids float32 vs float16 mismatch)."""
-    ty = (getattr(inp, "type", "") or "").lower()
-    if "float16" in ty:
-        return np.float16
-    if "uint8" in ty:
-        return np.uint8
-    if "int64" in ty:
-        return np.int64
-    if "int32" in ty:
-        return np.int32
-    return np.float32
 
 
 def _providers_with_trt_options(providers_for_model, trt_opts: dict):
@@ -605,6 +595,11 @@ class ModelsProcessor(QtCore.QObject):
 
         # Initialize models and models_path dictionaries
         self.models: Dict[str, onnxruntime.InferenceSession] = {}
+        # ONNX session I/O element types (name -> numpy scalar type) for IOBinding.
+        # Invalidated in unload_model. Used for FP16 graphs without changing float32 defaults.
+        self._ort_session_io_dtype_cache: Dict[
+            str, Tuple[Dict[str, type], Dict[str, type]]
+        ] = {}
         self.models_path = {}
         self.models_data = {}
 
@@ -1274,6 +1269,8 @@ class ModelsProcessor(QtCore.QObject):
                         )
                         self.models_pending_build.add(model_name)
 
+                # New session replaces any cached ONNX I/O dtype map from a prior load.
+                self._ort_session_io_dtype_cache.pop(model_name, None)
                 self.models[model_name] = model_instance
                 print(
                     f"[INFO] Loading model: {model_name} with provider: {self.provider_name}"
@@ -1469,6 +1466,7 @@ class ModelsProcessor(QtCore.QObject):
                 if model_instance is not None:
                     print(f"[INFO] Unloading ONNX model: {model_name_to_unload}")
                     self._model_last_used_mono.pop(model_name_to_unload, None)
+                    self._ort_session_io_dtype_cache.pop(model_name_to_unload, None)
                     # MP-06: set dict entry to None first, then del the instance
                     self.models[model_name_to_unload] = None
                     # Explicitly delete the object to trigger its __del__ method
@@ -1481,6 +1479,155 @@ class ModelsProcessor(QtCore.QObject):
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+
+    def get_ort_session_io_numpy_dtype_maps(
+        self, model_name: str
+    ) -> Tuple[Dict[str, type], Dict[str, type]]:
+        """Return ``(input_name -> np scalar type, output_name -> np scalar type)`` from the ONNX graph.
+
+        Types follow ORT ``NodeArg.type`` strings (e.g. ``tensor(float16)``). Cached until
+        ``unload_model`` removes the session.
+        """
+        with self.model_lock:
+            cached = self._ort_session_io_dtype_cache.get(model_name)
+            if cached is not None:
+                return cached
+            session = self.models.get(model_name)
+            if session is None:
+                raise RuntimeError(f"No ONNX session loaded for {model_name!r}")
+            ins = {
+                i.name: _ort_warmup_numpy_dtype_for_input(i)
+                for i in session.get_inputs()
+            }
+            outs = {
+                o.name: _ort_warmup_numpy_dtype_for_input(o)
+                for o in session.get_outputs()
+            }
+            cached = (ins, outs)
+            self._ort_session_io_dtype_cache[model_name] = cached
+            return cached
+
+    def get_ort_io_numpy_dtype(
+        self, model_name: str, tensor_name: str, *, is_output: bool
+    ) -> type:
+        """Declared numpy scalar type for one ONNX input or output (defaults to float32)."""
+        ins, outs = self.get_ort_session_io_numpy_dtype_maps(model_name)
+        table = outs if is_output else ins
+        return table.get(tensor_name, np.float32)
+
+    def get_ort_io_torch_dtype(
+        self, model_name: str, tensor_name: str, *, is_output: bool
+    ) -> torch.dtype:
+        """``torch.dtype`` matching the ONNX-declared type for I/O binding / buffers."""
+        return _numpy_scalar_type_to_torch_dtype(
+            self.get_ort_io_numpy_dtype(model_name, tensor_name, is_output=is_output)
+        )
+
+    def bind_ort_io_input(
+        self,
+        io_binding: Any,
+        model_name: str,
+        input_name: str,
+        tensor: torch.Tensor,
+        *,
+        device_type: Optional[str] = None,
+        device_id: Optional[int] = None,
+    ) -> torch.Tensor:
+        """Cast ``tensor`` to ONNX-declared input dtype; ``bind_input`` with matching ``element_type``."""
+        t = tensor.to(
+            dtype=self.get_ort_io_torch_dtype(model_name, input_name, is_output=False)
+        ).contiguous()
+        exp_np = self.get_ort_io_numpy_dtype(model_name, input_name, is_output=False)
+        dev_t = device_type if device_type is not None else self.get_ort_bind_device_type()
+        cuda_id = (
+            int(device_id)
+            if device_id is not None
+            else self.get_ort_bind_input_cuda_device_id()
+        )
+        io_binding.bind_input(
+            name=input_name,
+            device_type=dev_t,
+            device_id=cuda_id,
+            element_type=np.dtype(exp_np),
+            shape=t.size(),
+            buffer_ptr=t.data_ptr(),
+        )
+        return t
+
+    def bind_ort_io_output(
+        self,
+        io_binding: Any,
+        model_name: str,
+        output_name: str,
+        tensor: torch.Tensor,
+        *,
+        device_type: Optional[str] = None,
+        device_id: Optional[int] = None,
+    ) -> None:
+        """Bind a preallocated device tensor as an ONNX output; dtype must match the graph."""
+        exp_td = self.get_ort_io_torch_dtype(model_name, output_name, is_output=True)
+        if tensor.dtype != exp_td:
+            raise TypeError(
+                f"{model_name}: output buffer {output_name!r} has dtype {tensor.dtype} but "
+                f"ONNX declares {exp_td}; allocate torch.empty(..., dtype={exp_td})."
+            )
+        t = tensor.contiguous()
+        exp_np = self.get_ort_io_numpy_dtype(model_name, output_name, is_output=True)
+        dev_t = device_type if device_type is not None else self.get_ort_bind_device_type()
+        cuda_id = (
+            int(device_id)
+            if device_id is not None
+            else self.get_ort_bind_input_cuda_device_id()
+        )
+        io_binding.bind_output(
+            name=output_name,
+            device_type=dev_t,
+            device_id=cuda_id,
+            element_type=np.dtype(exp_np),
+            shape=t.size(),
+            buffer_ptr=t.data_ptr(),
+        )
+
+    def run_onnx_io_binding(
+        self,
+        model_name: str,
+        inputs: Dict[str, torch.Tensor],
+        output_spec: Dict[str, torch.Tensor],
+    ) -> Dict[str, torch.Tensor]:
+        """Run ORT with I/O binding; dtypes follow the loaded ONNX graph (see ``bind_ort_io_input``)."""
+        session = self.models.get(model_name)
+        if session is None:
+            raise RuntimeError(f"Model {model_name} not loaded")
+        io_binding = session.io_binding()
+        self.get_ort_session_io_numpy_dtype_maps(model_name)
+
+        for name, tensor in list(inputs.items()):
+            inputs[name] = self.bind_ort_io_input(
+                io_binding, model_name, name, tensor
+            )
+
+        for name, tensor in output_spec.items():
+            self.bind_ort_io_output(io_binding, model_name, name, tensor)
+
+        is_lazy_build = self.check_and_clear_pending_build(model_name)
+        if is_lazy_build:
+            self.show_build_dialog.emit(
+                "Finalizing TensorRT Build",
+                f"Performing first-run inference for:\n{model_name}\n\nThis may take several minutes.",
+            )
+
+        try:
+            if self.uses_cuda_ep_for_thread():
+                torch.cuda.current_stream().synchronize()
+            elif self.device != "cpu":
+                self.syncvec.cpu()
+
+            self.run_session_with_iobinding(session, io_binding)
+        finally:
+            if is_lazy_build:
+                self.hide_build_dialog.emit()
+
+        return output_spec
 
     def showModelLoadingProgressBar(self):
         """Shows the model-loading progress dialog in the UI."""
