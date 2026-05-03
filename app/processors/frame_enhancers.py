@@ -202,16 +202,26 @@ class FrameEnhancers:
                 self._run_model_with_lazy_build_check(mk, ort_session, io_binding)
                 torch.cuda.current_stream().synchronize()
             else:
-                out_np = ort_session.run(
-                    None,
-                    {
-                        n_img0: t0.detach().cpu().numpy(),
-                        n_img1: t1.detach().cpu().numpy(),
-                        n_ts: ts.detach().cpu().numpy(),
-                    },
-                )[0]
-                out_t = torch.from_numpy(np.asarray(out_np, dtype=np.float32)).to(
-                    device=device_torch
+                # PERF-003: ORT en CPU / ruta no-CUDA EP — IOBinding (sin session.run + NumPy).
+                dt = self.models_processor.get_ort_bind_device_type()
+                bind_dev = torch.device("cpu") if dt == "cpu" else device_torch
+                if isinstance(bind_dev, str):
+                    bind_dev = torch.device(bind_dev)
+
+                def _to_bind(t: torch.Tensor) -> torch.Tensor:
+                    tc = t.contiguous()
+                    if tc.device != bind_dev:
+                        return tc.to(bind_dev, non_blocking=False).contiguous()
+                    return tc
+
+                out_b = torch.empty((1, 3, ph, pw), dtype=td_out, device=bind_dev).contiguous()
+                self.models_processor.run_onnx_io_binding(
+                    mk,
+                    {n_img0: _to_bind(t0), n_img1: _to_bind(t1), n_ts: _to_bind(ts)},
+                    {n_out: out_b},
+                )
+                out_t = out_b.to(
+                    device_torch, non_blocking=(device_torch.type == "cuda")
                 )
 
             out_crop = out_t[:, :, :h0, :w0]

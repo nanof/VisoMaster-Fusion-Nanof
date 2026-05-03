@@ -467,18 +467,57 @@ class FaceMasks:
                 self.models_processor.run_session_with_iobinding(ort_session, io)
                 torch.cuda.current_stream().synchronize()
             else:
-                feed = {
-                    ins["src"].name: src.detach().cpu().numpy(),
-                    ins["r1i"].name: r1.detach().cpu().numpy(),
-                    ins["r2i"].name: r2.detach().cpu().numpy(),
-                    ins["r3i"].name: r3.detach().cpu().numpy(),
-                    ins["r4i"].name: r4.detach().cpu().numpy(),
-                    ins["downsample_ratio"].name: dr.detach().cpu().numpy(),
-                }
-                pha_np = ort_session.run(["pha"], feed)[0]
-                pha = torch.from_numpy(np.asarray(pha_np, dtype=np.float32)).to(
-                    device=face_chw_float_rgb_0_255.device
+                # PERF-003: CPU (or CPU-routed) ORT — IOBinding evita alloc NumPy por frame.
+                dt = self.models_processor.get_ort_bind_device_type()
+                cid = self.models_processor.get_ort_bind_input_cuda_device_id()
+                bind_dev = torch.device("cpu") if dt == "cpu" else dev
+                if isinstance(bind_dev, str):
+                    bind_dev = torch.device(bind_dev)
+
+                def _to_bind_dev(t: torch.Tensor) -> torch.Tensor:
+                    tc = t.contiguous()
+                    if tc.device != bind_dev:
+                        return tc.to(bind_dev, non_blocking=False).contiguous()
+                    return tc
+
+                io = ort_session.io_binding()
+                self.models_processor.bind_ort_io_input(
+                    io, model_name, ins["src"].name, _to_bind_dev(src), device_type=dt, device_id=cid
                 )
+                self.models_processor.bind_ort_io_input(
+                    io, model_name, ins["r1i"].name, _to_bind_dev(r1), device_type=dt, device_id=cid
+                )
+                self.models_processor.bind_ort_io_input(
+                    io, model_name, ins["r2i"].name, _to_bind_dev(r2), device_type=dt, device_id=cid
+                )
+                self.models_processor.bind_ort_io_input(
+                    io, model_name, ins["r3i"].name, _to_bind_dev(r3), device_type=dt, device_id=cid
+                )
+                self.models_processor.bind_ort_io_input(
+                    io, model_name, ins["r4i"].name, _to_bind_dev(r4), device_type=dt, device_id=cid
+                )
+                self.models_processor.bind_ort_io_input(
+                    io,
+                    model_name,
+                    ins["downsample_ratio"].name,
+                    _to_bind_dev(dr),
+                    device_type=dt,
+                    device_id=cid,
+                )
+                pha_buf = torch.empty((1, 1, H, W), dtype=td_pha, device=bind_dev).contiguous()
+                outs_meta = ort_session.get_outputs()
+                for o in outs_meta:
+                    if o.name != "pha":
+                        io.bind_output(o.name, dt)
+                self.models_processor.bind_ort_io_output(
+                    io, model_name, "pha", pha_buf, device_type=dt, device_id=cid
+                )
+                if self.models_processor.uses_cuda_ep_for_thread():
+                    torch.cuda.current_stream().synchronize()
+                elif self.models_processor.device != "cpu":
+                    self.models_processor.syncvec.cpu()
+                self.models_processor.run_session_with_iobinding(ort_session, io)
+                pha = pha_buf.to(face_chw_float_rgb_0_255.device, non_blocking=False)
         finally:
             if is_lazy:
                 self.models_processor.hide_build_dialog.emit()
@@ -547,11 +586,32 @@ class FaceMasks:
                     self.models_processor.hide_build_dialog.emit()
             prob = torch.sigmoid(out_t)
         else:
-            x_np = x.detach().cpu().numpy()
-            out_list = ort_session.run(out_names, {in_name: x_np})
-            prob = torch.sigmoid(
-                torch.from_numpy(out_list[-1].astype(np.float32))
-            ).to(dev)
+            dt = self.models_processor.get_ort_bind_device_type()
+            cid = self.models_processor.get_ort_bind_input_cuda_device_id()
+            bind_dev = torch.device("cpu") if dt == "cpu" else dev
+            if isinstance(bind_dev, str):
+                bind_dev = torch.device(bind_dev)
+            xb = x.contiguous()
+            if xb.device != bind_dev:
+                xb = xb.to(bind_dev, non_blocking=False).contiguous()
+            io = ort_session.io_binding()
+            self.models_processor.bind_ort_io_input(
+                io, model_name, in_name, xb, device_type=dt, device_id=cid
+            )
+            out_t = torch.empty((1, 1, 320, 320), dtype=td_last, device=bind_dev).contiguous()
+            for name in out_names:
+                if name == last_name:
+                    self.models_processor.bind_ort_io_output(
+                        io, model_name, name, out_t, device_type=dt, device_id=cid
+                    )
+                else:
+                    io.bind_output(name, dt)
+            if self.models_processor.uses_cuda_ep_for_thread():
+                torch.cuda.current_stream().synchronize()
+            elif self.models_processor.device != "cpu":
+                self.models_processor.syncvec.cpu()
+            self.models_processor.run_session_with_iobinding(ort_session, io)
+            prob = torch.sigmoid(out_t.to(dev, non_blocking=False))
 
         prob = v2.functional.resize(prob, [H, W], antialias=True)
         return prob.squeeze(0)

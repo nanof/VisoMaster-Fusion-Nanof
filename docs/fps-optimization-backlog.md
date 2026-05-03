@@ -145,7 +145,10 @@ M–L según cobertura | **Riesgo** Medio (TRT shapes, dtypes)
 - Coordinar con PERF-005 (perfiles TRT) al cambiar shapes de entrada.
 
 **Implementación (Fusion)**  
-`FaceMasks.run_faceparser`: ruta ORT + CUDA + tensor de entrada en GPU usa IOBinding (mismo estilo que `run_occluder`), sin round-trip NumPy. CPU / entrada CPU siguen con `session.run`.
+- `FaceMasks.run_faceparser`: ORT + CUDA + entrada en GPU → IOBinding (sin `cpu().numpy()` + `session.run`).  
+- `run_rvm_portrait_alpha` / `run_u2netp_salient_alpha`: rama sin CUDA EP → IOBinding con tensores en el dispositivo de enlace (`cpu` / `cuda` según `get_ort_bind_device_type`).  
+- `FrameEnhancers` (RIFE preview): rama no `uses_cuda_ep_for_thread` → `run_onnx_io_binding` en lugar de `session.run`.  
+- `mouth_action_detector`: modelo **TensorFlow** (no ORT); no aplica IOBinding ORT.
 
 ---
 
