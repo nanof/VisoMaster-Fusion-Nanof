@@ -350,7 +350,8 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "dock opens a side panel (good for long tables). Either or both collects the same data. "
             "On stop, prints [PIPELINE-PROFILE-SESSION] to the console. Optional: "
             "VISIOMASTER_PIPELINE_PROFILE_CSV=file.csv; VISIOMASTER_PERF_STAGES=1; VISIOMASTER_PIPELINE_METRICS=1; "
-            "VISIOMASTER_ORT_PER_SESSION_LOCK=1 (experimental). Inswapper128: VISIOMASTER_INSWAPPER_ORT_BATCH.",
+            "VISIOMASTER_ORT_PER_SESSION_LOCK=1 (experimental). Inswapper128: VISIOMASTER_INSWAPPER_ORT_BATCH; "
+            "plane multi-face prefetch + primary restorer: VISIOMASTER_RESTORER_ORT_BATCH.",
             "exec_function": graphics_view_actions.on_pipeline_profile_display_mode_changed,
             "exec_function_args": [],
         },

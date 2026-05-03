@@ -2592,6 +2592,18 @@ class ModelsProcessor(QtCore.QObject):
             dmd_landmarks_68_crop=dmd_landmarks_68_crop,
         )
 
+    def try_apply_facerestorer_batched_original_stack(
+        self,
+        swaps_bchw_0_255: torch.Tensor,
+        restorer_effective_type: str,
+        fidelity_weight: float,
+    ) -> Optional[torch.Tensor]:
+        return self.face_restorers.try_apply_facerestorer_batched_original_stack(
+            swaps_bchw_0_255,
+            restorer_effective_type,
+            fidelity_weight,
+        )
+
     def apply_occlusion(self, img, amount):
         return self.face_masks.apply_occlusion(img, amount)
 

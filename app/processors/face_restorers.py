@@ -58,6 +58,8 @@ class FaceRestorers:
         self._custom_init_lock = threading.Lock()  # serialises Custom-kernel lazy inits
         self._dmdnet_model: Optional[torch.nn.Module] = None
         self._dmdnet_lock = threading.Lock()
+        self._restorer_ort_batch_session_disabled = False
+        self._restorer_ort_batch_fail_logged = False
         self.model_map = {
             "GFPGAN-v1.4": "GFPGANv1.4",
             "GFPGAN-1024": "GFPGAN1024",
@@ -1243,6 +1245,86 @@ class FaceRestorers:
 
         # Run the model with lazy build handling
         self._run_model_with_lazy_build_check(model_name, ort_session, io_binding)
+
+    def restorer_ort_batched_attempt_enabled(self) -> bool:
+        """PERF-008: mirror VISIOMASTER_INSWAPPER_ORT_BATCH semantics for restorer B>1."""
+        if self.models_processor.provider_name == "Custom":
+            return False
+        if self._restorer_ort_batch_session_disabled:
+            return False
+        v_raw = os.environ.get("VISIOMASTER_RESTORER_ORT_BATCH", "").strip()
+        vl = v_raw.lower()
+        if vl in ("0", "false", "no", "off"):
+            return False
+        if self.models_processor.provider_name == "TensorRT-Engine":
+            if vl not in ("1", "true", "yes", "on"):
+                return False
+        return True
+
+    @torch.inference_mode()
+    def try_apply_facerestorer_batched_original_stack(
+        self,
+        swaps_bchw_0_255: torch.Tensor,
+        restorer_effective_type: str,
+        fidelity_weight: float,
+    ) -> torch.Tensor | None:
+        """
+        One ORT forward for B>=2 faces (``FaceRestorerDetTypeSelection`` == Original only).
+        Input: ``(B,3,H,W)`` float in ~0..255; output same spatial size per row.
+        """
+        if not self.restorer_ort_batched_attempt_enabled():
+            return None
+        if swaps_bchw_0_255.dim() != 4 or swaps_bchw_0_255.shape[1] != 3:
+            return None
+        b = int(swaps_bchw_0_255.shape[0])
+        if b < 2:
+            return None
+        if restorer_effective_type not in ("GFPGAN-v1.4", "CodeFormer"):
+            return None
+        dev = self.models_processor.get_effective_torch_device()
+        x = swaps_bchw_0_255.to(device=dev, dtype=torch.float32).contiguous()
+        _, _, h0, w0 = x.shape
+        temp = (x / 255.0).clamp(0.0, 1.0)
+        temp = v2.functional.normalize(
+            temp, (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=False
+        )
+        try:
+            if restorer_effective_type == "GFPGAN-v1.4":
+                mn = "GFPGANv1.4"
+                if temp.shape[-2] != 512 or temp.shape[-1] != 512:
+                    temp = v2.functional.resize(temp, [512, 512], antialias=True)
+                outpred = torch.empty(
+                    (b, 3, 512, 512),
+                    dtype=self._ort_output_dtype(mn, "output"),
+                    device=dev,
+                ).contiguous()
+                self.run_GFPGAN(temp, outpred)
+                out = outpred.float().clamp_(-1.0, 1.0).add_(1.0).mul_(127.5)
+            else:
+                mn = "CodeFormer"
+                if temp.shape[-2] != 512 or temp.shape[-1] != 512:
+                    temp = v2.functional.resize(temp, [512, 512], antialias=True)
+                outpred = torch.empty(
+                    (b, 3, 512, 512),
+                    dtype=self._ort_output_dtype(mn, "y"),
+                    device=dev,
+                ).contiguous()
+                self.run_codeformer(temp, outpred, float(fidelity_weight))
+                out = outpred.float().clamp_(-1.0, 1.0).add_(1.0).mul_(127.5)
+        except Exception as e:
+            self._restorer_ort_batch_session_disabled = True
+            if not self._restorer_ort_batch_fail_logged:
+                self._restorer_ort_batch_fail_logged = True
+                print(
+                    f"[WARN] Batched face restorer ORT failed (B={b}); falling back per-face. "
+                    f"First error: {e}. For TensorRT-Engine, set VISIOMASTER_RESTORER_ORT_BATCH=1 "
+                    "only if the engine supports dynamic batch.",
+                    flush=True,
+                )
+            return None
+        if out.shape[-2] != h0 or out.shape[-1] != w0:
+            out = v2.functional.resize(out, [h0, w0], antialias=True)
+        return out.contiguous()
 
     def run_GFPGAN(self, image, output):
         model_name = "GFPGANv1.4"

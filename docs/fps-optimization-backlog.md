@@ -28,7 +28,7 @@ Valores sugeridos en **Estado**: `Pendiente` | `En curso` | `Hecho` | `Descartad
 | PERF-005 | Hecho | UI: `TrtDynamicBatchTuningToggle` + sliders en General; lógica en `trt_dynamic_batch_profiles.py`. Tests `test_trt_dynamic_batch_profiles.py`. |
 | PERF-006 | Pendiente | |
 | PERF-007 | Pendiente | |
-| PERF-008 | Pendiente | |
+| PERF-008 | Hecho | `VISIOMASTER_RESTORER_ORT_BATCH`, `FaceRestorers.try_apply_facerestorer_batched_original_stack`, gather en `swap_core` + `_plane_swap_prefetched_apply_swap_core_sequence` (Inswapper128 plane batch + ORT256 plane batch). |
 | PERF-009 | Pendiente | |
 | PERF-010 | Pendiente | |
 | PERF-011 | Pendiente | |
