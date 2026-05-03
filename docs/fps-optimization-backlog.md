@@ -29,7 +29,7 @@ Valores sugeridos en **Estado**: `Pendiente` | `En curso` | `Hecho` | `Descartad
 | PERF-006 | Pendiente | |
 | PERF-007 | Pendiente | |
 | PERF-008 | Hecho | `VISIOMASTER_RESTORER_ORT_BATCH`, `FaceRestorers.try_apply_facerestorer_batched_original_stack`, gather en `swap_core` + `_plane_swap_prefetched_apply_swap_core_sequence` (Inswapper128 plane batch + ORT256 plane batch). |
-| PERF-009 | Pendiente | |
+| PERF-009 | Hecho | Subsample restaurador 1: `FaceRestorerSubsampleEnableToggle` + intervalo + umbral movimiento; delta estable en `FrameWorker._apply_primary_facerestorer_maybe_subsampled`; gather ORT batch desactivado si subsample ON; `VISIOMASTER_DISABLE_RESTORER_SUBSAMPLE=1`. **Corrección:** la clave de caché no puede basarse en `id(parameters)` (cada frame se crea un `ParametersDict` nuevo en `find_best_target_match`); se usa el dict por cara en `worker.parameters` / `target_face` / objeto estable (VR, rotate). |
 | PERF-010 | Pendiente | |
 | PERF-011 | Pendiente | |
 | PERF-012 | Pendiente | |

@@ -352,6 +352,9 @@ class FrameWorker(threading.Thread):
         # Typical usage: 1–10 entries.  Cap at 32 to handle large session edge cases.
         self._color_stats_ema: _OrderedDict = _OrderedDict()
         self._COLOR_STATS_EMA_MAX = 32
+        # PERF-009: primary restorer subsample — per (worker, track, type, H, W) delta reuse.
+        self._face_restorer_subsample_cache: _OrderedDict = _OrderedDict()
+        self._FACE_RESTORER_SUBSAMPLE_CACHE_MAX = 48
 
         # Mouth action detection score (set per-face call in _detect_mouth_action_score)
         self._mouth_action_score: float = 0.0
@@ -1449,6 +1452,9 @@ class FrameWorker(threading.Thread):
                     source_latent_cache=source_latent_cache,
                     blendswap_source_rgb112=_bs112_vr,
                     uniface_source_rgb256=_uf256_vr,
+                    face_restorer_param_bucket_id=self._face_restorer_param_bucket_id(
+                        stable_object=target_face_button
+                    ),
                 )
             except Exception as e_swap_core:
                 print(
@@ -2909,10 +2915,16 @@ class FrameWorker(threading.Thread):
             float(parameters.get("FaceRestorerUltraLightScaleGeDecimalSlider", 2.0)),
             bool(parameters.get("FaceRestorerUltraLightPreferFp16Toggle", True)),
             float(control.get("DetectorScoreSlider", 0.5)),
+            bool(parameters.get("FaceRestorerSubsampleEnableToggle", False)),
         )
 
     def _plane_ordered_share_primary_restorer_batch_key(self, ordered: list[dict]) -> bool:
         if len(ordered) < 2:
+            return False
+        if any(
+            s["parameters"].get("FaceRestorerSubsampleEnableToggle", False)
+            for s in ordered
+        ):
             return False
         sm = ordered[0]["parameters"]["SwapModelSelection"]
         live = self._is_live_stream_face_input()
@@ -2961,6 +2973,8 @@ class FrameWorker(threading.Thread):
         control: dict,
         tform_scale: float,
     ) -> bool:
+        if parameters.get("FaceRestorerSubsampleEnableToggle", False):
+            return False
         if not self.models_processor.face_restorers.restorer_ort_batched_attempt_enabled():
             return False
         if self._face_restorer_skip_for_small_face(parameters, tform_scale):
@@ -2972,6 +2986,132 @@ class FrameWorker(threading.Thread):
         if restorer_effective_type not in ("GFPGAN-v1.4", "CodeFormer"):
             return False
         return True
+
+    @staticmethod
+    def _perf009_interval_run_neural(tick_1based: int, interval: int) -> bool:
+        """True on frames where the heavy restorer should run (first frame always)."""
+        iv = max(2, min(8, int(interval)))
+        t = max(1, int(tick_1based))
+        return ((t - 1) % iv) == 0
+
+    @staticmethod
+    def _perf009_motion_exceeds(
+        swap: torch.Tensor, anchor: torch.Tensor | None, thr: float
+    ) -> bool:
+        if thr <= 0.0 or anchor is None or swap.shape != anchor.shape:
+            return False
+        diff = (swap.float() - anchor.float()).abs().mean().item() / 255.0
+        return diff > float(thr)
+
+    def _face_restorer_param_bucket_id(
+        self,
+        *,
+        face_id_str: str | None = None,
+        target_face: Any = None,
+        stable_object: Any = None,
+    ) -> int:
+        """Stable hash slot for PERF-009 (must not use id(ParametersDict) — rebuilt each frame)."""
+        if face_id_str is not None:
+            b = self.parameters.get(face_id_str)
+            if isinstance(b, dict):
+                return id(b)
+            return hash(face_id_str) & 0x7FFFFFFF
+        if target_face is not None:
+            fid = str(getattr(target_face, "face_id", "") or "")
+            if fid:
+                b = self.parameters.get(fid)
+                if isinstance(b, dict):
+                    return id(b)
+                return hash(fid) & 0x7FFFFFFF
+        if stable_object is not None:
+            return id(stable_object)
+        return 0
+
+    def _apply_primary_facerestorer_maybe_subsampled(
+        self,
+        swap: torch.Tensor,
+        parameters: dict,
+        control: dict,
+        kps_ref,
+        dmd_lm68_crop,
+        _rt1: str,
+        swapper_autores_track_id: int,
+        param_bucket_id: int | None,
+    ) -> torch.Tensor:
+        """PERF-009: run primary Face Restorer every N frames; reuse improvement delta in between."""
+        mp = self.models_processor
+        det_type = parameters["FaceRestorerDetTypeSelection"]
+
+        def _run_nn() -> torch.Tensor:
+            return mp.apply_facerestorer(
+                swap,
+                det_type,
+                _rt1,
+                parameters["FaceRestorerBlendSlider"],
+                parameters["FaceFidelityWeightDecimalSlider"],
+                control["DetectorScoreSlider"],
+                kps_ref,
+                slot_id=1,
+                dmd_landmarks_68_crop=dmd_lm68_crop,
+            )
+
+        if not parameters.get("FaceRestorerSubsampleEnableToggle", False):
+            return _run_nn()
+        if self.is_single_frame:
+            return _run_nn()
+        if os.environ.get("VISIOMASTER_DISABLE_RESTORER_SUBSAMPLE", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        ):
+            return _run_nn()
+
+        try:
+            interval = int(parameters.get("FaceRestorerSubsampleIntervalSlider", 3))
+        except (TypeError, ValueError):
+            interval = 3
+        try:
+            motion_thr = float(
+                parameters.get("FaceRestorerSubsampleMotionDecimalSlider", "0.08")
+            )
+        except (TypeError, ValueError):
+            motion_thr = 0.08
+
+        wid = int(self.worker_id)
+        tid = int(swapper_autores_track_id)
+        h, w = int(swap.shape[-2]), int(swap.shape[-1])
+        bucket = int(param_bucket_id) if param_bucket_id is not None else 0
+        if bucket == 0:
+            # Last resort: callers should pass worker face-bucket id or stable QObject id.
+            bucket = hash(id(parameters)) & 0x7FFFFFFF
+        cache_key = (wid, tid, bucket, str(_rt1), h, w)
+
+        od = self._face_restorer_subsample_cache
+        if cache_key not in od:
+            if len(od) >= self._FACE_RESTORER_SUBSAMPLE_CACHE_MAX:
+                od.popitem(last=False)
+            od[cache_key] = {"tick": 0, "delta": None, "anchor": None}
+        else:
+            od.move_to_end(cache_key)
+        st = od[cache_key]
+        st["tick"] = int(st["tick"]) + 1
+        tick = int(st["tick"])
+
+        delta = st.get("delta")
+        anchor = st.get("anchor")
+        run_nn = delta is None or self._perf009_interval_run_neural(tick, interval)
+        if not run_nn and self._perf009_motion_exceeds(swap, anchor, motion_thr):
+            run_nn = True
+
+        if not run_nn and isinstance(delta, torch.Tensor) and delta.shape == swap.shape:
+            approx = (swap.float() + delta).clamp_(0.0, 255.0)
+            return approx
+
+        out = _run_nn()
+        st["anchor"] = swap.detach().clone()
+        st["delta"] = (out.float() - swap.float()).detach()
+        return out
 
     def _plane_swap_prefetched_apply_swap_core_sequence(
         self,
@@ -3010,6 +3150,9 @@ class FrameWorker(threading.Thread):
                         blendswap_source_rgb112=s.get("blendswap_src112"),
                         uniface_source_rgb256=s.get("uniface_src256"),
                         gather_pre_primary_restorer_tails=gather_tails,
+                        face_restorer_param_bucket_id=s.get(
+                            "face_restorer_bucket_id"
+                        ),
                     )
                 except _GatherPrePrimaryRestorer:
                     continue
@@ -3068,6 +3211,9 @@ class FrameWorker(threading.Thread):
                     alignment_img=batch_snap,
                     blendswap_source_rgb112=s.get("blendswap_src112"),
                     uniface_source_rgb256=s.get("uniface_src256"),
+                    face_restorer_param_bucket_id=s.get(
+                        "face_restorer_bucket_id"
+                    ),
                 )
             )
             if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -3111,6 +3257,9 @@ class FrameWorker(threading.Thread):
                         blendswap_source_rgb112=s0.get("blendswap_src112"),
                         uniface_source_rgb256=s0.get("uniface_src256"),
                         swapper_autores_track_id=int(s0.get("swap_tid", -1)),
+                        face_restorer_param_bucket_id=s0.get(
+                            "face_restorer_bucket_id"
+                        ),
                     )
                 )
                 if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -3161,6 +3310,9 @@ class FrameWorker(threading.Thread):
                         blendswap_source_rgb112=sp.get("blendswap_src112"),
                         uniface_source_rgb256=sp.get("uniface_src256"),
                         swapper_autores_track_id=int(sp.get("swap_tid", -1)),
+                        face_restorer_param_bucket_id=sp.get(
+                            "face_restorer_bucket_id"
+                        ),
                     )
                 )
                 if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -3195,6 +3347,9 @@ class FrameWorker(threading.Thread):
                             blendswap_source_rgb112=sp.get("blendswap_src112"),
                             uniface_source_rgb256=sp.get("uniface_src256"),
                             swapper_autores_track_id=int(sp.get("swap_tid", -1)),
+                            face_restorer_param_bucket_id=sp.get(
+                                "face_restorer_bucket_id"
+                            ),
                         )
                     )
                     if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -3244,6 +3399,9 @@ class FrameWorker(threading.Thread):
                         source_latent_cache=source_latent_cache,
                         blendswap_source_rgb112=sp.get("blendswap_src112"),
                         uniface_source_rgb256=sp.get("uniface_src256"),
+                        face_restorer_param_bucket_id=sp.get(
+                            "face_restorer_bucket_id"
+                        ),
                     )
                 )
                 if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -3383,6 +3541,9 @@ class FrameWorker(threading.Thread):
                         source_latent_cache=source_latent_cache,
                         blendswap_source_rgb112=sp.get("blendswap_src112"),
                         uniface_source_rgb256=sp.get("uniface_src256"),
+                        face_restorer_param_bucket_id=sp.get(
+                            "face_restorer_bucket_id"
+                        ),
                     )
                 )
                 if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -4264,6 +4425,9 @@ class FrameWorker(threading.Thread):
                                 swapper_autores_track_id=int(
                                     best_fface.get("track_id", -1)
                                 ),
+                                face_restorer_param_bucket_id=self._face_restorer_param_bucket_id(
+                                    face_id_str=face_id_str
+                                ),
                             )
                             if edit_button_is_checked_global and any(
                                 params[f]
@@ -4441,6 +4605,9 @@ class FrameWorker(threading.Thread):
                                         uniface_source_rgb256=_uf256_rr,
                                         swapper_autores_track_id=int(
                                             fface.get("track_id", -1)
+                                        ),
+                                        face_restorer_param_bucket_id=self._face_restorer_param_bucket_id(
+                                            stable_object=in_btn
                                         ),
                                     )
                                 )
@@ -4626,6 +4793,9 @@ class FrameWorker(threading.Thread):
                                     "blendswap_src112": _bs112_sa,
                                     "uniface_src256": _uf256_sa,
                                     "swap_tid": int(fface.get("track_id", -1)),
+                                    "face_restorer_bucket_id": self._face_restorer_param_bucket_id(
+                                        target_face=best_target
+                                    ),
                                 }
                             )
                             continue
@@ -4657,6 +4827,9 @@ class FrameWorker(threading.Thread):
                                     uniface_source_rgb256=_uf256_sa,
                                     swapper_autores_track_id=int(
                                         fface.get("track_id", -1)
+                                    ),
+                                    face_restorer_param_bucket_id=self._face_restorer_param_bucket_id(
+                                        target_face=best_target
                                     ),
                                 )
                             )
@@ -7135,6 +7308,7 @@ class FrameWorker(threading.Thread):
         uniface_source_rgb256: torch.Tensor | None = None,
         swapper_autores_track_id: int = -1,
         gather_pre_primary_restorer_tails: list | None = None,
+        face_restorer_param_bucket_id: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """
         Core function for face swapping. Handles:
@@ -8924,16 +9098,15 @@ class FrameWorker(threading.Thread):
                     )
                 )
                 raise _GatherPrePrimaryRestorer()
-            swap_restorecalc = self.models_processor.apply_facerestorer(
+            swap_restorecalc = self._apply_primary_facerestorer_maybe_subsampled(
                 swap,
-                parameters["FaceRestorerDetTypeSelection"],
-                _rt1,
-                parameters["FaceRestorerBlendSlider"],
-                parameters["FaceFidelityWeightDecimalSlider"],
-                control["DetectorScoreSlider"],
+                parameters,
+                control,
                 kps_ref,
-                slot_id=1,
-                dmd_landmarks_68_crop=dmd_lm68_crop,
+                dmd_lm68_crop,
+                _rt1,
+                swapper_autores_track_id,
+                face_restorer_param_bucket_id,
             )
         elif _swap_restore_needs_clone:
             swap_restorecalc = swap.clone()

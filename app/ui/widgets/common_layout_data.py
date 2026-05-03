@@ -73,6 +73,43 @@ COMMON_LAYOUT_DATA: Any = {
             "requiredToggleValue": True,
             "help": "Control the blend ratio between the restored face and the swapped face.",
         },
+        "FaceRestorerSubsampleEnableToggle": {
+            "level": 2,
+            "label": "Subsample heavy restorer (FPS mode)",
+            "default": False,
+            "parentToggle": "FaceRestorerEnableToggle",
+            "requiredToggleValue": True,
+            "help": "PERF-009: run the primary Face Restorer network only every N frames per track; "
+            "in between, reuse a stable improvement map (restored−input) applied to the current swap. "
+            "Improves FPS when restoration dominates; fast mouth/eyes motion may look softer until the next full pass. "
+            "Single-frame preview always runs full quality. Disables multi-face ORT batch restore for this session path. "
+            "State is keyed per target face (worker parameter bucket) or stable UI object (VR / input-rotate). "
+            "Set VISIOMASTER_DISABLE_RESTORER_SUBSAMPLE=1 to force full inference every frame.",
+        },
+        "FaceRestorerSubsampleIntervalSlider": {
+            "level": 3,
+            "label": "Full restorer every N frames",
+            "min_value": "2",
+            "max_value": "5",
+            "default": "3",
+            "step": 1,
+            "parentToggle": "FaceRestorerEnableToggle & FaceRestorerSubsampleEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Lower N = more full passes (better quality, less FPS gain).",
+        },
+        "FaceRestorerSubsampleMotionDecimalSlider": {
+            "level": 3,
+            "label": "Motion refresh (mean |Δ|/255, 0=off)",
+            "min_value": "0.00",
+            "max_value": "0.35",
+            "default": "0.08",
+            "decimals": 2,
+            "step": 0.01,
+            "parentToggle": "FaceRestorerEnableToggle & FaceRestorerSubsampleEnableToggle",
+            "requiredToggleValue": True,
+            "help": "If the pre-restorer swap differs from the last full pass by more than this (mean absolute RGB / 255), "
+            "run a full restorer immediately. 0 disables this refresh (interval only).",
+        },
         "FaceRestorerSkipSmallFaceToggle": {
             "level": 2,
             "label": "Skip restorer on small target face",
