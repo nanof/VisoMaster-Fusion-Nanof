@@ -23,8 +23,8 @@ Valores sugeridos en **Estado**: `Pendiente` | `En curso` | `Hecho` | `Descartad
 |----|--------|-------|
 | PERF-001 | Pendiente | |
 | PERF-002 | Pendiente | |
-| PERF-003 | Pendiente | |
-| PERF-004 | Pendiente | |
+| PERF-003 | Hecho | FaceParser ORT en CUDA: IOBinding directo (sin ``img.cpu().numpy()`` + ``session.run``). |
+| PERF-004 | Hecho | ``rgb_hwc_uint8_numpy_to_torch_chw`` en ``miscellaneous.py`` (pinned + ``non_blocking``); usado en detección secuencial, issue scan y ``FrameWorker`` cuando no hay handoff CHW. ``VISIOMASTER_DISABLE_PINNED_H2D=1`` para desactivar. |
 | PERF-005 | Pendiente | |
 | PERF-006 | Pendiente | |
 | PERF-007 | Pendiente | |
@@ -144,6 +144,9 @@ M–L según cobertura | **Riesgo** Medio (TRT shapes, dtypes)
 - Fuerte si hay picos de VRAM o tiempo en “bind/copy” entre forwards.  
 - Coordinar con PERF-005 (perfiles TRT) al cambiar shapes de entrada.
 
+**Implementación (Fusion)**  
+`FaceMasks.run_faceparser`: ruta ORT + CUDA + tensor de entrada en GPU usa IOBinding (mismo estilo que `run_occluder`), sin round-trip NumPy. CPU / entrada CPU siguen con `session.run`.
+
 ---
 
 ## PERF-004 — H2D: pinned host + `non_blocking` y handoff CHW
@@ -163,6 +166,9 @@ M | **Riesgo** Medio (condiciones de carrera stream/stream)
 **Criterios de decisión**  
 - Subir si el perfil marca mucho tiempo en preparación / numpy→torch.  
 - Tras PERF-002 (streams coherentes).
+
+**Implementación (Fusion)**  
+`app/helpers/miscellaneous.rgb_hwc_uint8_numpy_to_torch_chw`: staging `pin_memory` + `.to(..., non_blocking=True)` en CUDA. Usado en `_run_sequential_detection` (frame completo y ROI), issue-scan tensor, y `FrameWorker` sin `_feeder_chw_tensor`. Variable `VISIOMASTER_DISABLE_PINNED_H2D=1` desactiva el pin. Tests: `tests/unit/helpers/test_miscellaneous_h2d.py`.
 
 ---
 

@@ -29,6 +29,7 @@ from app.helpers.miscellaneous import (
     coerce_similarity_threshold,
     copy_mapping_data,
     detector_input_size_from_control,
+    rgb_hwc_uint8_numpy_to_torch_chw,
     rgb_uint8_to_bgr_contiguous,
     find_best_target_match,
     get_scaling_transforms,
@@ -1667,7 +1668,6 @@ class FrameWorker(threading.Thread):
 
         # Prepare the base tensor: reuse feeder CHW upload when sequential detect already H2D'd.
         _dev = self.models_processor.get_effective_torch_device()
-        _nb = torch.cuda.is_available() and str(_dev).startswith("cuda")
         _handoff = self._feeder_chw_tensor
         self._feeder_chw_tensor = None
         _reuse = (
@@ -1690,12 +1690,9 @@ class FrameWorker(threading.Thread):
                 if _fcs is not None:
                     self.worker_stream.wait_stream(_fcs)
         else:
-            processed_tensor_rgb_uint8 = torch.from_numpy(img_numpy_rgb_uint8).to(
-                _dev, non_blocking=_nb
+            processed_tensor_rgb_uint8 = rgb_hwc_uint8_numpy_to_torch_chw(
+                img_numpy_rgb_uint8, _dev
             )
-            processed_tensor_rgb_uint8 = processed_tensor_rgb_uint8.permute(2, 0, 1)
-            if not processed_tensor_rgb_uint8.is_contiguous():
-                processed_tensor_rgb_uint8 = processed_tensor_rgb_uint8.contiguous()
         if perf_stages is not None:
             perf_stages.mark("prep_scaling_h2d")
 

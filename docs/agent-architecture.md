@@ -129,6 +129,7 @@ Vendored code (YOLOX, partial CLIP, VR, …). **Excluded from mypy** in `pyproje
 | `VISIOMASTER_MULTI_GPU_LOG`, `VISIOMASTER_MULTI_GPU_ASSIGN_PER_WORKER` | Multi-GPU debugging |
 | `VISIOMASTER_RECOG_CACHE_*` | Recognition cache thresholds |
 | `VISIOMASTER_FEEDER_POST_DETECT_SYNC` | Explicit sync (debug only) |
+| `VISIOMASTER_DISABLE_PINNED_H2D` | When set, skips pinned host staging for RGB HWC→CHW upload (see ``rgb_hwc_uint8_numpy_to_torch_chw`` in ``miscellaneous.py``). |
 | `VISIOMASTER_TORCH_COMPILE` | Disable Inductor compile if boot fails |
 | `VISIOMASTER_ORT_IOBINDING_POST_SYNC` | IOBinding post-sync behavior |
 | `VISIOMASTER_TRT_NO_DYNAMIC_PROFILES` | Disables all ORT TRT EP ``trt_profile_*`` entries from ``_tensorrt_dynamic_shape_profile_opts`` (plain TRT build). |

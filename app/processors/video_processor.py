@@ -1862,10 +1862,8 @@ class VideoProcessor(QObject):
 
             owns_frame_tensor = frame_tensor is None
             if frame_tensor is None:
-                full_frame_tensor = (
-                    torch.from_numpy(frame_rgb)
-                    .to(device, non_blocking=True)
-                    .permute(2, 0, 1)  # Convert [H, W, C] -> [C, H, W]
+                full_frame_tensor = misc_helpers.rgb_hwc_uint8_numpy_to_torch_chw(
+                    frame_rgb, device
                 )
             else:
                 full_frame_tensor = frame_tensor
@@ -1903,11 +1901,8 @@ class VideoProcessor(QObject):
                     frame_rgb, previous_faces_arg, pad_pct
                 )
                 if crop_np is not None and crop_np.size > 0:
-                    det_tensor = (
-                        torch.from_numpy(crop_np)
-                        .to(device, non_blocking=True)
-                        .permute(2, 0, 1)
-                        .contiguous()
+                    det_tensor = misc_helpers.rgb_hwc_uint8_numpy_to_torch_chw(
+                        crop_np, device
                     )
                     prev_for_detect = None
 
@@ -6573,10 +6568,9 @@ class VideoProcessor(QObject):
                         if frame_rgb.dtype == numpy.uint8
                         else frame_rgb.astype("uint8", copy=False)
                     )
-                    frame_tensor = (
-                        torch.from_numpy(frame_rgb_uint8)
-                        .to(self.main_window.models_processor.device, non_blocking=True)
-                        .permute(2, 0, 1)
+                    frame_tensor = misc_helpers.rgb_hwc_uint8_numpy_to_torch_chw(
+                        frame_rgb_uint8,
+                        self.main_window.models_processor.device,
                     )
                     self.current_frame_number = frame_number
                     bboxes, kpss_5, _, _, _, _ = self._run_sequential_detection(

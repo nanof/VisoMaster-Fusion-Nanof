@@ -65,6 +65,41 @@ THUMBNAIL_MAX_EDGE_PX = 320
 THUMBNAIL_CACHE_TAG = "e320"
 
 
+def rgb_hwc_uint8_numpy_to_torch_chw(
+    frame_rgb: np.ndarray,
+    device: torch.device | str,
+    *,
+    pin_host_for_cuda: bool = True,
+) -> torch.Tensor:
+    """
+    HWC uint8 RGB (feeder / detection) → CHW uint8 on ``device``.
+
+    PERF-004: on CUDA, copy through a **pinned** host staging buffer so the
+    subsequent ``.to(device, non_blocking=True)`` can overlap with the GPU.
+    Disable via ``VISIOMASTER_DISABLE_PINNED_H2D=1`` if troubleshooting transfers.
+    """
+    if frame_rgb.ndim != 3 or int(frame_rgb.shape[2]) != 3:
+        raise ValueError("frame_rgb must be HWC with 3 channels (RGB uint8)")
+    if not isinstance(device, torch.device):
+        device = torch.device(device)
+    use_cuda = device.type == "cuda" and torch.cuda.is_available()
+    disable_pin = os.environ.get("VISIOMASTER_DISABLE_PINNED_H2D", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    if not use_cuda or disable_pin or not pin_host_for_cuda:
+        t = torch.from_numpy(np.ascontiguousarray(frame_rgb)).to(
+            device, non_blocking=use_cuda
+        )
+        return t.permute(2, 0, 1).contiguous()
+    h, w, _c = frame_rgb.shape
+    staged = torch.empty((h, w, 3), dtype=torch.uint8, pin_memory=True)
+    staged.copy_(torch.from_numpy(np.ascontiguousarray(frame_rgb)))
+    return staged.to(device, non_blocking=True).permute(2, 0, 1).contiguous()
+
+
 def bgr_uint8_to_rgb_contiguous(frame_bgr: np.ndarray) -> np.ndarray:
     """
     OpenCV BGR ``uint8`` HWC image → row-major RGB ``uint8``.

@@ -1367,16 +1367,47 @@ class FaceMasks:
 
         if session is not None:
             try:
-                output_names = [x.name for x in session.get_outputs()]
+                outs_meta = session.get_outputs()
+                output_names = [x.name for x in outs_meta]
                 input_name = session.get_inputs()[0].name
-
-                if img.is_cuda:
-                    img_np = img.cpu().numpy()
+                dev = self.models_processor.get_effective_torch_device()
+                # PERF-003: CUDA ORT — IOBinding avoids D2H→run→H2D round-trip through NumPy.
+                if (
+                    str(dev).startswith("cuda")
+                    and torch.cuda.is_available()
+                    and img.is_cuda
+                ):
+                    io = session.io_binding()
+                    self.models_processor.bind_ort_io_input(
+                        io, model_key, input_name, img
+                    )
+                    prim = output_names[0]
+                    self.models_processor.bind_ort_io_output(
+                        io, model_key, prim, out
+                    )
+                    for name in output_names[1:]:
+                        io.bind_output(name, dev)
+                    is_lazy = self.models_processor.check_and_clear_pending_build(
+                        model_key
+                    )
+                    if is_lazy:
+                        self.models_processor.show_build_dialog.emit(
+                            "Finalizing TensorRT Build",
+                            f"Performing first-run inference for:\n{model_key}\n\nThis may take several minutes.",
+                        )
+                    try:
+                        if self.models_processor.uses_cuda_ep_for_thread():
+                            torch.cuda.current_stream().synchronize()
+                        elif self.models_processor.device != "cpu":
+                            self.models_processor.syncvec.cpu()
+                        self.models_processor.run_session_with_iobinding(session, io)
+                    finally:
+                        if is_lazy:
+                            self.models_processor.hide_build_dialog.emit()
                 else:
-                    img_np = img.numpy()
-
-                result = session.run(output_names, {input_name: img_np})[0]
-                out.copy_(torch.from_numpy(result))
+                    img_np = img.detach().cpu().numpy() if img.is_cuda else img.numpy()
+                    result = session.run(output_names, {input_name: img_np})[0]
+                    out.copy_(torch.from_numpy(np.asarray(result)).to(out.device))
             except Exception as e:
                 print(f"[ERROR] run_faceparser (ONNX) failed: {e}")
         else:
