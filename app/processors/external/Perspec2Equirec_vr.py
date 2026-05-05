@@ -128,17 +128,21 @@ class Perspective:
         # gives identical results every frame.  Cache to skip the expensive H×W matrix-
         # multiply, projection, and mask creation on every stitch call for stable faces.
         # Only F.grid_sample (image-dependent) is executed on every call.
+        # Cache key now includes the device so GPU-resident tensors are reused
+        # without a host→device round-trip on every stitch call. The previous
+        # CPU-cached variant was uploading ~56MiB grid + ~7MiB mask per cache
+        # hit, every frame, on every pool worker — and each upload's sync was
+        # spin-waiting on CUDA 13/Windows. The "GPU fragmentation" the original
+        # comment worried about is bounded by _P2E_GRID_MASK_CACHE_MAX entries.
         _cache_key = (self.THETA_deg_for_cache, self.PHI_deg_for_cache,
-                      self.wFOV, self._height, self._width, height, width)
+                      self.wFOV, self._height, self._width, height, width,
+                      str(self.device))
         # Thread-safe cache lookup — hold lock only for the dict read.
         with _P2E_GRID_MASK_CACHE_LOCK:
             _cached = _P2E_GRID_MASK_CACHE.get(_cache_key)
 
         if _cached is not None:
-            # Cache stores CPU tensors — move to device here (avoids persistent GPU fragmentation).
             grid, mask_out = _cached
-            grid = grid.to(self.device)
-            mask_out = mask_out.to(self.device)
         else:
             # Call the cached function to get the 3D coordinate grid (stored on CPU).
             # Move to device for the matrix multiply and projection.
@@ -178,26 +182,22 @@ class Perspective:
             grid = torch.stack((grid_x_persp, grid_y_persp), dim=2).unsqueeze(0)  # 1, H_out, W_out, 2
             mask_out = mask.unsqueeze(0)  # 1, H, W
 
-            # Store result on CPU — avoids holding large float grids in GPU memory permanently.
-            # (~56 MiB grid + ~7 MiB mask per entry at 4K; 4 entries = ~252 MiB saved on GPU)
-            # .cpu() transfers happen BEFORE acquiring the lock so the lock is not held during
-            # the slow GPU→CPU copy (would block all 8 pool workers sequentially).
-            _grid_cpu = grid.cpu()
-            _mask_out_cpu = mask_out.cpu()
+            # Cache GPU tensors directly. The earlier CPU-storage variant was
+            # paying a host→device upload (~63MiB total) on every cache hit
+            # which, multiplied by every face × every frame × every worker,
+            # dominated PCIe traffic and caused per-transfer sync spin.
             with _P2E_GRID_MASK_CACHE_LOCK:
                 if _cache_key not in _P2E_GRID_MASK_CACHE:
                     if len(_P2E_GRID_MASK_CACHE) >= _P2E_GRID_MASK_CACHE_MAX:
                         _P2E_GRID_MASK_CACHE.popitem(last=False)
-                    _P2E_GRID_MASK_CACHE[_cache_key] = (_grid_cpu, _mask_out_cpu)
+                    _P2E_GRID_MASK_CACHE[_cache_key] = (grid, mask_out)
 
-            # P2E-MEM-01: free all intermediate GPU tensors now that grid/mask_out are
-            # stored in the cache.  Without explicit del, Python keeps all 12+ tensors
-            # alive until the function returns — ~700 MiB for a 4K equirect frame.
-            # grid and mask_out are still needed below; all other intermediates are not.
+            # Free intermediate GPU tensors that are not part of the cached
+            # outputs. grid and mask_out are still needed below; all other
+            # intermediates are no longer referenced.
             del xyz_equ_norm, xyz_flat, rotated_xyz_flat, rotated_xyz_persp_view
             del depth_val, is_in_front, safe_depth_divisor, u_norm, v_norm
             del fov_conditions, mask, grid_x_persp, grid_y_persp
-            del _grid_cpu, _mask_out_cpu
 
         # Image-dependent sampling — always executed (image changes every frame)
         equirect_component_float = F.grid_sample(self._img_tensor_cxhxw_rgb_float.unsqueeze(0), grid,

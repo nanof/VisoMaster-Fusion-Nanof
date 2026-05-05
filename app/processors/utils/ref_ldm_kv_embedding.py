@@ -1475,18 +1475,21 @@ class KVExtractor:
                 v_list = cache_kv_module.v.get(id(module), [])
 
                 if k_list and v_list:
-                    final_k = k_list[0].clone().detach() * scale_factor
-                    final_v = v_list[0].clone().detach() * scale_factor
+                    # KEEP K/V ON GPU. The earlier R-05 "save VRAM by storing on CPU"
+                    # variant forced apply_denoiser_unet to re-upload all 32 K/V
+                    # tensors host→device on EVERY UNet call. With DDIM (~20-50
+                    # steps) × per-frame inference × 8 worker threads, that became
+                    # thousands of cudaMemcpyHostToDevice calls per second; each
+                    # one synchronizes the calling thread, and on CUDA 13/Windows
+                    # the sync spin-waits, pegging every CPU core at 100%.
+                    # Total cost of keeping the cache on GPU is ~30-150MB —
+                    # negligible against a modern GPU's VRAM.
+                    final_k = (k_list[0].clone().detach() * scale_factor).contiguous()
+                    final_v = (v_list[0].clone().detach() * scale_factor).contiguous()
 
-                    # R-05: copy to CPU then immediately release the GPU tensor
-                    k_cpu = final_k.cpu()
-                    del final_k  # free GPU memory
-                    v_cpu = final_v.cpu()
-                    del final_v  # free GPU memory
+                    extracted_kv_map[name] = {"k": final_k, "v": final_v}
 
-                    extracted_kv_map[name] = {"k": k_cpu, "v": v_cpu}
-
-        cache_kv_module.clear_cache()  # R-05: release any remaining GPU caches
+        cache_kv_module.clear_cache()  # release any remaining GPU caches
         cache_kv_module.mode = None
 
         print(

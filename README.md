@@ -135,7 +135,7 @@ VisoMaster Fusion includes all the great features of the original plus major enh
 
 Download **ONLY** the `Start_Portable.bat` file from this repo release page using the link below and place it in a new directory where you want to run VisoMaster. Then execute the batch file to start VisoMaster. Portable dependencies will be installed on the first run into the portable files directory.
 
-- [Download - Start_Portable.bat](https://github.com/VisoMasterFusion/VisoMaster-Fusion/releases/download/v2.0.0/start_portable.bat)
+- [Download - Start_Portable.bat](https://github.com/VisoMasterFusion/VisoMaster-Fusion/releases/latest/download/Start_Portable.bat)
 
 You do not need any of the non-portable steps below for the portable version. Always start VisoMaster with `Start_Portable.bat`.
 
@@ -159,7 +159,7 @@ Skip this if you already have one.
 #### Using Anaconda
 
 ```sh
-conda create -n visomaster python=3.11 -y
+conda create -n visomaster python=3.12 -y
 conda activate visomaster
 pip install uv
 ```
@@ -167,14 +167,14 @@ pip install uv
 #### Using uv directly
 
 ```sh
-uv venv --python 3.11
+uv venv --python 3.12
 .venv\Scripts\activate
 ```
 
 **3. Install requirements**
 
 ```sh
-uv pip install -r requirements_cu129.txt
+uv pip install -r requirements_cu13.txt
 ```
 
 **4. Download required models**
@@ -249,11 +249,11 @@ uv venv --python 3.12 .venv-test
 .venv-test\Scripts\activate
 
 # Install test dependencies
-uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
 uv pip install numpy scipy scikit-image opencv-python pillow pytest pytest-mock
 ```
 
-> If you already have a `.venv` with the full `requirements_cu129.txt` installed, you can run tests directly in it - the GPU packages do not interfere.
+> If you already have a `.venv` with the full `requirements_cu13.txt` installed, you can run tests directly in it - the GPU packages do not interfere.
 
 **Running the tests**
 

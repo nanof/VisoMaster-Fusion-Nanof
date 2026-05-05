@@ -66,9 +66,13 @@ class Equirectangular:
         equ_cy = (equ_h - 1) / 2.0
 
         # E2P-CACHE-01: perspective plane grid — depends only on FOV and output size,
-        # NOT on THETA/PHI.  Stores CPU tensors; move to device on use.
+        # NOT on THETA/PHI. Cached AS GPU TENSORS keyed by (FOV, h, w, device): a
+        # CPU-resident cache forced a host→device upload of the grid (W*H*float32
+        # ≈ a few MB) on every perspective extraction, multiplied by every face
+        # tile every frame on every pool worker — cumulative PCIe traffic was
+        # in the GB/s range and each transfer's sync was spin-waiting on CUDA 13.
         # Thread-safe via _PERSP_GRID_CACHE_LOCK.
-        cache_key = (FOV, height, width)
+        cache_key = (FOV, height, width, str(self.device))
         with _PERSP_GRID_CACHE_LOCK:
             _cached_grid = _PERSP_GRID_CACHE.get(cache_key)
             if _cached_grid is not None:
@@ -76,8 +80,6 @@ class Equirectangular:
 
         if _cached_grid is not None:
             persp_xx, persp_yy = _cached_grid
-            persp_xx = persp_xx.to(self.device)
-            persp_yy = persp_yy.to(self.device)
         else:
             wFOV = FOV
             hFOV = float(height) / float(width) * wFOV
@@ -88,15 +90,11 @@ class Equirectangular:
             persp_y_coords = torch.linspace(-h_len, h_len, height, device=self.device, dtype=torch.float32)
             persp_yy, persp_xx = torch.meshgrid(persp_y_coords, persp_x_coords, indexing='ij')
 
-            # .cpu() transfers happen BEFORE acquiring the lock to avoid holding the lock
-            # during GPU→CPU copies, which would serialize all 8 pool workers.
-            _persp_xx_cpu = persp_xx.cpu()
-            _persp_yy_cpu = persp_yy.cpu()
             with _PERSP_GRID_CACHE_LOCK:
                 if cache_key not in _PERSP_GRID_CACHE:
                     if len(_PERSP_GRID_CACHE) >= _PERSP_GRID_CACHE_MAX:
                         _PERSP_GRID_CACHE.popitem(last=False)
-                    _PERSP_GRID_CACHE[cache_key] = (_persp_xx_cpu, _persp_yy_cpu)
+                    _PERSP_GRID_CACHE[cache_key] = (persp_xx, persp_yy)
 
         # Points in 3D space on the perspective image plane (camera looking along X-axis)
         x_3d = torch.ones_like(persp_xx)

@@ -1173,6 +1173,9 @@ def _serialize_job_data(main_window: "MainWindow") -> dict:
         },
         "job_marker_pairs": copy.deepcopy(main_window.job_marker_pairs),
         "selected_media_id": selected_media_id,
+        "selected_target_face_id": getattr(
+            main_window, "selected_target_face_id", None
+        ),
         "swap_faces_enabled": main_window.swapfacesButton.isChecked(),
         "last_target_media_folder_path": main_window.last_target_media_folder_path,
         "last_input_media_folder_path": main_window.last_input_media_folder_path,

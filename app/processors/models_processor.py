@@ -3049,11 +3049,12 @@ class ModelsProcessor(QtCore.QObject):
         kv_tensor_map_for_this_run: Dict[str, Dict[str, torch.Tensor]] | None = None
         if reference_kv_map:
             try:
+                # The cache in ref_ldm_kv_embedding is already on GPU and read-only in this path.
+                # Cloning every layer on every DDIM step adds avoidable GPU churn.
                 kv_tensor_map_for_this_run = {
                     layer: {
-                        # OPTIMISATION PCIe : non_blocking=True for async
-                        "k": tens_dict["k"].clone().to(self.device, non_blocking=True),
-                        "v": tens_dict["v"].clone().to(self.device, non_blocking=True),
+                        "k": tens_dict["k"],
+                        "v": tens_dict["v"],
                     }
                     for layer, tens_dict in reference_kv_map.items()
                     if tens_dict

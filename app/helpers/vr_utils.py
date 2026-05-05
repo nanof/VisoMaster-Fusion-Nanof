@@ -209,6 +209,13 @@ class PerspectiveConverter:
         # (recording) and single-frame workers (scrubbing) share the same cached masks.
         # Cache hit skips eye-mask derivation, feather-radius estimation, max_pool2d erosion,
         # and Gaussian blur — all of which operate on the full H×W equirect frame.
+        _mask_device = mask_torch_original_shape.device
+        # Cache key now includes the device; the cache stores GPU tensors so a
+        # cache hit returns the resident tensor without a host→device upload.
+        # The previous CPU-storage variant was uploading the ~30 MiB feathered
+        # mask 4× per frame × 8 workers — a third of a gigabyte of PCIe traffic
+        # per frame, with each upload's sync spin-waiting on CUDA 13/Windows
+        # and saturating CPU cores instead of waking them.
         _fmask_key = (
             round(theta, 3),
             round(phi, 3),
@@ -216,21 +223,14 @@ class PerspectiveConverter:
             is_left_eye,
             self.orig_height,
             self.orig_width,
+            str(_mask_device),
         )
         # Thread-safe cache lookup: hold the lock only for the dict read so concurrent
         # pool workers cannot race between `key in cache` and `move_to_end(key)`.
-        _mask_device = mask_torch_original_shape.device
         with _FEATHERED_MASK_CACHE_LOCK:
             feathered_mask_torch_float_1hw = _FEATHERED_MASK_CACHE.get(_fmask_key)
             if feathered_mask_torch_float_1hw is not None:
                 _FEATHERED_MASK_CACHE.move_to_end(_fmask_key)
-
-        if feathered_mask_torch_float_1hw is not None:
-            # Cache stores CPU tensors — move to device here (avoids persistent GPU fragmentation).
-            # (~36 MiB per entry at 4K; 16 entries = ~576 MiB saved on GPU)
-            feathered_mask_torch_float_1hw = feathered_mask_torch_float_1hw.to(
-                _mask_device
-            )
 
         if feathered_mask_torch_float_1hw is None:
             eye_region_mask = torch.zeros_like(
@@ -261,15 +261,14 @@ class PerspectiveConverter:
                 erosion_kernel_size=(2 * feather_radius_val + 1),  # = 25
             )
 
-            # Store result on CPU — avoids holding large float masks in GPU memory permanently.
-            # .cpu() transfer happens BEFORE acquiring the lock to avoid holding the lock
-            # during the ~30 MB GPU→CPU copy, which would serialize all 8 pool workers.
-            _fmask_cpu = feathered_mask_torch_float_1hw.cpu()
+            # Store on GPU — re-uploading per cache hit was the dominant
+            # PCIe traffic cost on VR runs. Bounded entry count + clear on
+            # job teardown prevents unbounded GPU memory growth.
             with _FEATHERED_MASK_CACHE_LOCK:
                 if _fmask_key not in _FEATHERED_MASK_CACHE:
                     if len(_FEATHERED_MASK_CACHE) >= _FEATHERED_MASK_CACHE_MAX:
                         _FEATHERED_MASK_CACHE.popitem(last=False)
-                    _FEATHERED_MASK_CACHE[_fmask_key] = _fmask_cpu
+                    _FEATHERED_MASK_CACHE[_fmask_key] = feathered_mask_torch_float_1hw
 
             del eye_region_mask, eye_specific_mask_torch_original_shape
 
