@@ -10,12 +10,40 @@
 
 import os
 import subprocess
+import urllib.error
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from .core import PATHS
 import filecmp
 import sys
 from PySide6.QtWidgets import QApplication, QMessageBox
+
+
+RELEASE_BAT_URL = (
+    "https://github.com/VisoMasterFusion/VisoMaster-Fusion/releases/latest/download/Start_Portable.bat"
+)
+_remote_bat_cache: Path | None = None
+
+
+def _get_release_bat(force: bool = False) -> Path | None:
+    """Download the latest Start_Portable.bat from the release page (cached per session).
+
+    Returns the local path on success, or None if the download failed.
+    """
+    global _remote_bat_cache
+    if _remote_bat_cache and _remote_bat_cache.exists() and not force:
+        return _remote_bat_cache
+
+    target = PATHS["PORTABLE_DIR"] / "Start_Portable.bat.new"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        urllib.request.urlretrieve(RELEASE_BAT_URL, str(target))
+        _remote_bat_cache = target
+        return target
+    except (urllib.error.URLError, OSError) as e:
+        print(f"[Launcher] Could not download latest Start_Portable.bat: {e}")
+        return None
 
 
 # ---------- Git Command Wrapper ----------
@@ -161,15 +189,17 @@ def backup_changed_files(changed: list[str]) -> str | None:
 
 
 def is_launcher_update_available() -> bool:
-    """Check if the root Start_Portable.bat differs from the one in the repo."""
+    """Check if the local Start_Portable.bat differs from the one on the release page."""
     root_bat = PATHS["BASE_DIR"] / "Start_Portable.bat"
-    repo_bat = PATHS["APP_DIR"] / "Start_Portable.bat"
+    if not root_bat.exists():
+        return False
 
-    if not root_bat.exists() or not repo_bat.exists():
+    remote_bat = _get_release_bat()
+    if remote_bat is None or not remote_bat.exists():
         return False
 
     # filecmp.cmp returns True if files are identical, so we return the opposite.
-    return not filecmp.cmp(str(root_bat), str(repo_bat), shallow=False)
+    return not filecmp.cmp(str(root_bat), str(remote_bat), shallow=False)
 
 
 def trigger_self_update_if_needed(parent_widget=None):
@@ -179,7 +209,14 @@ def trigger_self_update_if_needed(parent_widget=None):
     """
 
     root_bat = PATHS["BASE_DIR"] / "Start_Portable.bat"
-    repo_bat = PATHS["APP_DIR"] / "Start_Portable.bat"
+    remote_bat = _get_release_bat()
+    if remote_bat is None or not remote_bat.exists():
+        QMessageBox.critical(
+            parent_widget,
+            "Update Error",
+            "Could not download the latest Start_Portable.bat from the release page.",
+        )
+        return
 
     print("[Launcher] Start_Portable.bat update requested. Relaunching...")
     QMessageBox.information(
@@ -194,12 +231,13 @@ def trigger_self_update_if_needed(parent_widget=None):
     echo Waiting for launcher to exit...
     timeout /t 3 /nobreak >nul
     echo Replacing Start_Portable.bat...
-    copy /y "{repo_bat.resolve()}" "{root_bat.resolve()}"
+    copy /y "{remote_bat.resolve()}" "{root_bat.resolve()}"
     if %errorlevel% neq 0 (
         echo ERROR: Failed to copy launcher script.
         pause
         exit /b 1
     )
+    del "{remote_bat.resolve()}"
     echo Update complete. Restarting launcher...
     start "" /d "{root_bat.parent.resolve()}" "Start_Portable.bat"
     pause >nul
