@@ -37,7 +37,7 @@ def resolve_paths():
         "STYLES_DIR": app_dir / "ui" / "styles",
         "LOGO_PNG": app_dir / "ui" / "core" / "media" / "visomaster_logo.png",
         "SMALL_ICON": app_dir / "ui" / "core" / "media" / "visomaster_small.png",
-        "REQ_FILE": repo_dir / "requirements_cu129.txt",
+        "REQ_FILE": repo_dir / "requirements_cu13.txt",
         "MAIN_PY": repo_dir / "main.py",
         "DOWNLOAD_PY": repo_dir / "download_models.py",
         "OPTIMIZE_PY": app_dir / "tools" / "optimize_models.py",
