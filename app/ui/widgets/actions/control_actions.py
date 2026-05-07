@@ -89,6 +89,20 @@ def change_gpu_index(main_window: "MainWindow", new_gpu_index):
         return
     main_window.video_processor.stop_processing()
     main_window.models_processor.set_gpu_index(resolved)
+    try:
+        import torch
+
+        if torch.cuda.is_available() and int(resolved) < int(torch.cuda.device_count()):
+            _gpu_nm = torch.cuda.get_device_name(int(resolved))
+        else:
+            _gpu_nm = "cuda"
+    except Exception:
+        _gpu_nm = "cuda"
+    print(
+        f"[INFO] Primary CUDA device → {int(resolved)}: {_gpu_nm} "
+        f"(TensorRT cache under tensorrt-engines/gpu{int(resolved)})",
+        flush=True,
+    )
     main_window.models_processor.switch_providers_priority(
         main_window.models_processor.provider_name
     )

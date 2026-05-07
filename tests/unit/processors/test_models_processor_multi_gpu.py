@@ -59,6 +59,25 @@ def test_thread_gpu_context_overrides_global_gpu_index():
     assert mp.get_active_ort_device_id() == 0
 
 
+def test_clamp_gpu_index_respects_physical_gpus_when_routing_targets_span_only_zero(
+    monkeypatch,
+):
+    """Primary GPU must still switch to physical :1 when routing list implies count 1."""
+    mp = _make_models_processor_stub()
+    mp.emulate_multi_gpu = False
+    mp.ui_multi_gpu_routing_enabled = True
+    mp.ui_routing_targets = [0]
+    mp.gpu_index = 0
+    monkeypatch.setattr(
+        "app.processors.models_processor.torch.cuda.is_available", lambda: True
+    )
+    monkeypatch.setattr(
+        "app.processors.models_processor.torch.cuda.device_count", lambda: 2
+    )
+
+    assert mp.clamp_gpu_index(1) == 1
+
+
 def test_get_compute_cuda_device_id_clamps_to_available_physical_gpus(monkeypatch):
     """Emulation can assign logical GPU 1 while only one physical CUDA device exists."""
     mp = _make_models_processor_stub()
@@ -75,3 +94,26 @@ def test_get_compute_cuda_device_id_clamps_to_available_physical_gpus(monkeypatc
     mp.set_thread_gpu_index(1)
     assert mp.get_active_ort_device_id() == 1
     assert mp.get_compute_cuda_device_id() == 0
+
+
+def test_ort_session_storage_key_splits_per_physical_gpu(monkeypatch):
+    """Multi-GPU routing + 2 physical devices → distinct ORT session dict keys per CUDA ordinal."""
+    mp = ModelsProcessor.__new__(ModelsProcessor)
+    mp.device = "cuda"
+    mp.ui_multi_gpu_routing_enabled = True
+    mp.emulate_multi_gpu = False
+    mp.gpu_index = 0
+    mp._thread_gpu_context = threading.local()
+
+    monkeypatch.setattr(mp, "_physical_cuda_device_count", lambda: 2)
+    monkeypatch.setattr(mp, "_is_thread_cpu_routing", lambda: False)
+
+    monkeypatch.setattr(mp, "get_compute_cuda_device_id", lambda: 0)
+    assert ModelsProcessor._ort_session_storage_key(mp, "Inswapper128ArcFace") == (
+        "Inswapper128ArcFace__cuda0"
+    )
+
+    monkeypatch.setattr(mp, "get_compute_cuda_device_id", lambda: 1)
+    assert ModelsProcessor._ort_session_storage_key(mp, "Inswapper128ArcFace") == (
+        "Inswapper128ArcFace__cuda1"
+    )

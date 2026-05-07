@@ -1779,6 +1779,13 @@ class VideoProcessor(QObject):
                 None,
             )
 
+        # Align this thread's CUDA ordinal with Primary GPU **before** optional feeder
+        # stream creation — otherwise ``torch.cuda.Stream()`` binds to device 0 while ORT
+        # runs on GPU 1 (cudnnAddTensor / Conv failures on non-primary GPUs).
+        _mp_det = self.main_window.models_processor
+        if _mp_det.device == "cuda" and torch.cuda.is_available():
+            _mp_det._sync_torch_cuda_device()
+
         # Only wrap detection in a dedicated CUDA stream when the user enables
         # "Separate CUDA streams". Otherwise torch.cuda.stream(current_stream()) was a
         # no-op that still added per-frame context overhead on the feeder hot path.
@@ -1858,7 +1865,14 @@ class VideoProcessor(QObject):
                 and frame_number % detection_interval != 0
             ):
                 previous_faces_arg = self.last_detected_faces
-            device = self.main_window.models_processor.device
+            # Must use cuda:N (primary GPU), not bare "cuda" — otherwise PyTorch defaults to cuda:0
+            # and Task Manager shows compute on GPU 0 while GPU 1 is selected in settings.
+            _mp_dev = self.main_window.models_processor
+            device = (
+                _mp_dev.get_effective_torch_device()
+                if _mp_dev.device == "cuda"
+                else _mp_dev.device
+            )
 
             owns_frame_tensor = frame_tensor is None
             if frame_tensor is None:
@@ -1867,6 +1881,21 @@ class VideoProcessor(QObject):
                 )
             else:
                 full_frame_tensor = frame_tensor
+                # Caller may have uploaded on default CUDA device (0) before this thread
+                # synced to Primary GPU — ORT inputs must match session ``device_id``.
+                _mp_ft = self.main_window.models_processor
+                if (
+                    full_frame_tensor.device.type == "cuda"
+                    and device == "cuda"
+                    and torch.cuda.is_available()
+                ):
+                    want_idx = int(_mp_ft._primary_cuda_device_ordinal())
+                    cur_idx = full_frame_tensor.device.index
+                    if cur_idx is None or int(cur_idx) != want_idx:
+                        full_frame_tensor = full_frame_tensor.to(
+                            torch.device(f"cuda:{want_idx}"),
+                            non_blocking=False,
+                        )
 
             det_tensor = full_frame_tensor
             roi_x = 0
@@ -6278,13 +6307,16 @@ class VideoProcessor(QObject):
         cropped_face = getattr(target_face, "cropped_face", None)
         if not isinstance(cropped_face, numpy.ndarray) or cropped_face.size == 0:
             return numpy.array([])
+        _mp_emb = self.main_window.models_processor
+        if _mp_emb.device == "cuda" and torch.cuda.is_available():
+            _mp_emb._sync_torch_cuda_device()
         image = numpy.ascontiguousarray(cropped_face)
         image_uint8 = (
             image if image.dtype == numpy.uint8 else image.astype("uint8", copy=False)
         )
         image_tensor = (
             torch.from_numpy(image_uint8)
-            .to(self.main_window.models_processor.device, non_blocking=True)
+            .to(_mp_emb.device, non_blocking=True)
             .permute(2, 0, 1)
         )
         height, width = image_uint8.shape[:2]
@@ -6568,9 +6600,15 @@ class VideoProcessor(QObject):
                         if frame_rgb.dtype == numpy.uint8
                         else frame_rgb.astype("uint8", copy=False)
                     )
+                    _mp_u = self.main_window.models_processor
+                    _dev_u = (
+                        _mp_u.get_effective_torch_device()
+                        if _mp_u.device == "cuda"
+                        else _mp_u.device
+                    )
                     frame_tensor = misc_helpers.rgb_hwc_uint8_numpy_to_torch_chw(
                         frame_rgb_uint8,
-                        self.main_window.models_processor.device,
+                        _dev_u,
                     )
                     self.current_frame_number = frame_number
                     bboxes, kpss_5, _, _, _, _ = self._run_sequential_detection(

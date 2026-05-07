@@ -83,7 +83,7 @@ class FaceSwappers:
     def _load_swapper_model(self, model_name):
         """Handles loading and swapping of swapper models."""
         self._manage_model(model_name)
-        model = self.models_processor.models.get(model_name)
+        model = self.models_processor.get_onnx_session(model_name)
         if not model:
             model = self.models_processor.load_model(model_name)
         # FS-BUG-07: only commit state after load is confirmed non-None
@@ -139,7 +139,7 @@ class FaceSwappers:
                 self.models_processor.unload_model(self.current_arcface_model)
             self.current_arcface_model = arcface_model
 
-        ort_session = self.models_processor.models.get(arcface_model)
+        ort_session = self.models_processor.get_onnx_session(arcface_model)
         if not ort_session:
             ort_session = self.models_processor.load_model(arcface_model)
 
@@ -225,7 +225,7 @@ class FaceSwappers:
                 self.models_processor.unload_model(self.current_arcface_model)
             self.current_arcface_model = arcface_model
 
-        ort_session = self.models_processor.models.get(arcface_model)
+        ort_session = self.models_processor.get_onnx_session(arcface_model)
         if not ort_session:
             ort_session = self.models_processor.load_model(arcface_model)
         if not ort_session:
@@ -267,7 +267,7 @@ class FaceSwappers:
                 batch,
             )
             for name in output_names:
-                io_binding.bind_output(name, self.models_processor.get_ort_bind_device_type())
+                self.models_processor.bind_ort_output_dynamic(io_binding, name)
 
             self._run_model_with_lazy_build_check(
                 arcface_model, ort_session, io_binding
@@ -301,7 +301,7 @@ class FaceSwappers:
         The ``similarity_type`` argument is kept for API compatibility but alignment follows
         yaw/pitch so ArcFace avoids brittle manual modes (e.g. Pearl) on challenging poses.
         """
-        ort_session = self.models_processor.models.get(arcface_model)
+        ort_session = self.models_processor.get_onnx_session(arcface_model)
         if not ort_session:
             return None, None
 
@@ -376,7 +376,7 @@ class FaceSwappers:
         )
 
         for name in output_names:
-            io_binding.bind_output(name, self.models_processor.get_ort_bind_device_type())
+            self.models_processor.bind_ort_output_dynamic(io_binding, name)
 
         # Run the model with lazy build handling (TensorRT safety)
         self._run_model_with_lazy_build_check(arcface_model, ort_session, io_binding)
@@ -422,7 +422,7 @@ class FaceSwappers:
         img, cropped_image = self.preprocess_image_cscs(img, face_kps)
 
         model_name = "CSCSArcFace"
-        model = self.models_processor.models.get(model_name)
+        model = self.models_processor.get_onnx_session(model_name)
         if not model:
             print("[ERROR] CSCSArcFace model not loaded in recognize_cscs.")
             return None, None
@@ -436,7 +436,7 @@ class FaceSwappers:
         img = self.models_processor.bind_ort_io_input(
             io_binding, model_name, "input", img
         )
-        io_binding.bind_output(name="output", device_type=self.models_processor.get_ort_bind_device_type())
+        self.models_processor.bind_ort_output_dynamic(io_binding, "output")
 
         self._run_model_with_lazy_build_check(model_name, model, io_binding)
 
@@ -456,7 +456,7 @@ class FaceSwappers:
 
     def recognize_cscs_id_adapter(self, img, face_kps):
         model_name = "CSCSIDArcFace"
-        model = self.models_processor.models.get(model_name)
+        model = self.models_processor.get_onnx_session(model_name)
         if not model:
             model = self.models_processor.load_model(model_name)
 
@@ -476,7 +476,7 @@ class FaceSwappers:
         img = self.models_processor.bind_ort_io_input(
             io_binding, model_name, "input", img
         )
-        io_binding.bind_output(name="output", device_type=self.models_processor.get_ort_bind_device_type())
+        self.models_processor.bind_ort_output_dynamic(io_binding, "output")
 
         self._run_model_with_lazy_build_check(model_name, model, io_binding)
 
@@ -1043,7 +1043,7 @@ class FaceSwappers:
         """ReHiFace-S: ArcFace 512-D → crossface_hififace → L2-normalized (1, 512)."""
         if source_embedding is None or len(source_embedding) == 0:
             return None
-        cross = self.models_processor.models.get("CrossFaceHiFaceS")
+        cross = self.models_processor.get_onnx_session("CrossFaceHiFaceS")
         if cross is None:
             cross = self.models_processor.load_model("CrossFaceHiFaceS")
         if cross is None:
@@ -1082,7 +1082,7 @@ class FaceSwappers:
         """SimSwap512-CrossFace: ArcFace w600k 512-D -> crossface_simswap -> L2 (1, 512)."""
         if source_embedding is None or len(source_embedding) == 0:
             return None
-        cross = self.models_processor.models.get("CrossFaceSimSwap")
+        cross = self.models_processor.get_onnx_session("CrossFaceSimSwap")
         if cross is None:
             cross = self.models_processor.load_model("CrossFaceSimSwap")
         if cross is None:

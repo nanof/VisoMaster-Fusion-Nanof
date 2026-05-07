@@ -125,7 +125,7 @@ class FaceLandmarkDetectors:
         detection_function = detector_info["function"]
 
         # Load model if it is not already loaded.
-        loaded_model_instance = self.models_processor.models.get(model_name)
+        loaded_model_instance = self.models_processor.get_onnx_session(model_name)
         if not loaded_model_instance:
             loaded_model_instance = self.models_processor.load_model(model_name)
             if loaded_model_instance:
@@ -304,7 +304,7 @@ class FaceLandmarkDetectors:
 
         # Bind outputs. The device will allocate memory for them.
         for name in output_names:
-            io_binding.bind_output(name, self.models_processor.get_ort_bind_device_type())
+            self.models_processor.bind_ort_output_dynamic(io_binding, name)
 
         # --- LAZY BUILD CHECK ---
         is_lazy_build = self.models_processor.check_and_clear_pending_build(model_name)
@@ -674,7 +674,7 @@ class FaceLandmarkDetectors:
         use_mean_eyes = kwargs.get("use_mean_eyes", False)
 
         # Ensure the 'FaceBlendShapes' dependency is loaded before we proceed
-        if not self.models_processor.models.get("FaceBlendShapes"):
+        if not self.models_processor.get_onnx_session("FaceBlendShapes"):
             # We use load_model, which handles caching. If it fails, it will return None.
             if not self.models_processor.load_model("FaceBlendShapes"):
                 print(

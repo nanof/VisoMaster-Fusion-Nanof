@@ -237,7 +237,7 @@ class FaceRestorers:
 
     def _ort_output_dtype(self, model_name: str, output_name: str) -> torch.dtype:
         """Declared ONNX output dtype, or float32 if the session is unavailable."""
-        if self.models_processor.models.get(model_name) is None:
+        if self.models_processor.get_onnx_session(model_name) is None:
             if self._get_model_session(model_name) is None:
                 return torch.float32
         return self.models_processor.get_ort_io_torch_dtype(
@@ -1014,11 +1014,11 @@ class FaceRestorers:
         """
         model_name = "RefLDMVAEEncoder"
         # FR-BUG-04: use .get() to avoid KeyError when model is not yet loaded
-        ort_session = self.models_processor.models.get(model_name)
+        ort_session = self.models_processor.get_onnx_session(model_name)
         if ort_session is None:
             # Lazy reload in case clear_gpu_memory() cleared the session after a provider switch.
             self.models_processor.ensure_denoiser_models_loaded()
-            ort_session = self.models_processor.models.get(model_name)
+            ort_session = self.models_processor.get_onnx_session(model_name)
         if ort_session is None:
             error_msg = f"[ERROR] VAE Encoder model '{model_name}' not loaded when run_vae_encoder was called. This model should be loaded by ModelsProcessor.ensure_denoiser_models_loaded()."
             print(error_msg)
@@ -1056,11 +1056,11 @@ class FaceRestorers:
         """
         model_name = "RefLDMVAEDecoder"
         # FR-BUG-04: use .get() to avoid KeyError when model is not yet loaded
-        ort_session = self.models_processor.models.get(model_name)
+        ort_session = self.models_processor.get_onnx_session(model_name)
         if ort_session is None:
             # Lazy reload in case clear_gpu_memory() cleared the session after a provider switch.
             self.models_processor.ensure_denoiser_models_loaded()
-            ort_session = self.models_processor.models.get(model_name)
+            ort_session = self.models_processor.get_onnx_session(model_name)
         if ort_session is None:
             error_msg = f"[ERROR] VAE Decoder model '{model_name}' not loaded when run_vae_decoder was called. This model should be loaded by ModelsProcessor.ensure_denoiser_models_loaded()."
             print(error_msg)
@@ -1101,7 +1101,7 @@ class FaceRestorers:
         Runs the UNet denoiser model with external K/V inputs.
         """
         model_name = self.models_processor.main_window.fixed_unet_model_name
-        ort_session = self.models_processor.models.get(model_name)
+        ort_session = self.models_processor.get_onnx_session(model_name)
 
         if not ort_session:
             # Enhanced error reporting
@@ -1536,9 +1536,9 @@ class FaceRestorers:
         fidelity_ratio = self.models_processor.bind_ort_io_input(
             io_binding, model_name, "fidelity_ratio", fidelity_ratio
         )
-        io_binding.bind_output("enc_feat", self.models_processor.get_ort_bind_device_type())
-        io_binding.bind_output("quant_logit", self.models_processor.get_ort_bind_device_type())
-        io_binding.bind_output("texture_dec", self.models_processor.get_ort_bind_device_type())
+        self.models_processor.bind_ort_output_dynamic(io_binding, "enc_feat")
+        self.models_processor.bind_ort_output_dynamic(io_binding, "quant_logit")
+        self.models_processor.bind_ort_output_dynamic(io_binding, "texture_dec")
         self.models_processor.bind_ort_io_output(
             io_binding, model_name, "main_dec", output
         )
@@ -1587,20 +1587,20 @@ class FaceRestorers:
         self.models_processor.bind_ort_io_output(
             io_binding, model_name, "2359", output
         )
-        io_binding.bind_output("1228", self.models_processor.get_ort_bind_device_type())
-        io_binding.bind_output("1238", self.models_processor.get_ort_bind_device_type())
-        io_binding.bind_output("onnx::MatMul_1198", self.models_processor.get_ort_bind_device_type())
-        io_binding.bind_output("onnx::Shape_1184", self.models_processor.get_ort_bind_device_type())
-        io_binding.bind_output("onnx::ArgMin_1182", self.models_processor.get_ort_bind_device_type())
-        io_binding.bind_output("input.1", self.models_processor.get_ort_bind_device_type())
-        io_binding.bind_output("x", self.models_processor.get_ort_bind_device_type())
-        io_binding.bind_output("x.3", self.models_processor.get_ort_bind_device_type())
-        io_binding.bind_output("x.7", self.models_processor.get_ort_bind_device_type())
-        io_binding.bind_output("x.11", self.models_processor.get_ort_bind_device_type())
-        io_binding.bind_output("x.15", self.models_processor.get_ort_bind_device_type())
-        io_binding.bind_output("input.252", self.models_processor.get_ort_bind_device_type())
-        io_binding.bind_output("input.280", self.models_processor.get_ort_bind_device_type())
-        io_binding.bind_output("input.288", self.models_processor.get_ort_bind_device_type())
+        self.models_processor.bind_ort_output_dynamic(io_binding, "1228")
+        self.models_processor.bind_ort_output_dynamic(io_binding, "1238")
+        self.models_processor.bind_ort_output_dynamic(io_binding, "onnx::MatMul_1198")
+        self.models_processor.bind_ort_output_dynamic(io_binding, "onnx::Shape_1184")
+        self.models_processor.bind_ort_output_dynamic(io_binding, "onnx::ArgMin_1182")
+        self.models_processor.bind_ort_output_dynamic(io_binding, "input.1")
+        self.models_processor.bind_ort_output_dynamic(io_binding, "x")
+        self.models_processor.bind_ort_output_dynamic(io_binding, "x.3")
+        self.models_processor.bind_ort_output_dynamic(io_binding, "x.7")
+        self.models_processor.bind_ort_output_dynamic(io_binding, "x.11")
+        self.models_processor.bind_ort_output_dynamic(io_binding, "x.15")
+        self.models_processor.bind_ort_output_dynamic(io_binding, "input.252")
+        self.models_processor.bind_ort_output_dynamic(io_binding, "input.280")
+        self.models_processor.bind_ort_output_dynamic(io_binding, "input.288")
 
         # Run the model with lazy build handling
         self._run_model_with_lazy_build_check(model_name, ort_session, io_binding)

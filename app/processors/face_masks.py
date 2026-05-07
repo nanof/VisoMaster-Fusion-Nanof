@@ -310,7 +310,7 @@ class FaceMasks:
             # Custom runner unavailable — fall through to ORT
 
         # ORT path
-        ort_session = self.models_processor.models.get(model_name)
+        ort_session = self.models_processor.get_onnx_session(model_name)
         if not ort_session:
             ort_session = self.models_processor.load_model(model_name)
 
@@ -345,7 +345,7 @@ class FaceMasks:
                     out.data_ptr(),
                 )
             else:
-                io.bind_output(ometa.name, self.models_processor.get_ort_bind_device_type())
+                self.models_processor.bind_ort_output_dynamic(io, ometa.name)
 
         # Handle Lazy TensorRT Build
         is_lazy_build = self.models_processor.check_and_clear_pending_build(model_name)
@@ -385,7 +385,7 @@ class FaceMasks:
         src = (face_chw_float_rgb_0_255.float() / 255.0).clamp(0.0, 1.0)
         src = src.unsqueeze(0).contiguous()
 
-        ort_session = self.models_processor.models.get(model_name)
+        ort_session = self.models_processor.get_onnx_session(model_name)
         if ort_session is None:
             ort_session = self.models_processor.load_model(model_name)
         if ort_session is None:
@@ -535,7 +535,7 @@ class FaceMasks:
         x = (face_chw_float_rgb_0_255.float() / 255.0).clamp(0.0, 1.0)
         x = v2.functional.resize(x.unsqueeze(0), [320, 320], antialias=True)
 
-        ort_session = self.models_processor.models.get(model_name)
+        ort_session = self.models_processor.get_onnx_session(model_name)
         if ort_session is None:
             ort_session = self.models_processor.load_model(model_name)
         if ort_session is None:
@@ -1366,7 +1366,7 @@ class FaceMasks:
 
     def run_occluder(self, image, output):
         model_name = "Occluder"
-        ort_session = self.models_processor.models.get(model_name)
+        ort_session = self.models_processor.get_onnx_session(model_name)
 
         if not ort_session:
             ort_session = self.models_processor.load_model(model_name)
@@ -1414,13 +1414,13 @@ class FaceMasks:
 
         # 1. Try TensorRT Execution first (Preferred)
         if hasattr(self.models_processor, "models_trt"):
-            trt_model = self.models_processor.models_trt.get(model_key)
+            trt_model = self.models_processor.get_trt_native_model(model_key)
             if trt_model is not None:
                 trt_model.run(img, out)
                 return
 
         # 2. Try ONNX Runtime Execution
-        session = self.models_processor.models.get(model_key)
+        session = self.models_processor.get_onnx_session(model_key)
 
         if session is None:
             session = self.models_processor.load_model(model_key)
@@ -1481,7 +1481,7 @@ class FaceMasks:
         img = img.type(torch.float32)
         img = torch.div(img, 255)
         img = torch.unsqueeze(img, 0).contiguous()
-        if self.models_processor.models.get("XSeg") is None:
+        if self.models_processor.get_onnx_session("XSeg") is None:
             self.models_processor.load_model("XSeg")
         td_xseg = self.models_processor.get_ort_io_torch_dtype(
             "XSeg", "out_mask:0", is_output=True
@@ -1611,7 +1611,7 @@ class FaceMasks:
 
     def run_dfl_xseg(self, image, output):
         model_name = "XSeg"
-        ort_session = self.models_processor.models.get(model_name)
+        ort_session = self.models_processor.get_onnx_session(model_name)
         if not ort_session:
             ort_session = self.models_processor.load_model(model_name)
 
@@ -1647,7 +1647,7 @@ class FaceMasks:
                 self.models_processor.hide_build_dialog.emit()
 
     def run_onnx(self, image_tensor, output_tensor, model_key):
-        sess = self.models_processor.models.get(model_key)
+        sess = self.models_processor.get_onnx_session(model_key)
         if sess is None:
             sess = self.models_processor.load_model(model_key)
 
@@ -2003,10 +2003,8 @@ class FaceMasks:
         }
 
         model_key = feature_layer
-        if model_key not in self.models_processor.models:
-            self.models_processor.models[model_key] = self.models_processor.load_model(
-                model_key
-            )
+        if not self.models_processor.get_onnx_session(model_key):
+            self.models_processor.load_model(model_key)
             self.active_models.add(model_key)
 
         def preprocess(img):
@@ -2018,7 +2016,7 @@ class FaceMasks:
         swapped = preprocess(swapped_face)
         original = preprocess(original_face)
 
-        sess = self.models_processor.models.get(model_key)
+        sess = self.models_processor.get_onnx_session(model_key)
         if sess is None:
             return (
                 torch.zeros_like(swap_mask, dtype=torch.float32),

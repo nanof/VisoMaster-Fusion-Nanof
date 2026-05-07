@@ -1209,7 +1209,7 @@ class FaceDetectors:
                 "477",
                 "500",
             ]:
-                io_binding.bind_output(i, self.models_processor.get_ort_bind_device_type())
+                self.models_processor.bind_ort_output_dynamic(io_binding, i)
             # Run the model with lazy build handling
             net_outs = self._run_model_with_lazy_build_check(
                 model_name, ort_session, io_binding
@@ -1384,7 +1384,7 @@ class FaceDetectors:
                 io_binding, model_name, input_name, aimg
             )
             for name in output_names:
-                io_binding.bind_output(name, self.models_processor.get_ort_bind_device_type())
+                self.models_processor.bind_ort_output_dynamic(io_binding, name)
 
             # Run the model with lazy build handling
             net_outs = self._run_model_with_lazy_build_check(
@@ -1561,7 +1561,7 @@ class FaceDetectors:
             aimg_prepared = self.models_processor.bind_ort_io_input(
                 io_binding, model_name, "images", aimg_prepared
             )
-            io_binding.bind_output("output0", self.models_processor.get_ort_bind_device_type())
+            self.models_processor.bind_ort_output_dynamic(io_binding, "output0")
             # Run the model with lazy build handling
             net_outs = self._run_model_with_lazy_build_check(
                 model_name, ort_session, io_binding
@@ -1725,7 +1725,7 @@ class FaceDetectors:
                 io_binding, model_name, input_name, aimg_prepared
             )
             for name in output_names:
-                io_binding.bind_output(name, self.models_processor.get_ort_bind_device_type())
+                self.models_processor.bind_ort_output_dynamic(io_binding, name)
 
             # Run the model with lazy build handling
             net_outs = self._run_model_with_lazy_build_check(

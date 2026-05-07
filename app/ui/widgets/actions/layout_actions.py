@@ -266,6 +266,15 @@ def add_widgets_to_tab_layout(
                 row_widget, horizontal_layout = add_horizontal_layout_to_category(
                     category_layout, label, widget, widget.reset_default_button
                 )
+                # Must wire here: relying only on finalize_gpu_widgets + UniqueConnection
+                # + lambda slots can fail to register in PySide6, so changing Primary GPU
+                # would never call change_gpu_index / TRT cache paths.
+                widget.currentIndexChanged.connect(
+                    partial(
+                        gpu_settings_actions.on_primary_gpu_combo_changed,
+                        main_window,
+                    )
+                )
 
             elif widget_name == "GpuRoutingTargetsPicker":
                 widget = widget_components.GpuRoutingTargetsPicker(

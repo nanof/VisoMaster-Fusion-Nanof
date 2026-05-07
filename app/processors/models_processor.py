@@ -218,6 +218,51 @@ def _providers_with_trt_options(providers_for_model, trt_opts: dict):
     return out
 
 
+def _patch_providers_cuda_device_id(providers_for_model, cuda_phys: int):
+    """Ensure CUDAExecutionProvider uses the same ordinal as IOBinding / TensorRT EP."""
+    out = []
+    cid = int(cuda_phys)
+    for p in providers_for_model:
+        name = p[0] if isinstance(p, (tuple, list)) else p
+        if name == "CUDAExecutionProvider":
+            if isinstance(p, (tuple, list)) and len(p) >= 2 and isinstance(p[1], dict):
+                opts = dict(p[1])
+                opts["device_id"] = cid
+                out.append(("CUDAExecutionProvider", opts))
+            else:
+                out.append(("CUDAExecutionProvider", {"device_id": cid}))
+        else:
+            out.append(p)
+    return out
+
+
+def _ort_error_indicates_trt_engine_deserialize_failure(exc: BaseException) -> bool:
+    """True when ORT failed loading a serialized TensorRT engine (stale/copied/wrong GPU cache)."""
+    s = str(exc).lower()
+    return "deserialize" in s and ("engine" in s or "tensorrt" in s)
+
+
+def _extract_tensorrt_engine_path_from_ort_error(exc: BaseException) -> Optional[str]:
+    """Parse ``*.engine`` path from ONNXRuntimeError text (Windows paths)."""
+    s = str(exc)
+    m = re.search(
+        r"(?:from cache|deserialize engine from cache)\s*:\s*(.+?\.engine)",
+        s,
+        flags=re.I | re.DOTALL,
+    )
+    if m:
+        candidate = (
+            m.group(1).strip().rstrip(")").rstrip(";").strip().strip('"').strip("'")
+        )
+        if os.path.isfile(candidate):
+            return candidate
+    for m in re.finditer(r"([A-Za-z]:[^\r\n\"]+\.engine)", s):
+        p = m.group(1).strip()
+        if os.path.isfile(p):
+            return p
+    return None
+
+
 # TensorRT EP + trt_dump_ep_context_model: paths under trt_ep_context_file_path must be
 # non-empty relative segments (ORT rejects trt_engine_cache_path == "").
 _TRT_REL_ENGINE_CACHE_DIR = "engines"
@@ -401,6 +446,7 @@ class ModelsProcessor(QtCore.QObject):
         self.dfm_inference_lock = threading.Lock()
         self.force_unload_in_progress = False
         self._model_last_used_mono: Dict[str, float] = {}
+        self.models_trt: Dict[str, Any] = {}
 
         # Initialize Sub-Processors
         self.face_detectors = FaceDetectors(self)
@@ -634,26 +680,45 @@ class ModelsProcessor(QtCore.QObject):
         self.rgb_to_linear_rgb_converter = None
         self.linear_rgb_to_rgb_converter = None
 
-    def _check_tensorrt_cache(self, model_name: str, onnx_path: str) -> bool:
+    def _check_tensorrt_cache(
+        self,
+        model_name: str,
+        onnx_path: str,
+        *,
+        cache_root: Optional[str] = None,
+    ) -> bool:
         """
         Checks if a valid TensorRT cache (ctx and engine file) exists for the given model.
         Returns True if a valid cache is found, False otherwise.
+
+        When *cache_root* is set (multi-GPU load on a specific CUDA ordinal), only that
+        directory is checked — no legacy flat ``tensorrt-engines/`` fallback.
         """
         try:
             base_onnx_name = os.path.splitext(os.path.basename(onnx_path))[0]
             ctx_file_name = f"{base_onnx_name}_ctx.onnx"
-            # Per-GPU cache root (matches _refresh_trt_options_for_gpu).
-            cache_dir = self._tensorrt_gpu_cache_root()
-            ctx_file_path = os.path.join(cache_dir, ctx_file_name)
-            # Legacy layout before per-GPU dirs: ctx under tensorrt-engines/
-            if not os.path.exists(ctx_file_path):
-                legacy_root = os.path.abspath("tensorrt-engines")
-                legacy_ctx = os.path.join(legacy_root, ctx_file_name)
-                if os.path.exists(legacy_ctx):
-                    cache_dir = legacy_root
-                    ctx_file_path = legacy_ctx
-                else:
+            if cache_root is not None:
+                cache_dir = cache_root
+                ctx_file_path = os.path.join(cache_dir, ctx_file_name)
+                if not os.path.exists(ctx_file_path):
                     return False
+            else:
+                # Per-GPU cache root (matches _refresh_trt_options_for_gpu).
+                cache_dir = self._tensorrt_gpu_cache_root()
+                ctx_file_path = os.path.join(cache_dir, ctx_file_name)
+                # Legacy layout before per-GPU dirs: ctx under tensorrt-engines/
+                # Only reuse it when Primary GPU is CUDA device 0. Otherwise we would
+                # load GPU-0 TensorRT engines while ``device_id`` targets another GPU,
+                # which keeps VRAM/compute on GPU 0 (common report with TensorRT-Engine).
+                if not os.path.exists(ctx_file_path):
+                    legacy_root = os.path.abspath("tensorrt-engines")
+                    legacy_ctx = os.path.join(legacy_root, ctx_file_name)
+                    primary_phys = self._primary_cuda_device_ordinal()
+                    if primary_phys == 0 and os.path.exists(legacy_ctx):
+                        cache_dir = legacy_root
+                        ctx_file_path = legacy_ctx
+                    else:
+                        return False
 
             with open(ctx_file_path, "rb") as f:
                 content = f.read()
@@ -735,7 +800,9 @@ class ModelsProcessor(QtCore.QObject):
         to_drop: list[str] = []
         with self.model_lock:
             for name, inst in list(self.models.items()):
-                if inst is None or name == protect:
+                if inst is None:
+                    continue
+                if protect and (name == protect or name.startswith(f"{protect}__cuda")):
                     continue
                 last = self._model_last_used_mono.get(name, now)
                 if now - last > max_age:
@@ -763,9 +830,10 @@ class ModelsProcessor(QtCore.QObject):
         Handles checking for existing TensorRT caches and launching the build probe if needed.
         """
         with self.model_lock:
-            if self.models.get(model_name):
-                self._model_last_used_mono[model_name] = time.monotonic()
-                return self.models[model_name]
+            storage_key = self._ort_session_storage_key(model_name)
+            if self.models.get(storage_key):
+                self._model_last_used_mono[storage_key] = time.monotonic()
+                return self.models[storage_key]
 
             if model_name == "DMDNetTorch":
                 return self.face_restorers.ensure_dmdnet_loaded()
@@ -778,7 +846,13 @@ class ModelsProcessor(QtCore.QObject):
                 )
                 return None
 
+            session_phys = self._session_phys_for_ort_load()
+            trt_cache_dir = self._tensorrt_cache_root_for_physical(session_phys)
+
             providers_for_model = self._providers_for_onnx_model(model_name)
+            providers_for_model = _patch_providers_cuda_device_id(
+                providers_for_model, session_phys
+            )
             if (
                 model_name in ONNX_MODELS_SKIP_TENSORRT_EP
                 and providers_for_model is not self.providers
@@ -800,8 +874,8 @@ class ModelsProcessor(QtCore.QObject):
                     # This will build the engine if it doesn't exist.
                     model_instance = self.load_model_trt(model_name)
                     if model_instance:
-                        self.models_trt[model_name] = model_instance
-                        self._model_last_used_mono[model_name] = time.monotonic()
+                        self.models_trt[storage_key] = model_instance
+                        self._model_last_used_mono[storage_key] = time.monotonic()
                         self._schedule_ort_warmup_if_enabled(model_name, model_instance)
                         # No need to load ONNX version if TRT succeeds
                         return model_instance
@@ -816,7 +890,7 @@ class ModelsProcessor(QtCore.QObject):
             trt_session_loading_dialog_shown = False
 
             # --- DYNAMIC PRECISION CONFIGURATION (WHITELIST FP16) ---
-            model_trt_options = dict(self.trt_ep_options)
+            model_trt_options = dict(self._trt_ep_options_for_physical(session_phys))
 
             # Check if the model is explicitly marked as safe for FP16 in models_data.py
             if model_name in fp16_safe_models_list:
@@ -843,7 +917,9 @@ class ModelsProcessor(QtCore.QObject):
                 # Only run the isolated probe if TensorRT is the target provider
                 if is_tensorrt_load:
                     # Check if engine config file exists...
-                    cache_is_valid = self._check_tensorrt_cache(model_name, onnx_path)
+                    cache_is_valid = self._check_tensorrt_cache(
+                        model_name, onnx_path, cache_root=trt_cache_dir
+                    )
                     if os.environ.get("VISIOMASTER_LOG_TRT_CACHE", "").strip().lower() in (
                         "1",
                         "true",
@@ -956,7 +1032,7 @@ class ModelsProcessor(QtCore.QObject):
                                 "[ERROR] The model will not be loaded. This is likely a fatal TensorRT/CUDA error."
                             )
                             traceback.print_exc()
-                            self.models[model_name] = (
+                            self.models[storage_key] = (
                                 None  # Ensure it's marked as not loaded
                             )
                             return None  # Abort the load
@@ -971,11 +1047,11 @@ class ModelsProcessor(QtCore.QObject):
             try:
                 # MP-01: Double-checked load after re-acquiring the lock.
                 # Another thread may have loaded this model while we were in the probe.
-                if self.models.get(model_name):
+                if self.models.get(storage_key):
                     print(
                         f"[INFO] Skipped loading: {model_name} is already loaded in memory (post-probe check)."
                     )
-                    return self.models.get(model_name)
+                    return self.models.get(storage_key)
 
                 if is_tensorrt_load and not build_was_triggered:
                     self.show_build_dialog.emit(
@@ -990,57 +1066,86 @@ class ModelsProcessor(QtCore.QObject):
                         f"[INFO] {model_name}: creating ONNX Runtime session with TensorRT EP...",
                         flush=True,
                     )
-                try:
+
+                def _create_ort_session(providers_list):
                     if session_options is None:
-                        model_instance = onnxruntime.InferenceSession(
+                        return onnxruntime.InferenceSession(
                             self.models_path[model_name],
-                            providers=ort_providers,
+                            providers=providers_list,
                         )
-                    else:
-                        model_instance = onnxruntime.InferenceSession(
-                            self.models_path[model_name],
-                            sess_options=session_options,
-                            providers=ort_providers,
-                        )
+                    return onnxruntime.InferenceSession(
+                        self.models_path[model_name],
+                        sess_options=session_options,
+                        providers=providers_list,
+                    )
+
+                try:
+                    model_instance = _create_ort_session(ort_providers)
                     if is_tensorrt_load:
                         print(
                             f"[INFO] {model_name}: TensorRT ONNX Runtime session created.",
                             flush=True,
                         )
                 except Exception as e_ort_first:
-                    fb_providers = _providers_without_tensorrt_execution_provider(
-                        providers_for_model
-                    )
-                    if (
-                        is_tensorrt_load
-                        and self.device != "cpu"
-                        and len(fb_providers) < len(providers_for_model)
+                    model_instance = None
+                    e_fallback = e_ort_first
+                    # Stale engines (e.g. copied from another GPU folder, incomplete write, TRT upgrade)
+                    # deserialize badly — delete the cited file and retry TensorRT EP once before CUDA EP.
+                    if is_tensorrt_load and _ort_error_indicates_trt_engine_deserialize_failure(
+                        e_ort_first
                     ):
-                        print(
-                            f"[WARN] {model_name}: ONNX Runtime load failed with current "
-                            f"providers ({e_ort_first!s}); retrying without TensorrtExecutionProvider."
+                        bad_engine = _extract_tensorrt_engine_path_from_ort_error(
+                            e_ort_first
                         )
-                        try:
-                            if session_options is None:
-                                model_instance = onnxruntime.InferenceSession(
-                                    self.models_path[model_name],
-                                    providers=fb_providers,
+                        if bad_engine:
+                            try:
+                                os.remove(bad_engine)
+                                print(
+                                    f"[INFO] {model_name}: removed unreadable TensorRT engine "
+                                    f"(will rebuild). Cache file:\n  {bad_engine}",
+                                    flush=True,
                                 )
-                            else:
-                                model_instance = onnxruntime.InferenceSession(
-                                    self.models_path[model_name],
-                                    sess_options=session_options,
-                                    providers=fb_providers,
+                                model_instance = _create_ort_session(ort_providers)
+                                print(
+                                    f"[INFO] {model_name}: TensorRT ONNX Runtime session created.",
+                                    flush=True,
                                 )
-                        except Exception:
+                            except OSError as rm_err:
+                                print(
+                                    f"[WARN] {model_name}: could not delete TRT cache "
+                                    f"{bad_engine}: {rm_err}",
+                                    flush=True,
+                                )
+                            except Exception as e_retry:
+                                e_fallback = e_retry
+
+                    if model_instance is None:
+                        fb_providers = _patch_providers_cuda_device_id(
+                            _providers_without_tensorrt_execution_provider(
+                                providers_for_model
+                            ),
+                            session_phys,
+                        )
+                        if (
+                            is_tensorrt_load
+                            and self.device != "cpu"
+                            and len(fb_providers) < len(providers_for_model)
+                        ):
                             print(
-                                f"[ERROR] {model_name}: CUDA/CPU fallback session also failed."
+                                f"[WARN] {model_name}: ONNX Runtime load failed with current "
+                                f"providers ({e_fallback!s}); retrying without TensorrtExecutionProvider."
                             )
-                            traceback.print_exc()
-                            self.models[model_name] = None
-                            return None
-                    else:
-                        raise e_ort_first
+                            try:
+                                model_instance = _create_ort_session(fb_providers)
+                            except Exception:
+                                print(
+                                    f"[ERROR] {model_name}: CUDA/CPU fallback session also failed."
+                                )
+                                traceback.print_exc()
+                                self.models[storage_key] = None
+                                return None
+                        else:
+                            raise e_fallback
 
                 # This ensures the CUDA context is synchronized after a new TRT
                 # engine build, before we try to load it.
@@ -1052,15 +1157,17 @@ class ModelsProcessor(QtCore.QObject):
                     # Check cache AGAIN.
                     # If the probe succeeded BUT the cache STILL doesn't exist,
                     # it's a "Lazy Build" model.
-                    if not self._check_tensorrt_cache(model_name, onnx_path):
+                    if not self._check_tensorrt_cache(
+                        model_name, onnx_path, cache_root=trt_cache_dir
+                    ):
                         print(
                             f"[INFO] Model {model_name} requires a lazy build (engine not found after probe)."
                         )
-                        self.models_pending_build.add(model_name)
+                        self.models_pending_build.add(storage_key)
 
                 # New session replaces any cached ONNX I/O dtype map from a prior load.
                 self._ort_session_io_dtype_cache.pop(model_name, None)
-                self.models[model_name] = model_instance
+                self.models[storage_key] = model_instance
                 print(
                     f"[INFO] Loading model: {model_name} with provider: {self.provider_name}"
                 )
@@ -1079,7 +1186,7 @@ class ModelsProcessor(QtCore.QObject):
                     # MP-17: release large ONNX graph object after emap extraction
                     del graph
                     gc.collect()
-                self._model_last_used_mono[model_name] = time.monotonic()
+                self._model_last_used_mono[storage_key] = time.monotonic()
                 self._schedule_ort_warmup_if_enabled(model_name, model_instance)
                 return model_instance
 
@@ -1090,7 +1197,7 @@ class ModelsProcessor(QtCore.QObject):
                 if model_instance is not None:
                     del model_instance
                     gc.collect()
-                self.models[model_name] = None
+                self.models[storage_key] = None
                 return None
 
             finally:
@@ -1103,13 +1210,14 @@ class ModelsProcessor(QtCore.QObject):
         Checks if a model is pending its first-run lazy build.
         If it is, it clears the flag and returns True.
         """
+        sk = self._ort_session_storage_key(model_name)
         with self.model_lock:
-            if model_name in self.models_pending_build:
+            if sk in self.models_pending_build:
                 print(
                     f"[INFO] Model '{model_name}' is triggering its first-run lazy build."
                 )
                 # MP-08: use discard for atomic, safe removal (no KeyError)
-                self.models_pending_build.discard(model_name)
+                self.models_pending_build.discard(sk)
                 return True
         return False
 
@@ -1248,21 +1356,42 @@ class ModelsProcessor(QtCore.QObject):
                 self.face_restorers.unload_dmdnet()
                 return
 
-            # Handle ONNX models (for CUDA, CPU, and TensorRT providers)
-            if model_name_to_unload and model_name_to_unload in self.models:
-                model_instance = self.models[model_name_to_unload]
-
-                if model_instance is not None:
-                    print(f"[INFO] Unloading ONNX model: {model_name_to_unload}")
-                    self._model_last_used_mono.pop(model_name_to_unload, None)
-                    self._ort_session_io_dtype_cache.pop(model_name_to_unload, None)
-                    # MP-06: set dict entry to None first, then del the instance
-                    self.models[model_name_to_unload] = None
-                    # Explicitly delete the object to trigger its __del__ method
-                    del model_instance
-                    unloaded = True
-                else:
-                    self.models[model_name_to_unload] = None
+            # Handle ONNX models (for CUDA, CPU, and TensorRT providers).
+            # Multi-GPU uses keys like ``ArcFace__cuda1`` in addition to the catalog name.
+            if model_name_to_unload:
+                keys_to_drop = [
+                    k
+                    for k in list(self.models.keys())
+                    if k == model_name_to_unload
+                    or k.startswith(f"{model_name_to_unload}__cuda")
+                ]
+                for k in keys_to_drop:
+                    model_instance = self.models.get(k)
+                    if model_instance is not None:
+                        print(f"[INFO] Unloading ONNX model: {k}")
+                        self._model_last_used_mono.pop(k, None)
+                        self._ort_session_io_dtype_cache.pop(model_name_to_unload, None)
+                        self.models[k] = None
+                        del model_instance
+                        unloaded = True
+                    elif k in self.models:
+                        self.models[k] = None
+                for sk in list(self.models_pending_build):
+                    if sk == model_name_to_unload or sk.startswith(
+                        f"{model_name_to_unload}__cuda"
+                    ):
+                        self.models_pending_build.discard(sk)
+                trt_keys = [
+                    k
+                    for k in list(getattr(self, "models_trt", {}).keys())
+                    if k == model_name_to_unload
+                    or k.startswith(f"{model_name_to_unload}__cuda")
+                ]
+                for k in trt_keys:
+                    inst = self.models_trt.pop(k, None)
+                    if inst is not None:
+                        del inst
+                        unloaded = True
 
             if unloaded:
                 gc.collect()
@@ -1281,7 +1410,7 @@ class ModelsProcessor(QtCore.QObject):
             cached = self._ort_session_io_dtype_cache.get(model_name)
             if cached is not None:
                 return cached
-            session = self.models.get(model_name)
+            session = self.models.get(self._ort_session_storage_key(model_name))
             if session is None:
                 raise RuntimeError(f"No ONNX session loaded for {model_name!r}")
             ins = {
@@ -1377,6 +1506,22 @@ class ModelsProcessor(QtCore.QObject):
             buffer_ptr=t.data_ptr(),
         )
 
+    def bind_ort_output_dynamic(self, io_binding: Any, output_name: str) -> None:
+        """Bind an output for ORT-managed allocation on the **active** CUDA device.
+
+        ``IoBinding.bind_output(name, device_type)`` defaults ``device_id`` to **0**,
+        which breaks when Primary GPU is not 0 (allocator / CUDNN errors).
+        """
+        dt = self.get_ort_bind_device_type()
+        if dt == "cuda":
+            io_binding.bind_output(
+                output_name,
+                dt,
+                int(self.get_ort_bind_input_cuda_device_id()),
+            )
+        else:
+            io_binding.bind_output(output_name, dt)
+
     def run_onnx_io_binding(
         self,
         model_name: str,
@@ -1384,7 +1529,7 @@ class ModelsProcessor(QtCore.QObject):
         output_spec: Dict[str, torch.Tensor],
     ) -> Dict[str, torch.Tensor]:
         """Run ORT with I/O binding; dtypes follow the loaded ONNX graph (see ``bind_ort_io_input``)."""
-        session = self.models.get(model_name)
+        session = self.models.get(self._ort_session_storage_key(model_name))
         if session is None:
             raise RuntimeError(f"Model {model_name} not loaded")
         io_binding = session.io_binding()
@@ -1494,10 +1639,19 @@ class ModelsProcessor(QtCore.QObject):
         except Exception:
             pass  # compile_utils not available or Qt import failed
 
-    def _tensorrt_gpu_cache_root(self) -> str:
-        """Absolute TRT EP context + engines directory (per physical GPU when CUDA is visible)."""
-        logical = self.get_active_ort_device_id()
-        phys = self._logical_to_physical_cuda_index(logical)
+    def _primary_cuda_device_ordinal(self) -> int:
+        """CUDA ordinal for **Primary GPU** in Settings (ignores worker thread routing).
+
+        Used for global TRT option refresh and UI-driven loads. FrameWorker threads
+        that route to another physical GPU use :meth:`_session_phys_for_ort_load`
+        so ORT sessions, caches, and IOBinding agree on the same CUDA ordinal.
+        """
+        return self._logical_to_physical_cuda_index(
+            self.clamp_gpu_index(self.gpu_index)
+        )
+
+    def _tensorrt_cache_root_for_physical(self, phys_ord: int) -> str:
+        """``tensorrt-engines/gpu{N}`` for a concrete CUDA device ordinal (multi-GPU ORT)."""
         try:
             n = (
                 int(torch.cuda.device_count())
@@ -1506,10 +1660,26 @@ class ModelsProcessor(QtCore.QObject):
             )
         except Exception:
             n = 0
-        # With real GPUs, name cache dirs by physical ordinal so emulated logical GPUs
-        # that map to the same hardware share one engine tree.
-        gpu_idx = phys if n > 0 else logical
+        if n > 0:
+            gpu_idx = max(0, min(int(phys_ord), n - 1))
+        else:
+            gpu_idx = int(phys_ord)
         return os.path.abspath(os.path.join("tensorrt-engines", f"gpu{gpu_idx}"))
+
+    def _tensorrt_gpu_cache_root(self) -> str:
+        """Absolute TRT EP context + engines directory for the primary CUDA device."""
+        logical_pri = self.clamp_gpu_index(self.gpu_index)
+        phys = self._logical_to_physical_cuda_index(logical_pri)
+        try:
+            n = (
+                int(torch.cuda.device_count())
+                if torch.cuda.is_available()
+                else 0
+            )
+        except Exception:
+            n = 0
+        gpu_idx = phys if n > 0 else logical_pri
+        return self._tensorrt_cache_root_for_physical(gpu_idx)
 
     def _refresh_trt_options_for_gpu(self) -> None:
         # ORT TensorRT EP + trt_dump_ep_context_model: engine cache path must be *relative*
@@ -1521,10 +1691,57 @@ class ModelsProcessor(QtCore.QObject):
             os.makedirs(os.path.join(ctx_dir, _TRT_REL_ENGINE_CACHE_DIR), exist_ok=True)
         except OSError:
             pass
-        self.trt_ep_options["device_id"] = self.get_compute_cuda_device_id()
+        self.trt_ep_options["device_id"] = int(self._primary_cuda_device_ordinal())
         self.trt_ep_options["trt_ep_context_file_path"] = ctx_dir
         self.trt_ep_options["trt_engine_cache_path"] = _TRT_REL_ENGINE_CACHE_DIR
         self.trt_ep_options["trt_timing_cache_path"] = _TRT_REL_TIMING_CACHE_FILE
+
+    def _session_phys_for_ort_load(self) -> int:
+        """CUDA ordinal used when creating ORT/TRT sessions on the current thread."""
+        if self.device != "cuda":
+            return 0
+        if (
+            getattr(self, "ui_multi_gpu_routing_enabled", False)
+            and self._physical_cuda_device_count() > 1
+            and not self._is_thread_cpu_routing()
+        ):
+            return int(self.get_compute_cuda_device_id())
+        return int(self._primary_cuda_device_ordinal())
+
+    def _ort_session_storage_key(self, model_name: str) -> str:
+        """Key in ``self.models`` — distinct ORT sessions per GPU when multi-GPU routing is on."""
+        if self.device != "cuda":
+            return model_name
+        if not getattr(self, "ui_multi_gpu_routing_enabled", False):
+            return model_name
+        if self._physical_cuda_device_count() <= 1:
+            return model_name
+        if self._is_thread_cpu_routing():
+            return model_name
+        return f"{model_name}__cuda{int(self.get_compute_cuda_device_id())}"
+
+    def _trt_ep_options_for_physical(self, phys_ord: int) -> dict:
+        """Snapshot of TensorRT EP options for ``phys_ord`` (does not mutate ``self.trt_ep_options``)."""
+        opts = dict(self.trt_ep_options)
+        ctx_dir = self._tensorrt_cache_root_for_physical(phys_ord)
+        try:
+            os.makedirs(ctx_dir, exist_ok=True)
+            os.makedirs(os.path.join(ctx_dir, _TRT_REL_ENGINE_CACHE_DIR), exist_ok=True)
+        except OSError:
+            pass
+        opts["device_id"] = int(phys_ord)
+        opts["trt_ep_context_file_path"] = ctx_dir
+        opts["trt_engine_cache_path"] = _TRT_REL_ENGINE_CACHE_DIR
+        opts["trt_timing_cache_path"] = _TRT_REL_TIMING_CACHE_FILE
+        return opts
+
+    def get_onnx_session(self, model_name: str):
+        """Return the loaded InferenceSession for *model_name* on this thread's GPU (multi-GPU aware)."""
+        return self.models.get(self._ort_session_storage_key(model_name))
+
+    def get_trt_native_model(self, model_name: str):
+        """TensorRT-native runtime object keyed like ONNX sessions (multi-GPU aware)."""
+        return self.models_trt.get(self._ort_session_storage_key(model_name))
 
     def _physical_cuda_device_count(self) -> int:
         if not torch.cuda.is_available():
@@ -1661,6 +1878,15 @@ class ModelsProcessor(QtCore.QObject):
 
     def clamp_gpu_index(self, requested_index: int) -> int:
         count = self.get_configured_gpu_count()
+        # Multi-GPU routing uses max(target)+1 as logical span; if targets only
+        # mention slot 0, count becomes 1 even with several physical CUDA devices,
+        # so primary GPU / physical ordinal 1 would clamp to 0 and the UI change
+        # is a no-op. Never clamp below visible CUDA devices unless emulation adds
+        # extra logical slots beyond physical GPUs.
+        if self.device == "cuda" and not self.emulate_multi_gpu:
+            phy = self._physical_cuda_device_count()
+            if phy > 0:
+                count = max(count, phy)
         return max(0, min(int(requested_index), count - 1))
 
     def get_active_ort_device_id(self) -> int:
@@ -1713,6 +1939,9 @@ class ModelsProcessor(QtCore.QObject):
 
     def _sync_torch_cuda_device(self) -> None:
         if self.device != "cuda" or not torch.cuda.is_available():
+            return
+        # CPU-routed ORT threads must not touch CUDA device state here.
+        if self._is_thread_cpu_routing():
             return
         try:
             torch.cuda.set_device(self.get_compute_cuda_device_id())
@@ -1921,42 +2150,52 @@ class ModelsProcessor(QtCore.QObject):
         """Sets the ONNX thread count. TRT engine reloading is no longer needed here."""
         self.nThreads = value
 
-    def get_gpu_memory(self):
+    def get_all_gpus_memory_mb(self) -> list[tuple[int, int]]:
         """
-        Returns GPU memory usage as ``(used_MB, total_MB)``.
+        Returns ``[(used_MB, total_MB), ...]`` for each CUDA GPU (ordinal order).
 
-        Queries nvidia-smi for accuracy; falls back to ``torch.cuda`` device properties
-        if nvidia-smi is unavailable.  Returns ``(0, 0)`` when no GPU is detected.
+        Uses one ``nvidia-smi`` query when possible; falls back to ``torch.cuda`` per device.
         """
-        # MP-13: use a single nvidia-smi call for both total and free memory
         try:
             command = "nvidia-smi --query-gpu=memory.total,memory.free --format=csv,noheader,nounits"
             output = sp.check_output(command.split()).decode("ascii").strip()
-            # Output format: "total, free" (one line per GPU)
             lines = [ln for ln in output.split("\n") if ln.strip()]
-            idx = self._logical_to_physical_cuda_index(
-                self.clamp_gpu_index(self.gpu_index)
-            )
-            first_line = lines[idx] if idx < len(lines) else lines[0]
-            parts = first_line.split(",")
-            memory_total_val = int(parts[0].strip())
-            memory_free_val = int(parts[1].strip())
-            memory_used = memory_total_val - memory_free_val
-            return memory_used, memory_total_val
+            out: list[tuple[int, int]] = []
+            for line in lines:
+                parts = line.split(",")
+                memory_total_val = int(parts[0].strip())
+                memory_free_val = int(parts[1].strip())
+                out.append((memory_total_val - memory_free_val, memory_total_val))
+            return out
         except Exception:
-            # Fallback to torch.cuda if nvidia-smi is unavailable
-            if torch.cuda.is_available():
-                idx = self._logical_to_physical_cuda_index(
-                    self.clamp_gpu_index(self.gpu_index)
-                )
+            if not torch.cuda.is_available():
+                return [(0, 0)]
+            out = []
+            for idx in range(int(torch.cuda.device_count())):
                 props = torch.cuda.get_device_properties(idx)
                 memory_total_val = props.total_memory // (1024 * 1024)
                 memory_free_val = (
                     props.total_memory - torch.cuda.memory_reserved(idx)
                 ) // (1024 * 1024)
-                memory_used = memory_total_val - memory_free_val
-                return memory_used, memory_total_val
+                out.append((memory_total_val - memory_free_val, memory_total_val))
+            return out
+
+    def get_gpu_memory(self):
+        """
+        Returns GPU memory usage as ``(used_MB, total_MB)`` for the **primary** GPU in settings.
+
+        Queries nvidia-smi for accuracy; falls back to ``torch.cuda`` device properties
+        if nvidia-smi is unavailable.  Returns ``(0, 0)`` when no GPU is detected.
+        """
+        rows = self.get_all_gpus_memory_mb()
+        if not rows:
             return 0, 0
+        idx = self._logical_to_physical_cuda_index(
+            self.clamp_gpu_index(self.gpu_index)
+        )
+        if idx < len(rows):
+            return rows[idx][0], rows[idx][1]
+        return rows[0][0], rows[0][1]
 
     def clear_gpu_memory(self):
         """
@@ -2106,14 +2345,14 @@ class ModelsProcessor(QtCore.QObject):
             vae_encoder_name = "RefLDMVAEEncoder"
             vae_decoder_name = "RefLDMVAEDecoder"
 
-            if not self.models.get(unet_model_name):
-                self.models[unet_model_name] = self.load_model(unet_model_name)
+            if not self.get_onnx_session(unet_model_name):
+                self.load_model(unet_model_name)
 
-            if not self.models.get(vae_encoder_name):
-                self.models[vae_encoder_name] = self.load_model(vae_encoder_name)
+            if not self.get_onnx_session(vae_encoder_name):
+                self.load_model(vae_encoder_name)
 
-            if not self.models.get(vae_decoder_name):
-                self.models[vae_decoder_name] = self.load_model(vae_decoder_name)
+            if not self.get_onnx_session(vae_decoder_name):
+                self.load_model(vae_decoder_name)
 
     def unload_denoiser_models(self):
         """Unloads the UNet and VAE models."""
@@ -2348,6 +2587,22 @@ class ModelsProcessor(QtCore.QObject):
 
         return x_512.clamp(0, 1), diff_norm_128
 
+    def _align_cuda_input_tensor(self, t: torch.Tensor) -> torch.Tensor:
+        """Move CUDA tensors onto the ORT primary/routed device for this thread.
+
+        Background threads often use ``.to('cuda')`` (defaults to GPU 0) while EP
+        sessions target Primary GPU — ORT then cannot find the CUDA allocator.
+        """
+        if not isinstance(t, torch.Tensor) or not t.is_cuda:
+            return t
+        if self.device != "cuda" or not torch.cuda.is_available():
+            return t
+        self._sync_torch_cuda_device()
+        want = self.get_effective_torch_device()
+        if want.startswith("cuda") and str(t.device) != want:
+            return t.to(want, non_blocking=False)
+        return t
+
     def run_detect(
         self,
         img,
@@ -2364,6 +2619,8 @@ class ModelsProcessor(QtCore.QObject):
         **kwargs,
     ):
         rotation_angles = rotation_angles or [0]
+        if isinstance(img, torch.Tensor):
+            img = self._align_cuda_input_tensor(img)
         return self.face_detectors.run_detect(
             img,
             detect_mode,
@@ -2402,6 +2659,8 @@ class ModelsProcessor(QtCore.QObject):
     def run_recognize_direct(
         self, img, kps, similarity_type="Auto", arcface_model="Inswapper128ArcFace"
     ):
+        if isinstance(img, torch.Tensor):
+            img = self._align_cuda_input_tensor(img)
         return self.face_swappers.run_recognize_direct(
             img, kps, similarity_type, arcface_model
         )
@@ -2413,6 +2672,8 @@ class ModelsProcessor(QtCore.QObject):
         similarity_type="Auto",
         arcface_model="Inswapper128ArcFace",
     ):
+        if isinstance(img, torch.Tensor):
+            img = self._align_cuda_input_tensor(img)
         return self.face_swappers.run_recognize_direct_batch(
             img, kps_list, similarity_type, arcface_model
         )
@@ -2778,9 +3039,9 @@ class ModelsProcessor(QtCore.QObject):
 
         with self.model_lock:
             self.ensure_denoiser_models_loaded()
-            unet_session = self.models.get(unet_model_name)
-            vae_enc_session = self.models.get(vae_encoder_name)
-            vae_dec_session = self.models.get(vae_decoder_name)
+            unet_session = self.get_onnx_session(unet_model_name)
+            vae_enc_session = self.get_onnx_session(vae_encoder_name)
+            vae_dec_session = self.get_onnx_session(vae_decoder_name)
 
             if not (unet_session and vae_enc_session and vae_dec_session):
                 return image_cxhxw_uint8

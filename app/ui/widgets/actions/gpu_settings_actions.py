@@ -6,8 +6,7 @@ import json
 from typing import TYPE_CHECKING, List
 
 import torch
-from PySide6 import QtWidgets, QtCore
-from PySide6.QtCore import Qt
+from PySide6 import QtWidgets
 
 from app.ui.widgets.actions import control_actions
 
@@ -69,16 +68,35 @@ def apply_primary_gpu_physical_index(main_window: MainWindow, physical_index: in
     control_actions.change_gpu_index(main_window, physical_index)
 
 
+def _primary_combo_physical_index(combo: QtWidgets.QComboBox) -> int | None:
+    """Resolve CUDA ordinal from combo userData (handles Qt roles where currentData() is None)."""
+    for getter in (
+        lambda: combo.currentData(),
+        lambda: combo.itemData(combo.currentIndex()),
+    ):
+        try:
+            data = getter()
+        except Exception:
+            data = None
+        if data is None:
+            continue
+        try:
+            return int(data)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def on_primary_gpu_combo_changed(main_window: MainWindow, *_args) -> None:
     combo = main_window.parameter_widgets.get("GpuPrimaryDeviceSelection")
-    if combo is None or not hasattr(combo, "currentData"):
+    if combo is None:
         return
-    data = combo.currentData()
-    if data is None:
-        return
-    try:
-        phys = int(data)
-    except (TypeError, ValueError):
+    phys = _primary_combo_physical_index(combo)
+    if phys is None:
+        print(
+            "[WARN] Primary GPU: could not read CUDA index from combo (no itemData).",
+            flush=True,
+        )
         return
     main_window.control["GpuPrimaryPhysicalIndex"] = phys
     apply_primary_gpu_physical_index(main_window, phys)
@@ -319,9 +337,5 @@ def finalize_gpu_widgets_after_settings_layout(main_window: MainWindow) -> None:
     combo = main_window.parameter_widgets.get("GpuPrimaryDeviceSelection")
     if combo is not None:
         fill_primary_gpu_combo(combo, main_window)
-        combo.currentIndexChanged.connect(
-            lambda *_: on_primary_gpu_combo_changed(main_window),
-            type=Qt.ConnectionType.UniqueConnection,
-        )
 
     apply_saved_gpu_settings(main_window)

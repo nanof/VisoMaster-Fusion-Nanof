@@ -234,10 +234,8 @@ class FaceEditors:
             model_name = "LivePortraitMotionExtractor"
 
             if face_editor_type == "Human-Face":
-                if not self.models_processor.models.get(model_name):
-                    self.models_processor.models[model_name] = (
-                        self.models_processor.load_model(model_name)
-                    )
+                if not self.models_processor.get_onnx_session(model_name):
+                    self.models_processor.load_model(model_name)
 
             td_in = self.models_processor.get_ort_io_torch_dtype(
                 model_name, "img", is_output=False
@@ -308,10 +306,8 @@ class FaceEditors:
             model_name = "LivePortraitAppearanceFeatureExtractor"
 
             if face_editor_type == "Human-Face":
-                if not self.models_processor.models.get(model_name):
-                    self.models_processor.models[model_name] = (
-                        self.models_processor.load_model(model_name)
-                    )
+                if not self.models_processor.get_onnx_session(model_name):
+                    self.models_processor.load_model(model_name)
 
             td_in = self.models_processor.get_ort_io_torch_dtype(
                 model_name, "img", is_output=False
@@ -357,10 +353,8 @@ class FaceEditors:
             model_name = "LivePortraitStitchingEye"
 
             if face_editor_type == "Human-Face":
-                if not self.models_processor.models.get(model_name):
-                    self.models_processor.models[model_name] = (
-                        self.models_processor.load_model(model_name)
-                    )
+                if not self.models_processor.get_onnx_session(model_name):
+                    self.models_processor.load_model(model_name)
 
             td_in = self.models_processor.get_ort_io_torch_dtype(
                 model_name, "input", is_output=False
@@ -406,10 +400,8 @@ class FaceEditors:
             model_name = "LivePortraitStitchingLip"
 
             if face_editor_type == "Human-Face":
-                if not self.models_processor.models.get(model_name):
-                    self.models_processor.models[model_name] = (
-                        self.models_processor.load_model(model_name)
-                    )
+                if not self.models_processor.get_onnx_session(model_name):
+                    self.models_processor.load_model(model_name)
 
             td_in = self.models_processor.get_ort_io_torch_dtype(
                 model_name, "input", is_output=False
@@ -457,10 +449,8 @@ class FaceEditors:
             model_name = "LivePortraitStitching"
 
             if face_editor_type == "Human-Face":
-                if not self.models_processor.models.get(model_name):
-                    self.models_processor.models[model_name] = (
-                        self.models_processor.load_model(model_name)
-                    )
+                if not self.models_processor.get_onnx_session(model_name):
+                    self.models_processor.load_model(model_name)
 
             td_in = self.models_processor.get_ort_io_torch_dtype(
                 model_name, "input", is_output=False
@@ -575,10 +565,8 @@ class FaceEditors:
             model_name = "LivePortraitWarpingSpade"
 
             if face_editor_type == "Human-Face":
-                if not self.models_processor.models.get(model_name):
-                    self.models_processor.models[model_name] = (
-                        self.models_processor.load_model(model_name)
-                    )
+                if not self.models_processor.get_onnx_session(model_name):
+                    self.models_processor.load_model(model_name)
 
             t_f = self.models_processor.get_ort_io_torch_dtype(
                 model_name, "feature_3d", is_output=False

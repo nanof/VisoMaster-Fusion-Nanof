@@ -750,6 +750,11 @@ class FrameWorker(threading.Thread):
             self._pipeline_profile_merged = None
             if self.assigned_gpu_index is not None:
                 self.models_processor.set_thread_gpu_index(self.assigned_gpu_index)
+            # PyTorch defaults ambiguous ``device="cuda"`` to this thread's current
+            # ordinal (default 0). Sync once per frame so primary GPU / routing
+            # matches tensor allocations and ORT buffer placement on workers.
+            if self.models_processor.uses_cuda_ep_for_thread():
+                self.models_processor._sync_torch_cuda_device()
             logical_gpu = self.models_processor.get_active_ort_device_id()
             if (
                 _env_flag("VISIOMASTER_MULTI_GPU_LOG")

@@ -407,6 +407,68 @@ def reset_selected_face_parameters(
     return True
 
 
+def _toggle_dependency_matches(
+    parent_toggle_spec: str, toggled_widget_name: str
+) -> bool:
+    """True if *toggled_widget_name* is one of the toggles listed in *parent_toggle_spec*.
+
+    Avoids substring bugs from ``toggled in spec`` (short names falsely matching longer toggle ids).
+    """
+    pt = (parent_toggle_spec or "").strip()
+    if not pt:
+        return False
+    if "," in pt:
+        parts = [item.strip() for item in pt.split(",")]
+        return toggled_widget_name in parts
+    if "|" in pt:
+        parts = [item.strip() for item in pt.split("|")]
+        return toggled_widget_name in parts
+    if "&" in pt:
+        parts = [item.strip() for item in pt.split("&")]
+        return toggled_widget_name in parts
+    return pt == toggled_widget_name
+
+
+def _set_dependent_widget_row_visible(current_widget: Any, visible: bool) -> None:
+    """Show/hide a dependent settings row; optional parts may be missing (tests / odd widgets)."""
+    row = getattr(current_widget, "row_widget", None)
+    if row is not None:
+        row.setVisible(visible)
+    below = getattr(current_widget, "below_row_widget", None)
+    if below is not None:
+        below.setVisible(visible)
+
+    if hasattr(current_widget, "setVisible") and callable(
+        getattr(current_widget, "setVisible")
+    ):
+        current_widget.setVisible(visible)
+    elif visible:
+        current_widget.show()
+    else:
+        current_widget.hide()
+
+    if visible:
+        lw = getattr(current_widget, "label_widget", None)
+        if lw:
+            lw.show()
+        rb = getattr(current_widget, "reset_default_button", None)
+        if rb:
+            rb.show()
+        le = getattr(current_widget, "line_edit", None)
+        if le:
+            le.show()
+    else:
+        lw = getattr(current_widget, "label_widget", None)
+        if lw:
+            lw.hide()
+        rb = getattr(current_widget, "reset_default_button", None)
+        if rb:
+            rb.hide()
+        le = getattr(current_widget, "line_edit", None)
+        if le:
+            le.hide()
+
+
 # Function to Hide Elements conditionally from values in LayoutData (Currently supports using Selection box and Toggle button to hide other widgets)
 def show_hide_related_widgets(
     main_window: "MainWindow",
@@ -437,18 +499,7 @@ def show_hide_related_widgets(
                         visible = cur_text in req_in
                     else:
                         visible = wdata.get("requiredSelectionValue") == cur_text
-                    if not visible:
-                        current_widget.hide()
-                        current_widget.label_widget.hide()
-                        current_widget.reset_default_button.hide()
-                        if current_widget.line_edit:
-                            current_widget.line_edit.hide()
-                    else:
-                        current_widget.show()
-                        current_widget.label_widget.show()
-                        current_widget.reset_default_button.show()
-                        if current_widget.line_edit:
-                            current_widget.line_edit.show()
+                    _set_dependent_widget_row_visible(current_widget, visible)
 
         elif "Toggle" in parent_widget_name:
             # Loop through all widgets data in the parent widget's group layout data
@@ -459,7 +510,7 @@ def show_hide_related_widgets(
                 current_widget = main_window.parameter_widgets[widget_name]
                 # Check if the current_widget depends on the Parent Widget's (toggle) value
                 parentToggles = group_layout_data[widget_name].get("parentToggle", "")
-                if parent_widget_name in parentToggles:
+                if _toggle_dependency_matches(parentToggles, parent_widget_name):
                     if "," in parentToggles:
                         result = [item.strip() for item in parentToggles.split(",")]
                         parentToggle_ischecked = False
@@ -468,21 +519,11 @@ def show_hide_related_widgets(
                                 required_widget_name
                             ].isChecked()
                         # Check if the current_widget has the required toggle value of Parent Widget's (toggle) checked state to hide/show the current_widget
-                        if (
+                        _set_dependent_widget_row_visible(
+                            current_widget,
                             group_layout_data[widget_name].get("requiredToggleValue")
-                            != parentToggle_ischecked
-                        ):
-                            current_widget.hide()
-                            current_widget.label_widget.hide()
-                            current_widget.reset_default_button.hide()
-                            if current_widget.line_edit:
-                                current_widget.line_edit.hide()
-                        else:
-                            current_widget.show()
-                            current_widget.label_widget.show()
-                            current_widget.reset_default_button.show()
-                            if current_widget.line_edit:
-                                current_widget.line_edit.show()
+                            == parentToggle_ischecked,
+                        )
                     elif "|" in parentToggles:
                         result = [item.strip() for item in parentToggles.split("|")]
                         parentToggle_ischecked = True
@@ -498,21 +539,11 @@ def show_hide_related_widgets(
                                 parentToggle_ischecked = False
 
                         # Check if the current_widget has the required toggle value of Parent Widget's (toggle) checked state to hide/show the current_widget
-                        if (
+                        _set_dependent_widget_row_visible(
+                            current_widget,
                             group_layout_data[widget_name].get("requiredToggleValue")
-                            != parentToggle_ischecked
-                        ):
-                            current_widget.hide()
-                            current_widget.label_widget.hide()
-                            current_widget.reset_default_button.hide()
-                            if current_widget.line_edit:
-                                current_widget.line_edit.hide()
-                        else:
-                            current_widget.show()
-                            current_widget.label_widget.show()
-                            current_widget.reset_default_button.show()
-                            if current_widget.line_edit:
-                                current_widget.line_edit.show()
+                            == parentToggle_ischecked,
+                        )
 
                     elif "&" in parentToggles:
                         result = [item.strip() for item in parentToggles.split("&")]
@@ -527,41 +558,21 @@ def show_hide_related_widgets(
                             )
 
                         # Check if the current_widget has the required toggle value of Parent Widget's (toggle) checked state to hide/show the current_widget
-                        if (
+                        _set_dependent_widget_row_visible(
+                            current_widget,
                             group_layout_data[widget_name].get("requiredToggleValue")
-                            != parentToggle_ischecked
-                        ):
-                            current_widget.hide()
-                            current_widget.label_widget.hide()
-                            current_widget.reset_default_button.hide()
-                            if current_widget.line_edit:
-                                current_widget.line_edit.hide()
-                        else:
-                            current_widget.show()
-                            current_widget.label_widget.show()
-                            current_widget.reset_default_button.show()
-                            if current_widget.line_edit:
-                                current_widget.line_edit.show()
+                            == parentToggle_ischecked,
+                        )
 
                     else:
                         parentToggle_ischecked = main_window.parameter_widgets[
                             parentToggles
                         ].isChecked()
-                        if (
+                        _set_dependent_widget_row_visible(
+                            current_widget,
                             group_layout_data[widget_name].get("requiredToggleValue")
-                            != parentToggle_ischecked
-                        ):
-                            current_widget.hide()
-                            current_widget.label_widget.hide()
-                            current_widget.reset_default_button.hide()
-                            if current_widget.line_edit:
-                                current_widget.line_edit.hide()
-                        else:
-                            current_widget.show()
-                            current_widget.label_widget.show()
-                            current_widget.reset_default_button.show()
-                            if current_widget.line_edit:
-                                current_widget.line_edit.show()
+                            == parentToggle_ischecked,
+                        )
 
             parent_widget.start_animation()
 
@@ -606,21 +617,90 @@ def update_gpu_memory_progressbar(main_window: "MainWindow"):
 
 
 def _update_gpu_memory_progressbar(main_window: "MainWindow"):
-    memory_used, memory_total = main_window.models_processor.get_gpu_memory()
-    main_window.gpu_memory_update_signal.emit(memory_used, memory_total)
+    rows = main_window.models_processor.get_all_gpus_memory_mb()
+    main_window.gpu_memory_update_signal.emit(rows)
 
 
-@QtCore.Slot(int, int)
-def set_gpu_memory_progressbar_value(
-    main_window: "MainWindow", memory_used, memory_total
-):
-    main_window.vramProgressBar.setMaximum(memory_total)
-    main_window.vramProgressBar.setValue(memory_used)
-    main_window.vramProgressBar.note_used_mb(memory_used)
-    main_window.vramProgressBar.setFormat(
-        f"{round(memory_used / 1024, 2)} GB / {round(memory_total / 1024, 2)} GB (%p%)"
-    )
-    palette = main_window.vramProgressBar.palette()
+def _layout_and_stretch_index_for_widget(
+    widget: QtWidgets.QWidget,
+) -> tuple[QtWidgets.QLayout | None, int]:
+    """Return the innermost layout that directly holds *widget* and its stretch index.
+
+    ``QWidget.parentWidget().layout()`` is often an outer ``QGridLayout``; the widget
+    may live in a nested ``QHBoxLayout``. ``QGridLayout.indexOf(bar)`` is then -1 and
+    multi-GPU VRAM setup would incorrectly bail out to a single bar.
+    """
+    parent_widget = widget.parentWidget()
+    if parent_widget is None:
+        return None, -1
+    top = parent_widget.layout()
+    if top is None:
+        return None, -1
+
+    def walk(layout: QtWidgets.QLayout) -> tuple[QtWidgets.QLayout | None, int]:
+        idx = layout.indexOf(widget)
+        if idx >= 0:
+            return layout, idx
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item is None:
+                continue
+            sub = item.layout()
+            if sub is not None:
+                inner, j = walk(sub)
+                if inner is not None and j >= 0:
+                    return inner, j
+        return None, -1
+
+    return walk(top)
+
+
+def setup_vram_progress_bars_layout(main_window: "MainWindow") -> None:
+    """Replace the single VRAM bar slot with a vertical stack of one bar per CUDA GPU."""
+    import torch
+    from app.ui.widgets.vram_progress_bar import VramPeakProgressBar
+
+    bar0 = main_window.vramProgressBar
+    if not torch.cuda.is_available() or int(torch.cuda.device_count()) <= 1:
+        main_window._vram_progress_bars = [bar0]
+        return
+
+    parent = bar0.parentWidget()
+    hlay, idx = _layout_and_stretch_index_for_widget(bar0)
+    if parent is None or hlay is None or idx < 0:
+        main_window._vram_progress_bars = [bar0]
+        return
+
+    n = int(torch.cuda.device_count())
+    container = QtWidgets.QWidget(parent)
+    vlay = QtWidgets.QVBoxLayout(container)
+    vlay.setContentsMargins(0, 0, 0, 0)
+    vlay.setSpacing(3)
+
+    hlay.removeWidget(bar0)
+    bars: list = []
+    for i in range(n):
+        if i == 0:
+            b = bar0
+        else:
+            b = VramPeakProgressBar(container)
+            b.setMinimumHeight(max(18, bar0.minimumHeight()))
+            mh = bar0.maximumHeight()
+            if mh > 0:
+                b.setMaximumHeight(mh)
+            sp = bar0.sizePolicy()
+            b.setSizePolicy(sp.horizontalPolicy(), sp.verticalPolicy())
+        b.setObjectName(f"vramProgressBar_gpu{i}")
+        b.setFont(bar0.font())
+        bars.append(b)
+        vlay.addWidget(b)
+
+    hlay.insertWidget(idx, container)
+    main_window._vram_progress_bars = bars
+
+
+def _vram_bar_stylesheet_for_usage(memory_used: int, memory_total: int, bar: QtWidgets.QProgressBar) -> str:
+    palette = bar.palette()
     background_color = palette.color(QtGui.QPalette.ColorRole.Base).name()
     text_color = palette.color(QtGui.QPalette.ColorRole.Text).name()
     border_color = palette.color(QtGui.QPalette.ColorRole.Mid).name()
@@ -644,29 +724,57 @@ def set_gpu_memory_progressbar_value(
 
     chunk_style_high = """
         QProgressBar::chunk {
-            background-color: #911414; /* Red */
+            background-color: #911414;
             border-radius: 4px;
         }
     """
 
     is_high = memory_total > 0 and (memory_used / memory_total) > 0.85
-    was_high = getattr(main_window, "_vram_high_style_active", None)
-    current_style = base_style + (chunk_style_high if is_high else chunk_style_normal)
-    if (
-        is_high != was_high
-        or getattr(main_window, "_vram_progressbar_style", None) != current_style
-    ):
-        main_window._vram_high_style_active = is_high
-        main_window._vram_progressbar_style = current_style
-        main_window.vramProgressBar.setStyleSheet(current_style)
+    return base_style + (chunk_style_high if is_high else chunk_style_normal)
 
-    main_window.vramProgressBar.update()
+
+@QtCore.Slot(object)
+def set_gpu_memory_progressbars_values(main_window: "MainWindow", memory_rows):
+    """*memory_rows*: list of ``(used_MB, total_MB)`` per GPU ordinal from ``nvidia-smi``."""
+    if not isinstance(memory_rows, list):
+        memory_rows = list(memory_rows) if memory_rows else []
+
+    bars = getattr(main_window, "_vram_progress_bars", None) or [
+        main_window.vramProgressBar
+    ]
+    mp = main_window.models_processor
+    try:
+        primary_phys = int(mp._primary_cuda_device_ordinal())
+    except Exception:
+        primary_phys = 0
+
+    for i, bar in enumerate(bars):
+        if i >= len(memory_rows):
+            bar.setMaximum(1)
+            bar.setValue(0)
+            bar.setFormat(f"GPU {i}: —")
+            continue
+        memory_used, memory_total = memory_rows[i]
+        bar.setMaximum(max(1, memory_total))
+        bar.setValue(min(memory_used, memory_total))
+        bar.note_used_mb(memory_used)
+        tag = f"GPU {i}"
+        if i == primary_phys:
+            tag += " · primary"
+        bar.setFormat(
+            f"{tag}: {round(memory_used / 1024, 2)} GB / "
+            f"{round(memory_total / 1024, 2)} GB (%p%)"
+        )
+        st = _vram_bar_stylesheet_for_usage(memory_used, memory_total, bar)
+        bar.setStyleSheet(st)
+        bar.update()
 
 
 def clear_gpu_memory(main_window: "MainWindow"):
     main_window.video_processor.stop_processing()
     main_window.models_processor.clear_gpu_memory()
-    main_window.vramProgressBar.reset_peak()
+    for _b in getattr(main_window, "_vram_progress_bars", [main_window.vramProgressBar]):
+        _b.reset_peak()
     main_window.swapfacesButton.setChecked(False)
     main_window.editFacesButton.setChecked(False)
     from app.ui.widgets.actions import preview_notification_actions as _preview_notify

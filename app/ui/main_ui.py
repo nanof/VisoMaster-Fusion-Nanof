@@ -80,7 +80,7 @@ _FACES_PANEL_ROW_HEIGHT = 144
 
 class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
     placeholder_update_signal = QtCore.Signal(QtWidgets.QListWidget, bool)
-    gpu_memory_update_signal = QtCore.Signal(int, int)
+    gpu_memory_update_signal = QtCore.Signal(object)
     model_loading_signal = QtCore.Signal()
     model_loaded_signal = QtCore.Signal()
     display_messagebox_signal = QtCore.Signal(str, str, QtWidgets.QWidget)
@@ -192,7 +192,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self._workspace_saved_preview_transform = None
 
         self.gpu_memory_update_signal.connect(
-            partial(common_widget_actions.set_gpu_memory_progressbar_value, self)
+            partial(common_widget_actions.set_gpu_memory_progressbars_values, self)
         )
         self.placeholder_update_signal.connect(
             partial(common_widget_actions.update_placeholder_visibility, self)
@@ -662,10 +662,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         # Initialize the button states
         video_control_actions.reset_media_buttons(self)
 
-        # Set GPU Memory Progressbar
+        # VRAM: one progress bar per CUDA GPU (primary GPU labeled in the format string).
+        common_widget_actions.setup_vram_progress_bars_layout(self)
         font = self.vramProgressBar.font()
         font.setBold(True)
-        self.vramProgressBar.setFont(font)
+        for _bar in getattr(self, "_vram_progress_bars", [self.vramProgressBar]):
+            _bar.setFont(font)
         common_widget_actions.update_gpu_memory_progressbar(self)
         # Set face_swap_tab as the default focused tab
         self.tabWidget.setCurrentIndex(0)

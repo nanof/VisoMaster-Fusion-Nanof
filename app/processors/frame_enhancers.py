@@ -92,7 +92,7 @@ class FrameEnhancers:
         """Unload RIFE preview-interpolation ONNX session(s) if loaded."""
         with self.models_processor.model_lock:
             for name in RIFE_PREVIEW_MODEL_NAMES:
-                if self.models_processor.models.get(name):
+                if self.models_processor.get_onnx_session(name):
                     self.models_processor.unload_model(name)
             self.current_rife_preview_model = None
 
@@ -103,9 +103,9 @@ class FrameEnhancers:
             return torch.float32
         mp = self.models_processor
         with mp.model_lock:
-            if not mp.models.get(key):
-                mp.models[key] = mp.load_model(key)
-            sess = mp.models.get(key)
+            if not mp.get_onnx_session(key):
+                mp.load_model(key)
+            sess = mp.get_onnx_session(key)
         if not sess or not sess.get_outputs():
             return torch.float32
         outn = sess.get_outputs()[0].name
@@ -146,7 +146,7 @@ class FrameEnhancers:
         mk = model_key or RIFE_PREVIEW_MODEL_NAME
         if mk not in RIFE_PREVIEW_MODEL_NAMES:
             mk = RIFE_PREVIEW_MODEL_NAME
-        ort_session = self.models_processor.models.get(mk)
+        ort_session = self.models_processor.get_onnx_session(mk)
         if not ort_session:
             print(
                 "[INFO] RIFE preview interpolation: loading model (first use; may take a while)…"
@@ -154,7 +154,7 @@ class FrameEnhancers:
             sess = self.models_processor.load_model(mk)
             if sess:
                 self.current_rife_preview_model = mk
-            ort_session = self.models_processor.models.get(mk)
+            ort_session = self.models_processor.get_onnx_session(mk)
         if not ort_session:
             return (
                 img0_bgr.astype(np.float32) * 0.5 + img1_bgr.astype(np.float32) * 0.5
@@ -406,11 +406,9 @@ class FrameEnhancers:
         # Lazy-load the model if it's not already in memory
         # 1. Thread-safe loading
         with self.models_processor.model_lock:
-            if not self.models_processor.models[model_name]:
-                self.models_processor.models[model_name] = (
-                    self.models_processor.load_model(model_name)
-                )
-            ort_session = self.models_processor.models[model_name]
+            if not self.models_processor.get_onnx_session(model_name):
+                self.models_processor.load_model(model_name)
+            ort_session = self.models_processor.get_onnx_session(model_name)
 
         if not ort_session:
             # This fix ensures the output tensor is correctly populated instead
