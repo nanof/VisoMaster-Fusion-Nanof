@@ -16,6 +16,7 @@
 #   3. The button will appear automatically on the respective page.
 # ---------------------------------------------------------------------------
 
+import subprocess
 import sys
 from datetime import datetime, timezone
 from PySide6 import QtWidgets, QtGui, QtCore
@@ -644,7 +645,19 @@ class LauncherWindow(QtWidgets.QWidget):
     def on_update_deps(self):
         print("[Launcher] Updating/checking dependencies via uv...")
         with with_busy_state(self, busy=True, text="Updating dependencies..."):
-            uv_pip_install()
+            try:
+                uv_pip_install()
+            except subprocess.CalledProcessError as e:
+                print(
+                    f"[Launcher] Dependency update failed (exit code {e.returncode})."
+                )
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Dependency Update Failed",
+                    "Dependency update failed.\n\n"
+                    "Check the console for details, then try again.",
+                )
+                return
             write_checksum_state(deps_sha=compute_file_sha256(PATHS["REQ_FILE"]))
             self._load_checksum_status()
             self._refresh_update_indicators()

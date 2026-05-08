@@ -10,6 +10,7 @@
 # ---------------------------------------------------------------------------
 
 from pathlib import Path
+import os
 import sys
 import subprocess
 from PySide6 import QtWidgets
@@ -76,16 +77,42 @@ def apply_theme_to_app(app: QtWidgets.QApplication):
 # ---------- Subprocess Helpers ----------
 
 
-def run_python(script_path: Path):
-    """Run a Python script using the portable Python interpreter."""
-    subprocess.run(
-        [str(PATHS["PYTHON_EXE"]), str(script_path)], cwd=PATHS["APP_DIR"], shell=False
-    )
+def run_python(script_path: Path, args: list | None = None):
+    """Run a Python script using the portable Python interpreter.
+
+    The working directory is always set to APP_DIR (the repo root) so that
+    `python -m app.ui.launcher` and similar module invocations find the `app/`
+    package regardless of where the caller's cwd is.
+    """
+    cmd = [str(PATHS["PYTHON_EXE"]), str(script_path)] + (args or [])
+    subprocess.run(cmd, cwd=str(PATHS["APP_DIR"]), shell=False)
+
+
+# UV network tuning defaults.
+# These can be overridden by setting environment variables before launching.
+# UV_HTTP_TIMEOUT: per-request HTTP read timeout in seconds (default 120 s).
+#   Increase if large wheels (torch, onnxruntime) time out on slow connections.
+# UV_HTTP_RETRIES: number of retry attempts on transient network errors (default 5).
+# UV_CONCURRENT_DOWNLOADS: parallel download slots (default 4).
+#   Reduce to 1 on very slow / metered connections to avoid overloading the pipe.
+_UV_HTTP_TIMEOUT = "120"
+_UV_HTTP_RETRIES = "5"
+_UV_CONCURRENT_DOWNLOADS = "4"
 
 
 def uv_pip_install():
-    """Run dependency installation using the portable uv executable."""
-    subprocess.run(
+    """Run dependency installation using the portable uv executable.
+
+    Passes uv network tuning via environment variables so that slow or unstable
+    connections (common in portable installs) do not abort mid-install with a
+    cryptic timeout error. Existing user-provided uv environment values win.
+    """
+    env = os.environ.copy()
+    env.setdefault("UV_HTTP_TIMEOUT", _UV_HTTP_TIMEOUT)
+    env.setdefault("UV_HTTP_RETRIES", _UV_HTTP_RETRIES)
+    env.setdefault("UV_CONCURRENT_DOWNLOADS", _UV_CONCURRENT_DOWNLOADS)
+
+    return subprocess.run(
         [
             str(PATHS["UV_EXE"]),
             "pip",
@@ -95,6 +122,8 @@ def uv_pip_install():
             "--python",
             str(PATHS["PYTHON_EXE"]),
         ],
-        cwd=PATHS["APP_DIR"],
+        cwd=str(PATHS["APP_DIR"]),
+        env=env,
+        check=True,
         shell=False,
     )
