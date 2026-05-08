@@ -1192,6 +1192,7 @@ class InputFaceCardButton(CardButton):
         )
         self.media_path = media_path
         self.kv_map: Dict | None = None
+        self.is_favorite_clip = bool(kwargs.get("is_favorite_clip", False))
 
         self.setCheckable(True)
         self.setToolTip(media_path)
@@ -1425,6 +1426,10 @@ class InputFaceCardButton(CardButton):
         )
         self.popMenu.addAction(self.create_embed_action)
 
+        self.add_to_favorites_action = QtGui.QAction("Add to favorites", self)
+        self.add_to_favorites_action.triggered.connect(self.add_selection_to_favorites)
+        self.popMenu.addAction(self.add_to_favorites_action)
+
         self.remove_action = QtGui.QAction("Remove from list", self)
         self.remove_action.triggered.connect(self.remove_input_face_from_list)
         self.popMenu.addAction(self.remove_action)
@@ -1487,7 +1492,23 @@ class InputFaceCardButton(CardButton):
         self.clear_all_faces_action.setEnabled(
             bool(self.main_window.input_faces) and not scan_active
         )
+        on_main_input_list = self.list_widget is self.main_window.inputFacesList
+        self.add_to_favorites_action.setVisible(
+            on_main_input_list and not self.is_favorite_clip
+        )
+        self.add_to_favorites_action.setEnabled(not scan_active)
         self.popMenu.exec_(self.mapToGlobal(point))
+
+    def add_selection_to_favorites(self):
+        if video_control_actions.block_if_issue_scan_active(
+            self.main_window, "add input faces to favorites"
+        ):
+            return
+        from app.ui.widgets.actions import list_view_actions
+
+        list_view_actions.add_input_faces_selection_to_favorites(
+            self.main_window, self
+        )
 
     def create_embedding_from_selected_faces(self):
         if video_control_actions.block_if_issue_scan_active(
