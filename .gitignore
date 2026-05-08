@@ -5,6 +5,7 @@
 *.exe
 *.jpg
 *.json
+!/version.json
 *.mp4
 *.onnx
 *.profile
