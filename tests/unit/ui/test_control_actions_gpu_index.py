@@ -15,38 +15,18 @@ def test_apply_saved_gpu_settings_clamps_primary_physical(monkeypatch):
         "app.ui.widgets.actions.gpu_settings_actions.fill_primary_gpu_combo",
         lambda *a, **k: None,
     )
-    monkeypatch.setattr(
-        "app.ui.widgets.actions.gpu_settings_actions.sync_routing_json_to_models_processor",
-        lambda *a, **k: None,
-    )
 
     models_processor = MagicMock()
     models_processor.set_gpu_index = MagicMock(return_value=1)
-    models_processor.ui_multi_gpu_routing_enabled = False
-    models_processor.ui_routing_targets = [0]
     models_processor.gpu_index = 0
 
     combo = MagicMock()
     combo.blockSignals = MagicMock(return_value=None)
-    picker = MagicMock()
-    picker.blockSignals = MagicMock(return_value=None)
-    picker.rebuild_from_models = MagicMock()
-    toggle = MagicMock()
-    toggle.blockSignals = MagicMock(return_value=None)
-    toggle.setChecked = MagicMock()
 
     main_window = SimpleNamespace(
-        control={
-            "GpuPrimaryPhysicalIndex": "8",
-            "GpuRoutingTargetsJson": "[0]",
-            "MultiGpuRoutingEnableToggle": False,
-        },
+        control={"GpuPrimaryPhysicalIndex": "8"},
         models_processor=models_processor,
-        parameter_widgets={
-            "GpuPrimaryDeviceSelection": combo,
-            "GpuRoutingTargetsPicker": picker,
-            "MultiGpuRoutingEnableToggle": toggle,
-        },
+        parameter_widgets={"GpuPrimaryDeviceSelection": combo},
     )
 
     control_actions.apply_saved_gpu_index(main_window)

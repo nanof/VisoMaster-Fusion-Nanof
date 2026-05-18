@@ -276,102 +276,6 @@ def add_widgets_to_tab_layout(
                     )
                 )
 
-            elif widget_name == "MultiGpuSecondaryGpuSelection":
-                widget = widget_components.SelectionBox(
-                    label=cast(str, widget_data["label"]),
-                    widget_name=widget_name,
-                    group_layout_data=widgets,
-                    label_widget=label,
-                    main_window=main_window,
-                    default_value=widget_data["default"],
-                    selection_values=[],
-                )
-                gpu_settings_actions.fill_secondary_gpu_combo(widget, main_window)
-                if "MultiGpuSecondaryGpuPhysicalIndex" not in main_window.control:
-                    common_widget_actions.create_control(
-                        main_window,
-                        "MultiGpuSecondaryGpuPhysicalIndex",
-                        int(
-                            gpu_settings_actions._default_secondary_physical_index(
-                                main_window
-                            )
-                        ),
-                    )
-                widget.reset_default_button = (
-                    widget_components.ParameterResetDefaultButton(related_widget=widget)
-                )
-                row_widget, horizontal_layout = add_horizontal_layout_to_category(
-                    category_layout, label, widget, widget.reset_default_button
-                )
-                widget.currentIndexChanged.connect(
-                    partial(
-                        gpu_settings_actions.on_secondary_gpu_combo_changed,
-                        main_window,
-                    )
-                )
-
-            elif widget_name == "GpuRoutingTargetsPicker":
-                widget = widget_components.GpuRoutingTargetsPicker(
-                    label_widget=label,
-                    widget_name=widget_name,
-                    group_layout_data=widgets,
-                    main_window=main_window,
-                )
-                stub_reset = QtWidgets.QWidget()
-                stub_reset.setFixedSize(0, 0)
-                widget.reset_default_button = (
-                    widget_components.ParameterResetDefaultButton(
-                        related_widget=widget  # type: ignore[arg-type]
-                    )
-                )
-                row_widget, horizontal_layout = add_horizontal_layout_to_category(
-                    category_layout, label, widget, widget.reset_default_button
-                )
-                if "GpuRoutingTargetsJson" not in main_window.control:
-                    common_widget_actions.create_control(
-                        main_window, "GpuRoutingTargetsJson", "[0]"
-                    )
-                widget.rebuild_from_models()
-
-            elif widget_name in ("GpuWeightsEditor", "GpuThreadsPerGpuEditor"):
-                editor_cls = getattr(widget_components, widget_name)
-                widget = editor_cls(
-                    label_widget=label,
-                    widget_name=widget_name,
-                    group_layout_data=widgets,
-                    main_window=main_window,
-                )
-                widget.reset_default_button = (
-                    widget_components.ParameterResetDefaultButton(
-                        related_widget=widget  # type: ignore[arg-type]
-                    )
-                )
-                row_widget, horizontal_layout = add_horizontal_layout_to_category(
-                    category_layout, label, widget, widget.reset_default_button
-                )
-                ctrl_key = editor_cls.control_key
-                if ctrl_key not in main_window.control:
-                    common_widget_actions.create_control(
-                        main_window, ctrl_key, "{}"
-                    )
-                widget.rebuild_from_models()
-
-            elif widget_name == "GpuLiveMetricsPanel":
-                widget = widget_components.GpuLiveMetricsPanel(
-                    label_widget=label,
-                    widget_name=widget_name,
-                    group_layout_data=widgets,
-                    main_window=main_window,
-                )
-                widget.reset_default_button = (
-                    widget_components.ParameterResetDefaultButton(
-                        related_widget=widget  # type: ignore[arg-type]
-                    )
-                )
-                row_widget, horizontal_layout = add_horizontal_layout_to_category(
-                    category_layout, label, widget, widget.reset_default_button
-                )
-
             elif "Selection" in widget_name:
                 options = widget_data["options"]
                 default = widget_data["default"]
@@ -1194,13 +1098,6 @@ def set_all_parameters_and_control_widgets_enabled(
         line_e = getattr(widget, "line_edit", None)
         if line_e:
             line_e.setDisabled(disabled)
-
-    if enabled:
-        try:
-            gpu_settings_actions.refresh_gpu_spin_editors(main_window)
-        except Exception:
-            pass
-
 
 def disable_all_parameters_and_control_widget(main_window: "MainWindow"):
     set_all_parameters_and_control_widgets_enabled(main_window, False)

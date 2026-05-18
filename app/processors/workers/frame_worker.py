@@ -187,7 +187,6 @@ class FrameWorker(threading.Thread):
         # Pool worker args (frame_queue is a task queue)
         frame_queue: queue.Queue | None = None,
         worker_id: int = -1,
-        assigned_gpu_index: int | None = None,
         # Single-frame worker args
         frame: np.ndarray | None = None,
         frame_number: int = -1,
@@ -270,7 +269,6 @@ class FrameWorker(threading.Thread):
         # Mode-specific args
         self.frame_queue = frame_queue  # This is now the TASK queue
         self.worker_id = worker_id
-        self.assigned_gpu_index = assigned_gpu_index
 
         # Single-frame data
         self.frame = frame  # Will be None in pool mode until a task is dequeued
@@ -492,73 +490,6 @@ class FrameWorker(threading.Thread):
             x = x.cpu()
         return np.ascontiguousarray(x.numpy())
 
-    def _fetch_task_with_stealing(self):
-        """Return ``(task, source_queue, stolen)`` respecting GPU affinity.
-
-        Behavior:
-        - Worker without affinity (``assigned_gpu_index is None``) or when
-          multi-GPU routing is off: plain ``self.frame_queue.get(timeout=1.0)``
-          on the legacy shared queue.
-        - Worker with affinity and the VideoProcessor in "hybrid" mode: try a
-          short blocking get on our own subqueue; if empty, peek at every
-          peer subqueue ordered by ``qsize`` (descending) and try
-          ``get_nowait()``; if none had work, block again on the own queue.
-          A stolen task is returned with ``stolen=True`` so the run loop
-          knows to keep **our** ``assigned_gpu_index`` instead of the one
-          encoded in the task.
-        - Any other weighted mode (manual / auto without hybrid): strict
-          affinity, no stealing — keeps load exactly at the configured
-          weights.
-        """
-        vp = getattr(self.main_window, "video_processor", None)
-        queues = None
-        stealing = False
-        if vp is not None and getattr(vp, "_queue_affinity_enabled", False):
-            queues = getattr(vp, "frame_queues_by_gpu", None)
-            mode = vp.main_window.models_processor.load_balancing_mode
-            try:
-                from app.processors.gpu_scheduler import mode_enables_stealing as _mes
-                stealing = bool(_mes(mode)) and self.assigned_gpu_index is not None
-            except Exception:
-                stealing = False
-        own_q = (
-            queues.get(int(self.assigned_gpu_index))
-            if (queues and self.assigned_gpu_index is not None)
-            else self.frame_queue
-        )
-        if own_q is None:
-            own_q = self.frame_queue
-        if not stealing or queues is None or len(queues) < 2:
-            task = own_q.get(timeout=1.0)
-            return task, own_q, False
-        try:
-            task = own_q.get(timeout=0.05)
-            return task, own_q, False
-        except queue.Empty:
-            pass
-        # Peer scan, ordered by qsize descending — steal from the busiest.
-        peers = [
-            (int(gid), q)
-            for gid, q in queues.items()
-            if int(gid) != int(self.assigned_gpu_index)
-        ]
-        peers.sort(key=lambda gq: gq[1].qsize(), reverse=True)
-        for _gid, peer_q in peers:
-            try:
-                task = peer_q.get_nowait()
-                if task is None:
-                    # Don't swallow a sibling's poison pill — put it back.
-                    try:
-                        peer_q.put_nowait(None)
-                    except queue.Full:
-                        pass
-                    continue
-                return task, peer_q, True
-            except queue.Empty:
-                continue
-        task = own_q.get(timeout=0.2)
-        return task, own_q, False
-
     def run(self):
         """
         Main thread execution loop.
@@ -570,9 +501,8 @@ class FrameWorker(threading.Thread):
             while not self.stop_event.is_set():
                 task = None  # Ensure task is defined for 'finally'
                 task_queue = self.frame_queue
-                stolen = False
                 try:
-                    task, task_queue, stolen = self._fetch_task_with_stealing()
+                    task = self.frame_queue.get(timeout=1.0)
 
                     if task is None:
                         # Poison pill received: Exit the loop
@@ -597,10 +527,6 @@ class FrameWorker(threading.Thread):
                             self._feeder_chw_tensor,
                             self.precomputed_track_ids,
                         ) = task[:11]
-                        if not stolen:
-                            self.assigned_gpu_index = (
-                                task[11] if len(task) >= 12 else self.assigned_gpu_index
-                            )
                     elif len(task) >= 10:
                         (
                             self.frame_number,
@@ -615,10 +541,6 @@ class FrameWorker(threading.Thread):
                             self.precomputed_track_ids,
                         ) = task[:10]
                         self.precomputed_kpss_203 = None
-                        if not stolen:
-                            self.assigned_gpu_index = (
-                                task[10] if len(task) >= 11 else self.assigned_gpu_index
-                            )
                     elif len(task) >= 9:
                         (
                             self.frame_number,
@@ -633,10 +555,6 @@ class FrameWorker(threading.Thread):
                         ) = task[:9]
                         self.precomputed_kpss_203 = None
                         self.precomputed_track_ids = None
-                        if not stolen:
-                            self.assigned_gpu_index = (
-                                task[9] if len(task) >= 10 else self.assigned_gpu_index
-                            )
                     else:
                         (
                             self.frame_number,
@@ -661,30 +579,7 @@ class FrameWorker(threading.Thread):
                     self.parameters = local_params_from_feeder
                     self.local_control_state_from_feeder = local_control_from_feeder
 
-                    if stolen:
-                        print(
-                            "[MULTI-GPU] "
-                            f"frame={self.frame_number} worker={self.name} "
-                            f"stolen_by_gpu={self.assigned_gpu_index} (hybrid steal)",
-                            flush=True,
-                        )
-
-                    # Process the frame
-                    _t_frame0 = time.perf_counter()
                     self.process_and_emit_task()
-                    _elapsed_ms_frame = (time.perf_counter() - _t_frame0) * 1000.0
-                    try:
-                        vp_metrics = getattr(self.main_window, "video_processor", None)
-                        if (
-                            vp_metrics is not None
-                            and self.assigned_gpu_index is not None
-                            and hasattr(vp_metrics, "gpu_metrics")
-                        ):
-                            vp_metrics.gpu_metrics.record(
-                                int(self.assigned_gpu_index), _elapsed_ms_frame
-                            )
-                    except Exception:
-                        pass
 
                 except queue.Empty:
                     # Timeout occurred, just loop again to check stop_event
@@ -748,27 +643,8 @@ class FrameWorker(threading.Thread):
             import contextlib
 
             self._pipeline_profile_merged = None
-            if self.assigned_gpu_index is not None:
-                self.models_processor.set_thread_gpu_index(self.assigned_gpu_index)
-            # PyTorch defaults ambiguous ``device="cuda"`` to this thread's current
-            # ordinal (default 0). Sync once per frame so primary GPU / routing
-            # matches tensor allocations and ORT buffer placement on workers.
             if self.models_processor.uses_cuda_ep_for_thread():
                 self.models_processor._sync_torch_cuda_device()
-            logical_gpu = self.models_processor.get_active_ort_device_id()
-            if (
-                _env_flag("VISIOMASTER_MULTI_GPU_LOG")
-                or self.models_processor.emulate_multi_gpu
-                or getattr(self.models_processor, "ui_multi_gpu_routing_enabled", False)
-                or self.models_processor.is_multi_gpu_stage_offload()
-            ):
-                print(
-                    "[MULTI-GPU] "
-                    f"frame={self.frame_number} worker={self.name} logical_gpu={logical_gpu} "
-                    f"compute_device={self.models_processor.get_effective_torch_device()} "
-                    f"provider={self.models_processor.provider_name}",
-                    flush=True,
-                )
 
             # Setup the dedicated asynchronous context for HPC parallel processing
             stream_context = (
@@ -3033,15 +2909,6 @@ class FrameWorker(threading.Thread):
             return id(stable_object)
         return 0
 
-    def _tensor_on_primary_device(self, tensor: torch.Tensor) -> torch.Tensor:
-        mp = self.models_processor
-        prim = mp.get_primary_torch_device()
-        if tensor.device.type != "cuda":
-            return tensor.to(prim, non_blocking=True)
-        if str(tensor.device) != prim:
-            return tensor.to(prim, non_blocking=True)
-        return tensor
-
     def _apply_facerestorer_maybe_offloaded(
         self,
         swap: torch.Tensor,
@@ -3055,17 +2922,7 @@ class FrameWorker(threading.Thread):
         def _run(t: torch.Tensor) -> torch.Tensor:
             return mp.apply_facerestorer(t, *args, **kwargs)
 
-        if not mp.should_offload_stage(
-            "facerestorer", control=control, parameters=parameters
-        ):
-            return _run(swap)
-        with mp.gpu_stage_context("facerestorer"):
-            sec = mp.get_effective_torch_device()
-            t = swap.to(sec, non_blocking=True)
-            if t.device.type == "cuda":
-                torch.cuda.synchronize(t.device)
-            out = _run(t)
-            return self._tensor_on_primary_device(out)
+        return _run(swap)
 
     def _try_apply_facerestorer_batched_maybe_offloaded(
         self,
@@ -3076,37 +2933,15 @@ class FrameWorker(threading.Thread):
         parameters: dict,
     ) -> torch.Tensor | None:
         mp = self.models_processor
-        if not mp.should_offload_stage(
-            "facerestorer", control=control, parameters=parameters
-        ):
-            return mp.try_apply_facerestorer_batched_original_stack(
-                stacked, restorer_type, fidelity_weight
-            )
-        with mp.gpu_stage_context("facerestorer"):
-            sec = mp.get_effective_torch_device()
-            t = stacked.to(sec, non_blocking=True)
-            if t.device.type == "cuda":
-                torch.cuda.synchronize(t.device)
-            bo = mp.try_apply_facerestorer_batched_original_stack(
-                t, restorer_type, fidelity_weight
-            )
-            if bo is None:
-                return None
-            return self._tensor_on_primary_device(bo)
+        return mp.try_apply_facerestorer_batched_original_stack(
+            stacked, restorer_type, fidelity_weight
+        )
 
     def _enhance_frame_maybe_offloaded(
         self, tensor: torch.Tensor, control: dict
     ) -> torch.Tensor:
         mp = self.models_processor
-        if not mp.should_offload_stage("frame_enhancer", control=control):
-            return self.frame_enhancers.enhance_core(tensor, control=control)
-        with mp.gpu_stage_context("frame_enhancer"):
-            sec = mp.get_effective_torch_device()
-            t = tensor.to(sec, non_blocking=True)
-            if t.device.type == "cuda":
-                torch.cuda.synchronize(t.device)
-            out = self.frame_enhancers.enhance_core(t, control=control)
-            return self._tensor_on_primary_device(out)
+        return self.frame_enhancers.enhance_core(tensor, control=control)
 
     def _apply_primary_facerestorer_maybe_subsampled(
         self,

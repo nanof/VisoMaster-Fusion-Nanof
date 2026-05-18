@@ -34,14 +34,6 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QPixmap
 
 # Internal project imports
-from app.processors.gpu_scheduler import (
-    GpuLoadMetrics,
-    WeightedScheduler,
-    calibrate_weights_from_timings,
-    mode_enables_autotune,
-    mode_enables_stealing,
-    normalize_mode,
-)
 from app.processors.workers.frame_worker import FrameWorker, _env_flag
 from app.ui.widgets.actions import graphics_view_actions
 from app.ui.widgets.actions import common_actions as common_widget_actions
@@ -252,8 +244,6 @@ class VideoProcessor(QObject):
     processing_heartbeat_signal = Signal()  # Emits periodically to show liveness
     # ndarray|None, generation, exception|None — emitted from QThreadPool worker
     neural_rife_preview_async_done = Signal(object, int, object)
-    # dict[int, dict[str, float]] — per-logical-GPU rolling stats
-    gpu_load_metrics_signal = Signal(object)
 
     def __init__(self, main_window: "MainWindow", num_threads=4):
         """
@@ -286,22 +276,9 @@ class VideoProcessor(QObject):
         )  # Max frames allowed "in flight" (queued + being displayed)
         self.max_frames_to_display_size = 8  # VP-22: Hard cap on frames_to_display dict
 
-        # Pool tasks: (..., precomputed_track_ids?, assigned_gpu_index?)
-        # ``frame_queue`` is always the primary GPU's subqueue. When routing is
-        # proportional / hybrid (see ``_rebuild_frame_queue_from_control``), the
-        # other GPUs also get a dedicated subqueue in ``frame_queues_by_gpu``
-        # so workers can pin to a GPU and steal when empty. With round-robin or
-        # a single target this dict holds exactly one entry.
         self.frame_queue: queue.Queue[Any] = queue.Queue(
             maxsize=self.max_display_buffer_size
         )
-        self.frame_queues_by_gpu: Dict[int, queue.Queue[Any]] = {0: self.frame_queue}
-        self._queue_affinity_enabled: bool = False
-        # Deterministic weighted scheduler (DRR) + live metrics collector.
-        self.scheduler = WeightedScheduler(targets=[0], weights={})
-        self.gpu_metrics = GpuLoadMetrics()
-        self._gpu_metrics_timer: Optional[QTimer] = None
-        self._autotune_state: Dict[str, Any] = {"last_snapshot_count": 0}
         # Decode → ordered detection (this queue) → frame_queue (parallel workers)
         self._raw_frame_queue: Optional[queue.Queue[Any]] = None
         self._detection_pipeline_thread: Optional[threading.Thread] = None
@@ -944,9 +921,7 @@ class VideoProcessor(QObject):
         rq = self._raw_frame_queue
         rq_sz = rq.qsize() if rq is not None else -1
         fq_sz = self._total_frame_queue_size()
-        fq_max = sum(
-            int(q.maxsize or 0) for q in self.frame_queues_by_gpu.values()
-        )
+        fq_max = int(self.frame_queue.maxsize or 0)
         snap = self.main_window.models_processor.get_ort_pipeline_metrics_snapshot()
         print(
             f"[PIPELINE-METRICS] raw_q={rq_sz} frame_q={fq_sz}/{fq_max} "
@@ -2422,7 +2397,7 @@ class VideoProcessor(QObject):
 
     def _clear_frame_and_raw_queues(self) -> None:
         """Drop pending decode and worker tasks (used on seek / pipeline reset)."""
-        for q in self._iter_frame_subqueues():
+        for q in (self.frame_queue,):
             try:
                 with q.mutex:
                     q.queue.clear()
@@ -2560,7 +2535,6 @@ class VideoProcessor(QObject):
                             flush=True,
                         )
 
-            assigned_gpu = self._resolve_assigned_gpu_index(int(logical_fn))
             task = (
                 display_fn,
                 frame_rgb,
@@ -2573,31 +2547,14 @@ class VideoProcessor(QObject):
                 feeder_perf,
                 feeder_chw_uint8,
                 detect_track_ids,
-                assigned_gpu,
             )
-            self._log_multi_gpu_route(int(logical_fn), assigned_gpu)
-            target_q = self.frame_queues_by_gpu.get(int(assigned_gpu), self.frame_queue)
-            target_q.put(task)
-            # Periodic auto re-weighter (cheap: only reads rolling metrics).
-            self._maybe_autotune_weights()
+            self.frame_queue.put(task)
 
-        nw = len(self.worker_threads)
-        subqueues = self._iter_frame_subqueues() or [self.frame_queue]
-        q_idx = 0
-        for _ in range(nw):
-            q = subqueues[q_idx % len(subqueues)]
-            q_idx += 1
+        for _ in range(len(self.worker_threads)):
             try:
-                q.put(None, timeout=30.0)
+                self.frame_queue.put(None, timeout=30.0)
             except Exception:
                 break
-        # One extra pill per subqueue to wake stealers that might be asleep on
-        # a peer queue when the last frame arrived on another one.
-        for q in subqueues:
-            try:
-                q.put(None, timeout=0.1)
-            except Exception:
-                pass
         print("[INFO] Detection pipeline thread finished.", flush=True)
 
     def _overlay_playback_live_control_keys(self, local_control: dict) -> None:
@@ -2606,134 +2563,6 @@ class VideoProcessor(QObject):
         for key in _FEEDER_PLAYBACK_LIVE_CONTROL_KEYS:
             if key in mw:
                 local_control[key] = mw[key]
-
-    def _resolve_assigned_gpu_index(
-        self, frame_number: int, worker_id: int | None = None
-    ) -> int:
-        mp = self.main_window.models_processor
-        if mp.device != "cuda":
-            return mp.clamp_gpu_index(mp.gpu_index)
-        phy_n = mp._physical_cuda_device_count()
-        primary = (
-            max(0, min(int(mp.gpu_index), max(0, phy_n - 1)))
-            if phy_n > 0
-            else 0
-        )
-        if getattr(mp, "is_multi_gpu_stage_offload", None) and mp.is_multi_gpu_stage_offload():
-            return primary
-        if getattr(mp, "ui_multi_gpu_routing_enabled", False):
-            tg = mp.get_ui_routing_targets_sorted()
-            if len(tg) >= 2:
-                mode = normalize_mode(getattr(mp, "load_balancing_mode", "round_robin"))
-                if (
-                    worker_id is not None
-                    and _env_flag("VISIOMASTER_MULTI_GPU_ASSIGN_PER_WORKER")
-                ):
-                    slot = int(worker_id) % len(tg)
-                    return int(tg[slot])
-                if mode == "round_robin":
-                    slot = int(frame_number) % len(tg)
-                    return int(tg[slot])
-                # Weighted (manual/auto/hybrid): use the deterministic DRR
-                # scheduler. Its internal state advances once per call, which
-                # is exactly what we want: one decision per frame.
-                if sorted(self.scheduler.get_targets()) != sorted(int(x) for x in tg):
-                    self.scheduler.set_targets(tg, mp.resolve_effective_weights())
-                return int(self.scheduler.next_gpu())
-            if tg:
-                return int(tg[0])
-            return primary
-        if mp.emulate_multi_gpu:
-            logical_gpus = max(1, mp.get_configured_gpu_count())
-            if logical_gpus <= 1:
-                return primary
-            if (
-                worker_id is not None
-                and _env_flag("VISIOMASTER_MULTI_GPU_ASSIGN_PER_WORKER")
-            ):
-                return int(worker_id) % logical_gpus
-            return int(frame_number) % logical_gpus
-        return primary
-
-    # ------------------------------------------------------------------
-    # Auto re-weighter (weighted_auto / hybrid)
-    # ------------------------------------------------------------------
-    def _maybe_autotune_weights(self) -> None:
-        """Recalibrate scheduler weights from rolling per-GPU ms measurements.
-
-        Runs at most once every ``GpuAutoWeightsReweightEveryNFramesSlider``
-        frames (or never when that slider is 0 / mode doesn't need it). The
-        computation is O(targets) and uses only data already collected by
-        workers, so calling it from the detection thread is cheap.
-        """
-        mp = self.main_window.models_processor
-        if not mode_enables_autotune(getattr(mp, "load_balancing_mode", "round_robin")):
-            return
-        every = int(getattr(mp, "gpu_auto_reweight_every_n_frames", 0) or 0)
-        benchmark_on_start = bool(getattr(mp, "gpu_auto_benchmark_on_start", False))
-        # Fast first pass: when the benchmark toggle is on, seed weights after
-        # just ``first_target`` frames per GPU instead of waiting for ``every``
-        # frames (which may be much larger). After that first pass, fall back
-        # to the user-configured cadence.
-        first_done = bool(self._autotune_state.get("first_reweight_done", False))
-        first_target = 40 if benchmark_on_start else 0
-        if every <= 0 and not (benchmark_on_start and not first_done):
-            return
-        total_now = int(sum(int(v.get("count", 0)) for v in self.gpu_metrics.snapshot().values()))
-        last = int(self._autotune_state.get("last_snapshot_count", 0))
-        if not first_done and first_target > 0:
-            if total_now - last < first_target:
-                return
-        elif every <= 0:
-            return
-        else:
-            if total_now - last < every:
-                return
-        snap = self.gpu_metrics.snapshot()
-        ms_map = {int(g): float(s.get("ema_ms", s.get("avg_ms", 0.0))) for g, s in snap.items()}
-        targets = self.scheduler.get_targets()
-        full = {int(t): ms_map.get(int(t), 0.0) for t in targets}
-        # Require at least one measured sample per target before applying;
-        # otherwise we would nuke a GPU that just hasn't been hit yet.
-        if any(v <= 0.0 for v in full.values()):
-            return
-        weights = calibrate_weights_from_timings(full)
-        self.scheduler.update_weights(weights)
-        mp.gpu_weights = dict(weights)
-        self._autotune_state["last_snapshot_count"] = total_now
-        self._autotune_state["first_reweight_done"] = True
-        print(
-            "[MULTI-GPU] Auto re-weight: "
-            + ", ".join(f"gpu={g} w={w} ms={full[g]:.2f}" for g, w in sorted(weights.items())),
-            flush=True,
-        )
-
-    def _log_multi_gpu_route(self, frame_number: int, assigned_gpu: int) -> None:
-        mp = self.main_window.models_processor
-        if not (
-            _env_flag("VISIOMASTER_MULTI_GPU_LOG")
-            or mp.emulate_multi_gpu
-            or getattr(mp, "ui_multi_gpu_routing_enabled", False)
-            or (
-                getattr(mp, "is_multi_gpu_stage_offload", None)
-                and mp.is_multi_gpu_stage_offload()
-            )
-        ):
-            return
-        logical = int(assigned_gpu)
-        phys = mp._logical_to_physical_cuda_index(mp.clamp_gpu_index(logical))
-        compute = (
-            "cpu_ort"
-            if logical == mp._routing_cpu_logical_id()
-            else str(phys)
-        )
-        print(
-            "[MULTI-GPU] "
-            f"frame={frame_number} logical_gpu={logical} "
-            f"provider={mp.provider_name} global_logical_gpu={mp.gpu_index} "
-            f"compute_cuda={compute}",
-            flush=True,
-        )
 
     def _feed_video_loop(self):
         """
@@ -3183,14 +3012,12 @@ class VideoProcessor(QObject):
                     self._detection_pipeline_thread
                     and self._detection_pipeline_thread.is_alive()
                 ):
-                    subqueues = self._iter_frame_subqueues() or [self.frame_queue]
-                    per_q = max(1, len(self.worker_threads)) // max(1, len(subqueues)) + 1
-                    for _q in subqueues:
-                        for _ in range(per_q):
-                            try:
-                                _q.put(None, block=False)
-                            except queue.Full:
-                                pass
+                    per_worker = max(1, len(self.worker_threads))
+                    for _ in range(per_worker):
+                        try:
+                            self.frame_queue.put(None, block=False)
+                        except queue.Full:
+                            pass
 
         # Log summary of skipped frames at end
         if self.total_skipped_frames > 0:
@@ -3314,14 +3141,12 @@ class VideoProcessor(QObject):
                     self._detection_pipeline_thread
                     and self._detection_pipeline_thread.is_alive()
                 ):
-                    subqueues = self._iter_frame_subqueues() or [self.frame_queue]
-                    per_q = max(1, len(self.worker_threads)) // max(1, len(subqueues)) + 1
-                    for _q in subqueues:
-                        for _ in range(per_q):
-                            try:
-                                _q.put(None, block=False)
-                            except queue.Full:
-                                pass
+                    per_worker = max(1, len(self.worker_threads))
+                    for _ in range(per_worker):
+                        try:
+                            self.frame_queue.put(None, block=False)
+                        except queue.Full:
+                            pass
 
     def _mark_skipped_frame(self, frame_number: int, reason: str) -> None:
         """Track skipped-frame reasons for later audio-rebuild diagnostics."""
@@ -3908,161 +3733,29 @@ class VideoProcessor(QObject):
         mult = max(2, min(24, mult))
         self.preroll_target = max(20, self.num_threads * 2)
         self.max_display_buffer_size = max(16, self.preroll_target * mult)
-        mp = self.main_window.models_processor
-        mode = normalize_mode(getattr(mp, "load_balancing_mode", "round_robin"))
-        targets: List[int] = []
-        if (
-            getattr(mp, "is_multi_gpu_stage_offload", None)
-            and mp.is_multi_gpu_stage_offload()
-        ):
-            self.frame_queue = queue.Queue(maxsize=self.max_display_buffer_size)
-            primary_target = int(mp._primary_cuda_device_ordinal())
-            self.frame_queues_by_gpu = {primary_target: self.frame_queue}
-            self._queue_affinity_enabled = False
-            self.scheduler.set_targets([primary_target], {primary_target: 1})
-            self.gpu_metrics.reset()
-            print(
-                f"[INFO] Multi-GPU stage offload: single queue on primary GPU "
-                f"(maxsize={self.max_display_buffer_size}, secondary="
-                f"cuda:{mp.get_stage_offload_secondary_physical()})"
-            )
-            self._raw_frame_queue = queue.Queue(maxsize=self.max_display_buffer_size)
-            self._autotune_state = {
-                "last_snapshot_count": 0,
-                "first_reweight_done": False,
-            }
-            return
-        if getattr(mp, "ui_multi_gpu_routing_enabled", False):
-            try:
-                targets = list(mp.get_ui_routing_targets_sorted())
-            except Exception:
-                targets = []
-        multi_gpu = mode != "round_robin" and len(targets) >= 2
-        weights = mp.resolve_effective_weights() if targets else {}
-        if multi_gpu:
-            n = max(1, len(targets))
-            per_q = max(8, self.max_display_buffer_size // n)
-            self.frame_queues_by_gpu = {
-                int(gid): queue.Queue(maxsize=per_q) for gid in targets
-            }
-            primary = mp.clamp_gpu_index(mp.gpu_index)
-            if int(primary) not in self.frame_queues_by_gpu:
-                primary = targets[0]
-            self.frame_queue = self.frame_queues_by_gpu[int(primary)]
-            self._queue_affinity_enabled = True
-            self.scheduler.set_targets(targets, weights)
-            self.gpu_metrics.reset(targets)
-            print(
-                "[INFO] Multi-GPU queues: "
-                + ", ".join(
-                    f"gpu={gid} max={per_q} weight={weights.get(gid, 1)}"
-                    for gid in targets
-                )
-                + f" (mode={mode})"
-            )
-        else:
-            self.frame_queue = queue.Queue(maxsize=self.max_display_buffer_size)
-            primary_target = 0
-            if getattr(mp, "ui_multi_gpu_routing_enabled", False) and targets:
-                primary_target = int(targets[0])
-            self.frame_queues_by_gpu = {primary_target: self.frame_queue}
-            self._queue_affinity_enabled = False
-            self.scheduler.set_targets(
-                targets if targets else [primary_target],
-                weights if weights else {primary_target: 1},
-            )
-            self.gpu_metrics.reset()
-            print(
-                f"[INFO] Frame queue: maxsize={self.max_display_buffer_size} "
-                f"(preroll={self.preroll_target}, multiplier={mult})"
-            )
+        self.frame_queue = queue.Queue(maxsize=self.max_display_buffer_size)
         self._raw_frame_queue = queue.Queue(maxsize=self.max_display_buffer_size)
-        self._autotune_state = {"last_snapshot_count": 0, "first_reweight_done": False}
+        print(
+            f"[INFO] Frame queue: maxsize={self.max_display_buffer_size} "
+            f"(preroll={self.preroll_target}, multiplier={mult})"
+        )
 
     def _total_frame_queue_size(self) -> int:
-        """Sum of tasks pending across all per-GPU subqueues."""
-        total = 0
-        for q in self.frame_queues_by_gpu.values():
-            try:
-                total += int(q.qsize())
-            except Exception:
-                pass
-        return total
-
-    def _iter_frame_subqueues(self) -> List[queue.Queue]:
-        return list(self.frame_queues_by_gpu.values())
+        try:
+            return int(self.frame_queue.qsize())
+        except Exception:
+            return 0
 
     def _spawn_worker_pool(self) -> None:
-        """Create persistent workers; distribute by per-GPU weights when routing.
-
-        - Multi-GPU + proportional: one subgroup of workers per target GPU,
-          sized via ``ModelsProcessor.resolve_threads_per_gpu``. Each worker
-          is pinned via ``assigned_gpu_index`` to its own subqueue and will
-          steal from peers when idle.
-        - Single-GPU or round-robin: legacy behavior — ``num_threads`` workers
-          sharing the primary subqueue (which is also ``self.frame_queue``).
-        """
-        mp = self.main_window.models_processor
-        mode = normalize_mode(getattr(mp, "load_balancing_mode", "round_robin"))
-        targets = sorted(self.frame_queues_by_gpu.keys())
-        proportional = self._queue_affinity_enabled and len(targets) >= 2 and mode != "round_robin"
-        if proportional:
-            per_gpu = mp.resolve_threads_per_gpu(self.num_threads)
-            print(
-                "[INFO] Multi-GPU workers: "
-                + ", ".join(f"gpu={g} workers={per_gpu.get(g, 0)}" for g in targets)
-                + f" (mode={mode})"
+        """Create persistent workers sharing the single frame queue."""
+        for i in range(self.num_threads):
+            worker = FrameWorker(
+                frame_queue=self.frame_queue,
+                main_window=self.main_window,
+                worker_id=i,
             )
-            wid = 0
-            for gid in targets:
-                n = int(per_gpu.get(int(gid), 0))
-                for _ in range(max(1, n)):
-                    worker = FrameWorker(
-                        frame_queue=self.frame_queues_by_gpu[int(gid)],
-                        main_window=self.main_window,
-                        worker_id=wid,
-                        assigned_gpu_index=int(gid),
-                    )
-                    worker.start()
-                    self.worker_threads.append(worker)
-                    wid += 1
-        else:
-            for i in range(self.num_threads):
-                worker = FrameWorker(
-                    frame_queue=self.frame_queue,
-                    main_window=self.main_window,
-                    worker_id=i,
-                )
-                worker.start()
-                self.worker_threads.append(worker)
-
-    def _start_gpu_metrics_timer(self) -> None:
-        """Publish GpuLoadMetrics snapshots on a Qt timer (500 ms)."""
-        if self._gpu_metrics_timer is None:
-            self._gpu_metrics_timer = QTimer(self)
-            self._gpu_metrics_timer.setInterval(500)
-            self._gpu_metrics_timer.timeout.connect(self._emit_gpu_load_metrics)
-        if not self._gpu_metrics_timer.isActive():
-            self._gpu_metrics_timer.start()
-
-    def _stop_gpu_metrics_timer(self) -> None:
-        if self._gpu_metrics_timer is not None and self._gpu_metrics_timer.isActive():
-            self._gpu_metrics_timer.stop()
-
-    def _emit_gpu_load_metrics(self) -> None:
-        snap = self.gpu_metrics.snapshot()
-        for gid, q in self.frame_queues_by_gpu.items():
-            stats = snap.setdefault(int(gid), {"fps": 0.0, "avg_ms": 0.0, "ema_ms": 0.0, "count": 0.0, "window": 0.0})
-            try:
-                stats["qsize"] = float(q.qsize())
-                stats["qmax"] = float(q.maxsize) if q.maxsize else 0.0
-            except Exception:
-                stats["qsize"] = 0.0
-                stats["qmax"] = 0.0
-        try:
-            self.gpu_load_metrics_signal.emit(snap)
-        except Exception:
-            pass
+            worker.start()
+            self.worker_threads.append(worker)
 
     def process_video(self):
         """
@@ -4228,7 +3921,6 @@ class VideoProcessor(QObject):
         self._spawn_worker_pool()
 
         self._start_detection_pipeline_thread()
-        self._start_gpu_metrics_timer()
 
         # --- 7. AUDIO/VIDEO SYNC LOGIC ---
 
@@ -4386,8 +4078,6 @@ class VideoProcessor(QObject):
     def _launch_async_single_frame_worker(
         self, frame_number: int, frame: numpy.ndarray, generation: int
     ):
-        assigned_gpu = self._resolve_assigned_gpu_index(int(frame_number))
-        self._log_multi_gpu_route(int(frame_number), assigned_gpu)
         worker = FrameWorker(
             frame=frame,
             main_window=self.main_window,
@@ -4395,7 +4085,6 @@ class VideoProcessor(QObject):
             frame_queue=None,
             is_single_frame=True,
             worker_id=-1,
-            assigned_gpu_index=assigned_gpu,
         )
         worker.preview_generation = generation
         self._current_single_frame_worker = worker
@@ -4490,8 +4179,6 @@ class VideoProcessor(QObject):
                 prev.stop_event.set()
                 prev.join()
             self._current_single_frame_worker = None
-            assigned_gpu = self._resolve_assigned_gpu_index(int(frame_number))
-            self._log_multi_gpu_route(int(frame_number), assigned_gpu)
             worker = FrameWorker(
                 frame=frame,  # Pass frame directly
                 main_window=self.main_window,
@@ -4499,7 +4186,6 @@ class VideoProcessor(QObject):
                 frame_queue=None,  # No queue for single frame
                 is_single_frame=is_single_frame,
                 worker_id=-1,  # Indicates single-frame mode
-                assigned_gpu_index=assigned_gpu,
             )
             if fit_on_complete:
                 self._fit_on_single_frame_request_generation = 0
@@ -4892,7 +4578,6 @@ class VideoProcessor(QObject):
 
         self._log_processing_summary(processing_time_sec, num_frames_processed)
         self.playback_display_start_time = 0.0
-        self._stop_gpu_metrics_timer()
         self.processing_stopped_signal.emit()
 
     def stop_processing(self, block: bool = True) -> bool:
@@ -5013,35 +4698,18 @@ class VideoProcessor(QObject):
                     )
 
         # 2. Wake up any workers blocked on queue.get() by sending a "poison pill" (None).
-        # VP-24: Clear every per-GPU subqueue first so pills are never lost when
-        # a queue is full, then put at least one pill per worker across all
-        # subqueues so every affined/stealing worker wakes up.
-        subqueues = self._iter_frame_subqueues() or [self.frame_queue]
-        for q in subqueues:
-            try:
-                with q.mutex:
-                    q.queue.clear()
-            except Exception:
-                pass
-        q_idx = 0
+        try:
+            with self.frame_queue.mutex:
+                self.frame_queue.queue.clear()
+        except Exception:
+            pass
         for _ in active_threads:
-            q = subqueues[q_idx % len(subqueues)]
-            q_idx += 1
             try:
-                q.put(None, block=False)
+                self.frame_queue.put(None, block=False)
             except queue.Full:
                 pass
             except Exception as e:
                 print(f"[WARN] Error putting poison pill in queue: {e}")
-        # Extra pill per subqueue in case a worker is currently stealing from
-        # an empty peer (avoids the rare case of waking only one side).
-        for q in subqueues:
-            try:
-                q.put(None, block=False)
-            except queue.Full:
-                pass
-            except Exception:
-                pass
 
         # 3. Join all threads
         for thread in active_threads:
@@ -8797,7 +8465,6 @@ class VideoProcessor(QObject):
         self.worker_threads = []
         self._rebuild_frame_queue_from_control()
         self._spawn_worker_pool()
-        self._start_gpu_metrics_timer()
 
         # Start the feeder thread
         print("[INFO] Starting feeder thread (Mode: webcam)...")
@@ -8868,7 +8535,6 @@ class VideoProcessor(QObject):
         self.worker_threads = []
         self._rebuild_frame_queue_from_control()
         self._spawn_worker_pool()
-        self._start_gpu_metrics_timer()
 
         print("[INFO] Starting feeder thread (Mode: screen)...")
         self._start_detection_pipeline_thread()

@@ -317,29 +317,6 @@ class ModelsProcessor(QtCore.QObject):
         self.kv_extraction_lock = threading.Lock()
         self.gpu_index = 0
         self._thread_gpu_context = threading.local()
-        self.emulate_multi_gpu = _env_truthy("VISIOMASTER_EMULATE_MULTI_GPU")
-        self.emulated_gpu_count = max(
-            1, _env_int("VISIOMASTER_EMULATED_GPU_COUNT", default=2)
-        )
-        self.ui_multi_gpu_routing_enabled = False
-        self.ui_multi_gpu_mode: str = "off"  # off | stage | frame
-        self.ui_stage_offload_secondary_phys: int = 1
-        self.ui_offload_face_restorer: bool = False
-        self.ui_offload_frame_enhancer: bool = False
-        self.ui_routing_targets: list[int] = [0]
-        # --- Proportional multi-GPU scheduling (advanced panel) ---
-        # Mode drives how per-frame routing picks a target and whether workers
-        # can steal frames from busy peers. Default keeps the historical
-        # round-robin behaviour so no weights are needed.
-        self.load_balancing_mode: str = "round_robin"
-        # Integer per-logical-GPU weights (DRR). Default {} -> all 1.
-        self.gpu_weights: Dict[int, int] = {}
-        # Optional override for worker count per logical GPU; empty means the
-        # VideoProcessor auto-distributes ``nThreadsSlider`` by weight.
-        self.threads_per_gpu: Dict[int, int] = {}
-        # Auto-calibration knobs (Weighted Auto / Hybrid modes).
-        self.gpu_auto_benchmark_on_start: bool = False
-        self.gpu_auto_reweight_every_n_frames: int = 0
         self.device = device
         self.model_lock = threading.RLock()  # Reentrant lock for model access
 
@@ -408,12 +385,6 @@ class ModelsProcessor(QtCore.QObject):
         self._refresh_trt_options_for_gpu()
         self.providers = self._build_providers_for_name(self.provider_name)
         self._sync_torch_cuda_device()
-        if self.emulate_multi_gpu:
-            print(
-                "[MULTI-GPU] Emulation enabled "
-                f"(logical_gpus={self.emulated_gpu_count}, active_logical_gpu={self.gpu_index}).",
-                flush=True,
-            )
         if self.device == "cuda" and torch.cuda.is_available():
             try:
                 names = [
@@ -1701,98 +1672,6 @@ class ModelsProcessor(QtCore.QObject):
         self.trt_ep_options["trt_engine_cache_path"] = _TRT_REL_ENGINE_CACHE_DIR
         self.trt_ep_options["trt_timing_cache_path"] = _TRT_REL_TIMING_CACHE_FILE
 
-    def get_multi_gpu_mode(self) -> str:
-        mode = str(getattr(self, "ui_multi_gpu_mode", "off") or "off").strip().lower()
-        if mode in ("off", "stage", "frame"):
-            return mode
-        return "off"
-
-    def is_multi_gpu_stage_offload(self) -> bool:
-        return self.get_multi_gpu_mode() == "stage"
-
-    def is_multi_gpu_frame_routing(self) -> bool:
-        return self.get_multi_gpu_mode() == "frame"
-
-    def get_stage_offload_secondary_physical(self) -> int:
-        phy = self._physical_cuda_device_count()
-        prim = int(self._primary_cuda_device_ordinal())
-        if phy <= 1:
-            return prim
-        sec = int(getattr(self, "ui_stage_offload_secondary_phys", prim))
-        sec = max(0, min(sec, phy - 1))
-        if sec == prim:
-            for i in range(phy):
-                if i != prim:
-                    return i
-        return sec
-
-    def _is_stage_offload_thread(self) -> bool:
-        return bool(getattr(self._thread_gpu_context, "stage_offload_active", None))
-
-    def should_offload_stage(
-        self,
-        stage: str,
-        *,
-        control: dict | None = None,
-        parameters: dict | None = None,
-    ) -> bool:
-        if not self.is_multi_gpu_stage_offload():
-            return False
-        if stage not in ("facerestorer", "frame_enhancer"):
-            return False
-        if self.device != "cuda" or self._physical_cuda_device_count() <= 1:
-            return False
-        if self.get_stage_offload_secondary_physical() == int(
-            self._primary_cuda_device_ordinal()
-        ):
-            return False
-        if stage == "facerestorer":
-            if not bool(getattr(self, "ui_offload_face_restorer", False)):
-                return False
-            if parameters is not None:
-                if not bool(parameters.get("FaceRestorerEnableToggle", False)):
-                    if not bool(parameters.get("FaceRestorerEnable2Toggle", False)):
-                        return False
-        elif stage == "frame_enhancer":
-            if not bool(getattr(self, "ui_offload_frame_enhancer", False)):
-                return False
-            if control is not None and not bool(
-                control.get("FrameEnhancerEnableToggle", False)
-            ):
-                return False
-        return True
-
-    @contextlib.contextmanager
-    def gpu_stage_context(self, stage: str):
-        if not self.is_multi_gpu_stage_offload() or stage not in (
-            "facerestorer",
-            "frame_enhancer",
-        ):
-            yield
-            return
-        sec_phys = self.get_stage_offload_secondary_physical()
-        prev_gpu = getattr(self._thread_gpu_context, "gpu_index", None)
-        prev_stage = getattr(self._thread_gpu_context, "stage_offload_active", None)
-        prev_depth = int(getattr(self._thread_gpu_context, "stage_offload_depth", 0))
-        self._thread_gpu_context.gpu_index = int(sec_phys)
-        self._thread_gpu_context.stage_offload_active = str(stage)
-        self._thread_gpu_context.stage_offload_depth = prev_depth + 1
-        self._sync_torch_cuda_device()
-        try:
-            yield
-        finally:
-            self._thread_gpu_context.stage_offload_depth = prev_depth
-            if prev_depth <= 0:
-                if hasattr(self._thread_gpu_context, "stage_offload_active"):
-                    delattr(self._thread_gpu_context, "stage_offload_active")
-            else:
-                self._thread_gpu_context.stage_offload_active = prev_stage
-            if prev_gpu is None:
-                self.clear_thread_gpu_index()
-            else:
-                self.set_thread_gpu_index(int(prev_gpu))
-            self._sync_torch_cuda_device()
-
     def get_primary_torch_device(self) -> str:
         if self.device != "cuda" or not torch.cuda.is_available():
             return "cpu"
@@ -1802,33 +1681,11 @@ class ModelsProcessor(QtCore.QObject):
         """CUDA ordinal used when creating ORT/TRT sessions on the current thread."""
         if self.device != "cuda":
             return 0
-        if self._is_stage_offload_thread() and self._physical_cuda_device_count() > 1:
-            return int(self.get_compute_cuda_device_id())
-        if (
-            getattr(self, "ui_multi_gpu_routing_enabled", False)
-            and self._physical_cuda_device_count() > 1
-            and not self._is_thread_cpu_routing()
-        ):
-            return int(self.get_compute_cuda_device_id())
         return int(self._primary_cuda_device_ordinal())
 
     def _ort_session_storage_key(self, model_name: str) -> str:
-        """Key in ``self.models`` — distinct ORT sessions per GPU when multi-GPU routing is on."""
-        if self.device != "cuda":
-            return model_name
-        if self._is_stage_offload_thread():
-            if self._physical_cuda_device_count() <= 1:
-                return model_name
-            if self._is_thread_cpu_routing():
-                return model_name
-            return f"{model_name}__cuda{int(self.get_compute_cuda_device_id())}"
-        if not getattr(self, "ui_multi_gpu_routing_enabled", False):
-            return model_name
-        if self._physical_cuda_device_count() <= 1:
-            return model_name
-        if self._is_thread_cpu_routing():
-            return model_name
-        return f"{model_name}__cuda{int(self.get_compute_cuda_device_id())}"
+        """Key in ``self.models`` for the active ONNX session."""
+        return model_name
 
     def _trt_ep_options_for_physical(self, phys_ord: int) -> dict:
         """Snapshot of TensorRT EP options for ``phys_ord`` (does not mutate ``self.trt_ep_options``)."""
@@ -1861,143 +1718,33 @@ class ModelsProcessor(QtCore.QObject):
         except Exception:
             return 0
 
-    def _routing_cpu_logical_id(self) -> int:
-        """Synthetic routing slot: run ORT IOBinding on CPU (logical == physical_count + 1)."""
-        n = self._physical_cuda_device_count()
-        return (n + 1) if n > 0 else 1
-
-    def _is_thread_cpu_routing(self) -> bool:
-        if self.device != "cuda" or not torch.cuda.is_available():
-            return False
-        return int(self.get_active_ort_device_id()) == int(self._routing_cpu_logical_id())
-
     def get_ort_bind_device_type(self) -> str:
-        """ORT IOBinding device string: cuda or cpu (per-thread when multi-GPU routes to CPU)."""
+        """ORT IOBinding device string: cuda or cpu."""
         if self.device != "cuda":
-            return "cpu"
-        if self._is_thread_cpu_routing():
             return "cpu"
         return "cuda"
 
     def get_ort_bind_input_cuda_device_id(self) -> int:
-        """CUDA ordinal for bind_input when device_type is cuda; 0 when routing to CPU ORT."""
-        if self._is_thread_cpu_routing():
-            return 0
+        """CUDA ordinal for bind_input when device_type is cuda."""
         return int(self.get_compute_cuda_device_id())
 
     def uses_cuda_ep_for_thread(self) -> bool:
-        """Whether this thread should synchronize/use CUDA EP (not CPU-routed ORT)."""
-        return (
-            self.device == "cuda"
-            and torch.cuda.is_available()
-            and not self._is_thread_cpu_routing()
-        )
-
-    def get_ui_routing_targets_sorted(self) -> list[int]:
-        phy = self._physical_cuda_device_count()
-        prim = (
-            max(0, min(int(self.gpu_index), max(0, phy - 1)))
-            if phy > 0
-            else 0
-        )
-        raw = getattr(self, "ui_routing_targets", None) or [prim]
-        tg = [int(x) for x in raw]
-        allowed_max = (phy + 1) if phy > 0 else 1
-        tg = [x for x in tg if x >= 0 and x <= allowed_max]
-        if not tg:
-            return [prim]
-        if prim not in tg:
-            tg.append(prim)
-        return sorted(set(tg))
+        """Whether this thread should synchronize/use CUDA EP."""
+        return self.device == "cuda" and torch.cuda.is_available()
 
     def get_configured_gpu_count(self) -> int:
         if self.device != "cuda":
             return 1
         phy = self._physical_cuda_device_count()
-        if getattr(self, "ui_multi_gpu_routing_enabled", False):
-            tg = self.get_ui_routing_targets_sorted()
-            if tg:
-                return max(tg) + 1
-        if self.emulate_multi_gpu:
-            return max(1, int(self.emulated_gpu_count))
         return max(1, phy) if phy > 0 else 1
 
-    def resolve_effective_weights(self) -> Dict[int, int]:
-        """Integer weights keyed by every active routing target.
-
-        Every target receives at least weight=1 so the DRR scheduler never
-        starves a GPU. ``round_robin`` mode forces all weights to 1 no matter
-        what the UI has stored, so changing to and from weighted modes is a
-        pure toggle with no stale data.
-        """
-        from app.processors.gpu_scheduler import normalize_mode
-
-        targets = self.get_ui_routing_targets_sorted()
-        mode = normalize_mode(getattr(self, "load_balancing_mode", "round_robin"))
-        if mode == "round_robin" or not targets:
-            return {int(t): 1 for t in targets}
-        raw = getattr(self, "gpu_weights", None) or {}
-        out: Dict[int, int] = {}
-        for t in targets:
-            v = 1
-            try:
-                v = int(raw.get(int(t), raw.get(t, 1)))
-            except (TypeError, ValueError):
-                v = 1
-            out[int(t)] = max(1, min(1024, v))
-        return out
-
-    def resolve_threads_per_gpu(self, total_threads: int) -> Dict[int, int]:
-        """Distribute ``total_threads`` across active routing targets.
-
-        Honors a non-empty ``threads_per_gpu`` override from the UI (values
-        are clamped to ``>= 1``). Falls back to a weight-proportional split
-        (largest-remainder) with a minimum of 1 thread per GPU so every
-        logical device has its own worker.
-        """
-        from app.processors.gpu_scheduler import distribute_threads_by_weights
-
-        targets = self.get_ui_routing_targets_sorted()
-        if not targets:
-            return {}
-        override = getattr(self, "threads_per_gpu", None) or {}
-        if override:
-            out: Dict[int, int] = {}
-            claimed = 0
-            for t in targets:
-                try:
-                    v = int(override.get(int(t), override.get(t, 0)))
-                except (TypeError, ValueError):
-                    v = 0
-                if v > 0:
-                    out[int(t)] = max(1, min(64, v))
-                    claimed += out[int(t)]
-            missing = [t for t in targets if int(t) not in out]
-            if missing:
-                remaining = max(len(missing), int(total_threads) - claimed)
-                weights = self.resolve_effective_weights()
-                filled = distribute_threads_by_weights(
-                    remaining,
-                    {t: weights.get(int(t), 1) for t in missing},
-                    missing,
-                )
-                out.update(filled)
-            return out
-        weights = self.resolve_effective_weights()
-        return distribute_threads_by_weights(int(total_threads), weights, targets)
-
     def clamp_gpu_index(self, requested_index: int) -> int:
-        count = self.get_configured_gpu_count()
-        # Multi-GPU routing uses max(target)+1 as logical span; if targets only
-        # mention slot 0, count becomes 1 even with several physical CUDA devices,
-        # so primary GPU / physical ordinal 1 would clamp to 0 and the UI change
-        # is a no-op. Never clamp below visible CUDA devices unless emulation adds
-        # extra logical slots beyond physical GPUs.
-        if self.device == "cuda" and not self.emulate_multi_gpu:
-            phy = self._physical_cuda_device_count()
-            if phy > 0:
-                count = max(count, phy)
-        return max(0, min(int(requested_index), count - 1))
+        if self.device != "cuda":
+            return 0
+        phy = self._physical_cuda_device_count()
+        if phy <= 0:
+            return 0
+        return max(0, min(int(requested_index), phy - 1))
 
     def get_active_ort_device_id(self) -> int:
         """Logical GPU index (emulation-aware) for routing and logs — not always a valid torch ordinal."""
@@ -2009,25 +1756,8 @@ class ModelsProcessor(QtCore.QObject):
         return self.clamp_gpu_index(self.gpu_index)
 
     def _logical_to_physical_cuda_index(self, logical_index: int) -> int:
-        """Map a logical GPU index to a valid CUDA device ordinal for torch/ONNXRuntime."""
-        if self.device != "cuda":
-            return 0
-        try:
-            n = (
-                int(torch.cuda.device_count())
-                if torch.cuda.is_available()
-                else 0
-            )
-        except Exception:
-            n = 0
-        if n <= 0:
-            return int(logical_index)
-        phys_cap = n - 1
-        li = int(logical_index)
-        if li < n:
-            return max(0, min(li, phys_cap))
-        pb = max(0, min(int(self.gpu_index), phys_cap))
-        return pb
+        """Map a GPU index to a valid CUDA device ordinal for torch/ONNXRuntime."""
+        return self.clamp_gpu_index(logical_index)
 
     def get_compute_cuda_device_id(self) -> int:
         """CUDA device ordinal for bindings, torch.cuda.device, and TRT/CUDA EP device_id."""
@@ -2035,8 +1765,6 @@ class ModelsProcessor(QtCore.QObject):
 
     def get_effective_torch_device(self) -> str:
         if self.device != "cuda" or not torch.cuda.is_available():
-            return "cpu"
-        if self._is_thread_cpu_routing():
             return "cpu"
         return f"cuda:{self.get_compute_cuda_device_id()}"
 
@@ -2049,9 +1777,6 @@ class ModelsProcessor(QtCore.QObject):
 
     def _sync_torch_cuda_device(self) -> None:
         if self.device != "cuda" or not torch.cuda.is_available():
-            return
-        # CPU-routed ORT threads must not touch CUDA device state here.
-        if self._is_thread_cpu_routing():
             return
         try:
             torch.cuda.set_device(self.get_compute_cuda_device_id())
@@ -2082,13 +1807,6 @@ class ModelsProcessor(QtCore.QObject):
         self._sync_torch_cuda_device()
         if reconfigure_providers:
             self.providers = self._build_providers_for_name(self.provider_name)
-        if self.emulate_multi_gpu:
-            print(
-                "[MULTI-GPU] Switched active logical GPU "
-                f"to {resolved} (provider={self.provider_name}, "
-                f"compute_device={self.get_effective_torch_device()}).",
-                flush=True,
-            )
         return resolved
 
     def switch_providers_priority(self, provider_name):
@@ -2212,14 +1930,6 @@ class ModelsProcessor(QtCore.QObject):
         """Run ORT with IO binding; serialized on CUDA (global or per-session)."""
         if self.device != "cuda":
             session.run_with_iobinding(io_binding)
-            return
-        if self._is_thread_cpu_routing():
-            lock = self._get_ort_cuda_lock_for_session(session)
-            lock.acquire()
-            try:
-                session.run_with_iobinding(io_binding)
-            finally:
-                lock.release()
             return
         metrics_on = _env_truthy("VISIOMASTER_PIPELINE_METRICS")
         try:

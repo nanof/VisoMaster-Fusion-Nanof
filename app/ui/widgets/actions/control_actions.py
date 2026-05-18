@@ -539,6 +539,13 @@ def handle_restorer_state_change(
     main_window: "MainWindow", new_value: bool, control_name: str
 ):
     """Loads or unloads a specific face restorer model based on its toggle state."""
+    if not isinstance(new_value, bool):
+        print(
+            f"[WARN] handle_restorer_state_change ignored non-boolean value "
+            f"for {control_name!r}: {new_value!r}",
+            flush=True,
+        )
+        return
     params = main_window.current_widget_parameters
     model_map = main_window.models_processor.face_restorers.model_map
     face_restorers_manager = main_window.models_processor.face_restorers
