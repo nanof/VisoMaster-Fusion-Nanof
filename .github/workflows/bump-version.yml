@@ -1,9 +1,9 @@
 name: Bump Version on Merge
 
 on:
-  pull_request:
+  pull_request_target:
     types: [closed]
-    branches: [dev, main]
+    branches: [dev]
 
 concurrency:
   group: bump-version
@@ -15,13 +15,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
-          # Use a token with write access so the push triggers downstream workflows.
-          # GITHUB_TOKEN is sufficient for writing to the same repo.
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # Check out the base branch only; do not run code from the PR head.
+          # GITHUB_TOKEN can push the bump, but usually will not trigger downstream workflows.
+          token: ${{ github.token }}
           ref: ${{ github.event.pull_request.base.ref }}
 
       - name: Determine bump type from PR labels
@@ -72,4 +73,4 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add version.json
           git commit -m "chore: bump version to ${{ steps.version.outputs.new_version }} [skip ci]"
-          git push
+          git push origin HEAD:${{ github.event.pull_request.base.ref }}

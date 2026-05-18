@@ -1,4 +1,4 @@
-# Quick Start Guide
+# Visomaster Fusion - Quick Start Guide
 
 > Your first successful face swap in a few minutes.
 
@@ -13,6 +13,8 @@ You will need:
 - At least one clear source face image
 - A reasonably capable Nvidia GPU
 
+Most portable users should start VisoMaster Fusion with `Start_Portable.bat`. On first run, the launcher may download dependencies and model files before the main app opens.
+
 For best results, use a clear source face with good lighting, a mostly visible face, and minimal heavy shadows or obstructions.
 
 > **Tip:** One good source image is enough for a first test. If you have several photos of the same person, you can combine them into an embedding later for more consistent results.
@@ -21,7 +23,7 @@ For best results, use a clear source face with good lighting, a mostly visible f
 
 ## Step 1 - Load Your Target Media
 
-1. Open a target image or video in the main window.
+1. Open a target image or video from the Target Media area in the main window.
 2. Confirm it appears in the center preview.
 3. If you loaded a video, scrub through a few frames to make sure it opened correctly.
 
@@ -41,9 +43,9 @@ For best results, use a clear source face with good lighting, a mostly visible f
 
 ## Step 3 - Detect and Assign the Face
 
-1. Detect the face or faces in the target media.
-2. Select the target face you want to swap.
-3. Assign your source face card to that target face.
+1. Click **Find Faces** to detect the face or faces in the target media.
+2. Select the detected target face you want to swap.
+3. Select the source face card or embedding you want to assign to that target face.
 
 > **Tip:** If the scene contains several people and you only want to swap one of them, remove or ignore the other detected faces before recording.
 
@@ -89,6 +91,7 @@ Set this in the **Settings** tab before you use **Save Image** or **Record**.
 ## If Something Looks Wrong
 
 - Wrong person is being swapped: raise **Similarity Threshold**
+- No target face is detected: try a clearer frame, lower **Detect Score**, try another detector, or use rotation controls for rotated footage
 - Result looks soft or blurry: keep **Inswapper128**, leave **Enable Auto Resolution** on, and enable **Face Restorer**
 - Face identity jumps between people in video: enable **Enable Face Tracking (ByteTrack)**
 - Saving or recording does not work: check that an output folder is selected

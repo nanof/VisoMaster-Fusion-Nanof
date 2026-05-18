@@ -77,8 +77,21 @@ class MouthOpennessState:
         ratio: float | None,
         alpha: float,
         threshold: float,
+        *,
+        single_frame_mode: bool = False,
     ) -> tuple[bool, float]:
         """Update EMA and activation state.
+
+        Args:
+            ratio: New lip-open ratio, or None when no detection succeeded.
+            alpha: EMA blending factor (0.0–1.0).
+            threshold: Activation threshold for the lip-open ratio.
+            single_frame_mode: When True, the caller is the FrameWorker servicing
+                a stopped-frame preview (not playback). In that mode every
+                `_apply_auto_mouth` call evaluates the *same* underlying frame, so
+                None-ratios from a transiently bad detection should NOT accumulate
+                an occlusion penalty — otherwise toggling settings on a stopped
+                frame would slowly decay the EMA past the deactivate threshold.
 
         Returns:
             (active, ema) — current activation flag and smoothed EMA value.
@@ -88,7 +101,11 @@ class MouthOpennessState:
 
         with self._lock:
             if ratio is None:
-                # Rule 2: stay; manage occlusion timeout
+                # Rule 2: stay; manage occlusion timeout (playback only).
+                # In single-frame mode we never accrue the penalty: there is no
+                # "missed frame" — the user is just toggling settings.
+                if single_frame_mode:
+                    return self.active, self.ema
                 if self.active:
                     self.none_streak += 1
                     if self.none_streak > OCCLUSION_TIMEOUT_FRAMES:

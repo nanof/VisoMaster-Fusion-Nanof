@@ -20,9 +20,7 @@ import sys
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 
-RELEASE_BAT_URL = (
-    "https://github.com/VisoMasterFusion/VisoMaster-Fusion/releases/latest/download/Start_Portable.bat"
-)
+RELEASE_BAT_URL = "https://github.com/VisoMasterFusion/VisoMaster-Fusion/releases/latest/download/Start_Portable.bat"
 _remote_bat_cache: Path | None = None
 
 

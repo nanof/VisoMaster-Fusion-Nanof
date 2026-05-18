@@ -4,6 +4,7 @@ import uuid
 import numpy
 import cv2
 import torch
+import gc
 from torchvision.transforms import v2
 from PySide6 import QtGui
 
@@ -32,6 +33,18 @@ def clear_target_faces(main_window: "MainWindow", refresh_frame=True):
     main_window.targetFacesList.clear()
 
     for target_face in list(main_window.target_faces.values()):
+        if hasattr(target_face, "embedding_store"):
+            target_face.embedding_store.clear()
+        if hasattr(target_face, "assigned_input_embedding"):
+            target_face.assigned_input_embedding.clear()
+        if hasattr(target_face, "assigned_input_faces"):
+            target_face.assigned_input_faces.clear()
+        if hasattr(target_face, "assigned_merged_embeddings"):
+            target_face.assigned_merged_embeddings.clear()
+        if hasattr(target_face, "aged_input_embedding"):
+            target_face.aged_input_embedding.clear()
+        if hasattr(target_face, "aged_kv_map"):
+            target_face.aged_kv_map = None
         target_face.deleteLater()
     main_window.target_faces.clear()
     main_window.parameters.clear()
@@ -50,6 +63,15 @@ def clear_target_faces(main_window: "MainWindow", refresh_frame=True):
         main_window=main_window, face_id=None
     )
     video_control_actions.update_scan_review_button_states(main_window)
+
+    # Force VRAM cleanup
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    # --- DIRTY FLAG : CLEAR TARGETS ---
+    if hasattr(main_window, "video_processor") and main_window.video_processor:
+        main_window.video_processor.ui_state_is_dirty = True
+
     if refresh_frame:
         common_widget_actions.refresh_frame(main_window=main_window)
 
@@ -66,12 +88,26 @@ def clear_input_faces(main_window: "MainWindow"):
     main_window.inputFacesFavoritesList.clear()
 
     for input_face in list(main_window.input_faces.values()):
+        if hasattr(input_face, "embedding_store"):
+            input_face.embedding_store.clear()
+        if hasattr(input_face, "cropped_face"):
+            input_face.cropped_face = None
         input_face.deleteLater()
+
     main_window.input_faces.clear()
 
     for target_face in main_window.target_faces.values():
         target_face.assigned_input_faces = {}
         target_face.calculate_assigned_input_embedding()
+
+    # Force VRAM cleanup
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    # --- DIRTY FLAG : CLEAR INPUTS ---
+    if hasattr(main_window, "video_processor") and main_window.video_processor:
+        main_window.video_processor.ui_state_is_dirty = True
+
     common_widget_actions.refresh_frame(main_window=main_window)
 
     input_face_favorites_storage.load_persisted_favorites(main_window)
@@ -88,12 +124,26 @@ def clear_merged_embeddings(main_window: "MainWindow"):
     main_window.inputEmbeddingsList.clear()
 
     for embed_button in list(main_window.merged_embeddings.values()):
+        if hasattr(embed_button, "embedding_store"):
+            embed_button.embedding_store.clear()
+        if hasattr(embed_button, "kv_map"):
+            embed_button.kv_map = None
         embed_button.deleteLater()
+
     main_window.merged_embeddings.clear()
 
     for target_face in main_window.target_faces.values():
         target_face.assigned_merged_embeddings = {}
         target_face.calculate_assigned_input_embedding()
+
+    # Force VRAM cleanup
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    # --- DIRTY FLAG : CLEAR MERGED EMBEDDINGS ---
+    if hasattr(main_window, "video_processor") and main_window.video_processor:
+        main_window.video_processor.ui_state_is_dirty = True
+
     common_widget_actions.refresh_frame(main_window=main_window)
 
 
@@ -102,10 +152,22 @@ def uncheck_all_input_faces(main_window: "MainWindow"):
     for _, input_face_button in main_window.input_faces.items():
         input_face_button.setChecked(False)
 
+    # Force Garbage Collection for dangling merged tensors
+    gc.collect()
+    # Force PyTorch to release cached VRAM back to the OS
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
 
 def uncheck_all_merged_embeddings(main_window: "MainWindow"):
     for _, embed_button in main_window.merged_embeddings.items():
         embed_button.setChecked(False)
+
+    # Force Garbage Collection for dangling merged tensors
+    gc.collect()
+    # Force PyTorch to release cached VRAM back to the OS
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def find_target_faces(main_window: "MainWindow"):

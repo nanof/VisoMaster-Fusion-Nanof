@@ -315,6 +315,7 @@ def test_finalize_default_style_recording_uses_rebuilt_audio_when_frames_skipped
         ),
         _write_video_only_output=lambda *args: True,
         _log_processing_summary=lambda *args: None,
+        _auto_save_workspace_for_output=lambda *args: None,
         disable_virtualcam=lambda: None,
         processing_stopped_signal=SimpleNamespace(emit=lambda: None),
         file_type="image",
@@ -357,7 +358,7 @@ def _make_finalize_default_style_recording_dummy(
 ):
     temp_file = tmp_path / "temp_output.mp4"
     temp_file.write_bytes(b"temp-video")
-    return SimpleNamespace(
+    dummy = SimpleNamespace(
         feeder_thread=None,
         frames_to_display=[],
         frame_queue=queue.Queue(),
@@ -404,6 +405,12 @@ def _make_finalize_default_style_recording_dummy(
         file_type="image",
         start_time=0.0,
     )
+
+    def auto_save_workspace(final_file_path):
+        return VideoProcessor._auto_save_workspace_for_output(dummy, final_file_path)
+
+    dummy._auto_save_workspace_for_output = auto_save_workspace
+    return dummy
 
 
 def test_finalize_default_style_recording_uses_active_output_folder_for_output_and_autosave(
@@ -455,7 +462,6 @@ def test_finalize_default_style_recording_uses_active_output_folder_for_output_a
 
     assert [call["output_folder"] for call in output_path_calls] == [
         resolved_output_folder,
-        resolved_output_folder,
     ]
     assert ffmpeg_calls[-1][-1] == str(
         Path(resolved_output_folder) / "resolved_output.mp4"
@@ -499,3 +505,152 @@ def test_finalize_default_style_recording_falls_back_to_output_media_folder_when
     VideoProcessor._finalize_default_style_recording(dummy)
 
     assert output_path_calls == [str(tmp_path / "fallback-output")]
+
+
+def _make_finalize_segment_concatenation_dummy(
+    tmp_path,
+    *,
+    auto_save=False,
+    stopped_by_error_limit=False,
+):
+    segment_dir = tmp_path / "segments"
+    segment_dir.mkdir()
+    segment_file = segment_dir / "segment_000.mp4"
+    segment_file.write_bytes(b"segment-video")
+    q = queue.Queue()
+
+    dummy = SimpleNamespace(
+        recording_sp=None,
+        current_segment_index=1,
+        triggered_by_job_manager=False,
+        processing=True,
+        is_processing_segments=True,
+        recording=False,
+        temp_segment_files=[str(segment_file)],
+        segment_temp_dir=str(segment_dir),
+        segments_to_process=[(10, 20)],
+        current_segment_end_frame=20,
+        active_output_folder=str(tmp_path / "output"),
+        media_path=str(tmp_path / "input.mkv"),
+        stopped_by_error_limit=stopped_by_error_limit,
+        consecutive_read_errors=0,
+        total_skipped_frames=0,
+        frame_queue=q,
+        start_time=0.0,
+        end_time=0.0,
+        file_type="image",
+        main_window=SimpleNamespace(
+            control={
+                "AutoSaveWorkspaceToggle": auto_save,
+                "OpenOutputToggle": False,
+            },
+            display_messagebox_signal=SimpleNamespace(emit=lambda *args: None),
+        ),
+        _apply_job_timestamp_to_output_name=lambda *args: (None, None),
+        _attempt_segment_video_only_fallback=lambda *args, **kwargs: False,
+        _cleanup_temp_dir=lambda: setattr(dummy, "segment_temp_dir", None),
+        _format_duration=lambda seconds: f"{seconds:.2f}s",
+        processing_stopped_signal=SimpleNamespace(emit=lambda: None),
+    )
+    dummy._auto_save_workspace_for_output = lambda final_file_path: (
+        VideoProcessor._auto_save_workspace_for_output(dummy, final_file_path)
+    )
+    return dummy
+
+
+def _patch_segment_finalize_dependencies(monkeypatch, saved_workspaces):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(
+        "app.processors.video_processor.layout_actions.enable_all_parameters_and_control_widget",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.processors.video_processor.video_control_actions.reset_media_buttons",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.processors.video_processor.save_load_actions.save_current_workspace",
+        lambda _main_window, json_path: saved_workspaces.append(json_path),
+    )
+
+
+def test_finalize_segment_concatenation_autosaves_after_successful_concat(
+    tmp_path, monkeypatch
+):
+    dummy = _make_finalize_segment_concatenation_dummy(tmp_path, auto_save=True)
+    final_output = tmp_path / "output" / "final_output.mp4"
+    saved_workspaces: list[str] = []
+
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: _RunResult())
+    monkeypatch.setattr(
+        "app.processors.video_processor.misc_helpers.get_output_file_path",
+        lambda *args, **kwargs: str(final_output),
+    )
+    _patch_segment_finalize_dependencies(monkeypatch, saved_workspaces)
+
+    VideoProcessor.finalize_segment_concatenation(dummy)
+
+    assert saved_workspaces == [f"{final_output}.json"]
+
+
+def test_finalize_segment_concatenation_skips_autosave_when_disabled(
+    tmp_path, monkeypatch
+):
+    dummy = _make_finalize_segment_concatenation_dummy(tmp_path, auto_save=False)
+    saved_workspaces: list[str] = []
+
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: _RunResult())
+    monkeypatch.setattr(
+        "app.processors.video_processor.misc_helpers.get_output_file_path",
+        lambda *args, **kwargs: str(tmp_path / "output" / "final_output.mp4"),
+    )
+    _patch_segment_finalize_dependencies(monkeypatch, saved_workspaces)
+
+    VideoProcessor.finalize_segment_concatenation(dummy)
+
+    assert saved_workspaces == []
+
+
+def test_finalize_segment_concatenation_skips_autosave_when_concat_fails(
+    tmp_path, monkeypatch
+):
+    dummy = _make_finalize_segment_concatenation_dummy(tmp_path, auto_save=True)
+    saved_workspaces: list[str] = []
+
+    def fake_run(*args, **kwargs):
+        raise RuntimeError("concat failed")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "app.processors.video_processor.misc_helpers.get_output_file_path",
+        lambda *args, **kwargs: str(tmp_path / "output" / "final_output.mp4"),
+    )
+    _patch_segment_finalize_dependencies(monkeypatch, saved_workspaces)
+
+    VideoProcessor.finalize_segment_concatenation(dummy)
+
+    assert saved_workspaces == []
+
+
+def test_finalize_segment_concatenation_autosave_uses_incomplete_output_suffix(
+    tmp_path, monkeypatch
+):
+    dummy = _make_finalize_segment_concatenation_dummy(
+        tmp_path,
+        auto_save=True,
+        stopped_by_error_limit=True,
+    )
+    saved_workspaces: list[str] = []
+
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: _RunResult())
+    monkeypatch.setattr(
+        "app.processors.video_processor.misc_helpers.get_output_file_path",
+        lambda *args, **kwargs: str(tmp_path / "output" / "final_output.mp4"),
+    )
+    _patch_segment_finalize_dependencies(monkeypatch, saved_workspaces)
+
+    VideoProcessor.finalize_segment_concatenation(dummy)
+
+    assert saved_workspaces == [
+        str(tmp_path / "output" / "final_output_incomplete.mp4.json")
+    ]

@@ -1,9 +1,8 @@
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 import copy
 from functools import partial
 import os
-import time
 from pathlib import Path
 import traceback
 
@@ -20,17 +19,82 @@ from app.helpers.miscellaneous import get_video_rotation
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
 import app.helpers.miscellaneous as misc_helpers
-
-
-def _perf_seek_logging_enabled() -> bool:
-    v = os.environ.get("VISIOMASTER_PERF_SEEK", "").strip().lower()
-    return v in ("1", "true", "yes", "on")
 from app.ui.widgets.actions import common_actions as common_widget_actions
 from app.ui.widgets.actions import graphics_view_actions
 import app.ui.widgets.actions.layout_actions as layout_actions
 from app.ui.widgets.actions import card_actions
 from app.ui.widgets import widget_components
 from app.ui.widgets import ui_workers
+
+
+def _get_selected_embedding_name(main_window: "MainWindow") -> str:
+    target_face_button = getattr(main_window, "cur_selected_target_face_button", None)
+    assigned_embeddings = (
+        getattr(target_face_button, "assigned_merged_embeddings", None)
+        if target_face_button
+        else None
+    )
+    embedding_id = (
+        next(iter(assigned_embeddings), None) if assigned_embeddings else None
+    )
+    embedding_button = (
+        main_window.merged_embeddings.get(embedding_id)
+        if embedding_id is not None
+        else None
+    )
+    return (
+        str(getattr(embedding_button, "embedding_name", "")).strip()
+        if embedding_button is not None
+        else ""
+    )
+
+
+def _get_target_media_root(main_window: "MainWindow") -> str:
+    target_path_line_edit = getattr(main_window, "targetVideosPathLineEdit", None)
+    if target_path_line_edit is not None and hasattr(target_path_line_edit, "text"):
+        root = str(target_path_line_edit.text() or "").strip()
+        if root:
+            return os.path.abspath(root)
+    fallback = str(
+        getattr(main_window, "last_target_media_folder_path", "") or ""
+    ).strip()
+    return os.path.abspath(fallback) if fallback else ""
+
+
+def _get_relative_source_parent(media_path: str, source_root: str) -> str:
+    if not media_path or not source_root:
+        return ""
+    try:
+        media_parent = os.path.abspath(os.path.dirname(str(media_path)))
+        root_abs = os.path.abspath(source_root)
+        common = os.path.commonpath([media_parent, root_abs])
+        if os.path.normcase(common) != os.path.normcase(root_abs):
+            return ""
+        relative_parent = os.path.relpath(media_parent, root_abs)
+        if relative_parent in ("", ".") or relative_parent.startswith(".."):
+            return ""
+        return relative_parent
+    except Exception:
+        return ""
+
+
+def resolve_output_folder(main_window: "MainWindow", media_path: str) -> str:
+    output_folder = str(main_window.control.get("OutputMediaFolder", "")).strip()
+
+    if main_window.control.get("OutputToTargetLocationToggle", False):
+        output_folder = os.path.dirname(str(media_path))
+    elif main_window.control.get("PreserveOutputDirectoryStructureToggle", False):
+        source_root = _get_target_media_root(main_window)
+        relative_parent = _get_relative_source_parent(media_path, source_root)
+        if relative_parent:
+            output_folder = os.path.join(output_folder, relative_parent)
+
+    if main_window.control.get("ClusterOutputBySourceToggle", False):
+        embedding_name = _get_selected_embedding_name(main_window)
+        if embedding_name:
+            output_folder = os.path.join(output_folder, embedding_name)
+
+    return output_folder
 
 
 def set_up_video_seek_line_edit(main_window: "MainWindow"):
@@ -42,6 +106,25 @@ def set_up_video_seek_line_edit(main_window: "MainWindow"):
     videoSeekLineEdit.setValidator(
         QtGui.QIntValidator(0, video_processor.max_frame_number)
     )  # Restrict input to numbers
+
+
+def update_video_time_line_edit(
+    main_window: "MainWindow", current_frame_number: int | None = None
+):
+    video_time_line_edit = getattr(main_window, "videoTimeLineEdit", None)
+    if video_time_line_edit is None:
+        return
+
+    if current_frame_number is None:
+        current_frame_number = int(
+            getattr(main_window.videoSeekSlider, "value", lambda: 0)()
+        )
+
+    fps = float(getattr(main_window.video_processor, "fps", 0.0) or 0.0)
+    total_seconds = max(0.0, float(current_frame_number) / fps) if fps > 0 else 0.0
+    minutes = int(total_seconds // 60)
+    seconds = int(total_seconds % 60)
+    video_time_line_edit.setText(f"{minutes:02d}:{seconds:02d}")
 
 
 def set_up_video_seek_slider(main_window: "MainWindow"):
@@ -540,7 +623,6 @@ def move_slider_to_nearest_marker(main_window: "MainWindow", direction: str):
     if new_position is not None:
         main_window.videoSeekSlider.setValue(new_position)
         main_window.video_processor.process_current_frame()
-        resume_playback_after_seek_if_applicable(main_window)
 
 
 # Wrappers for specific directions
@@ -626,10 +708,11 @@ def add_scan_review_controls(main_window: "MainWindow"):
 
     run_scan_button = QtWidgets.QPushButton("Scan for Issues")
     run_scan_button.setToolTip(
-        "Scans the current render range using your current settings.\n"
+        "Predicts detect/match misses using your current render-time settings.\n"
         "If record start/end markers exist, only those ranges are scanned.\n"
         "Saved settings markers are applied during the scan.\n"
-        "Flags detection or similarity misses for the selected target face.\n"
+        "Honors detection, tracking, KPS smoothing, recognition, and threshold settings.\n"
+        "Flags detection or similarity misses for the loaded target faces.\n"
         "Single-frame preview may differ from playback on borderline frames."
     )
     run_scan_button.setSizePolicy(
@@ -922,7 +1005,6 @@ def _move_slider_to_nearest_issue(main_window: "MainWindow", direction: str):
     if new_position is not None:
         main_window.videoSeekSlider.setValue(new_position)
         main_window.video_processor.process_current_frame()
-        resume_playback_after_seek_if_applicable(main_window)
 
 
 def move_slider_to_next_issue(main_window: "MainWindow"):
@@ -1026,7 +1108,7 @@ def _get_issue_scan_mutation_lock_targets(main_window: "MainWindow") -> list:
         "clearTargetFacesButton",
         "buttonTargetVideosPath",
         "buttonInputFacesPath",
-        "filterWebcamsCheckBox",
+        "targetVideosFilterMenuButton",
         "openEmbeddingButton",
         "addMarkerButton",
         "removeMarkerButton",
@@ -1173,10 +1255,11 @@ def _restore_issue_scan_ui(main_window: "MainWindow") -> None:
     if run_button is not None:
         run_button.setText("Scan for Issues")
         run_button.setToolTip(
-            "Scans the current render range using your current settings.\n"
+            "Predicts detect/match misses using your current render-time settings.\n"
             "If record start/end markers exist, only those ranges are scanned.\n"
             "Saved settings markers are applied during the scan.\n"
-            "Flags detection or similarity misses for the selected target face.\n"
+            "Honors detection, tracking, KPS smoothing, recognition, and threshold settings.\n"
+            "Flags detection or similarity misses for the loaded target faces.\n"
             "Single-frame preview may differ from playback on borderline frames."
         )
 
@@ -1344,6 +1427,24 @@ def run_issue_scan(main_window: "MainWindow"):
             main_window.videoSeekSlider,
         )
         return
+    scan_ranges = (
+        video_processor._get_issue_scan_ranges()
+        if hasattr(video_processor, "_get_issue_scan_ranges")
+        else None
+    )
+    unsupported_reason = video_processor.get_issue_scan_unavailable_reason(
+        getattr(main_window, "control", None),
+        scan_ranges=scan_ranges,
+        markers=getattr(main_window, "markers", None),
+    )
+    if unsupported_reason:
+        common_widget_actions.create_and_show_messagebox(
+            main_window,
+            "Scan Not Available",
+            unsupported_reason,
+            main_window.videoSeekSlider,
+        )
+        return
     if getattr(main_window, "scan_issue_worker", None) is not None:
         return
 
@@ -1423,22 +1524,6 @@ def remove_all_markers(main_window: "MainWindow"):
         main_window.job_marker_pairs.clear()
 
 
-def adjust_sequential_input_rotate_offset(main_window: "MainWindow", delta: int) -> None:
-    """Adjust Face Swap → Input rotate start offset (only when the slider exists and is enabled)."""
-    key = "SequentialInputRotateOffsetSlider"
-    w = main_window.parameter_widgets.get(key)
-    if w is None or not w.isEnabled():
-        return
-    lo, hi = int(w.minimum()), int(w.maximum())
-    span = hi - lo + 1
-    cur = int(w.value())
-    newv = lo + (cur - lo + int(delta)) % span
-    w.blockSignals(True)
-    w.setValue(newv)
-    w.blockSignals(False)
-    common_widget_actions.update_control(main_window, key, newv)
-
-
 def advance_video_slider_by_n_frames(main_window: "MainWindow", n=None):
     """
     Advances the seek slider forward by *n* frames (clamped to the last frame).
@@ -1456,19 +1541,32 @@ def advance_video_slider_by_n_frames(main_window: "MainWindow", n=None):
         if new_position > video_processor.max_frame_number:
             new_position = video_processor.max_frame_number
 
-        # 1. Setting the value triggers 'on_change_video_seek_slider' automatically.
-        # Since the slider is not being dragged (isSliderDown() == False),
-        # that slot will naturally execute 'run_post_seek_actions' ONCE.
-        main_window.videoSeekSlider.setValue(new_position)
+        # --- CONTEXT-AWARE NAVIGATION (STEPPING) ---
+        is_compare_active = getattr(main_window, "view_face_compare_enabled", False)
+        is_mask_active = getattr(main_window, "view_face_mask_enabled", False)
+        suppress_flash = is_compare_active or is_mask_active
+
+        # Raise the flag to prevent raw frame rendering during slider update
+        if suppress_flash:
+            main_window._is_stepping_media = True
+
+        try:
+            # 1. Setting the value triggers 'on_change_video_seek_slider' automatically.
+            # Since the slider is not being dragged (isSliderDown() == False),
+            # that slot will naturally execute 'run_post_seek_actions' ONCE.
+            main_window.videoSeekSlider.setValue(new_position)
+        finally:
+            # Always drop the flag safely
+            if suppress_flash:
+                main_window._is_stepping_media = False
 
         # 2. Check if this is a single frame step (like 'V' key)
         is_single_frame_step = n == 1
 
-        # 3. Run AI models. Runs synchronously only for single steps to prevent "flash".
+        # 3. Run AI models. Explicitly suppress raw preview if special mode is active!
         main_window.video_processor.process_current_frame(
-            synchronous=is_single_frame_step
+            synchronous=is_single_frame_step, suppress_raw_preview=suppress_flash
         )
-        resume_playback_after_seek_if_applicable(main_window)
 
 
 def rewind_video_slider_by_n_frames(main_window: "MainWindow", n=None):
@@ -1488,18 +1586,31 @@ def rewind_video_slider_by_n_frames(main_window: "MainWindow", n=None):
         if new_position < 0:
             new_position = 0
 
-        # 1. Setting the value triggers 'on_change_video_seek_slider' automatically.
-        # Prevents double execution of heavy Face Detection.
-        main_window.videoSeekSlider.setValue(new_position)
+        # --- CONTEXT-AWARE NAVIGATION (STEPPING) ---
+        is_compare_active = getattr(main_window, "view_face_compare_enabled", False)
+        is_mask_active = getattr(main_window, "view_face_mask_enabled", False)
+        suppress_flash = is_compare_active or is_mask_active
+
+        # Raise the flag to prevent raw frame rendering during slider update
+        if suppress_flash:
+            main_window._is_stepping_media = True
+
+        try:
+            # 1. Setting the value triggers 'on_change_video_seek_slider' automatically.
+            # Prevents double execution of heavy Face Detection.
+            main_window.videoSeekSlider.setValue(new_position)
+        finally:
+            # Always drop the flag safely
+            if suppress_flash:
+                main_window._is_stepping_media = False
 
         # 2. Check if this is a single frame step (like 'C' key)
         is_single_frame_step = n == 1
 
-        # 3. Run AI models. Runs synchronously only for single steps to prevent "flash".
+        # 3. Run AI models. Explicitly suppress raw preview if special mode is active!
         main_window.video_processor.process_current_frame(
-            synchronous=is_single_frame_step
+            synchronous=is_single_frame_step, suppress_raw_preview=suppress_flash
         )
-        resume_playback_after_seek_if_applicable(main_window)
 
 
 def delete_all_markers(main_window: "MainWindow"):
@@ -1584,21 +1695,22 @@ def fit_view_to_current_image(main_window: "MainWindow"):
 
 
 def zoom_current_image_100(main_window: "MainWindow"):
-    from app.ui.widgets.actions import graphics_view_actions as _gva
-
     view = main_window.graphicsViewFrame
     if not view.scene():
         return
-    fit_item, scene_rect = _gva.primary_preview_graphics_item_for_fit(main_window)
-    if fit_item is None or scene_rect is None:
+    items = view.scene().items()
+    pixmap_item = next(
+        (item for item in items if isinstance(item, QtWidgets.QGraphicsPixmapItem)),
+        None,
+    )
+    if pixmap_item is None:
         return
 
     view.resetTransform()
-    view.setSceneRect(scene_rect)
-    view.centerOn(fit_item)
+    view.setSceneRect(pixmap_item.boundingRect())
+    view.centerOn(pixmap_item)
     view.zoom_value = 0
     view.last_scale_factor = 1.0
-    setattr(main_window, "_graphics_view_keep_transform_on_resize", True)
 
 
 def show_graphics_view_context_menu(
@@ -1775,19 +1887,7 @@ def play_video(main_window: "MainWindow", checked: bool):
             video_processor.stop_processing()
         print("[INFO] Starting webcam stream processing.")
         set_play_button_icon_to_stop(main_window)
-        graphics_view_actions.start_playback_fps_preview_session(main_window)
         video_processor.process_webcam()
-        return
-    if checked and video_processor.file_type == "screen":
-        if video_processor.processing:
-            print(
-                "[WARN] Screen capture already streaming. Stopping before restarting."
-            )
-            video_processor.stop_processing()
-        print("[INFO] Starting screen capture stream processing.")
-        set_play_button_icon_to_stop(main_window)
-        graphics_view_actions.start_playback_fps_preview_session(main_window)
-        video_processor.process_screen()
         return
     if checked:
         if (
@@ -1801,13 +1901,12 @@ def play_video(main_window: "MainWindow", checked: bool):
             return
         print("[INFO] Starting video processing.")
         set_play_button_icon_to_stop(main_window)
-        graphics_view_actions.start_playback_fps_preview_session(main_window)
         video_processor.process_video()
     else:
         video_processor = main_window.video_processor
         # print("play_video: Stopping video processing.")
         set_play_button_icon_to_play(main_window)
-        video_processor.stop_processing(block=False)
+        video_processor.stop_processing()
         main_window.buttonMediaRecord.blockSignals(True)
         main_window.buttonMediaRecord.setChecked(False)
         main_window.buttonMediaRecord.blockSignals(False)
@@ -1837,11 +1936,11 @@ def record_video(main_window: "MainWindow", checked: bool):
         main_window.buttonMediaRecord.blockSignals(True)
         main_window.buttonMediaRecord.setChecked(False)
         main_window.buttonMediaRecord.blockSignals(False)
-        if video_processor.file_type in ("webcam", "screen"):
+        if video_processor.file_type == "webcam":
             common_widget_actions.create_and_show_messagebox(
                 main_window,
                 "Recording Not Supported",
-                "Recording live webcam or screen capture is not supported yet.",
+                "Recording webcam stream is not supported yet.",
                 main_window,
             )
         return
@@ -1982,16 +2081,21 @@ def record_video(main_window: "MainWindow", checked: bool):
         # callers.
         #
         # Do NOT prompt when this stop was initiated programmatically by Job Manager.
+        should_confirm_stop = bool(
+            main_window.control.get("ConfirmBeforeStoppingRecordingToggle", True)
+        )
         if (
-            video_processor.is_processing_segments or video_processor.recording
-        ) and not job_mgr_flag:
+            (video_processor.is_processing_segments or video_processor.recording)
+            and not job_mgr_flag
+            and should_confirm_stop
+        ):
             try:
                 box = QtWidgets.QMessageBox(main_window)
                 box.setIcon(QtWidgets.QMessageBox.Warning)
                 box.setWindowTitle("Confirm stop")
-                box.setText("Stop multi-segment recording?")
+                box.setText("Stop recording?")
                 box.setInformativeText(
-                    "Segment recording will stop immediately. Output may be incomplete."
+                    "Recording will stop immediately. Output may be incomplete."
                 )
                 box.setStandardButtons(
                     QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
@@ -2142,68 +2246,6 @@ def set_record_button_icon(main_window: "MainWindow"):
         main_window.buttonMediaRecord.setToolTip("Start Recording")
 
 
-def resume_playback_after_seek_if_applicable(main_window: "MainWindow") -> None:
-    """
-    If the user was playing a video file (not recording / not segment mode) before a
-    seek, restart playback after the seek completes. Slider drags use
-    `_seek_gesture_had_playback`; programmatic slider changes use
-    `_resume_playback_after_seek_pending` (set from on_change when the slider is not
-    being dragged).
-    """
-    gesture = getattr(main_window, "_seek_gesture_had_playback", False)
-    pending = getattr(main_window, "_resume_playback_after_seek_pending", False)
-    should_resume = gesture or pending
-    main_window._seek_gesture_had_playback = False
-    main_window._resume_playback_after_seek_pending = False
-    if not should_resume:
-        return
-    vp = main_window.video_processor
-    if vp.file_type != "video" or vp.processing:
-        return
-    if not vp.media_capture or not vp.media_capture.isOpened():
-        return
-    if vp.current_frame_number >= vp.max_frame_number:
-        return
-    main_window.buttonMediaPlay.blockSignals(True)
-    main_window.buttonMediaPlay.setChecked(True)
-    main_window.buttonMediaPlay.blockSignals(False)
-    play_video(main_window, True)
-
-
-def apply_av1_scrub_preview_frame(
-    main_window: "MainWindow", frame_num: int, frame_bgr: Any
-) -> None:
-    """
-    GUI-thread handler for FFmpeg AV1 scrub previews (see VideoProcessor._av1_scrub_worker_loop).
-    Drops stale results when the slider has already moved.
-    """
-    if main_window.videoSeekSlider.value() != frame_num:
-        return
-    if frame_bgr is None:
-        return
-    vp = main_window.video_processor
-    if vp.media_rotation != 0:
-        frame_bgr = misc_helpers._apply_frame_rotation(frame_bgr, vp.media_rotation)
-    vp._seek_cached_frame = None
-    use_gl_upscale = (
-        vp.file_type == "video"
-        and graphics_view_actions.preview_gl_spatial_upscale_preview_enabled(
-            main_window
-        )
-        and graphics_view_actions.ensure_video_preview_opengl_viewport(main_window)
-    )
-    if use_gl_upscale:
-        graphics_view_actions.update_graphics_view(
-            main_window,
-            QtGui.QPixmap(),
-            frame_num,
-            preview_frame_bgr=frame_bgr,
-        )
-    else:
-        pixmap = common_widget_actions.get_pixmap_from_frame(main_window, frame_bgr)
-        graphics_view_actions.update_graphics_view(main_window, pixmap, frame_num)
-
-
 # @misc_helpers.benchmark
 @QtCore.Slot(int)
 def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
@@ -2213,181 +2255,41 @@ def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
     Stops any active processing, seeks the capture to the new position, reads the
     raw frame for immediate preview, and defers heavy post-seek work (marker
     application, AutoSwap) until the slider is released.
-
-    During playback, cooperative scrub uses ``_video_seek_slider_gesture_active``
-    (sliderPressed/Released) so groove clicks are not mistaken for non-drag seeks.
-    Set ``VISIOMASTER_PERF_SEEK=1`` for stderr timing/branch logs.
     """
     # print("Called on_change_video_seek_slider()")
     video_processor = main_window.video_processor
-    slider_down = main_window.videoSeekSlider.isSliderDown()
-    # Groove/page clicks move the slider without isSliderDown() == True (thumb drag only).
-    # sliderPressed/sliderReleased still bracket the gesture — use that for cooperative seek.
-    seek_slider_gesture = getattr(main_window, "_video_seek_slider_gesture_active", False)
 
-    playback_was_active_before_seek = (
-        video_processor.file_type == "video"
-        and video_processor.processing
-        and not video_processor.recording
-        and not video_processor.is_processing_segments
-    )
-
-    # Scrubbing during file playback: seek cooperatively (feeder clears buffers + CAP seek)
-    # instead of stop_processing() per tick (feeder join, capture release, reopen, gc).
-    interactive_playback_scrub = playback_was_active_before_seek and (
-        slider_down or seek_slider_gesture
-    )
-    if _perf_seek_logging_enabled():
-        print(
-            "[VISIOMASTER_PERF_SEEK] on_change "
-            f"fn={new_position} slider_down={slider_down} seek_gesture={seek_slider_gesture} "
-            f"interactive_scrub={interactive_playback_scrub} playback={playback_was_active_before_seek}"
-        )
-    if interactive_playback_scrub:
-        use_av1_light_scrub = (
-            video_processor.is_av1_codec
-            and video_processor.file_type == "video"
-            and (slider_down or seek_slider_gesture)
-        )
-        with video_processor.state_lock:
-            video_processor._interactive_playback_seek_pending = new_position
-        video_processor.current_frame_number = new_position
-        video_processor.next_frame_to_display = new_position
-        update_drop_frame_button_label(main_window)
-
-        if use_av1_light_scrub and misc_helpers.cmd_exist("ffmpeg"):
-            video_processor.enqueue_av1_scrub_preview(new_position)
-            return
-
-        if use_av1_light_scrub and not misc_helpers.cmd_exist("ffmpeg"):
-            now = time.perf_counter()
-            if now - video_processor._av1_scrub_preview_last_t < 0.15:
-                return
-            video_processor._av1_scrub_preview_last_t = now
-
-        if video_processor.media_capture:
-            _t_read0 = time.perf_counter() if _perf_seek_logging_enabled() else 0.0
-            ret, frame = misc_helpers.read_frame(
-                video_processor.media_capture,
-                video_processor.media_rotation,
-                seek_to_frame_first=new_position,
-                seek_msec_keypoint=(
-                    use_av1_light_scrub
-                    and not misc_helpers.cmd_exist("ffmpeg")
-                ),
-                seek_keypoint_fps=float(video_processor.fps or 0.0),
-            )
-            if _perf_seek_logging_enabled():
-                print(
-                    "[VISIOMASTER_PERF_SEEK] interactive read_frame "
-                    f"fn={new_position} ok={ret} "
-                    f"{(time.perf_counter() - _t_read0) * 1000.0:.1f} ms"
-                )
-            if ret:
-                if use_av1_light_scrub:
-                    video_processor._seek_cached_frame = None
-                else:
-                    video_processor._seek_cached_frame = (new_position, frame)
-                use_gl_upscale = (
-                    video_processor.file_type == "video"
-                    and graphics_view_actions.preview_gl_spatial_upscale_preview_enabled(
-                        main_window
-                    )
-                    and graphics_view_actions.ensure_video_preview_opengl_viewport(
-                        main_window
-                    )
-                )
-                if use_gl_upscale:
-                    graphics_view_actions.update_graphics_view(
-                        main_window,
-                        QtGui.QPixmap(),
-                        new_position,
-                        preview_frame_bgr=frame,
-                    )
-                else:
-                    pixmap = common_widget_actions.get_pixmap_from_frame(
-                        main_window, frame
-                    )
-                    graphics_view_actions.update_graphics_view(
-                        main_window, pixmap, new_position
-                    )
-            else:
-                print(
-                    f"[WARN] on_change_video_seek_slider: Read failed at frame {new_position}. Attempting recovery..."
-                )
-                video_processor._seek_cached_frame = None
-                main_window.last_seek_read_failed = True
-                video_processor.stop_processing()
-        return
-
-    if _perf_seek_logging_enabled():
-        print(
-            "[VISIOMASTER_PERF_SEEK] stop_processing path "
-            f"(interactive_scrub was false) fn={new_position}"
-        )
     was_processing = video_processor.stop_processing()
     if was_processing:
-        print("[INFO] Processing in progress. Stopping current processing.")
+        print("[WARN] Processing in progress. Stopping current processing.")
 
     video_processor.current_frame_number = new_position
     video_processor.next_frame_to_display = new_position
+    update_video_time_line_edit(main_window, new_position)
     update_drop_frame_button_label(main_window)
-    if not slider_down and playback_was_active_before_seek:
-        main_window._resume_playback_after_seek_pending = True
     if video_processor.media_capture:
-        use_av1_light_scrub = (
-            video_processor.is_av1_codec
-            and video_processor.file_type == "video"
-            and slider_down
-        )
-        if use_av1_light_scrub:
-            # FFmpeg input-seek + small MJPEG decode in a worker thread (fast on AV1).
-            # Falls back to OpenCV if ffmpeg is not installed.
-            if misc_helpers.cmd_exist("ffmpeg"):
-                video_processor.enqueue_av1_scrub_preview(new_position)
-                return
-            now = time.perf_counter()
-            if now - video_processor._av1_scrub_preview_last_t < 0.15:
-                return
-            video_processor._av1_scrub_preview_last_t = now
+        misc_helpers.seek_frame(video_processor.media_capture, new_position)
 
-        # Seek + read under one capture lock (safe vs feeder / libavcodec threads).
+        # Read the raw frame without triggering the full pipeline.
         ret, frame = misc_helpers.read_frame(
-            video_processor.media_capture,
-            video_processor.media_rotation,
-            seek_to_frame_first=new_position,
-            seek_msec_keypoint=use_av1_light_scrub,
-            seek_keypoint_fps=float(video_processor.fps or 0.0),
+            video_processor.media_capture, video_processor.media_rotation
         )
         if ret:
-            # Approximate AV1 scrub can land on a different frame; do not cache for
-            # process_current_frame EOF fallback (release uses a precise seek+read).
-            if use_av1_light_scrub:
-                video_processor._seek_cached_frame = None
-            else:
-                # Cache the raw frame so process_current_frame() can use it as a
-                # fallback when the near-EOF re-read fails (OpenCV reliability issue).
-                video_processor._seek_cached_frame = (new_position, frame)
-            # For preview, show the raw frame immediately.
-            # The processed frame will be shown when the slider is released.
-            use_gl_upscale = (
-                video_processor.file_type == "video"
-                and graphics_view_actions.preview_gl_spatial_upscale_preview_enabled(
-                    main_window
-                )
-                and graphics_view_actions.ensure_video_preview_opengl_viewport(
-                    main_window
-                )
-            )
-            if use_gl_upscale:
-                graphics_view_actions.update_graphics_view(
-                    main_window,
-                    QtGui.QPixmap(),
-                    new_position,
-                    size_mode="native_pixmap_size",
-                    preview_frame_bgr=frame,
-                )
-            else:
+            # Cache the raw frame so process_current_frame() can use it as a
+            # fallback when the near-EOF re-read fails (OpenCV reliability issue).
+            video_processor._seek_cached_frame = (new_position, frame)
+
+            # --- HYBRID NAVIGATION PREVIEW ---
+            is_stepping = getattr(main_window, "_is_stepping_media", False)
+            is_compare_active = getattr(main_window, "view_face_compare_enabled", False)
+            is_mask_active = getattr(main_window, "view_face_mask_enabled", False)
+
+            # Suppress raw frame display ONLY if we are stepping via actions/shortcuts
+            # AND a special preview mode (Compare/Mask) is currently active.
+            suppress_flash = is_stepping and (is_compare_active or is_mask_active)
+
+            if not suppress_flash:
+                # Standard scrubbing: push the raw frame to the UI immediately for fast response
                 pixmap = common_widget_actions.get_pixmap_from_frame(main_window, frame)
                 graphics_view_actions.update_graphics_view(
                     main_window,
@@ -2404,11 +2306,14 @@ def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
             video_processor._seek_cached_frame = None
             main_window.last_seek_read_failed = True
             video_processor.stop_processing()
+
     # Only update parameters and widgets if the slider is NOT being actively dragged.
     # This ensures playback, clicks, and button presses update the UI,
     # but fast scrubbing does not cause lag or skip marker updates.
-    if not slider_down:
+    if not main_window.videoSeekSlider.isSliderDown():
         run_post_seek_actions(main_window, new_position)
+    # Do not automatically restart the video, let the user press Play to resume
+    # print("on_change_video_seek_slider: Video stopped after slider movement.")
 
 
 def _get_marker_data_for_position(
@@ -2520,18 +2425,9 @@ def on_slider_moved(main_window: "MainWindow"):
 
 
 def on_slider_pressed(main_window: "MainWindow"):
-    """Slot connected to sliderPressed; records whether playback was active before a drag seek."""
-    main_window._video_seek_slider_gesture_active = True
-    vp = main_window.video_processor
-    main_window._seek_gesture_had_playback = (
-        vp.file_type == "video"
-        and vp.processing
-        and not vp.recording
-        and not vp.is_processing_segments
-    )
-    # Avoid ffplay running ahead of the video while the user scrubs the timeline.
-    if main_window._seek_gesture_had_playback:
-        vp.stop_live_sound()
+    """Slot connected to sliderPressed; currently a no-op placeholder for future press-time logic."""
+    main_window.videoSeekSlider.value()
+    # print(f"\nSlider Pressed. position: {position}\n")
 
 
 def run_post_seek_actions(main_window: "MainWindow", new_position: int):
@@ -2579,36 +2475,15 @@ def on_slider_released(main_window: "MainWindow"):
     # print(f"\nSlider released. New position: {new_position}\n")
 
     video_processor = main_window.video_processor
-    # Cooperative timeline scrub leaves file playback running; avoid
-    # process_current_frame() here — it calls stop_processing() and forces a
-    # one-shot worker (swap + models) before resume, which feels very slow with
-    # swap on. The feeder already seeks to the slider; next frames carry swap.
-    seek_playback_continuation = (
-        getattr(main_window, "_seek_gesture_had_playback", False)
-        and video_processor.processing
-        and video_processor.file_type == "video"
-        and not video_processor.recording
-        and not video_processor.is_processing_segments
-    )
-    try:
-        if video_processor.media_capture:
-            # Execute post seek (Markers, Autoswap)
-            # Run post-seek actions ONCE on slider release to apply
-            # the parameters for the final frame position.
-            run_post_seek_actions(main_window, new_position)
+    if video_processor.media_capture:
+        # Execute post seek (Markers, Autoswap)
+        # Run post-seek actions ONCE on slider release to apply
+        # the parameters for the final frame position.
+        run_post_seek_actions(main_window, new_position)
 
-            if seek_playback_continuation:
-                video_processor.sync_feeder_ui_face_flags_from_main_window()
-                main_window._seek_gesture_had_playback = False
-                main_window._resume_playback_after_seek_pending = False
-            else:
-                # This is the heavy processing call that runs the AI models (swap, etc.)
-                # It will now use the correct faces and parameters from the functions above.
-                video_processor.process_current_frame()
-        if not seek_playback_continuation:
-            resume_playback_after_seek_if_applicable(main_window)
-    finally:
-        main_window._video_seek_slider_gesture_active = False
+        # This is the heavy processing call that runs the AI models (swap, etc.)
+        # It will now use the correct faces and parameters from the functions above.
+        video_processor.process_current_frame()
 
 
 def process_swap_faces(main_window: "MainWindow"):
@@ -2617,50 +2492,26 @@ def process_swap_faces(main_window: "MainWindow"):
     Runs synchronously so the processed result (including any required model loading
     or first-time CUDA graph builds) is applied to the currently displayed frame
     before control returns to the UI, matching the behaviour of the single-frame-step
-    advance button.  For TensorRT, build-progress dialogs are shown via show_build_dialog
-    before each engine build; for the Custom provider, the same signals are used for
-    CUDA graph capture.  Both call processEvents() so the dialog paints while the main
-    thread is busy.
-
-    During active playback/recording/webcam/segments, toggling swap only updates
-    feeder flags and worker-visible state; we do not stop the pipeline (workers
-    already snapshot swap from the button each frame).
+    advance button.  Build-progress dialogs are shown via show_build_dialog signals
+    emitted before each TensorRT build; those signals call processEvents() so the
+    dialog paints even while the main thread is occupied.
     """
     video_processor = main_window.video_processor
-    video_processor.sync_feeder_ui_face_flags_from_main_window()
-    if video_processor.processing or video_processor.is_processing_segments:
-        from app.ui.widgets.actions import preview_notification_actions as _preview_notify
-
-        _preview_notify.show_swap_faces_state(
-            main_window, main_window.swapfacesButton.isChecked()
-        )
-        return
     video_processor.process_current_frame(synchronous=True)
-    from app.ui.widgets.actions import preview_notification_actions as _preview_notify
-
-    _preview_notify.show_swap_faces_state(
-        main_window, main_window.swapfacesButton.isChecked()
-    )
 
 
 def process_edit_faces(main_window: "MainWindow"):
     """Triggers a single-frame re-process after the Edit Faces button state changes.
 
-    Runs synchronously for the same reason as process_swap_faces when idle.
-    During active processing, only syncs feeder flags (same as swap toggle).
+    Runs synchronously for the same reason as process_swap_faces.
     """
     video_processor = main_window.video_processor
-    video_processor.sync_feeder_ui_face_flags_from_main_window()
-    if video_processor.processing or video_processor.is_processing_segments:
-        return
     video_processor.process_current_frame(synchronous=True)
 
 
 def process_compare_checkboxes(main_window: "MainWindow"):
     """Triggers a single-frame re-process and view resize after a compare/mask checkbox changes."""
-    vp = main_window.video_processor
-    vp.sync_feeder_ui_face_flags_from_main_window()
-    vp.process_current_frame(fit_on_complete=True)
+    main_window.video_processor.process_current_frame(fit_on_complete=True)
 
 
 def save_current_frame_to_file(main_window: "MainWindow"):
@@ -2678,33 +2529,9 @@ def save_current_frame_to_file(main_window: "MainWindow"):
             main_window,
         )
         return
-    output_folder = str(main_window.control.get("OutputMediaFolder", "")).strip()
-    if main_window.control.get("OutputToTargetLocationToggle", False):
-        output_folder = os.path.dirname(str(main_window.video_processor.media_path))
-    if main_window.control.get("ClusterOutputBySourceToggle", False):
-        target_face_button = getattr(
-            main_window, "cur_selected_target_face_button", None
-        )
-        assigned_embeddings = (
-            getattr(target_face_button, "assigned_merged_embeddings", None)
-            if target_face_button
-            else None
-        )
-        embedding_id = (
-            next(iter(assigned_embeddings), None) if assigned_embeddings else None
-        )
-        embedding_button = (
-            main_window.merged_embeddings.get(embedding_id)
-            if embedding_id is not None
-            else None
-        )
-        embedding_name = (
-            str(getattr(embedding_button, "embedding_name", "")).strip()
-            if embedding_button is not None
-            else ""
-        )
-        if embedding_name:
-            output_folder = os.path.join(output_folder, embedding_name)
+    output_folder = resolve_output_folder(
+        main_window, str(main_window.video_processor.media_path)
+    )
     frame = main_window.video_processor.current_frame.copy()
     image_format = "image"
     if main_window.control["ImageFormatToggle"]:
@@ -2936,8 +2763,6 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
                     main_window.video_processor.fps = media_capture.get(
                         cv2.CAP_PROP_FPS
                     )
-                    main_window.video_processor.refresh_video_codec_flags()
-                    main_window.video_processor.reset_av1_scrub_pipeline()
 
                     # Update the slider for this video
                     main_window.videoSeekSlider.blockSignals(True)
@@ -3011,39 +2836,7 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
                     image_format = "image"
                     if main_window.control["ImageFormatToggle"]:
                         image_format = "jpegimage"
-                    output_folder = str(
-                        main_window.control.get("OutputMediaFolder", "")
-                    ).strip()
-                    if main_window.control.get("OutputToTargetLocationToggle", False):
-                        output_folder = os.path.dirname(str(media_path))
-                    if main_window.control.get("ClusterOutputBySourceToggle", False):
-                        target_face_button = getattr(
-                            main_window, "cur_selected_target_face_button", None
-                        )
-                        assigned_embeddings = (
-                            getattr(
-                                target_face_button, "assigned_merged_embeddings", None
-                            )
-                            if target_face_button
-                            else None
-                        )
-                        embedding_id = (
-                            next(iter(assigned_embeddings), None)
-                            if assigned_embeddings
-                            else None
-                        )
-                        embedding_button = (
-                            main_window.merged_embeddings.get(embedding_id)
-                            if embedding_id is not None
-                            else None
-                        )
-                        embedding_name = (
-                            str(getattr(embedding_button, "embedding_name", "")).strip()
-                            if embedding_button is not None
-                            else ""
-                        )
-                        if embedding_name:
-                            output_folder = os.path.join(output_folder, embedding_name)
+                    output_folder = resolve_output_folder(main_window, str(media_path))
                     os.makedirs(output_folder, exist_ok=True)
                     save_filename = misc_helpers.get_output_file_path(
                         media_path,
@@ -3070,10 +2863,19 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
                     # This will use the markers, inputs, etc., currently set in the UI
                     # and will block until the video is fully processed and saved.
 
-                    # 1. Trigger the recording. This will start the async process.
+                    # 1. Purge the tracker and the Temporal EMA state for the new video
+                    if hasattr(main_window, "video_processor") and hasattr(
+                        main_window.video_processor, "sequential_detector"
+                    ):
+                        main_window.video_processor.sequential_detector.reset_state()
+                        print(
+                            "[INFO] Batch: Detector state and Temporal EMA cleared for the new video."
+                        )
+
+                    # 2. Trigger the recording. This will start the async process.
                     record_video(main_window, True)
 
-                    # 2. Wait for the processing to finish.
+                    # 3. Wait for the processing to finish.
                     # This loop now checks for cancellation
                     while (
                         main_window.video_processor.processing
@@ -3094,7 +2896,7 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
 
                         QtCore.QThread.msleep(1)  # 1ms sleep
 
-                    # 3. At this point, record_video has completed (or been aborted)
+                    # 4. At this point, record_video has completed (or been aborted)
                     # We must check *again* if the loop was exited due to cancellation
                     # to avoid incorrectly incrementing the 'processed_count'.
                     if not progress_dialog.confirmedCanceled():
@@ -3120,7 +2922,7 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
     finally:
         main_window.is_batch_processing = False
         # 8. Close the progress dialog
-        progress_dialog.close()
+        progress_dialog.close_without_confirmation()
 
         # 9. Show completion message
         if progress_dialog.confirmedCanceled():
@@ -3181,9 +2983,6 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
                     main_window.videoSeekSlider.setValue(original_frame_num)
                     main_window.videoSeekSlider.blockSignals(False)
                     main_window.video_processor.max_frame_number = original_max_frames
-                    main_window.video_processor._av1_scrub_preview_last_t = 0.0
-                    main_window.video_processor.refresh_video_codec_flags()
-                    main_window.video_processor.reset_av1_scrub_pipeline()
                 else:
                     print(
                         f"[ERROR] Failed to re-open original media capture: {original_media_path}"
@@ -3202,7 +3001,6 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
         else:
             # If no media was loaded, clear the scene
             main_window.scene.clear()
-            graphics_view_actions.invalidate_video_preview_blend_gl_item_ref(main_window)
             # Manually update graphics view to show nothing
             graphics_view_actions.update_graphics_view(main_window, QtGui.QPixmap(), 0)
             # Reset the slider
@@ -3211,8 +3009,6 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
             main_window.videoSeekSlider.setValue(0)
             main_window.videoSeekSlider.blockSignals(False)
             main_window.video_processor.max_frame_number = 0
-
-        graphics_view_actions.update_preview_media_metadata(main_window)
 
 
 def toggle_live_sound(main_window: "MainWindow", toggle_value: bool):
@@ -3293,11 +3089,19 @@ def toggle_theatre_mode(main_window: "MainWindow"):
     if not is_theatre:
         # --- ENTER THEATRE MODE ---
         main_window.is_theatre_mode = True
+        use_fullscreen_with_theatre = bool(
+            getattr(main_window, "control", {}).get(
+                "TheatreModeUsesFullscreenToggle", False
+            )
+        )
 
         # 0. Save the exact state of all docks and toolbars (sizes, proportions, splitters)
         main_window._saved_window_state = main_window.saveState()
         main_window._was_maximized = main_window.isMaximized()
         main_window._was_custom_fullscreen = main_window.isFullScreen()
+        main_window._theatre_forced_fullscreen = bool(
+            use_fullscreen_with_theatre and not main_window._was_custom_fullscreen
+        )
         if main_window.isMaximized() or main_window.isFullScreen():
             main_window._was_normal_geometry = main_window.normalGeometry()
         else:
@@ -3377,8 +3181,17 @@ def toggle_theatre_mode(main_window: "MainWindow"):
             QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
 
-        # 6. Preserve the base window mode; only remain fullscreen if already fullscreen.
-        if main_window._was_custom_fullscreen:
+        # 6. Preserve the base window mode; optionally enter fullscreen with theatre.
+        if main_window._was_custom_fullscreen or main_window._theatre_forced_fullscreen:
+            if main_window._theatre_forced_fullscreen:
+                main_window._fullscreen_restore_was_maximized = (
+                    main_window._was_maximized
+                )
+                main_window._fullscreen_restore_geometry = (
+                    None
+                    if main_window._was_maximized
+                    else main_window._was_normal_geometry
+                )
             main_window.setWindowState(QtCore.Qt.WindowState.WindowFullScreen)
             main_window.showFullScreen()
             QtWidgets.QApplication.processEvents()
@@ -3479,6 +3292,7 @@ def toggle_theatre_mode(main_window: "MainWindow"):
         was_custom_fullscreen = getattr(main_window, "_was_custom_fullscreen", False)
         was_maximized = getattr(main_window, "_was_maximized", False)
         saved_normal_geometry = getattr(main_window, "_was_normal_geometry", None)
+        main_window._theatre_forced_fullscreen = False
 
         _restore_window_base_mode(
             main_window,

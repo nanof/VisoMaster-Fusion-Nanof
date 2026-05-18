@@ -47,7 +47,7 @@ The application supports multiple AI inference backends (CPU, CUDA, TensorRT, Te
 
 ### 2.1 Installation (Portable)
 
-Execute `Start_Portable.bat` to begin. On first run it automatically downloads and installs everything needed: Python 3.11, Git, FFmpeg, and all AI libraries (PyTorch 2.8 + CUDA 12.9, TensorRT 10.9, cuDNN 9.13, ONNX Runtime).
+Execute `Start_Portable.bat` to begin. On first run it automatically downloads and installs everything needed: Python 3.11, Git, FFmpeg, and all AI libraries. The current portable dependency set includes PyTorch 2.8.0 + CUDA 12.9, CUDA Toolkit 12.9.1, TensorRT 10.9.0.34, cuDNN 9.13.1.26, and ONNX Runtime GPU 1.22.0.
 
 No existing software on your system is modified. Everything is installed inside the application folder and is self-contained. This means you can move the entire folder to another drive or run it from a USB drive without reinstalling anything.
 
@@ -102,21 +102,21 @@ Load target media from a folder, individual files, or available webcams. Load so
 
 ### 3.5 Processing Pipeline Overview
 
-VisoMaster Fusion processes each frame through a fixed sequence of stages. Understanding this order helps explain the **Pipeline Position** controls shown in several tabs:
+VisoMaster Fusion processes each frame through a fixed sequence of stages. Understanding this order helps explain the position controls shown in several tabs:
 
 1. **Face Detection** - Detects and tracks faces in the input frame (Section 10)
 2. **Face Swap** - Applies the selected swap model to each detected face (Section 4)
 3. **Masks** - Composites the swapped face back into the frame using the configured masks (Section 4.5)
-4. **Denoiser** (optional, position configurable) - Reduces noise and reconstructs texture (Section 6)
+4. **Denoiser Before Restorers** (optional) - Reduces noise and reconstructs texture before restoration (Section 6)
 5. **Face Restorer 1** (optional) - Sharpens and corrects artifacts on the face crop (Section 5)
-6. **Denoiser** (optional, after first restorer position) - Second denoiser pass if configured (Section 6)
+6. **Denoiser After First Restorer** (optional) - Second denoiser pass if configured (Section 6)
 7. **Face Expression Restorer** (optional, position configurable) - Transfers expression and pose from the driving face (Section 7)
-8. **Face Restorer 2** (optional, can run at end of pipeline) - Second restoration pass (Section 5)
-9. **Denoiser** (optional, after all restorers position) - Third denoiser pass if configured (Section 6)
+8. **Face Restorer 2** (optional, with **Apply at End** available) - Second restoration pass (Section 5)
+9. **Denoiser After Restorers** (optional) - Third denoiser pass if configured (Section 6)
 10. **Face Editor / Makeup** - Manual pose and expression adjustments (Section 8)
 11. **Frame Enhancer** (optional) - Full-frame upscaling or colorization (Section 9)
 
-The Denoiser, Face Expression Restorer, Second Restorer, and Face Pose/Expression Editor each expose a **Pipeline Position** control that lets you choose where in this chain they run. These are covered in detail in their respective sections.
+The Denoiser exposes three explicit enable points. Face Expression Restorer and Face Pose/Expression Editor expose **Pipeline Position** controls, while the second face restorer uses **Apply at End** to move the pass later in the pipeline. These are covered in detail in their respective sections.
 
 ---
 
@@ -163,8 +163,6 @@ Masks control which pixels from the swapped face are blended back into the origi
 
 The **Mask View Selection** dropdown (`swap_mask`, `diff`, `texture`) lets you inspect the active composite mask in the preview while working. This is useful for diagnosing blending issues before committing to a full render.
 
-The **Mask Dilatation Type** setting (in Settings) controls the algorithm used when growing mask regions. The available options are `conv`, `pool`, and `iter_pool`.
-
 #### 4.5.1 Border Mask
 
 A rectangular mask with adjustable Top, Bottom, Left, Right, and Blur sliders. Anything outside the mask boundary fades back to the original image. Useful for hiding stray pixels at the hairline or chin.
@@ -187,7 +185,7 @@ Uses the CLIP vision-language model to identify objects described in plain Engli
 
 #### 4.5.6 Mouth Fit & Align
 
-Repositions and scales the original mouth region to fit cleanly inside the swapped face without distorting its shape. Can be used independently of FaceParser. Options include: **Use Original Mouth** (uses the original face's mouth as the reference rather than the swap), **Paste After Restorer** (applies the mouth mask after the restorers rather than before), **Smart Sharpen (USM)** (edge-aware unsharp masking to sharpen teeth and lip edges without adding noise to surrounding skin), and a **Mouth Zoom** slider (0.90-1.20).
+Repositions and scales the original mouth region to fit cleanly inside the swapped face without distorting its shape. Can be used independently of FaceParser. Options include: **Use Original Mouth** (uses the original face's mouth as the reference rather than the swap), **Cavity Blur Amount** and **Cavity Shadow (Gamma)** for softening and darkening the artificial mouth cavity when using the original mouth, **Paste After Restorer** (applies the mouth mask after the restorers rather than before), **Smart Sharpen (USM)** (edge-aware unsharp masking to sharpen teeth and lip edges without adding noise to surrounding skin), and a **Mouth Zoom** slider (0.90-1.20).
 
 #### 4.5.7 Face Parser Mask
 
@@ -199,7 +197,7 @@ Blends the original eyes back into the swapped face using a configurable ellipti
 
 #### 4.5.9 Restore Mouth
 
-Blends the original mouth back into the swapped face, similar in structure to Restore Eyes. Includes a **Mouth Blend Amount** slider for controlling the mix between original and swapped mouth regions.
+Blends the original mouth back into the swapped face, similar in structure to Restore Eyes. Includes **Mouth Blend Amount**, **Mouth Size Factor**, **Mouth Feather Blend**, **X/Y Mouth Radius Factor**, and **X/Y Mouth Offset** controls for shaping and positioning the blend. A shared **Eyes/Mouth Blur** slider controls additional softness for the Restore Eyes and Restore Mouth masks.
 
 ### 4.6 Textures and Colors
 
@@ -209,8 +207,8 @@ The Face Swap tab also includes a **Textures and Colors** group for refining how
 |---|---|
 | **Differencing** | Builds a transfer mask from the difference between the swap and the original face. Includes controls such as **Difference Lower Limit**, **Difference Upper Limit**, **Lower Strength**, **Upper Strength**, and **Mask Blur Amount**. |
 | **Transfer Texture** | Transfers texture detail from the original face into the swap. Includes controls for **Texture Strength Amount**, **Texture Gamma adjust**, **Texture Contrast adjust**, **CLAHE**, feature-exclusion masks, and background exclusion. |
-| **AutoColor Transfer** | Applies an automatic color transfer pass to better match tones between the source and target. |
-| **Enable Ending Color Transfer** | Applies a final color transfer pass later in the pipeline. |
+| **AutoColor Transfer** | Applies an automatic color transfer pass to better match tones between the source and target. The **Transfer Type** dropdown selects the color-transfer method. |
+| **Enable Ending Color Transfer** | Applies a final color transfer pass later in the pipeline. The **Ending Transfer Type** dropdown selects the final-pass color-transfer method. |
 | **Color Adjustments** | Manual controls for **Red**, **Green**, **Blue**, **Brightness**, **Contrast**, **Saturation**, **Sharpness**, **Hue**, and **Gamma**. |
 | **Noise** | Adds noise to the swapped face. |
 | **JPEG Compression** | Applies controlled JPEG-style compression to the swapped face and blends it back in. |
@@ -512,11 +510,10 @@ The app uses ONNX-based detectors to locate faces in each frame before swapping.
 |---|---|
 | **Detect Score** | Minimum confidence threshold for a detection to be accepted. Lower values catch more faces but may produce false positives. |
 | **Max Faces to Detect** | Limits how many faces are processed per frame. Useful for performance when only one or two faces are relevant. |
-| **Detection Interval** | Runs face detection only every N frames and reuses the result in between. Reduces CPU/GPU load on high-frame-rate video. |
 | **Auto Rotation** | Rotates the input frame to the detected face's upright orientation before processing. |
 | **Manual Rotation** | Enables a fixed detector rotation instead of relying only on auto rotation. |
 | **Rotation Angle** | Sets the fixed rotation angle used when Manual Rotation is enabled. |
-| **Enable KPS Smoothing** | Applies temporal smoothing to facial keypoints to reduce jitter. |
+| **Enable KPS Smoothing** | Applies temporal smoothing to facial keypoints to reduce jitter. The **EMA Alpha** slider controls the balance between stability and responsiveness. |
 
 ### 10.2 ByteTrack Face Tracking
 
@@ -533,7 +530,7 @@ When enabled, ByteTrack assigns a consistent ID to each face across frames. This
 
 ## 11. Job Manager
 
-The Job Manager lets you save the current workspace as a job, reload saved jobs, and batch-process multiple jobs in sequence.
+The Job Manager lets you save the current workspace as a job, reload saved jobs, and batch-process multiple jobs in sequence. Job files are stored in the `jobs/` folder. When a job completes successfully, its JSON file is moved to `jobs/completed/`.
 
 | Feature | Description |
 |---|---|
@@ -544,6 +541,8 @@ The Job Manager lets you save the current workspace as a job, reload saved jobs,
 | **Process Selected** | Processes only the selected jobs. |
 | **Use job name for output file name** | When saving a job, uses the job name as the output filename. |
 | **Output File Name** | Lets you choose a custom output filename when the job-name option is turned off. |
+
+During batch processing, the Job Manager validates each job before running it. Jobs with missing target media, missing input faces, unreadable embeddings, or invalid job files are skipped instead of stopping the entire batch during setup. Record start/end marker pairs are saved with each job and used as render segments when the job is processed.
 
 ### 11.1 Basic Workflow
 
@@ -580,6 +579,21 @@ The video timeline supports markers that let you apply different face-card setti
 - Use **Previous Marker** and **Next Marker** to move between markers.
 - Enable **Track Markers on Video Seek** if you want settings to update when you seek to a marked position.
 
+### 13.1 Scan & Issue Review Tools
+
+The scan tools row helps find frames where the current render-time settings may miss a face or fail the similarity match for a loaded target face. The scan uses the active detection, tracking, recognition, threshold, KPS smoothing, and saved marker settings. If record start/end markers exist, only those ranges are scanned.
+
+| Tool | Description |
+|---|---|
+| **Scan for Issues** | Scans the current video for detection or match misses. The button changes to **Abort Scan** while a scan is running. |
+| **Prev Issue / Next Issue** | Moves between issue frames for the selected target face. |
+| **Drop Frame / Restore Frame** | Excludes or restores the current frame from render output. |
+| **Drop Issue Frames** | Marks all current issue frames for the selected target face as dropped. |
+| **Clear Issues** | Removes the current issue markers without changing dropped frames. |
+| **Restore Dropped** | Restores all dropped frames so they are included in render output again. |
+
+Dropped frames are excluded from rendered output. Issue scans are not supported while **VR180 Mode** is enabled.
+
 ---
 
 ## 14. Recording & Output
@@ -588,18 +602,32 @@ The video timeline supports markers that let you apply different face-card setti
 
 Playback and recording use toggle-style buttons. Related actions in the main window also include **Save Image** and the batch-processing buttons.
 
-### 14.2 FFmpeg Output Options
+### 14.2 Output Location
+
+By default, processed images and videos are saved to the selected output folder. The Settings tab includes additional output-routing options:
+
+| Option | Description |
+|---|---|
+| **Output to Target Location** | Saves processed output next to the current target media instead of using the global output folder. |
+| **Preserve Source Directory Structure** | When target media is loaded recursively from a folder, mirrors each source subfolder inside the output folder. |
+| **Cluster Output by Source Name** | Saves processed output into a subfolder named after the selected merged embedding. |
+
+These options can be combined. For example, preserving source structure can recreate the target folder layout under the output folder, and clustering can then place the result inside an embedding-named subfolder.
+
+### 14.3 FFmpeg Output Options
 
 | Option | Description |
 |---|---|
 | **Presets SDR** | HEVC_NVENC encoding presets for standard-dynamic-range output (p1-p7). p1 is the fastest but lowest quality; p7 is the slowest but highest quality. The default is p5, which offers a good balance. |
 | **Presets HDR** | Encoding presets for high-dynamic-range output: ultrafast, superfast, veryfast, faster, fast, medium, slow. **Important:** HDR encoding bypasses the GPU encoder and uses CPU-based libx265, which is significantly slower. Use only on genuine HDR source material. |
 | **Quality** | CRF-equivalent quality setting (0-51). Lower values produce larger, higher-quality files. Default is 18. |
+| **Auto-set quality from source** | Estimates source complexity with FFprobe and automatically sets the Quality value for more consistent visual quality across mixed encodes. |
 | **Spatial AQ / Temporal AQ** | Adaptive quantisation options available with NVENC. Spatial AQ allocates more bits to detailed areas within a frame; Temporal AQ maintains consistent quality across frames over time. Both improve perceptual quality at similar file sizes. |
+| **Confirm Before Stopping Recording** | Shows a confirmation prompt before manually stopping an active recording. |
 | **Frame resize to 1920x1080** | Forces the output to 1080p resolution regardless of the source dimensions. Only effective on 16:9 content. |
 | **Open Output Folder After Recording** | Automatically opens the output directory in your file explorer when recording stops. |
 
-### 14.3 Playback Settings
+### 14.4 Playback Settings
 
 | Setting | Description |
 |---|---|
@@ -607,8 +635,10 @@ Playback and recording use toggle-style buttons. Related actions in the main win
 | **Video Playback FPS** | Sets the manual playback frame rate when custom FPS is enabled. |
 | **Playback Buffering** | Enables frame buffering to smooth out playback on slower systems. |
 | **Playback Loop** | Loops video playback continuously. |
+| **Theatre Mode Uses Fullscreen** | Makes Theatre Mode also enter fullscreen, then restores the previous window state when Theatre Mode is turned off. |
+| **Frame Skip Step** | Number of frames skipped by the forward/rewind buttons and mouse wheel timeline navigation. |
 | **Audio Playback Volume** | Controls the volume of audio during preview playback. |
-| **Audio Start Delay** | Introduces a delay (in seconds) before audio begins, useful to compensate for sync issues. |
+| **Audio Start Delay (Seconds)** | Introduces a delay before audio begins, useful to compensate for sync issues. |
 
 ---
 
@@ -631,16 +661,16 @@ Playback and recording use toggle-style buttons. Related actions in the main win
 | **Number of Threads** | Number of execution threads used during playback and recording. Reduce to 1 if you encounter VRAM issues or crashes. |
 | **Keep Controls Active** | When enabled, UI controls remain interactive during recording, allowing you to make live adjustments. When disabled, controls are locked while recording is in progress. |
 | **Track Markers on Video Seek** | Updates parameters and controls when seeking to a marked position on the timeline. |
+| **Frame Worker Delay** | Delay in seconds before AI processing starts after seeking in a video. Increasing it can reduce GPU overload and stutter while scrubbing. |
 | **Keep Loaded Models in Memory** | Prevents models from automatically unloading when you change settings. Models remain in VRAM until you press the Clear GPU button explicitly. Useful when rapidly iterating on settings to avoid repeated load delays. |
 | **Resize Input Source (Performance/Output)** | Downscales the input resolution before processing to trade output quality for speed. |
-| **Input Resolution Target** | The target resolution when Resize Input Source is enabled (540p, 720p, or 1080p). Aspect ratio is preserved. |
+| **Input Resolution Target** | The target resolution when Resize Input Source is enabled (540p, 720p, 1080p, 1440p, or 2160p). Aspect ratio is preserved. |
 
 ### 15.2 Face Recognition
 
 | Setting | Description |
 |---|---|
 | **Recognition Model** | The ArcFace-based embedding model used to generate face identity vectors. This setting controls two distinct things. During **face detection and matching** - identifying which detected face in the frame corresponds to which face card - the model selected here is used directly. During the **swap itself**, the app automatically selects the correct ArcFace model based on the active swapper (Inswapper128, InStyleSwapper256, and DFM use Inswapper128ArcFace; SimSwap512 uses SimSwapArcFace; GhostFace-v1/v2/v3 use GhostArcFace; CSCS uses CSCSArcFace) regardless of what is selected here. In most cases the default is fine; changing this may affect how well face cards are matched to detected faces when using the Similarity Threshold. |
-| **Swapping Similarity Type** | The alignment strategy used when computing face embeddings: **Optimal** (full warp via arcfacemap - default), **Pearl** (offset alignment), or **Opal** (standard similarity transform). Affects how closely the embedding captures the face geometry. |
 | **Embedding Merge Method** | When multiple source images are combined into a single face card embedding, controls how their individual vectors are merged: **Mean** (average of all vectors) or **Median** (more robust to outlier images). |
 
 ### 15.3 Face Detection & Tracking Settings
@@ -651,7 +681,6 @@ These settings are also related to Section 10 but are configured in the Settings
 |---|---|
 | **Face Detect Model** | Selects the active face detector: RetinaFace, SCRFD, Yolov8, or Yunet. See Section 10.1 for descriptions of each. |
 | **Detect Score** | Minimum confidence threshold for a detection to be accepted. |
-| **Detection Interval (Frames)** | Runs detection only every N frames; reuses results in between for performance. |
 | **Max No of Faces to Detect** | Limits how many faces are processed per frame. |
 | **Auto Rotation** | Rotates the input frame to the detected face's upright orientation before processing. |
 | **Manual Rotation** | Overrides auto rotation with a fixed angle. |
@@ -663,6 +692,7 @@ These settings are also related to Section 10 but are configured in the Settings
 | **Show Bounding Boxes** | Displays face detection bounding boxes on the preview. Useful for diagnosing missed or incorrect detections. |
 | **Show ByteTrack Bounding Boxes** | Displays ByteTrack-assigned bounding boxes separately from the raw detector output, helping distinguish between detection and tracking results. |
 | **Enable KPS Smoothing** | Smooths facial keypoints over time to reduce jitter. |
+| **EMA Alpha** | Controls keypoint smoothing rigidity when KPS smoothing is enabled. Lower values are more stable but can lag; higher values are more responsive but may jitter. |
 
 ### 15.4 Landmark Detection
 
@@ -679,7 +709,7 @@ VisoMaster Fusion includes a configurable landmark detector that can be used to 
 
 ### 15.5 Appearance
 
-The **Theme** selector lets you choose from a set of built-in UI colour schemes: True-Dark, Dark, Dark-Blue, Light, Solarized-Dark, Solarized-Light, Dracula, Nord, and Gruvbox. Themes are applied immediately without restarting.
+The **Theme** selector lets you choose from a set of built-in UI colour schemes: True-Dark, OLED-Black, Windows11-Dark, Dark, Dark-Blue, Light, Solarized-Dark, Solarized-Light, Dracula, Nord, Gruvbox, and Monokai. Themes are applied immediately without restarting.
 
 ### 15.6 VR / 360-Degree Mode
 
@@ -712,7 +742,10 @@ When working with VR180 or equirectangular 360-degree video, enable **VR180 Mode
 | **Target Media Include Subfolders** | When selecting a target media folder for batch processing, includes files from all subfolders. |
 | **Input Faces Include Subfolders** | When selecting an input faces folder, includes face images from all subfolders. |
 | **Save Output Image in JPG Format** | Saves output images (from Save Image or batch processing) in JPG format instead of the default PNG. |
-| **Commandline Infos** | Outputs restore strength metrics and iteration counts to the console, along with JPEG/MPEG quality information. Useful for diagnosing performance and quality tradeoffs. |
+| **Output to Target Location** | Saves processed output next to the current target media instead of using the global output folder. |
+| **Preserve Source Directory Structure** | Mirrors source subfolders inside the output folder when target media is loaded recursively. |
+| **Cluster Output by Source Name** | Saves processed output into a subfolder named after the selected merged embedding. |
+| **Enable Mouse Wheel on Parameter Controls** | Allows the mouse wheel to adjust hovered sliders and dropdowns. When disabled, the wheel scrolls the parameter panel instead; hold Ctrl to adjust a hovered control temporarily. |
 
 ### 15.9 Swap Settings
 
@@ -742,7 +775,7 @@ VisoMaster Fusion has two separate model optimisation processes:
 
 **ONNX Simplification** (`app/tools/optimize_models.py`) simplifies eligible ONNX model files using onnxsim (constant folding, dead node removal) and symbolic shape inference. It replaces the original `.onnx` files in `model_assets/` with leaner versions, backing up the originals to `model_assets/unopt-backup/`. This produces optimized ONNX files - not TensorRT engines. It can be run via the **Optimize Models (onnxsim)** action in the launcher's maintenance menu, which calls this script directly. The **Revert to Original Models** launcher action deletes the optimized files and re-downloads the originals from source.
 
-**TensorRT Engine Building** is a separate process that converts ONNX models into hardware-specific `.trt` engine files (`app/processors/utils/engine_builder.py`). This happens automatically the first time a model is used with the **TensorRT-Engine** provider - it is not triggered by the ONNX Simplifier. The resulting engine files are stored in `tensorrt-engines/` and reused on subsequent runs. A progress dialog is shown during the build.
+**TensorRT Engine Building** is handled by the model processor and ONNX Runtime TensorRT provider. The first time a model is used with a TensorRT-backed provider, the app builds and caches TensorRT engine/context data in `tensorrt-engines/`. This is not triggered by the ONNX Simplifier. A progress dialog is shown during the build and the cache is reused on subsequent runs.
 
 > **Note:** TensorRT engines are hardware-specific. An engine built on one GPU will not work on a different GPU model and must be rebuilt. This happens automatically the first time you run with the new hardware.
 
@@ -793,7 +826,6 @@ VisoMaster Fusion has two separate model optimisation processes:
 | **Inswapper128** | The default face swap model. Fast and versatile, with configurable internal resolution (128-512 px via Swapper Resolution or Auto Resolution). Uses Inswapper128ArcFace. |
 | **Landmark** | A keypoint detected on the face, such as the corner of an eye or the tip of the nose. Used for face alignment, crop warping, and expression transfer. VisoMaster Fusion supports landmark models detecting 5, 68, 3D-68, 98, 106, 203, or 478 points. |
 | **LivePortrait** | A neural animation pipeline used by both the Face Expression Restorer (Section 7) and the Face Pose/Expression Editor (Section 8). Extracts motion keypoints from a driving face and applies them to the target. |
-| **Mask Dilatation** | The process of growing a face mask region outward by a set number of pixels to ensure clean compositing at the edges of the swap. Controlled by the **Mask Dilatation Type** setting (`conv`, `pool`, or `iter_pool`). |
 | **Mask view selection** | A Face Swap preview control that changes which mask visualization is shown: `swap_mask`, `diff`, or `texture`. |
 | **Micro-Expression Boost** | A multiplier in the Face Expression Restorer's Advanced mode (Section 7.5) that amplifies subtle facial movements, such as small squints, slight smirks, and minor brow furrows, that may be compressed or lost during swapping and normalization. Operates when Relative Position is active for any region. |
 | **Occluder** | The occlusion mask model (Section 4.5.3) that detects foreground objects covering the face, such as hands, glasses, or microphones, so they are preserved in the final composite rather than replaced by the swap. |

@@ -5,6 +5,41 @@ import numpy as np
 import pytest
 
 from app.processors.video_processor import VideoProcessor
+from app.processors.video_utils.sequential_detector import SequentialDetector
+
+
+def _setup_sequential_detector(
+    processor,
+    *,
+    last_detected_faces=None,
+    smoothed_kps=None,
+    smoothed_dense_kps=None,
+    smoothed_dense_kps_203=None,
+):
+    """Attach a real SequentialDetector to a bare-constructed processor.
+
+    PR #176 moved the temporal-smoothing state (last_detected_faces /
+    _smoothed_kps / _smoothed_dense_kps / _smoothed_dense_kps_203) and the
+    per-frame detection logic out of VideoProcessor into a dedicated
+    SequentialDetector class. Tests that build their VideoProcessor via
+    __new__() must wire up the corresponding attribute on the processor.
+
+    Returns the attached SequentialDetector so callers can patch its `run`
+    method or read its state in assertions.
+    """
+    sd = SequentialDetector(processor.main_window)
+    sd.last_detected_faces = (
+        list(last_detected_faces) if last_detected_faces is not None else []
+    )
+    sd._smoothed_kps = dict(smoothed_kps) if smoothed_kps is not None else {}
+    sd._smoothed_dense_kps = (
+        dict(smoothed_dense_kps) if smoothed_dense_kps is not None else {}
+    )
+    sd._smoothed_dense_kps_203 = (
+        dict(smoothed_dense_kps_203) if smoothed_dense_kps_203 is not None else {}
+    )
+    processor.sequential_detector = sd
+    return sd
 
 
 class _DummyCapture:
@@ -173,11 +208,6 @@ def test_scan_issue_frames_restores_dense_smoothing_state():
     processor.media_rotation = 0
     processor.fps = 30.0
     processor.current_frame_number = 0
-    processor.last_detected_faces = [{"id": 1}]
-    processor._smoothed_kps = {1: np.array([[1.0, 2.0]], dtype=np.float32)}
-    processor._smoothed_dense_kps = {1: np.array([[3.0, 4.0]], dtype=np.float32)}
-    processor._smoothed_dense_kps_203 = {1: np.array([[5.0, 6.0]], dtype=np.float32)}
-    processor.last_detected_faces = [{"id": 1}]
     processor.main_window = SimpleNamespace(
         control={},
         parameters={},
@@ -185,6 +215,13 @@ def test_scan_issue_frames_restores_dense_smoothing_state():
         dropped_frames=set(),
         markers={},
         videoSeekSlider=SimpleNamespace(value=lambda: 7),
+    )
+    sd = _setup_sequential_detector(
+        processor,
+        last_detected_faces=[{"id": 1}],
+        smoothed_kps={1: np.array([[1.0, 2.0]], dtype=np.float32)},
+        smoothed_dense_kps={1: np.array([[3.0, 4.0]], dtype=np.float32)},
+        smoothed_dense_kps_203={1: np.array([[5.0, 6.0]], dtype=np.float32)},
     )
     processor._get_target_input_height = lambda: 256
 
@@ -210,16 +247,16 @@ def test_scan_issue_frames_restores_dense_smoothing_state():
         "cancelled": False,
     }
     np.testing.assert_array_equal(
-        processor._smoothed_dense_kps[1], np.array([[3.0, 4.0]], dtype=np.float32)
+        sd._smoothed_dense_kps[1], np.array([[3.0, 4.0]], dtype=np.float32)
     )
     np.testing.assert_array_equal(
-        processor._smoothed_kps[1], np.array([[1.0, 2.0]], dtype=np.float32)
+        sd._smoothed_kps[1], np.array([[1.0, 2.0]], dtype=np.float32)
     )
     np.testing.assert_array_equal(
-        processor._smoothed_dense_kps_203[1],
+        sd._smoothed_dense_kps_203[1],
         np.array([[5.0, 6.0]], dtype=np.float32),
     )
-    assert processor.last_detected_faces == [{"id": 1}]
+    assert sd.last_detected_faces == [{"id": 1}]
     assert processor.current_frame_number == 3
 
 
@@ -229,10 +266,6 @@ def test_scan_issue_frames_rejects_when_marker_enables_vr180():
     processor.media_rotation = 0
     processor.fps = 30.0
     processor.current_frame_number = 0
-    processor.last_detected_faces = []
-    processor._smoothed_kps = {}
-    processor._smoothed_dense_kps = {}
-    processor._smoothed_dense_kps_203 = {}
     processor.main_window = SimpleNamespace(
         control={"VR180ModeEnableToggle": False},
         parameters={},
@@ -241,6 +274,7 @@ def test_scan_issue_frames_rejects_when_marker_enables_vr180():
         markers={10: {"control": {"VR180ModeEnableToggle": True}}},
         videoSeekSlider=SimpleNamespace(value=lambda: 0),
     )
+    _setup_sequential_detector(processor)
 
     with pytest.raises(RuntimeError, match="Issue scans are not supported"):
         processor.scan_issue_frames(
@@ -526,10 +560,6 @@ def test_scan_issue_frames_filters_scan_state_before_detection():
     processor.media_rotation = 0
     processor.fps = 30.0
     processor.current_frame_number = 0
-    processor.last_detected_faces = []
-    processor._smoothed_kps = {}
-    processor._smoothed_dense_kps = {}
-    processor._smoothed_dense_kps_203 = {}
     frame = np.zeros((4, 4, 3), dtype=np.uint8)
     captured = {}
 
@@ -544,18 +574,21 @@ def test_scan_issue_frames_filters_scan_state_before_detection():
         default_parameters=SimpleNamespace(data={"SimilarityThresholdSlider": 50}),
         models_processor=SimpleNamespace(device="cpu"),
     )
+    sd = _setup_sequential_detector(processor)
     processor._get_target_input_height = lambda: 256
 
-    def fake_run_sequential_detection(
-        _frame_rgb,
-        local_control,
-        local_params,
+    def fake_run(
+        frame_rgb=None,
+        local_control_for_worker=None,
+        local_params_for_worker=None,
+        is_master_edit_active=False,
         frame_tensor=None,
         detector_control_override=None,
+        frame_number=-1,
         **_kwargs,
     ):
-        captured["local_control"] = local_control
-        captured["local_params"] = local_params
+        captured["local_control"] = local_control_for_worker
+        captured["local_params"] = local_params_for_worker
         captured["detector_control_override"] = detector_control_override
         return _empty_scan_detection_result()
 
@@ -570,11 +603,7 @@ def test_scan_issue_frames_filters_scan_state_before_detection():
         ),
         patch("app.processors.video_processor.misc_helpers.seek_frame"),
         patch("app.processors.video_processor.misc_helpers.release_capture"),
-        patch.object(
-            processor,
-            "_run_sequential_detection",
-            side_effect=fake_run_sequential_detection,
-        ),
+        patch.object(sd, "run", side_effect=fake_run),
     ):
         result = processor.scan_issue_frames(
             scan_ranges=[(0, 0)],

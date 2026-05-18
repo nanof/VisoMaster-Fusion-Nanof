@@ -1907,42 +1907,106 @@ def test_target_face_parameter_mutations_are_blocked_while_scan_is_active(
 
 def test_target_face_context_menu_disables_mutating_actions_while_scan_is_active():
     menu_exec_calls = []
+    menu_state_snapshots = []
     target_face_button = SimpleNamespace(
         main_window=_make_scan_main_window(keep_controls=True),
-        face_header_action=_DummyButton("Face 1"),
-        parameters_copy_action=_DummyButton("Copy Parameters"),
-        parameters_paste_action=_DummyButton("Apply Copied Parameters"),
-        save_parameters_action=_DummyButton("Save Current Parameters and Settings"),
-        load_parameters_action=_DummyButton("Load Parameters"),
-        load_parameters_and_settings_action=_DummyButton(
-            "Load Parameters and Settings"
-        ),
-        small_thumbnails_action=_DummyButton("Small Thumbnails"),
-        large_thumbnails_action=_DummyButton("Large Thumbnails"),
-        remove_action=_DummyButton("Remove from List"),
         get_display_label=lambda: "Face 1",
         mapToGlobal=lambda point: point,
-        popMenu=SimpleNamespace(exec_=lambda point: menu_exec_calls.append(point)),
+        popMenu=None,
     )
+
+    def create_context_menu():
+        target_face_button.face_header_action = _DummyButton("Face 1")
+        target_face_button.parameters_copy_action = _DummyButton("Copy Parameters")
+        target_face_button.parameters_paste_action = _DummyButton(
+            "Apply Copied Parameters"
+        )
+        target_face_button.save_parameters_action = _DummyButton(
+            "Save Current Parameters and Settings"
+        )
+        target_face_button.load_parameters_action = _DummyButton("Load Parameters")
+        target_face_button.load_parameters_and_settings_action = _DummyButton(
+            "Load Parameters and Settings"
+        )
+        target_face_button.small_thumbnails_action = _DummyButton("Small Thumbnails")
+        target_face_button.large_thumbnails_action = _DummyButton("Large Thumbnails")
+        target_face_button.remove_action = _DummyButton("Remove from List")
+
+    def exec_context_menu(point):
+        menu_exec_calls.append(point)
+        menu_state_snapshots.append(
+            {
+                "parameters_copy": target_face_button.parameters_copy_action.enabled,
+                "parameters_paste": target_face_button.parameters_paste_action.enabled,
+                "save_parameters": target_face_button.save_parameters_action.enabled,
+                "load_parameters": target_face_button.load_parameters_action.enabled,
+                "load_parameters_and_settings": target_face_button.load_parameters_and_settings_action.enabled,
+                "remove": target_face_button.remove_action.enabled,
+            }
+        )
+
+    def release_context_menu(*action_attrs):
+        for attr in action_attrs:
+            setattr(target_face_button, attr, None)
+        target_face_button.popMenu = None
+
+    target_face_button.create_context_menu = create_context_menu
+    target_face_button._exec_context_menu = exec_context_menu
+    target_face_button._release_context_menu = release_context_menu
     target_face_button.main_window.scan_issue_worker = object()
 
     widget_components.TargetFaceCardButton.on_context_menu(target_face_button, 12)
 
-    assert target_face_button.parameters_copy_action.enabled is True
-    assert target_face_button.save_parameters_action.enabled is True
-    assert target_face_button.parameters_paste_action.enabled is False
-    assert target_face_button.load_parameters_action.enabled is False
-    assert target_face_button.load_parameters_and_settings_action.enabled is False
-    assert target_face_button.remove_action.enabled is False
+    assert menu_state_snapshots[-1] == {
+        "parameters_copy": True,
+        "parameters_paste": False,
+        "save_parameters": True,
+        "load_parameters": False,
+        "load_parameters_and_settings": False,
+        "remove": False,
+    }
     assert menu_exec_calls == [12]
+    assert target_face_button.remove_action is None
 
     target_face_button.main_window.scan_issue_worker = None
     target_face_button.main_window.scan_issue_ui_state = {}
 
     widget_components.TargetFaceCardButton.on_context_menu(target_face_button, 34)
 
-    assert target_face_button.parameters_paste_action.enabled is True
-    assert target_face_button.load_parameters_action.enabled is True
-    assert target_face_button.load_parameters_and_settings_action.enabled is True
-    assert target_face_button.remove_action.enabled is True
+    assert menu_state_snapshots[-1] == {
+        "parameters_copy": True,
+        "parameters_paste": True,
+        "save_parameters": True,
+        "load_parameters": True,
+        "load_parameters_and_settings": True,
+        "remove": True,
+    }
     assert menu_exec_calls == [12, 34]
+    assert target_face_button.remove_action is None
+
+
+def test_target_face_refresh_display_label_does_not_require_context_menu():
+    display_label = _DummyButton("Face")
+    target_face_button = SimpleNamespace(
+        display_label=display_label,
+        get_display_label=lambda: "Face 2",
+    )
+
+    widget_components.TargetFaceCardButton.refresh_display_label(target_face_button)
+
+    assert display_label.text == "Face 2"
+
+
+def test_target_face_refresh_display_label_updates_live_context_menu_header():
+    display_label = _DummyButton("Face")
+    face_header_action = _DummyButton("Face")
+    target_face_button = SimpleNamespace(
+        display_label=display_label,
+        face_header_action=face_header_action,
+        get_display_label=lambda: "Face 2",
+    )
+
+    widget_components.TargetFaceCardButton.refresh_display_label(target_face_button)
+
+    assert display_label.text == "Face 2"
+    assert face_header_action.text == "Face 2"

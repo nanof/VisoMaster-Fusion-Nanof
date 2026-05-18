@@ -84,6 +84,7 @@ ACTIONS_MAINT = [
     ("Revert to Previous Version", "_go_rollback", "Select and revert to older commit"),
     ("Back", "_go_home", "Return to home screen"),
 ]
+ROLLBACK_COMMIT_LIMIT = 50
 
 
 # ---------- Update Check ----------
@@ -142,7 +143,7 @@ class LauncherWindow(QtWidgets.QWidget):
         self.update_status = self._check_and_log_update_status()
 
         update_current_commit_in_cfg()
-        self.commits = fetch_commit_list(10)
+        self.commits = fetch_commit_list(ROLLBACK_COMMIT_LIMIT)
 
         # --- Checksum state ---
         self._load_checksum_status()
@@ -581,7 +582,7 @@ class LauncherWindow(QtWidgets.QWidget):
                 run_git(["reset", "--hard", f"origin/{branch}"])
                 update_current_commit_in_cfg()
                 update_last_updated_in_cfg()
-                self.commits = fetch_commit_list(10)
+                self.commits = fetch_commit_list(ROLLBACK_COMMIT_LIMIT)
                 self._rebuild_page("page_rollback", self._build_rollback_page)
                 self._refresh_update_indicators()
                 print("[Launcher] Update complete.")
@@ -789,7 +790,7 @@ class LauncherWindow(QtWidgets.QWidget):
                 update_current_commit_in_cfg()
                 update_last_updated_in_cfg()
                 print("[Launcher] Revert complete.")
-                self.commits = fetch_commit_list(10)
+                self.commits = fetch_commit_list(ROLLBACK_COMMIT_LIMIT)
                 self._rebuild_page("page_rollback", self._build_rollback_page)
                 self._refresh_update_indicators()
                 if is_launcher_update_available():

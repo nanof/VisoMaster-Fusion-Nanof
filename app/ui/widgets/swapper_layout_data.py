@@ -1,6 +1,9 @@
 from typing import Any
 import app.ui.widgets.actions.control_actions as control_actions
 
+MASK_SHOW_OPTIONS = ["swap_mask", "diff", "texture"]
+MASK_SHOW_DEFAULT = "swap_mask"
+
 # Widgets in Face Swap tab are created from this Layout
 SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
     "Swapper": {
@@ -14,24 +17,13 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
                 "InStyleSwapper256 Version C",
                 "DeepFaceLive (DFM)",
                 "SimSwap512",
-                "SimSwap512-CrossFace",
                 "GhostFace-v1",
                 "GhostFace-v2",
                 "GhostFace-v3",
-                "HyperSwap-v1",
-                "HyperSwap-v2",
-                "HyperSwap-v3",
-                "ReHiFace-S",
                 "CSCS",
-                "BlendSwap-256",
-                "UniFace-256",
             ],
             "default": "Inswapper128",
-            "help": (
-                "Choose which swapper model to use for face swapping. "
-                "BlendSwap-256 and UniFace-256 (FaceFusion) need an assigned input face with kps_5; "
-                "their ONNX weights download from Hugging Face (facefusion/models-3.0.0)."
-            ),
+            "help": "Choose which swapper model to use for face swapping.",
         },
         "SwapperResSelection": {
             "level": 2,
@@ -118,31 +110,6 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "step": 1,
             "help": "Set the similarity threshold to control how similar the detected face should be to the reference (target) face.",
         },
-        "SequentialTargetMatchEnableToggle": {
-            "level": 1,
-            "label": "Swap all by index",
-            "default": False,
-            "help": "No Find Faces required. Uses only checked Input Faces in list order: detection 0 gets input 0, detection 1 gets input 1, and if there are more detections than inputs, wraps to input 0 again (round-robin). Cosine similarity is not used. When Face Tracking is on and ByteTrack IDs are valid and unique, assignments are further stabilized per track. IoU + remembered bounding boxes (TTL ~90 frames, ghost slots when a face briefly disappears) keep the same input on the same physical face when 'Stabilize without Face Tracking' is on; turn that off for pure per-frame left-to-right round-robin with no memory (can reshuffle when faces appear/disappear). Large timeline jumps or backward seeks clear stabilization state. Swap/restorer/mask settings use the same parameter set as normal swap: the selected Find Faces card if any, otherwise the current face-parameter panel (current_widget_parameters). Recognition uses the active swapper's ArcFace model for the target embedding. Ignored when 'Swap Input Face only once' is enabled (Settings → Swap settings). Use 'Input rotate start offset' (or window keys comma / full stop) to shift which checked input is treated as index 0 for the first detection.",
-        },
-        "SequentialStabilizeWithoutTrackingToggle": {
-            "level": 2,
-            "label": "Stabilize without Face Tracking",
-            "default": True,
-            "parentToggle": "SequentialTargetMatchEnableToggle",
-            "requiredToggleValue": True,
-            "help": "When Face Tracking is off, still match detections to recent positions (IoU / centroid, same memory budget as with ByteTrack) so the same person keeps the same checked input when faces briefly drop out or the count changes. Disable only if you prefer strict per-frame spatial round-robin with no temporal memory (may avoid rare wrong locks in chaotic scenes at the cost of shuffling).",
-        },
-        "SequentialInputRotateOffsetSlider": {
-            "level": 2,
-            "label": "Input rotate start offset",
-            "min_value": "0",
-            "max_value": "31",
-            "default": "0",
-            "step": 1,
-            "parentToggle": "SequentialTargetMatchEnableToggle",
-            "requiredToggleValue": True,
-            "help": "Adds a circular shift to input assignment: effective input index is (assignment + offset) modulo number of checked inputs. Example with 3 inputs: offset 1 maps the first detection (by stabilized order) to the second checked face. Window keys , (comma) and . (full stop) decrease/increase this value with wraparound — same physical keys on ES and US layouts; they do nothing if this slider is hidden or disabled.",
-        },
         "PreSwapSharpnessDecimalSlider": {
             "level": 1,
             "label": "Pre Swap Sharpness (1.0)",
@@ -152,69 +119,6 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "step": 0.1,
             "decimals": 1,
             "help": 'Sharpens the original face befor swapping. can sometimes be usefull. care it can tamper with "Auto Face Restorer"!',
-        },
-        "SwapLightTouchEnableToggle": {
-            "level": 1,
-            "label": "Light touch (no neural net)",
-            "default": False,
-            "help": "After the swap model, optional cheap GPU pass on the aligned face crop: unsharp mask and/or CLAHE on luminance (torch/Kornia). "
-            "Almost free vs Face Restorer; cosmetic only — does not fix badly broken swaps.",
-        },
-        "SwapLightTouchUSMAmountDecimalSlider": {
-            "level": 2,
-            "label": "Light touch — USM amount",
-            "min_value": "0.00",
-            "max_value": "1.50",
-            "default": "0.00",
-            "decimals": 2,
-            "step": 0.05,
-            "parentToggle": "SwapLightTouchEnableToggle",
-            "requiredToggleValue": True,
-            "help": "Unsharp mask strength on RGB (0 = off). Try 0.15–0.45 for a subtle crispness.",
-        },
-        "SwapLightTouchUSMSigmaDecimalSlider": {
-            "level": 2,
-            "label": "Light touch — USM blur σ",
-            "min_value": "0.10",
-            "max_value": "3.00",
-            "default": "1.00",
-            "decimals": 2,
-            "step": 0.05,
-            "parentToggle": "SwapLightTouchEnableToggle",
-            "requiredToggleValue": True,
-            "help": "Gaussian blur sigma (px) for the USM base layer; higher = broader halos.",
-        },
-        "SwapLightTouchClaheEnableToggle": {
-            "level": 2,
-            "label": "Light touch — CLAHE (L channel)",
-            "default": False,
-            "parentToggle": "SwapLightTouchEnableToggle",
-            "requiredToggleValue": True,
-            "help": "Contrast-limited adaptive histogram equalization on luminance only; can lift flat lighting — use low blend first.",
-        },
-        "SwapLightTouchClaheClipDecimalSlider": {
-            "level": 3,
-            "label": "CLAHE clip limit",
-            "min_value": "0.50",
-            "max_value": "4.00",
-            "default": "1.50",
-            "decimals": 2,
-            "step": 0.05,
-            "parentToggle": "SwapLightTouchEnableToggle & SwapLightTouchClaheEnableToggle",
-            "requiredToggleValue": True,
-            "help": "Kornia equalize_clahe clip_limit; higher = stronger local contrast (noise risk).",
-        },
-        "SwapLightTouchClaheBlendDecimalSlider": {
-            "level": 3,
-            "label": "CLAHE blend",
-            "min_value": "0.00",
-            "max_value": "1.00",
-            "default": "0.30",
-            "decimals": 2,
-            "step": 0.05,
-            "parentToggle": "SwapLightTouchEnableToggle & SwapLightTouchClaheEnableToggle",
-            "requiredToggleValue": True,
-            "help": "Mix equalized L with original L (1 = full CLAHE).",
         },
     },
     "Swap strenght and likeness": {
@@ -281,17 +185,10 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
         },
     },
     "Masks": {
-        "MaskShowSelection": {
-            "level": 1,
-            "label": "Mask view selection",
-            "options": ["swap_mask", "diff", "texture"],
-            "default": "swap_mask",
-            "help": 'select what mask is shown in "view face mask".',
-        },
         "BordermaskEnableToggle": {
             "level": 1,
             "label": "Border Mask",
-            "default": False,
+            "default": True,  # Default to True to prevent black square around the swap when no occlusion is selected
             "help": "A rectangle with adjustable bottom, left, right, top, and sides that masks the swapped face result back into the original image.",
         },
         "BorderBottomSlider": {
@@ -535,68 +432,6 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "requiredToggleValue": True,
             "help": "Increase to strengthen the effect.",
         },
-        "PoissonRingEdgeEnableToggle": {
-            "level": 1,
-            "label": "Seamless edge blend (Poisson)",
-            "default": False,
-            "help": "Face Swap → Masks: reduces halo at the face boundary using OpenCV seamlessClone "
-            "in the mask feather band (CPU on the face crop).",
-        },
-        "PoissonRingEdgeAmountSlider": {
-            "level": 2,
-            "label": "Seamless edge strength",
-            "min_value": "0",
-            "max_value": "100",
-            "default": "60",
-            "step": 1,
-            "parentToggle": "PoissonRingEdgeEnableToggle",
-            "requiredToggleValue": True,
-            "help": "0 = off, 100 = full seamless mix in the feather band.",
-        },
-        "PoissonRingEdgeModeSelection": {
-            "level": 2,
-            "label": "Seamless mode",
-            "options": ["Mixed", "Normal"],
-            "default": "Mixed",
-            "parentToggle": "PoissonRingEdgeEnableToggle",
-            "requiredToggleValue": True,
-            "help": "Mixed = MIXED_CLONE (gradients + texture). Normal = NORMAL_CLONE (stronger match to scene color at edge).",
-        },
-        "PoissonRingEdgeBandwidthSlider": {
-            "level": 2,
-            "label": "Ring bandwidth",
-            "min_value": "0",
-            "max_value": "100",
-            "default": "50",
-            "step": 1,
-            "parentToggle": "PoissonRingEdgeEnableToggle",
-            "requiredToggleValue": True,
-            "help": "Where seamless vs standard alpha is mixed: 0 = narrow band (only the steepest part of the feather), "
-            "100 = wide band (more of the soft mask). Default 50 ≈ previous single curve.",
-        },
-        "PoissonRingEdgePeakScaleSlider": {
-            "level": 2,
-            "label": "Feather curve peak",
-            "min_value": "2",
-            "max_value": "10",
-            "default": "4",
-            "step": 1,
-            "parentToggle": "PoissonRingEdgeEnableToggle",
-            "requiredToggleValue": True,
-            "help": "Multiplier for m·(1−m) before shaping (was fixed at 4). Higher pushes weight toward the middle of the feather.",
-        },
-        "PoissonRingEdgeMaskBlurSlider": {
-            "level": 2,
-            "label": "Mask blur (σ px)",
-            "min_value": "0",
-            "max_value": "12",
-            "default": "0",
-            "step": 1,
-            "parentToggle": "PoissonRingEdgeEnableToggle",
-            "requiredToggleValue": True,
-            "help": "Gaussian blur on the soft mask before computing the ring weights only (not the seamlessClone binary mask). "
-            "Higher σ widens the transition region used for mixing.",
-        },
     },
     "Original Face Parsers": {
         "MouthParserStretchToggle": {
@@ -668,22 +503,6 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "requiredToggleValue": True,
             "help": "Mouth Zoom slider.",
         },
-        "PortraitMattingRVMEnableToggle": {
-            "level": 1,
-            "label": "Portrait matting (RVM)",
-            "default": False,
-            "help": "Robust Video Matting ONNX: refina la máscara del swap con un mate de retrato (estado recurrente en cero por frame).",
-            "exec_function": control_actions.handle_face_mask_state_change,
-            "exec_function_args": ["PortraitMattingRVMEnableToggle"],
-        },
-        "U2NetSalientMaskEnableToggle": {
-            "level": 1,
-            "label": "Salient mask (U2Net-p)",
-            "default": False,
-            "help": "Segmentación saliente tipo u2netp (rembg) como máscara adicional sobre el swap; prototipo estilo SAM para objetos.",
-            "exec_function": control_actions.handle_face_mask_state_change,
-            "exec_function_args": ["U2NetSalientMaskEnableToggle"],
-        },
         "FaceParserEnableToggle": {
             "level": 1,
             "label": "Face Parser Mask",
@@ -691,17 +510,6 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "help": "Allow the unprocessed background from the orginal image to show in the final swap.",
             "exec_function": control_actions.handle_face_mask_state_change,
             "exec_function_args": ["FaceParserEnableToggle"],
-        },
-        "FaceParserBackboneSelection": {
-            "level": 2,
-            "label": "Face parser backbone",
-            "options": ["ResNet34", "BiSeNet-18"],
-            "default": "ResNet34",
-            "parentToggle": "FaceParserEnableToggle",
-            "requiredToggleValue": True,
-            "help": "ResNet34: modelo estándar (faceparser_resnet34). BiSeNet-18: variante más ligera (yakhyo/face-parsing).",
-            "exec_function": control_actions.handle_face_parser_backbone_change,
-            "exec_function_args": ["FaceParserBackboneSelection"],
         },
         "FaceParserEndToggle": {
             "level": 2,
@@ -895,23 +703,6 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "requiredToggleValue": True,
             "help": "Blend the value for Face Parser",
         },
-        "BlinkAwareEyeMaskEnableToggle": {
-            "level": 1,
-            "label": "Blink-aware eye mask (no Restore Eyes)",
-            "default": False,
-            "help": "Weakens the swap in the eye region when a blink is likely, so **target** eyes show through — **without** enabling Restore Eyes. Uses the same oval mask math as Restore Eyes; eye shape/feather sliders stay under Restore Eyes (defaults apply here until you enable it). Turn off when using full Restore Eyes to avoid applying the eye mask twice.",
-        },
-        "BlinkAwareEyeMaskBlendSlider": {
-            "level": 2,
-            "label": "Blink mask base blend",
-            "min_value": "1",
-            "max_value": "100",
-            "default": "52",
-            "step": 1,
-            "parentToggle": "BlinkAwareEyeMaskEnableToggle",
-            "requiredToggleValue": True,
-            "help": "Baseline swap strength in the eye ovals (same meaning as Eyes Blend Amount): higher = more swapped eyes when **not** blinking; Smart Close then pulls toward the target on blinks.",
-        },
         "RestoreEyesEnableToggle": {
             "level": 1,
             "label": "Restore Eyes",
@@ -928,47 +719,6 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "parentToggle": "RestoreEyesEnableToggle",
             "requiredToggleValue": True,
             "help": "Increase this to show more of the swapped eyes. Decrease it to show more of the original eyes.",
-        },
-        "RestoreEyesSmartCloseEnableToggle": {
-            "level": 2,
-            "label": "Smart Close (with Restore Eyes)",
-            "default": False,
-            "parentToggle": "RestoreEyesEnableToggle",
-            "requiredToggleValue": True,
-            "help": "Only applies when **Restore Eyes** is on: temporally smooths 203-point eye-open ratios for adaptive blend. With **Blink-aware eye mask** alone, use the Smart Close sliders above (they do not require this toggle).",
-        },
-        "RestoreEyesSmartCloseAmountSlider": {
-            "level": 3,
-            "label": "Smart Close Strength",
-            "min_value": "0",
-            "max_value": "100",
-            "default": "65",
-            "step": 1,
-            "parentToggle": "RestoreEyesSmartCloseEnableToggle | BlinkAwareEyeMaskEnableToggle",
-            "requiredToggleValue": True,
-            "help": "How much to favor original eyes when a blink is detected. 0 disables the adaptive effect (same as Eyes Blend Amount only). 100 applies the full correction at full blink.",
-        },
-        "RestoreEyesSmartCloseSmoothSlider": {
-            "level": 3,
-            "label": "Smart Close Smoothing",
-            "min_value": "5",
-            "max_value": "95",
-            "default": "42",
-            "step": 1,
-            "parentToggle": "RestoreEyesSmartCloseEnableToggle | BlinkAwareEyeMaskEnableToggle",
-            "requiredToggleValue": True,
-            "help": "Temporal smoothing of the blink signal. Lower values react faster but may jitter; higher values are steadier but can lag a fast blink.",
-        },
-        "RestoreEyesSmartClosePixelAssistSlider": {
-            "level": 3,
-            "label": "Smart Close Pixel Assist",
-            "min_value": "0",
-            "max_value": "100",
-            "default": "45",
-            "step": 1,
-            "parentToggle": "RestoreEyesSmartCloseEnableToggle | BlinkAwareEyeMaskEnableToggle",
-            "requiredToggleValue": True,
-            "help": "Uses Laplacian texture on the **target** aligned face around each eye (kps_5) and combines it with the landmark blink signal. Improves closed-eye detection when landmarks lag; set to 0 to use landmarks only. Can mis-read heavy makeup or sunglasses as “more closed” — lower the slider if that happens.",
         },
         "RestoreEyesSizeFactorDecimalSlider": {
             "level": 2,
@@ -1142,7 +892,7 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "max_value": "50",
             "default": "0",
             "step": 1,
-            "parentToggle": "RestoreEyesEnableToggle | RestoreMouthEnableToggle | BlinkAwareEyeMaskEnableToggle",
+            "parentToggle": "RestoreEyesEnableToggle | RestoreMouthEnableToggle",
             "requiredToggleValue": True,
             "help": "Adjust the blur of mask border.",
         },
@@ -1499,6 +1249,11 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "level": 1,
             "label": "AutoColor Transfer",
             "default": False,
+            # Toggling color transfer must NOT trigger a single-frame refresh.
+            # The refresh path mutates det_faces_data_for_display bboxes in place,
+            # which corrupted the bbox passed to _detect_mouth_action_score on the
+            # next refresh and broke the auto-mouth state machine on stopped frames.
+            "enable_refresh_frame": False,
             "help": "Enable AutoColor Transfer: 1. Hans Test without mask, 2. Hans Test with mask, 3. DFL Method without mask, 4. DFL Original Method.",
         },
         "AutoColorTransferTypeSelection": {
@@ -1531,6 +1286,11 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "level": 1,
             "label": "Enable Ending Color Transfer",
             "default": False,
+            # Toggling color transfer must NOT trigger a single-frame refresh.
+            # See AutoColorEnableToggle above for the same rationale — refresh
+            # corrupted bboxes broke auto-mouth on stopped frames after color
+            # transfer was toggled.
+            "enable_refresh_frame": False,
             "help": "Enables a final color transfer pass after face restoration to match original skin tone.",
         },
         "EndingColorTransferTypeSelection": {
@@ -1975,8 +1735,9 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "requiredToggleValue": True,
             "enable_refresh_frame": False,
             "help": "Target age to transform the input face to (0–100). Click 'Apply' after changing this value.",
-            "action_button": {
+            "below_row_button": {
                 "label": "Apply",
+                "fixed_width": 68,
                 "help": "Apply the age transformation to the input face and re-compute embeddings and KV maps.",
                 "exec_function": control_actions.apply_face_reaging,
             },

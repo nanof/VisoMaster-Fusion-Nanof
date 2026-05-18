@@ -140,7 +140,18 @@ class BYTETracker(object):
     def __init__(self, args, frame_rate=30):
         self.tracked_stracks = []  # type: list[STrack]
         self.lost_stracks = []  # type: list[STrack]
-        self.removed_stracks = []  # type: list[STrack]
+        # MEM-FIX: Previously `removed_stracks` was a list of STrack objects
+        # appended unboundedly across the lifetime of the tracker — every track
+        # that ended (occlusion, scene cut, end-of-life) added another ~1 KB
+        # STrack instance that was never pruned. For long videos with crowd
+        # scenes this grew into many MB of dead Python objects, contributing to
+        # the user-reported "rendering slows to a crawl after a while" symptom.
+        #
+        # The list is only consumed internally to filter `lost_stracks` against
+        # already-removed track IDs; only `track.track_id` is ever accessed from
+        # the items. We therefore retain just the integer track IDs in a set,
+        # which is O(1) for membership testing and orders of magnitude smaller.
+        self._removed_track_ids: set = set()
 
         self.frame_id = 0
         self.args = args
@@ -149,6 +160,15 @@ class BYTETracker(object):
         self.buffer_size = int(frame_rate / 30.0 * args.track_buffer)
         self.max_time_lost = self.buffer_size
         self.kalman_filter = KalmanFilter()
+
+    @property
+    def removed_stracks(self):
+        """Backwards-compat shim for any external code that reads this attribute.
+
+        Returns an empty list — the full STrack objects are no longer retained.
+        Internal lookups go through `_removed_track_ids` instead.
+        """
+        return []
 
     def update(self, output_results, img_info, img_size):
         self.frame_id += 1
@@ -276,8 +296,15 @@ class BYTETracker(object):
         self.tracked_stracks = joint_stracks(self.tracked_stracks, refind_stracks)
         self.lost_stracks = sub_stracks(self.lost_stracks, self.tracked_stracks)
         self.lost_stracks.extend(lost_stracks)
-        self.lost_stracks = sub_stracks(self.lost_stracks, self.removed_stracks)
-        self.removed_stracks.extend(removed_stracks)
+        # MEM-FIX: Use the integer-id set instead of a list of STrack objects.
+        # The previous code retained every removed STrack forever; we only need
+        # to know which IDs are dead so they can be excluded from lost_stracks.
+        self.lost_stracks = [
+            t for t in self.lost_stracks
+            if t.track_id not in self._removed_track_ids
+        ]
+        for _t in removed_stracks:
+            self._removed_track_ids.add(_t.track_id)
         self.tracked_stracks, self.lost_stracks = remove_duplicate_stracks(self.tracked_stracks, self.lost_stracks)
         # get scores of lost tracks
         output_stracks = [track for track in self.tracked_stracks if track.is_activated]

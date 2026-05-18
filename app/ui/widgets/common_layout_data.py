@@ -19,25 +19,16 @@ COMMON_LAYOUT_DATA: Any = {
                 "GFPGAN-1024",
                 "CodeFormer",
                 "GPEN-256",
-                "GPEN-256 FP16 (HF)",
                 "GPEN-512",
                 "GPEN-1024",
                 "GPEN-2048",
                 "RestoreFormer++",
-                "RestoreFormer",
                 "VQFR-v2",
-                "DMDNet",
-                "DMDNet FP16",
-                "GPEN-256 Fast (128→256)",
-                "GPEN-256 Fast FP16 (128→256)",
             ],
             "default": "GFPGAN-v1.4",
             "parentToggle": "FaceRestorerEnableToggle",
             "requiredToggleValue": True,
-            "help": "Select the model type for face restoration. DMDNet (Li et al., dual-memory blind restoration, generic path) "
-            "requires CUDA, weights at model_assets/pytorch_weights/DMDNet.pth (download_models.py), and target 106-point landmarks. "
-            "DMDNet FP16 uses the same weights with CUDA autocast (often less VRAM / faster; quality may differ slightly). "
-            "GPEN-256 Fast*: same GPEN-BFR-256 ONNX with a 128→256 bottleneck before inference (preview-style).",
+            "help": "Select the model type for face restoration.",
             "exec_function": control_actions.handle_model_selection_change,
             "exec_function_args": ["FaceRestorerTypeSelection"],
         },
@@ -49,6 +40,8 @@ COMMON_LAYOUT_DATA: Any = {
             "parentToggle": "FaceRestorerEnableToggle",
             "requiredToggleValue": True,
             "help": "Select the alignment method for restoring the face to its original or blended position.",
+            "exec_function": control_actions.handle_restorer_state_change,
+            "exec_function_args": ["FaceRestorerEnable2Toggle"],
         },
         "FaceFidelityWeightDecimalSlider": {
             "level": 2,
@@ -73,6 +66,45 @@ COMMON_LAYOUT_DATA: Any = {
             "requiredToggleValue": True,
             "help": "Control the blend ratio between the restored face and the swapped face.",
         },
+        "FaceRestorerAutoEnableToggle": {
+            "level": 2,
+            "label": "Auto Restore",
+            "default": False,
+            "parentToggle": "FaceRestorerEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Auto Adjust Restorer Blend Amount",
+        },
+        "FaceRestorerAutoSharpAdjustSlider": {
+            "level": 3,
+            "label": "Adjust Sharpness",
+            "min_value": "-60",
+            "max_value": "60",
+            "default": "0",
+            "step": 1,
+            "parentToggle": "FaceRestorerEnableToggle & FaceRestorerAutoEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Adjust sharp calc. mostly needed for over 0, which makes the swap sharper. depends on swap model, restorer model, resolution, face size,...",
+        },
+        "FaceRestorerAutoMaskEnableToggle": {
+            "level": 3,
+            "label": "Sharpness Mask",
+            "default": False,
+            "parentToggle": "FaceRestorerEnableToggle & FaceRestorerAutoEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Auto Adjust Restorer Blend Amount with sharpness Map",
+        },
+        "FaceRestorerAutoSharpMaskAdjustDecimalSlider": {
+            "level": 4,
+            "label": "Mask Adjust",
+            "min_value": "0.00",
+            "max_value": "1.00",
+            "default": "1.00",
+            "decimals": 2,
+            "step": 0.05,
+            "parentToggle": "FaceRestorerEnableToggle & FaceRestorerAutoEnableToggle & FaceRestorerAutoMaskEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Adjust Min/Max Blend value change from base auto Blend value",
+        },
         "FaceRestorerSubsampleEnableToggle": {
             "level": 2,
             "label": "Subsample heavy restorer (FPS mode)",
@@ -80,7 +112,7 @@ COMMON_LAYOUT_DATA: Any = {
             "parentToggle": "FaceRestorerEnableToggle",
             "requiredToggleValue": True,
             "help": "PERF-009: run the primary Face Restorer network only every N frames per track; "
-            "in between, reuse a stable improvement map (restored−input) applied to the current swap. "
+            "in between, reuse a stable improvement map (restoredâˆ’input) applied to the current swap. "
             "Improves FPS when restoration dominates; fast mouth/eyes motion may look softer until the next full pass. "
             "Single-frame preview always runs full quality. Disables multi-face ORT batch restore for this session path. "
             "State is keyed per target face (worker parameter bucket) or stable UI object (VR / input-rotate). "
@@ -99,7 +131,7 @@ COMMON_LAYOUT_DATA: Any = {
         },
         "FaceRestorerSubsampleMotionDecimalSlider": {
             "level": 3,
-            "label": "Motion refresh (mean |Δ|/255, 0=off)",
+            "label": "Motion refresh (mean |Î”|/255, 0=off)",
             "min_value": "0.00",
             "max_value": "0.35",
             "default": "0.08",
@@ -117,11 +149,11 @@ COMMON_LAYOUT_DATA: Any = {
             "parentToggle": "FaceRestorerEnableToggle",
             "requiredToggleValue": True,
             "help": "When ON, skips Face Restorer 1 and 2 for this face if the alignment scale is at or above the threshold "
-            "(small face in frame — same idea as Inswapper auto-res: higher scale means more zoom). Saves GPU; applies to both restorer slots.",
+            "(small face in frame â€” same idea as Inswapper auto-res: higher scale means more zoom). Saves GPU; applies to both restorer slots.",
         },
         "FaceRestorerSmallFaceScaleGeDecimalSlider": {
             "level": 2,
-            "label": "Small-face scale threshold (≥ skip)",
+            "label": "Small-face scale threshold (â‰¥ skip)",
             "min_value": "1.00",
             "max_value": "4.00",
             "default": "2.00",
@@ -129,14 +161,14 @@ COMMON_LAYOUT_DATA: Any = {
             "step": 0.05,
             "parentToggle": "FaceRestorerEnableToggle & FaceRestorerSkipSmallFaceToggle",
             "requiredToggleValue": True,
-            "help": "Skip restoration when similarity-transform scale ≥ this value. Default 2.0 matches the boundary where Inswapper auto-res switches past 256 px.",
+            "help": "Skip restoration when similarity-transform scale â‰¥ this value. Default 2.0 matches the boundary where Inswapper auto-res switches past 256 px.",
         },
         "FaceRestorerUltraLightOnnxToggle": {
             "level": 1,
             "label": "Auto ultra-light GPEN path",
             "default": False,
-            "help": "When ON, temporarily use GPEN-256 Fast (128→256) instead of the selected restorer on webcam/screen and/or small target faces (see sub-toggles). "
-            "Same ONNX as GPEN-256 but a 128px bottleneck before the 256 input — softer / faster preprocessing; ONNX cost is still 256×256. "
+            "help": "When ON, temporarily use GPEN-256 Fast (128â†’256) instead of the selected restorer on webcam/screen and/or small target faces (see sub-toggles). "
+            "Same ONNX as GPEN-256 but a 128px bottleneck before the 256 input â€” softer / faster preprocessing; ONNX cost is still 256Ã—256. "
             "Skip-restorer-on-small-face (if ON) still wins and skips inference entirely. Applies to Restorer 1 and 2 when either slot runs.",
         },
         "FaceRestorerUltraLightOnLiveToggle": {
@@ -153,11 +185,11 @@ COMMON_LAYOUT_DATA: Any = {
             "default": False,
             "parentToggle": "FaceRestorerUltraLightOnnxToggle",
             "requiredToggleValue": True,
-            "help": "Use the fast GPEN path when alignment scale ≥ threshold (same meaning as small-face skip: higher scale = smaller face in frame).",
+            "help": "Use the fast GPEN path when alignment scale â‰¥ threshold (same meaning as small-face skip: higher scale = smaller face in frame).",
         },
         "FaceRestorerUltraLightScaleGeDecimalSlider": {
             "level": 3,
-            "label": "Ultra-light small-face scale (≥)",
+            "label": "Ultra-light small-face scale (â‰¥)",
             "min_value": "1.00",
             "max_value": "4.00",
             "default": "2.00",
@@ -165,7 +197,7 @@ COMMON_LAYOUT_DATA: Any = {
             "step": 0.05,
             "parentToggle": "FaceRestorerUltraLightOnnxToggle & FaceRestorerUltraLightOnSmallFaceToggle",
             "requiredToggleValue": True,
-            "help": "Trigger ultra-light GPEN when similarity-transform scale ≥ this value.",
+            "help": "Trigger ultra-light GPEN when similarity-transform scale â‰¥ this value.",
         },
         "FaceRestorerUltraLightPreferFp16Toggle": {
             "level": 2,
@@ -238,23 +270,16 @@ COMMON_LAYOUT_DATA: Any = {
                 "GFPGAN-1024",
                 "CodeFormer",
                 "GPEN-256",
-                "GPEN-256 FP16 (HF)",
                 "GPEN-512",
                 "GPEN-1024",
                 "GPEN-2048",
                 "RestoreFormer++",
-                "RestoreFormer",
                 "VQFR-v2",
-                "DMDNet",
-                "DMDNet FP16",
-                "GPEN-256 Fast (128→256)",
-                "GPEN-256 Fast FP16 (128→256)",
             ],
             "default": "GFPGAN-v1.4",
             "parentToggle": "FaceRestorerEnable2Toggle",
             "requiredToggleValue": True,
-            "help": "Select the model type for face restoration. DMDNet / DMDNet FP16: CUDA + DMDNet.pth + 106-point landmarks (see Restorer 1 help). "
-            "GPEN-256 Fast*: see Restorer 1 help.",
+            "help": "Select the model type for face restoration.",
             "exec_function": control_actions.handle_model_selection_change,
             "exec_function_args": ["FaceRestorerType2Selection"],
         },
@@ -465,6 +490,44 @@ COMMON_LAYOUT_DATA: Any = {
             "parentSelection": "FaceExpressionModeSelection",
             "requiredSelectionValue": "Advanced",
             "help": "Activate the eyes face expression restorer",
+        },
+        "FaceExpressionCameraGazeToggle": {
+            "level": 4,
+            "label": "Camera Gaze Lock",
+            "default": False,
+            "parentToggle": "FaceExpressionEnableBothToggle & FaceExpressionEyesToggle",
+            "requiredToggleValue": True,
+            "parentSelection": "FaceExpressionModeSelection",
+            "requiredSelectionValue": "Advanced",
+            "help": "Forces the eyes to look directly at the camera. Overrides original and driving gaze.",
+        },
+        "FaceExpressionCameraGazeStrengthDecimalSlider": {
+            "level": 5,
+            "label": "Gaze Strength",
+            "min_value": "0.00",
+            "max_value": "1.00",
+            "default": "0.50",
+            "decimals": 2,
+            "step": 0.05,
+            "parentToggle": "FaceExpressionEnableBothToggle & FaceExpressionEyesToggle & FaceExpressionCameraGazeToggle",
+            "requiredToggleValue": True,
+            "parentSelection": "FaceExpressionModeSelection",
+            "requiredSelectionValue": "Advanced",
+            "help": "Controls the strength of the camera gaze lock.",
+        },
+        "FaceExpressionCameraGazeVerticalOffsetDecimalSlider": {
+            "level": 5,
+            "label": "Gaze Vertical Fine-Tune",
+            "min_value": "-1.00",
+            "max_value": "1.00",
+            "default": "0.00",
+            "decimals": 2,
+            "step": 0.05,
+            "parentToggle": "FaceExpressionEnableBothToggle & FaceExpressionEyesToggle & FaceExpressionCameraGazeToggle",
+            "requiredToggleValue": True,
+            "parentSelection": "FaceExpressionModeSelection",
+            "requiredSelectionValue": "Advanced",
+            "help": "Micro-adjust the vertical gaze up or down to fix perceptual eye contact issues caused by eyelid shape.",
         },
         "FaceExpressionStableGazeEyesToggle": {
             "level": 4,
@@ -684,22 +747,6 @@ COMMON_LAYOUT_DATA: Any = {
             "requiredSelectionValue": "Advanced",
             "help": "Threshold value for Normalize Lips.",
         },
-        "FaceExpressionAdvancedPerformanceEyesLipsOnlyToggle": {
-            "level": 3,
-            "label": "Advanced: eyes/lips only (faster)",
-            "default": False,
-            "parentToggle": "FaceExpressionEnableBothToggle",
-            "requiredToggleValue": True,
-            "parentSelection": "FaceExpressionModeSelection",
-            "requiredSelectionValue": "Advanced",
-            "help": (
-                "Ignores brow and general regions for this pass even if those toggles are on, "
-                "reducing LivePortrait stitching work. For motion, driving+target use one batched "
-                "run when the engine allows it. "
-                "VISIOMASTER_LP_MOTION_NO_BATCH2=1 forces two separate motion runs; "
-                "VISIOMASTER_LP_MOTION_TRT_STATIC_BATCH=1 omits TensorRT batch-2 profile (batch-1 cache only)."
-            ),
-        },
         "FaceExpressionGeneralToggle": {
             "level": 3,
             "label": "Restore General Face Features",
@@ -791,9 +838,26 @@ COMMON_LAYOUT_DATA: Any = {
             "exec_function": control_actions.handle_auto_mouth_toggle,
             "exec_function_args": [],
             "help": (
-                "Automatically activates lip-transfer expression when mouth action is "
-                "detected. Face Parser is not forced on (that would punch through the "
-                "swap in the mouth area); enable Face Parser manually in Face Swap if needed."
+                "Triggers lip expression or face-parser mouth masks automatically when "
+                "mouth action is detected. In 'Expression Restorer' mode, takes "
+                "precedence over the face expression restorer's lip settings while "
+                "preserving your eye configuration. Deactivating auto mouth restores "
+                "normal face expression restorer behaviour for lips."
+            ),
+        },
+        "AutoMouthRestoreModeSelection": {
+            "level": 2,
+            "label": "Trigger Mode",
+            "options": ["Expression Restorer", "Face Parser Only"],
+            "default": "Expression Restorer",
+            "parentToggle": "AutoMouthExpressionEnableToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "'Expression Restorer': overrides the face expression restorer lip "
+                "settings when mouth is detected — preserves your eye/brow/general "
+                "restorer settings, updates mouth position. Slower (runs LivePortrait). "
+                "'Face Parser Only': applies face-parser mouth dilation masks only, "
+                "no expression transfer — faster, similar to xseg mouth."
             ),
         },
         "AutoMouthOpenThresholdDecimalSlider": {
@@ -801,15 +865,18 @@ COMMON_LAYOUT_DATA: Any = {
             "label": "Confidence Threshold",
             "min_value": "0.01",
             "max_value": "0.99",
-            "default": "0.20",
+            "default": "0.50",
             "decimals": 2,
             "step": 0.01,
             "parentToggle": "AutoMouthExpressionEnableToggle",
             "requiredToggleValue": True,
             "enable_refresh_frame": False,
             "help": (
-                "Minimum detection confidence required to trigger auto-mouth activation. "
-                "Higher values require a more confident detection before activating."
+                "Minimum lip-open ratio required to activate the auto-mouth feature. "
+                "The ratio is vertical_gap / horizontal_span of the mouth. "
+                "Typical conversational values are 0.20–0.50; "
+                "above 0.60 only fires for a very wide-open mouth. "
+                "Lower values are more sensitive; higher values require a larger opening."
             ),
         },
         "AutoMouthEMAAlphaDecimalSlider": {
@@ -854,8 +921,9 @@ COMMON_LAYOUT_DATA: Any = {
             "parentToggle": "AutoMouthExpressionEnableToggle",
             "requiredToggleValue": True,
             "help": (
-                "'lips' transfers only mouth motion (recommended). "
-                "'all' also includes eyes, matching full Simple-mode expression restorer."
+                "Used when the face expression restorer is not already enabled. "
+                "'lips' transfers only mouth motion. 'all' includes eyes too. "
+                "When the restorer is active, eye settings are inherited from it automatically."
             ),
         },
         "AutoMouthNormalizeLipsToggle": {
@@ -865,8 +933,32 @@ COMMON_LAYOUT_DATA: Any = {
             "parentToggle": "AutoMouthExpressionEnableToggle",
             "requiredToggleValue": True,
             "help": (
-                "Enable lip-ratio normalisation (uses lp_retarget_lip) for better "
-                "lip shape accuracy when auto-mouth is active."
+                "Enables lip-ratio normalisation for better lip shape accuracy. "
+                "In Expression Restorer mode uses lip retargeting (Advanced) or "
+                "lp_retarget_lip (Simple/fallback)."
+            ),
+        },
+        "AutoMouthExcludeUpperTeethToggle": {
+            "level": 2,
+            "label": "Exclude Upper Teeth Area",
+            "default": False,
+            "parentToggle": "AutoMouthExpressionEnableToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "When auto-mouth is active, trims the top part of the inner-mouth "
+                "face-parser mask to keep swapped upper teeth visible while preserving "
+                "original inner-mouth content like tongue/cavity."
+            ),
+        },
+        "AutoMouthShowDebugOutlineToggle": {
+            "level": 2,
+            "label": "Show Mouth Region Outline",
+            "default": False,
+            "parentToggle": "AutoMouthExpressionEnableToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "Draw a green outline around the mouth region on the preview frame "
+                "for debugging. Only visible when Auto Mouth Expression is active."
             ),
         },
         "AutoMouthMouthParserSlider": {
@@ -880,9 +972,8 @@ COMMON_LAYOUT_DATA: Any = {
             "requiredToggleValue": True,
             "enable_refresh_frame": False,
             "help": (
-                "Reserved: auto-mouth no longer forces Face Parser (avoids showing the "
-                "target mouth through the swap). Adjust Mouth in Face Swap if you use "
-                "Face Parser manually."
+                "Dilation amount for the inner-mouth face-parser mask when auto-mouth "
+                "is active. Overrides the Mouth slider in the Face Swap tab."
             ),
         },
         "AutoMouthUpperLipParserSlider": {
@@ -896,8 +987,8 @@ COMMON_LAYOUT_DATA: Any = {
             "requiredToggleValue": True,
             "enable_refresh_frame": False,
             "help": (
-                "Reserved: see Auto Mouth — Mouth Parser. Use Face Swap → Upper Lip when "
-                "Face Parser is enabled."
+                "Dilation amount for the upper-lip face-parser mask when auto-mouth "
+                "is active. Overrides the Upper Lip slider in the Face Swap tab."
             ),
         },
         "AutoMouthLowerLipParserSlider": {
@@ -905,14 +996,14 @@ COMMON_LAYOUT_DATA: Any = {
             "label": "Lower Lip Parser",
             "min_value": "0",
             "max_value": "30",
-            "default": "17",
+            "default": "8",
             "step": 1,
             "parentToggle": "AutoMouthExpressionEnableToggle",
             "requiredToggleValue": True,
             "enable_refresh_frame": False,
             "help": (
-                "Reserved: see Auto Mouth — Mouth Parser. Use Face Swap → Lower Lip when "
-                "Face Parser is enabled."
+                "Dilation amount for the lower-lip face-parser mask when auto-mouth "
+                "is active. Overrides the Lower Lip slider in the Face Swap tab."
             ),
         },
     },

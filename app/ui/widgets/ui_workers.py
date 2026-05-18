@@ -34,6 +34,7 @@ class TargetMediaLoaderWorker(qtc.QThread):
         folder_name=False,
         files_list=None,
         media_ids=None,
+        sort_files_list_by_name=True,
         webcam_mode=False,
         parent=None,
     ):
@@ -42,8 +43,12 @@ class TargetMediaLoaderWorker(qtc.QThread):
         self.folder_name = folder_name
         self.files_list = files_list or []
         self.media_ids = media_ids or []
+        self.sort_files_list_by_name = sort_files_list_by_name
         self.webcam_mode = webcam_mode
         self._running = True  # Flag to control the running state
+        self.control_snapshot = (
+            main_window.control.copy() if getattr(main_window, "control", None) else {}
+        )
 
     def run(self):
         if self.folder_name:
@@ -54,21 +59,32 @@ class TargetMediaLoaderWorker(qtc.QThread):
             self.load_webcams()
         self.finished.emit()
 
+    def _iter_sorted_recursive_media_files(self, folder_name: str):
+        for dirpath, dirnames, filenames in os.walk(folder_name, topdown=True):
+            dirnames.sort(key=str.lower)
+            for filename in sorted(filenames, key=str.lower):
+                media_file_path = os.path.abspath(os.path.join(dirpath, filename))
+                if misc_helpers.get_file_type(media_file_path):
+                    yield media_file_path
+
     def load_videos_and_images_from_folder(self, folder_name):
         # Initially hide the placeholder text
         self.main_window.placeholder_update_signal.emit(
             self.main_window.targetVideosList, True
         )
-        recursive_toggle = self.main_window.control.get(
+        recursive_toggle = self.control_snapshot.get(
             "TargetMediaFolderRecursiveToggle", False
         )
-        video_files = misc_helpers.get_video_files(folder_name, recursive_toggle)
-        image_files = misc_helpers.get_image_files(folder_name, recursive_toggle)
 
         i = 0
-        media_files = video_files + image_files
-        # Sorting the list
-        media_files.sort(key=lambda x: os.path.basename(str(x)).lower())
+        if recursive_toggle:
+            media_files = self._iter_sorted_recursive_media_files(folder_name)
+        else:
+            video_files = misc_helpers.get_video_files(folder_name, recursive_toggle)
+            image_files = misc_helpers.get_image_files(folder_name, recursive_toggle)
+            media_files = video_files + image_files
+            # Sorting the list
+            media_files.sort(key=lambda x: os.path.basename(str(x)).lower())
 
         for media_file in media_files:
             if not self._running:  # Check if the thread is still running
@@ -76,7 +92,10 @@ class TargetMediaLoaderWorker(qtc.QThread):
             media_file_path = os.path.join(folder_name, media_file)
             file_type = misc_helpers.get_file_type(media_file_path)
             q_image = common_widget_actions.extract_frame_as_image(
-                self.main_window, media_file_path, file_type
+                self.main_window,
+                media_file_path,
+                file_type,
+                cache_thumbnail=True,
             )
 
             media_id = self.media_ids[i] if self.media_ids else str(uuid.uuid1().int)
@@ -101,8 +120,9 @@ class TargetMediaLoaderWorker(qtc.QThread):
             m_id = self.media_ids[idx] if self.media_ids else str(uuid.uuid1().int)
             paired_files_ids.append((path, m_id))
 
-        # Alphabetical sorting on filename only
-        paired_files_ids.sort(key=lambda x: os.path.basename(str(x[0])).lower())
+        # Keep existing behavior by default; allow callers to preserve original order.
+        if self.sort_files_list_by_name:
+            paired_files_ids.sort(key=lambda x: os.path.basename(str(x[0])).lower())
 
         for media_file_path, media_id in paired_files_ids:
             if not self._running:  # Check if the thread is still running
@@ -111,7 +131,10 @@ class TargetMediaLoaderWorker(qtc.QThread):
                 continue
             file_type = misc_helpers.get_file_type(media_file_path)
             q_image = common_widget_actions.extract_frame_as_image(
-                self.main_window, media_file_path, file_type=file_type
+                self.main_window,
+                media_file_path,
+                file_type=file_type,
+                cache_thumbnail=True,
             )
             if q_image:
                 # Emit the signal to update GUI
@@ -126,9 +149,9 @@ class TargetMediaLoaderWorker(qtc.QThread):
             self.main_window.targetVideosList, True
         )
         camera_backend = CAMERA_BACKENDS[
-            self.main_window.control.get("WebcamBackendSelection", "DirectShow")
+            self.control_snapshot.get("WebcamBackendSelection", "DirectShow")
         ]
-        max_no = int(self.main_window.control.get("WebcamMaxNoSelection", 1))
+        max_no = int(self.control_snapshot.get("WebcamMaxNoSelection", 1))
 
         for i in range(max_no):
             try:
@@ -334,77 +357,97 @@ class InputFacesLoaderWorker(qtc.QThread):
         for image_file_path, face_id in paired_files_ids:
             if not self._running:  # Check if the thread is still running
                 break
-            if not misc_helpers.is_image_file(image_file_path):
-                continue
 
-            frame = misc_helpers.read_image_file(image_file_path)
-            if frame is None:
-                continue
-
-            frame_rgb = misc_helpers.bgr_uint8_to_rgb_contiguous(frame)
-
-            img = torch.from_numpy(frame_rgb).to(
-                self.main_window.models_processor.device
-            )
-            img = img.permute(2, 0, 1)
-
-            _, kpss_5, _ = self.main_window.models_processor.run_detect(
-                img,
-                control.get("DetectorModelSelection", "RetinaFace"),
-                max_num=1,
-                score=control.get("DetectorScoreSlider", 50) / 100.0,
-                input_size=misc_helpers.detector_input_size_from_control(control),
-                use_landmark_detection=control.get("LandmarkDetectToggle", False),
-                landmark_detect_mode=control.get("LandmarkDetectModelSelection", "203"),
-                landmark_score=control.get("LandmarkDetectScoreSlider", 50) / 100.0,
-                from_points=control.get("DetectFromPointsToggle", False),
-                rotation_angles=[0]
-                if not control.get("AutoRotationToggle", False)
-                else [0, 90, 180, 270],
-            )
-
-            if kpss_5 is None or len(kpss_5) == 0:
-                continue
-
-            face_kps = kpss_5[0]
-            if face_kps.any():
-                # Calculate embedding ONLY for the selected recognition model
-                selected_recognition_model = control.get(
-                    "RecognitionModelSelection", "Inswapper128ArcFace"
-                )
-                similarity_type = str("Auto")
-                face_emb, cropped_img = (
-                    self.main_window.models_processor.run_recognize_direct(
-                        img,
-                        face_kps,
-                        similarity_type,
-                        selected_recognition_model,  # Use selected model
-                    )
-                )
-
-                if face_emb is None:  # Check if recognition failed
+            # WORKER SAFETY: Wrap the entire image processing in a try/except block.
+            # If an image is corrupted or causes a tensor shape mismatch, it will gracefully
+            # skip to the next image without crashing the entire loader thread.
+            try:
+                if not misc_helpers.is_image_file(image_file_path):
                     continue
 
-                cropped_img_np = cropped_img.cpu().numpy()
-                face_img = misc_helpers.rgb_uint8_to_bgr_contiguous(cropped_img_np)
+                frame = misc_helpers.read_image_file(image_file_path)
+                if frame is None:
+                    print(
+                        f"[WARNING] InputFacesLoaderWorker: Could not read image, skipping {image_file_path}"
+                    )
+                    continue
 
-                # QIMAGE THREAD-SAFE
-                height, width, channel = face_img.shape
-                bytes_per_line = 3 * width
-                q_image = QImage(
-                    face_img.data, width, height, bytes_per_line, QImage.Format_BGR888
-                ).copy()
+                # Frame must be in RGB format
+                frame = frame[..., ::-1]  # Swap the channels from BGR to RGB
 
-                embedding_store: Dict[str, numpy.ndarray] = {
-                    selected_recognition_model: face_emb,
-                    "kps_5": face_kps,
-                }
+                img = torch.from_numpy(frame.astype("uint8")).to(
+                    self.main_window.models_processor.device
+                )
+                img = img.permute(2, 0, 1)
 
-                self.thumbnail_ready.emit(
-                    image_file_path, face_img, embedding_store, q_image, face_id
+                _, kpss_5, _ = self.main_window.models_processor.run_detect(
+                    img,
+                    control.get("DetectorModelSelection", "RetinaFace"),
+                    max_num=1,
+                    score=control.get("DetectorScoreSlider", 50) / 100.0,
+                    input_size=(512, 512),
+                    use_landmark_detection=control.get("LandmarkDetectToggle", False),
+                    landmark_detect_mode=control.get(
+                        "LandmarkDetectModelSelection", "203"
+                    ),
+                    landmark_score=control.get("LandmarkDetectScoreSlider", 50) / 100.0,
+                    from_points=control.get("DetectFromPointsToggle", False),
+                    rotation_angles=[0]
+                    if not control.get("AutoRotationToggle", False)
+                    else [0, 90, 180, 270],
                 )
 
-        # torch.cuda.empty_cache()  removed to not block main thread
+                if kpss_5 is None or len(kpss_5) == 0:
+                    continue
+
+                face_kps = kpss_5[0]
+                if face_kps.any():
+                    # Calculate embedding ONLY for the selected recognition model
+                    selected_recognition_model = control.get(
+                        "RecognitionModelSelection", "Inswapper128ArcFace"
+                    )
+                    similarity_type = str("Auto")
+                    face_emb, cropped_img = (
+                        self.main_window.models_processor.run_recognize_direct(
+                            img,
+                            face_kps,
+                            similarity_type,
+                            selected_recognition_model,  # Use selected model
+                        )
+                    )
+
+                    if face_emb is None:  # Check if recognition failed
+                        continue
+
+                    cropped_img_np = cropped_img.cpu().numpy()
+                    # Swap channels from RGB to BGR for pixmap creation
+                    face_img = numpy.ascontiguousarray(cropped_img_np[..., ::-1])
+
+                    # QIMAGE THREAD-SAFE
+                    height, width, channel = face_img.shape
+                    bytes_per_line = 3 * width
+                    q_image = QImage(
+                        face_img.data,
+                        width,
+                        height,
+                        bytes_per_line,
+                        QImage.Format_BGR888,
+                    ).copy()
+
+                    embedding_store: Dict[str, numpy.ndarray] = {
+                        selected_recognition_model: face_emb,
+                        "kps_5": face_kps,
+                    }
+
+                    self.thumbnail_ready.emit(
+                        image_file_path, face_img, embedding_store, q_image, face_id
+                    )
+
+            except Exception as e:
+                print(
+                    f"[ERROR] InputFacesLoaderWorker: Failed to process {image_file_path}. Reason: {e}"
+                )
+                continue  # Skip this specific corrupt image and continue the loop
 
     def stop(self):
         # Stop the thread by setting the running flag to False.
@@ -444,8 +487,6 @@ class FilterWorker(qtc.QThread):
             list_widget = self.main_window.targetVideosList
         elif self.filter_list == "input_faces":
             list_widget = self.main_window.inputFacesList
-        elif self.filter_list == "input_faces_favorites":
-            list_widget = self.main_window.inputFacesFavoritesList
         elif self.filter_list == "merged_embeddings":
             list_widget = self.main_window.inputEmbeddingsList
         return list_widget
@@ -454,8 +495,6 @@ class FilterWorker(qtc.QThread):
         if self.filter_list == "target_videos":
             self.filter_target_videos()
         elif self.filter_list == "input_faces":
-            self.filter_input_faces()
-        elif self.filter_list == "input_faces_favorites":
             self.filter_input_faces()
         elif self.filter_list == "merged_embeddings":
             self.filter_merged_embeddings()

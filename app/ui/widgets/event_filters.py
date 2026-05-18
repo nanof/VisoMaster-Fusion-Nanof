@@ -68,31 +68,31 @@ class VideoSeekSliderEventFilter(QtCore.QObject):
 
     def eventFilter(self, slider, event):
         if event.type() == QtCore.QEvent.Type.KeyPress:
-            if event.key() in {QtCore.Qt.Key_Left, QtCore.Qt.Key_Right}:
-                # Allow default slider movement
-                result = super().eventFilter(slider, event)
+            if event.key() == QtCore.Qt.Key_Right:
+                # Force strictly 1 frame advance through our controlled pipeline
+                video_control_actions.advance_video_slider_by_n_frames(
+                    self.main_window, 1
+                )
+                return True  # Stop QT from applying default values
 
-                def _after_key_frame_seek():
-                    mw = self.main_window
-                    mw.video_processor.process_current_frame()
-                    video_control_actions.resume_playback_after_seek_if_applicable(mw)
-
-                QtCore.QTimer.singleShot(0, _after_key_frame_seek)
-
-                return result  # Return the result of the default handling
+            elif event.key() == QtCore.Qt.Key_Left:
+                # Force strictly 1 frame rewind through our controlled pipeline
+                video_control_actions.rewind_video_slider_by_n_frames(
+                    self.main_window, 1
+                )
+                return True  # Stop QT from applying default values
 
         elif event.type() == QtCore.QEvent.Type.Wheel:
-            # Intercept mousewheel to force FrameSkipStepSlider
+            # Intercept mousewheel to use FrameSkipStepSlider logic
             delta = event.angleDelta().y()
             if delta > 0:
                 # If wheel up (Advance)
                 video_control_actions.advance_video_slider_by_n_frames(self.main_window)
             elif delta < 0:
-                # If wheel up (Rewind)
+                # If wheel down (Rewind)
                 video_control_actions.rewind_video_slider_by_n_frames(self.main_window)
 
-            # Return True to stop QT from applying default values
-            return True
+            return True  # Stop QT from applying default values
 
         # For other events, use the default behavior
         return super().eventFilter(slider, event)
@@ -108,8 +108,11 @@ class ListWidgetEventFilter(QtCore.QObject):
         list_widget: QtWidgets.QListWidget,
         event: QtCore.QEvent | QtGui.QDropEvent | QtGui.QMouseEvent,
     ):
-        # During shutdown, Qt may destroy C++ widgets before Python wrappers.
-        # Guard against "Internal C++ object already deleted" RuntimeError.
+        # During application shutdown, Qt deletes the C++ widgets before the
+        # Python wrappers; events may still fire on this filter while the
+        # underlying QListWidget / its viewport have already been destroyed.
+        # Touching them then raises shiboken's "Internal C++ object … already
+        # deleted." Bail out cleanly so the atexit traceback stops appearing.
         try:
             target_videos_list = self.main_window.targetVideosList
             target_videos_viewport = target_videos_list.viewport()

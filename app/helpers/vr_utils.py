@@ -28,6 +28,16 @@ _FEATHERED_MASK_CACHE_MAX = 8
 _FEATHERED_MASK_CACHE_LOCK = threading.Lock()
 
 
+def clear_feathered_mask_cache() -> None:
+    """Release all cached feathered VR stitch masks.
+
+    Called by VideoProcessor.join_and_clear_threads() between jobs to prevent
+    CPU RAM accumulation from large equirect-resolution float tensors.
+    """
+    with _FEATHERED_MASK_CACHE_LOCK:
+        _FEATHERED_MASK_CACHE.clear()
+
+
 # Define Sobel kernels once at the module level
 _SOBEL_X_KERNEL = torch.tensor(
     [[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]], dtype=torch.float32

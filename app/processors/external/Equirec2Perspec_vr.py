@@ -15,6 +15,35 @@ _PERSP_GRID_CACHE_MAX = 16
 _PERSP_GRID_CACHE_LOCK = threading.Lock()
 
 
+def clear_persp_grid_cache() -> None:
+    """Release all cached perspective sampling grids (CPU tensors only).
+
+    Cheap to clear and rebuild — the meshgrid generation is fast.
+    """
+    with _PERSP_GRID_CACHE_LOCK:
+        _PERSP_GRID_CACHE.clear()
+
+
+def clear_rotation_matrix_cache() -> None:
+    """Release all cached rotation matrices (GPU tensors).
+
+    Heavier to rebuild than the perspective grids because each entry triggers
+    cv2.Rodrigues + numpy → GPU transfers, but holds device memory across jobs.
+    """
+    _get_e2p_rotation_matrices_cached.cache_clear()
+
+
+def clear_persp_cache() -> None:
+    """Backwards-compatible umbrella: clear both grid and rotation caches.
+
+    Called by VideoProcessor.join_and_clear_threads() between jobs to prevent
+    accumulation across multiple recording sessions. Callers that only need
+    to drop one cache should use the dedicated clear_*_cache helpers.
+    """
+    clear_persp_grid_cache()
+    clear_rotation_matrix_cache()
+
+
 # E2P-CACHE-02: rotation matrix cache — same pattern as P2E's _get_rotation_matrices_cached.
 # Avoids 2× cv2.Rodrigues + 2× numpy→GPU transfers on EVERY GetPerspective call.
 # With 24 tiles × multiple faces, this was 48+ redundant Rodrigues calls per detection frame.

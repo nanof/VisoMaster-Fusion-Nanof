@@ -6,19 +6,21 @@ from typing import TYPE_CHECKING, Optional, Dict, Any, cast, TypedDict
 import os
 import shutil
 import time
-from PySide6.QtCore import QThread, Signal, Slot, QMetaObject, Qt, QEventLoop, QTimer
+import hashlib
+from PySide6.QtCore import QThread, Signal, Slot, QMetaObject, Qt, QEventLoop
 from PySide6 import QtWidgets
 from PySide6.QtWidgets import QMessageBox
 import numpy as np
 import threading
 import re
 import traceback  # Import traceback for error logging
-from app.helpers.recycle_bin import recycle_path
+from send2trash import send2trash
 
 from app.ui.widgets.actions import common_actions as common_widget_actions
 from app.ui.widgets.actions import card_actions
 from app.ui.widgets.actions import list_view_actions
 from app.ui.widgets.actions import video_control_actions
+from app.ui.widgets.actions import control_actions
 from app.ui.widgets.actions import layout_actions
 from app.ui.widgets.actions import save_load_actions
 from app.ui.widgets import ui_workers
@@ -191,7 +193,7 @@ def delete_job(main_window: "MainWindow") -> bool:
         job_file = jobs_dir / f"{job_name}.json"
         if job_file.exists():
             try:
-                recycle_path(job_file)
+                send2trash(str(job_file))  # Use send2trash for safety
                 print(f"[INFO] Job moved to trash: {job_file}")
                 deleted_any = True
             except Exception as e:
@@ -275,8 +277,6 @@ def _clear_main_window_state(main_window: "MainWindow"):
         ):
             main_window.selected_video_button = None
 
-    list_view_actions.apply_main_window_title_for_selected_media(main_window)
-
 
 def _load_job_target_media(main_window: "MainWindow", data: dict):
     """Loads target media files from the job data."""
@@ -312,18 +312,20 @@ def _load_job_target_media(main_window: "MainWindow", data: dict):
     # .run() is synchronous, ensuring media is loaded before proceeding.
     main_window.video_loader_worker.run()
 
+    # Target media thumbnails are batch-enqueued; wait briefly until target_videos
+    # is populated before trying to re-select saved media.
+    wait_start = time.perf_counter()
+    while list_view_actions._has_pending_target_media_thumbnail_work(main_window):
+        QtWidgets.QApplication.processEvents(QEventLoop.AllEvents, 5)
+        if (time.perf_counter() - wait_start) > 2.0:
+            break
+
+    QtWidgets.QApplication.processEvents()
+
     # Select the previously active media
     selected_media_id = data.get("selected_media_id", False)
     if selected_media_id and main_window.target_videos.get(selected_media_id):
         main_window.target_videos[selected_media_id].click()
-        QTimer.singleShot(
-            0,
-            partial(
-                list_view_actions.scroll_target_videos_list_to_media_id,
-                main_window,
-                selected_media_id,
-            ),
-        )
 
 
 def _load_job_input_faces(main_window: "MainWindow", data: dict):
@@ -449,8 +451,9 @@ def _load_job_target_faces_and_params(main_window: "MainWindow", data: dict):
                         main_window.merged_embeddings[assigned_id].embedding_store
                     )
 
-            # use TargetFaceCardButton widget to load existing target_face_button hooks
-            target_face_obj.load_target_face()
+            # IMPORTANT: do not call load_target_face() during restore.
+            # That method can clear assigned_input_faces/assigned_merged_embeddings
+            # when KeepInputToggle/AutoSwapToggle are enabled, overwriting saved job data.
 
             # Load assigned input faces
             target_face_obj.assigned_input_faces.clear()
@@ -489,14 +492,14 @@ def _load_job_controls_and_state(
     # Restore swap faces button state
     swap_faces_state = data.get("swap_faces_enabled", True)
     main_window.swapfacesButton.setChecked(swap_faces_state)
+    edit_faces_state = data.get("edit_faces_enabled", False)
+    main_window.editFacesButton.setChecked(edit_faces_state)
+    # Keep LivePortrait model lifecycle in sync when restoring button state.
+    control_actions.handle_face_editor_button_click(main_window)
     # On a batch load, this is harmful and breaks the logic.
     if swap_faces_state and not is_batch_load:
         # This will trigger a frame refresh via its own logic
         video_control_actions.process_swap_faces(main_window)
-    elif not swap_faces_state and not is_batch_load:
-        from app.ui.widgets.actions import preview_notification_actions as _preview_notify
-
-        _preview_notify.show_swap_faces_state(main_window, False)
     print(f"[INFO] Swap Faces button state restored: {swap_faces_state}")
 
     # Restore misc paths and settings
@@ -822,6 +825,13 @@ def load_job_workspace(main_window: "MainWindow", job_name: str):
         progress_dialog.update_progress(3, total_steps, steps[2])
         _load_job_input_faces(main_window, data)
 
+        # Wait for async face loader so assignments can be restored reliably.
+        worker = main_window.input_faces_loader_worker
+        if isinstance(worker, ui_workers.InputFacesLoaderWorker) and worker.isRunning():
+            loop = QEventLoop()
+            worker.finished.connect(loop.quit)
+            loop.exec()
+
         progress_dialog.update_progress(4, total_steps, steps[3])
         _load_job_embeddings(main_window, data)
 
@@ -846,8 +856,13 @@ def load_job_workspace(main_window: "MainWindow", job_name: str):
 
         # After loading, check if any target faces were loaded
         if main_window.target_faces:
-            # Get the ID of the first loaded target face
-            first_face_id = list(main_window.target_faces.keys())[0]
+            # Restore previously selected target face when available.
+            saved_face_id = data.get("selected_target_face_id")
+            first_face_id = (
+                saved_face_id
+                if saved_face_id in main_window.target_faces
+                else list(main_window.target_faces.keys())[0]
+            )
 
             # Ensure this face is marked as selected internally
             main_window.selected_target_face_id = first_face_id
@@ -858,12 +873,32 @@ def load_job_workspace(main_window: "MainWindow", job_name: str):
             if first_face_button:
                 first_face_button.setChecked(True)  # Visually select it
                 main_window.cur_selected_target_face_button = first_face_button
-                save_load_actions._sync_input_and_embedding_checkboxes_from_target_face(
-                    main_window, first_face_button
-                )
                 print(
                     f"[INFO] Loaded Job target_face {main_window.cur_selected_target_face_button}"
                 )
+                assigned_embedding_ids = (
+                    first_face_button.assigned_merged_embeddings.keys()
+                )
+                for embed_id in assigned_embedding_ids:
+                    embed_button = main_window.merged_embeddings.get(embed_id)
+                    if embed_button:
+                        embed_button.setChecked(True)
+                        print(
+                            f"[INFO] Checked embedding: {embed_button.embedding_name} (ID: {embed_id})"
+                        )
+
+                # *** Visually check assigned input faces for this face ***
+                print(
+                    f"[INFO] Checking assigned input faces for face_id: {first_face_id}"
+                )
+                assigned_input_face_ids = first_face_button.assigned_input_faces.keys()
+                for input_face_id in assigned_input_face_ids:
+                    input_face_button = main_window.input_faces.get(input_face_id)
+                    if input_face_button:
+                        input_face_button.setChecked(True)
+                        print(
+                            f"[INFO] Checked input face: {input_face_button.media_path} (ID: {input_face_id})"
+                        )
 
             print(
                 f"[INFO] Setting parameter widgets for loaded face_id: {first_face_id}"
@@ -994,8 +1029,13 @@ def _restore_workspace_from_snapshot(main_window: "MainWindow", data: dict):
 
         # After restoring, check if any target faces were restored
         if main_window.target_faces:
-            # Get the ID of the first restored target face
-            first_face_id = list(main_window.target_faces.keys())[0]
+            # Restore previously selected target face when available.
+            saved_face_id = data.get("selected_target_face_id")
+            first_face_id = (
+                saved_face_id
+                if saved_face_id in main_window.target_faces
+                else list(main_window.target_faces.keys())[0]
+            )
 
             # Ensure this face is marked as selected internally
             main_window.selected_target_face_id = first_face_id
@@ -1006,9 +1046,29 @@ def _restore_workspace_from_snapshot(main_window: "MainWindow", data: dict):
             if first_face_button:
                 first_face_button.setChecked(True)  # Visually select it
                 main_window.cur_selected_target_face_button = first_face_button
-                save_load_actions._sync_input_and_embedding_checkboxes_from_target_face(
-                    main_window, first_face_button
+                assigned_embedding_ids = (
+                    first_face_button.assigned_merged_embeddings.keys()
                 )
+                for embed_id in assigned_embedding_ids:
+                    embed_button = main_window.merged_embeddings.get(embed_id)
+                    if embed_button:
+                        embed_button.setChecked(True)
+                        print(
+                            f"[INFO] Checked embedding: {embed_button.embedding_name} (ID: {embed_id})"
+                        )
+
+                # *** Visually check assigned input faces for this face ***
+                print(
+                    f"[INFO] Checking assigned input faces for restored face_id: {first_face_id}"
+                )
+                assigned_input_face_ids = first_face_button.assigned_input_faces.keys()
+                for input_face_id in assigned_input_face_ids:
+                    input_face_button = main_window.input_faces.get(input_face_id)
+                    if input_face_button:
+                        input_face_button.setChecked(True)
+                        print(
+                            f"[INFO] Checked input face: {input_face_button.media_path} (ID: {input_face_id})"
+                        )
 
             print(
                 f"[INFO] Setting parameter widgets for restored face_id: {first_face_id}"
@@ -1121,12 +1181,11 @@ def _serialize_job_data(main_window: "MainWindow") -> dict:
             "kv_map": kv_map_path,
         }
 
-    # Serialize Target Media (excluding webcams and screen capture)
+    # Serialize Target Media (excluding webcams)
     target_medias_data = [
         {"media_id": media_id, "media_path": target_media.media_path}
         for media_id, target_media in main_window.target_videos.items()
         if not target_media.is_webcam
-        and not getattr(target_media, "is_screen_capture", False)
     ]
 
     # Get selected media ID
@@ -1177,6 +1236,7 @@ def _serialize_job_data(main_window: "MainWindow") -> dict:
             main_window, "selected_target_face_id", None
         ),
         "swap_faces_enabled": main_window.swapfacesButton.isChecked(),
+        "edit_faces_enabled": main_window.editFacesButton.isChecked(),
         "last_target_media_folder_path": main_window.last_target_media_folder_path,
         "last_input_media_folder_path": main_window.last_input_media_folder_path,
         "loaded_embedding_filename": main_window.loaded_embedding_filename,
@@ -1513,7 +1573,6 @@ def load_job_settings(main_window: "MainWindow", job_data: dict):
         # frame sees fully restored controls instead of stale pre-load state.
 
         # 1. Select the media.
-        scroll_to_media_id: str | None = None
         selected_media_id = job_data.get("selected_media_id", False)
         if (
             selected_media_id
@@ -1522,7 +1581,6 @@ def load_job_settings(main_window: "MainWindow", job_data: dict):
         ):
             print(f"[INFO] Clicking target media: {selected_media_id}")
             main_window.target_videos[selected_media_id].click()
-            scroll_to_media_id = selected_media_id
         else:
             print(f"[WARN] Could not select media_id {selected_media_id} for job.")
             # Try to select the first available media
@@ -1532,20 +1590,9 @@ def load_job_settings(main_window: "MainWindow", job_data: dict):
                     f"[WARN] Selecting first available media instead: {first_media.media_id}"
                 )
                 first_media.click()
-                scroll_to_media_id = first_media.media_id
             else:
                 print("[ERROR] No target media loaded, cannot proceed.")
                 # This job will likely fail, but we must continue
-
-        if scroll_to_media_id:
-            QTimer.singleShot(
-                0,
-                partial(
-                    list_view_actions.scroll_target_videos_list_to_media_id,
-                    main_window,
-                    scroll_to_media_id,
-                ),
-            )
 
         # 2. Load target faces and parameters.
         _load_job_target_faces_and_params(main_window, job_data)
@@ -1912,6 +1959,20 @@ class JobProcessor(QThread):
             self.job_failed_signal.emit(job_name, f"Failed to load job file: {e}")
             return None
 
+    @staticmethod
+    def _embedding_signature(embedding_data: dict[str, Any]) -> str:
+        """Build a stable signature so equivalent embeddings across jobs are loaded once."""
+        embedding_name = embedding_data.get(
+            "embedding_name", embedding_data.get("name", "")
+        )
+        embedding_store = embedding_data.get("embedding_store", {})
+        payload = {
+            "embedding_name": embedding_name,
+            "embedding_store": embedding_store,
+        }
+        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
     def _analyze_job_batch(self) -> Optional[MasterData]:
         """
         (SMART ANALYSIS & VALIDATION) Reads all job JSONs in the batch.
@@ -1929,6 +1990,8 @@ class JobProcessor(QThread):
         seen_media_ids = set()
         seen_face_ids = set()
         seen_embed_ids = set()
+        seen_embed_signature_to_id: dict[str, str] = {}
+        embed_id_alias_map: dict[str, str] = {}
 
         valid_job_data_list = []  # List for jobs that pass validation
         self.skipped_jobs.clear()  # Clear skipped list for this batch
@@ -1988,12 +2051,42 @@ class JobProcessor(QThread):
             # Collect embeddings
             all_embeddings_in_job = data.get("embeddings_data", {})
             for embed_id in required_embed_ids:
-                if embed_id not in seen_embed_ids:
-                    # We know embed_id exists in all_embeddings_in_job from validation
-                    master_data["embeddings_data"][embed_id] = all_embeddings_in_job[
-                        embed_id
-                    ]
+                if embed_id in seen_embed_ids:
+                    continue
+
+                embedding_payload = all_embeddings_in_job.get(embed_id)
+                if not embedding_payload:
+                    continue
+
+                embed_signature = self._embedding_signature(embedding_payload)
+                if embed_signature in seen_embed_signature_to_id:
+                    canonical_embed_id = seen_embed_signature_to_id[embed_signature]
+                    embed_id_alias_map[embed_id] = canonical_embed_id
                     seen_embed_ids.add(embed_id)
+                    continue
+
+                # Keep the first occurrence, skip equivalent duplicates from other jobs.
+                master_data["embeddings_data"][embed_id] = embedding_payload
+                seen_embed_ids.add(embed_id)
+                seen_embed_signature_to_id[embed_signature] = embed_id
+
+            # Rewrite per-job embedding assignments to canonical IDs so lookups
+            # succeed even when equivalent embeddings were de-duplicated.
+            for target_face in data.get("target_faces_data", {}).values():
+                assigned_embed_ids = target_face.get("assigned_merged_embeddings", [])
+                if not isinstance(assigned_embed_ids, list):
+                    continue
+
+                remapped_ids = []
+                seen_ids_for_face = set()
+                for assigned_id in assigned_embed_ids:
+                    mapped_id = embed_id_alias_map.get(assigned_id, assigned_id)
+                    if mapped_id in seen_ids_for_face:
+                        continue
+                    seen_ids_for_face.add(mapped_id)
+                    remapped_ids.append(mapped_id)
+
+                target_face["assigned_merged_embeddings"] = remapped_ids
 
             # --- 3. Add valid job to processing list ---
             valid_job_data_list.append(data)
