@@ -4,7 +4,7 @@ import os
 import traceback
 from functools import partial
 import uuid
-from typing import TYPE_CHECKING, Any, Dict
+from typing import TYPE_CHECKING, Any, Dict, Mapping
 from app.helpers.recycle_bin import recycle_path
 import subprocess
 import sys
@@ -2327,6 +2327,16 @@ class GpuRoutingTargetsPicker(QtWidgets.QWidget, ParametersWidget):
         gpu_settings_actions.sync_routing_json_to_models_processor(self.main_window)
 
 
+class _SpinBoxNoScrollSteal(QtWidgets.QSpinBox):
+    """Do not change value on wheel unless focused — parent ``QScrollArea`` steals wheels."""
+
+    def wheelEvent(self, event: QtGui.QWheelEvent) -> None:
+        if not self.hasFocus():
+            event.ignore()
+            return
+        super().wheelEvent(event)
+
+
 class _PerGpuSpinTable(QtWidgets.QWidget, ParametersWidget):
     """Base helper: one labelled QSpinBox per active routing GPU.
 
@@ -2363,6 +2373,27 @@ class _PerGpuSpinTable(QtWidgets.QWidget, ParametersWidget):
         self._outer = QtWidgets.QVBoxLayout(self)
         self._outer.setContentsMargins(0, 0, 0, 0)
         self._spins: Dict[int, QtWidgets.QSpinBox] = {}
+
+    def set_value(self, value: Any) -> None:
+        """Used by ``sync_all_widgets_for_control_key`` when ``bind_control`` matches JSON controls."""
+        data: Dict[int, int] = {}
+        if isinstance(value, Mapping):
+            raw_map = dict(value)
+        else:
+            try:
+                parsed = json.loads(str(value))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                parsed = {}
+            raw_map = parsed if isinstance(parsed, dict) else {}
+        for k, v in raw_map.items():
+            try:
+                data[int(k)] = int(v)
+            except (TypeError, ValueError):
+                continue
+        self.main_window.control[self.control_key] = json.dumps(data)
+        self.rebuild_from_models()
+        if self._spins:
+            self._on_changed()
 
     def reset_to_default_value(self) -> None:
         self.main_window.control[self.control_key] = "{}"
@@ -2430,10 +2461,12 @@ class _PerGpuSpinTable(QtWidgets.QWidget, ParametersWidget):
             h = QtWidgets.QHBoxLayout(row)
             h.setContentsMargins(0, 0, 0, 0)
             lbl = QtWidgets.QLabel(self._label_for(logical))
-            spin = QtWidgets.QSpinBox()
+            spin = _SpinBoxNoScrollSteal()
             spin.setMinimum(self.min_value)
             spin.setMaximum(self.max_value)
-            spin.setValue(int(stored.get(int(logical), self.default_value)))
+            iv = int(stored.get(int(logical), self.default_value))
+            iv = max(int(self.min_value), min(int(self.max_value), iv))
+            spin.setValue(iv)
             if self.row_suffix:
                 spin.setSuffix(self.row_suffix)
             spin.valueChanged.connect(self._on_changed)

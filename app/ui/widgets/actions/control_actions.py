@@ -231,6 +231,19 @@ def change_threads_number(main_window: "MainWindow", new_threads_number):
     common_widget_actions.update_gpu_memory_progressbar(main_window)
 
 
+def on_keep_controls_active_toggle(main_window: "MainWindow", enabled: bool) -> None:
+    """Re-enable parameters when turning on *Keep Controls Active* mid-session.
+
+    If the UI was locked because playback started without keep-controls, this
+    restores editors (including GPU weight spinboxes) without restarting.
+    """
+    if not enabled:
+        return
+    from app.ui.widgets.actions import layout_actions
+
+    layout_actions.enable_all_parameters_and_control_widget(main_window)
+
+
 def change_theme(main_window: "MainWindow", new_theme):
     def get_style_data(filename, theme="dark", custom_colors=None):
         custom_colors = custom_colors or {"primary": "#4090a3"}

@@ -310,6 +310,27 @@ def migrate_legacy_gpu_slider_key(control: dict) -> None:
         control["GpuPrimaryPhysicalIndex"] = 0
 
 
+def refresh_gpu_spin_editors(main_window: MainWindow) -> None:
+    """Rebuild per-GPU spin rows so spinboxes match current enabled/visibility state.
+
+    After ``setDisabled(True)`` on the editor, children can remain effectively stuck on
+    some platforms; rebuilding after re-enable fixes weights / threads editors.
+    """
+    from PySide6 import QtWidgets
+
+    for key in ("GpuWeightsEditor", "GpuThreadsPerGpuEditor"):
+        w = main_window.parameter_widgets.get(key)
+        if w is None:
+            continue
+        try:
+            w.rebuild_from_models()
+        except Exception:
+            continue
+        use = bool(w.isVisible() and w.isEnabled())
+        for sb in w.findChildren(QtWidgets.QSpinBox):
+            sb.setEnabled(use)
+
+
 def finalize_gpu_widgets_after_settings_layout(main_window: MainWindow) -> None:
     """Populate dynamic GPU names and sync ModelsProcessor once."""
     migrate_legacy_gpu_slider_key(main_window.control)

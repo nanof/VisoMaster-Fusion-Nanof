@@ -1161,6 +1161,12 @@ def set_all_parameters_and_control_widgets_enabled(
         if line_e:
             line_e.setDisabled(disabled)
 
+    if enabled:
+        try:
+            gpu_settings_actions.refresh_gpu_spin_editors(main_window)
+        except Exception:
+            pass
+
 
 def disable_all_parameters_and_control_widget(main_window: "MainWindow"):
     set_all_parameters_and_control_widgets_enabled(main_window, False)

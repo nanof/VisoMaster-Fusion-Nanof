@@ -191,6 +191,7 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
         "GpuWeightsEditor": {
             "level": 2,
             "label": "Weights per GPU",
+            "bind_control": "GpuWeightsJson",
             "parentToggle": "MultiGpuRoutingEnableToggle & MultiGpuAdvancedToggle",
             "requiredToggleValue": True,
             "help": "Relative share of frames per GPU (integers, 1..16). Ex.: 5070 Ti = 3 / 3070 = 1 -> the fast GPU receives three frames for every one that goes to the slow GPU. Ignored in Round-Robin mode.",
@@ -198,6 +199,7 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
         "GpuThreadsPerGpuEditor": {
             "level": 2,
             "label": "Worker threads per GPU (optional)",
+            "bind_control": "GpuThreadsPerGpuJson",
             "parentToggle": "MultiGpuRoutingEnableToggle & MultiGpuAdvancedToggle",
             "requiredToggleValue": True,
             "help": "Leave rows at 0 to let the engine split ‘Number of Threads’ by weight. Set an explicit count per GPU only to hard-pin e.g. 3 workers to the fast GPU and 1 to the slow GPU.",
@@ -252,6 +254,8 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "label": "Keep Controls Active",
             "default": False,
             "help": "Keep the controls active during recording.",
+            "exec_function": control_actions.on_keep_controls_active_toggle,
+            "exec_function_args": [],
         },
         "TrackMarkersToggle": {
             "level": 1,
