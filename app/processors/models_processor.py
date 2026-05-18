@@ -1,3 +1,4 @@
+import contextlib
 import threading
 import weakref
 import os
@@ -321,6 +322,10 @@ class ModelsProcessor(QtCore.QObject):
             1, _env_int("VISIOMASTER_EMULATED_GPU_COUNT", default=2)
         )
         self.ui_multi_gpu_routing_enabled = False
+        self.ui_multi_gpu_mode: str = "off"  # off | stage | frame
+        self.ui_stage_offload_secondary_phys: int = 1
+        self.ui_offload_face_restorer: bool = False
+        self.ui_offload_frame_enhancer: bool = False
         self.ui_routing_targets: list[int] = [0]
         # --- Proportional multi-GPU scheduling (advanced panel) ---
         # Mode drives how per-frame routing picks a target and whether workers
@@ -1696,10 +1701,109 @@ class ModelsProcessor(QtCore.QObject):
         self.trt_ep_options["trt_engine_cache_path"] = _TRT_REL_ENGINE_CACHE_DIR
         self.trt_ep_options["trt_timing_cache_path"] = _TRT_REL_TIMING_CACHE_FILE
 
+    def get_multi_gpu_mode(self) -> str:
+        mode = str(getattr(self, "ui_multi_gpu_mode", "off") or "off").strip().lower()
+        if mode in ("off", "stage", "frame"):
+            return mode
+        return "off"
+
+    def is_multi_gpu_stage_offload(self) -> bool:
+        return self.get_multi_gpu_mode() == "stage"
+
+    def is_multi_gpu_frame_routing(self) -> bool:
+        return self.get_multi_gpu_mode() == "frame"
+
+    def get_stage_offload_secondary_physical(self) -> int:
+        phy = self._physical_cuda_device_count()
+        prim = int(self._primary_cuda_device_ordinal())
+        if phy <= 1:
+            return prim
+        sec = int(getattr(self, "ui_stage_offload_secondary_phys", prim))
+        sec = max(0, min(sec, phy - 1))
+        if sec == prim:
+            for i in range(phy):
+                if i != prim:
+                    return i
+        return sec
+
+    def _is_stage_offload_thread(self) -> bool:
+        return bool(getattr(self._thread_gpu_context, "stage_offload_active", None))
+
+    def should_offload_stage(
+        self,
+        stage: str,
+        *,
+        control: dict | None = None,
+        parameters: dict | None = None,
+    ) -> bool:
+        if not self.is_multi_gpu_stage_offload():
+            return False
+        if stage not in ("facerestorer", "frame_enhancer"):
+            return False
+        if self.device != "cuda" or self._physical_cuda_device_count() <= 1:
+            return False
+        if self.get_stage_offload_secondary_physical() == int(
+            self._primary_cuda_device_ordinal()
+        ):
+            return False
+        if stage == "facerestorer":
+            if not bool(getattr(self, "ui_offload_face_restorer", False)):
+                return False
+            if parameters is not None:
+                if not bool(parameters.get("FaceRestorerEnableToggle", False)):
+                    if not bool(parameters.get("FaceRestorerEnable2Toggle", False)):
+                        return False
+        elif stage == "frame_enhancer":
+            if not bool(getattr(self, "ui_offload_frame_enhancer", False)):
+                return False
+            if control is not None and not bool(
+                control.get("FrameEnhancerEnableToggle", False)
+            ):
+                return False
+        return True
+
+    @contextlib.contextmanager
+    def gpu_stage_context(self, stage: str):
+        if not self.is_multi_gpu_stage_offload() or stage not in (
+            "facerestorer",
+            "frame_enhancer",
+        ):
+            yield
+            return
+        sec_phys = self.get_stage_offload_secondary_physical()
+        prev_gpu = getattr(self._thread_gpu_context, "gpu_index", None)
+        prev_stage = getattr(self._thread_gpu_context, "stage_offload_active", None)
+        prev_depth = int(getattr(self._thread_gpu_context, "stage_offload_depth", 0))
+        self._thread_gpu_context.gpu_index = int(sec_phys)
+        self._thread_gpu_context.stage_offload_active = str(stage)
+        self._thread_gpu_context.stage_offload_depth = prev_depth + 1
+        self._sync_torch_cuda_device()
+        try:
+            yield
+        finally:
+            self._thread_gpu_context.stage_offload_depth = prev_depth
+            if prev_depth <= 0:
+                if hasattr(self._thread_gpu_context, "stage_offload_active"):
+                    delattr(self._thread_gpu_context, "stage_offload_active")
+            else:
+                self._thread_gpu_context.stage_offload_active = prev_stage
+            if prev_gpu is None:
+                self.clear_thread_gpu_index()
+            else:
+                self.set_thread_gpu_index(int(prev_gpu))
+            self._sync_torch_cuda_device()
+
+    def get_primary_torch_device(self) -> str:
+        if self.device != "cuda" or not torch.cuda.is_available():
+            return "cpu"
+        return f"cuda:{int(self._primary_cuda_device_ordinal())}"
+
     def _session_phys_for_ort_load(self) -> int:
         """CUDA ordinal used when creating ORT/TRT sessions on the current thread."""
         if self.device != "cuda":
             return 0
+        if self._is_stage_offload_thread() and self._physical_cuda_device_count() > 1:
+            return int(self.get_compute_cuda_device_id())
         if (
             getattr(self, "ui_multi_gpu_routing_enabled", False)
             and self._physical_cuda_device_count() > 1
@@ -1712,6 +1816,12 @@ class ModelsProcessor(QtCore.QObject):
         """Key in ``self.models`` — distinct ORT sessions per GPU when multi-GPU routing is on."""
         if self.device != "cuda":
             return model_name
+        if self._is_stage_offload_thread():
+            if self._physical_cuda_device_count() <= 1:
+                return model_name
+            if self._is_thread_cpu_routing():
+                return model_name
+            return f"{model_name}__cuda{int(self.get_compute_cuda_device_id())}"
         if not getattr(self, "ui_multi_gpu_routing_enabled", False):
             return model_name
         if self._physical_cuda_device_count() <= 1:
@@ -2150,42 +2260,49 @@ class ModelsProcessor(QtCore.QObject):
         """Sets the ONNX thread count. TRT engine reloading is no longer needed here."""
         self.nThreads = value
 
+    def _gpu_memory_mb_for_cuda_index(self, cuda_index: int) -> tuple[int, int]:
+        """``(used_MB, total_MB)`` for one CUDA ordinal (aligned with ``torch.cuda`` device id).
+
+        Uses ``torch.cuda.mem_get_info`` so totals match ``get_device_name`` and ORT/CUDA
+        routing. On Windows, ``nvidia-smi -i=N`` often uses a different GPU order than CUDA.
+        """
+        idx = int(cuda_index)
+        if not torch.cuda.is_available() or idx < 0 or idx >= int(torch.cuda.device_count()):
+            return 0, 0
+        try:
+            free_b, total_b = torch.cuda.mem_get_info(idx)
+            total_mb = max(1, int(total_b) // (1024 * 1024))
+            used_mb = max(0, int(total_b - free_b) // (1024 * 1024))
+            return used_mb, total_mb
+        except Exception:
+            try:
+                props = torch.cuda.get_device_properties(idx)
+                total_mb = max(1, int(props.total_memory) // (1024 * 1024))
+                used_mb = max(
+                    0, int(torch.cuda.memory_reserved(idx)) // (1024 * 1024)
+                )
+                return used_mb, total_mb
+            except Exception:
+                return 0, 0
+
     def get_all_gpus_memory_mb(self) -> list[tuple[int, int]]:
         """
         Returns ``[(used_MB, total_MB), ...]`` for each CUDA GPU (ordinal order).
 
-        Uses one ``nvidia-smi`` query when possible; falls back to ``torch.cuda`` per device.
+        Per-CUDA-index via ``torch.cuda`` (same ordinals as device names and multi-GPU routing).
         """
-        try:
-            command = "nvidia-smi --query-gpu=memory.total,memory.free --format=csv,noheader,nounits"
-            output = sp.check_output(command.split()).decode("ascii").strip()
-            lines = [ln for ln in output.split("\n") if ln.strip()]
-            out: list[tuple[int, int]] = []
-            for line in lines:
-                parts = line.split(",")
-                memory_total_val = int(parts[0].strip())
-                memory_free_val = int(parts[1].strip())
-                out.append((memory_total_val - memory_free_val, memory_total_val))
-            return out
-        except Exception:
-            if not torch.cuda.is_available():
-                return [(0, 0)]
-            out = []
-            for idx in range(int(torch.cuda.device_count())):
-                props = torch.cuda.get_device_properties(idx)
-                memory_total_val = props.total_memory // (1024 * 1024)
-                memory_free_val = (
-                    props.total_memory - torch.cuda.memory_reserved(idx)
-                ) // (1024 * 1024)
-                out.append((memory_total_val - memory_free_val, memory_total_val))
-            return out
+        if not torch.cuda.is_available():
+            return [(0, 0)]
+        n = int(torch.cuda.device_count())
+        if n <= 0:
+            return [(0, 0)]
+        return [self._gpu_memory_mb_for_cuda_index(i) for i in range(n)]
 
     def get_gpu_memory(self):
         """
         Returns GPU memory usage as ``(used_MB, total_MB)`` for the **primary** GPU in settings.
 
-        Queries nvidia-smi for accuracy; falls back to ``torch.cuda`` device properties
-        if nvidia-smi is unavailable.  Returns ``(0, 0)`` when no GPU is detected.
+        Uses the same per-CUDA rows as the VRAM progress bars.  Returns ``(0, 0)`` when no GPU.
         """
         rows = self.get_all_gpus_memory_mb()
         if not rows:

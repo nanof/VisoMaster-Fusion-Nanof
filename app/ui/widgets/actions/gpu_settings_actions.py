@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, List
 import torch
 from PySide6 import QtWidgets
 
+from app.processors.gpu_mode import resolve_multi_gpu_mode_key
 from app.ui.widgets.actions import control_actions
 
 if TYPE_CHECKING:
@@ -103,11 +104,149 @@ def on_primary_gpu_combo_changed(main_window: MainWindow, *_args) -> None:
     picker = main_window.parameter_widgets.get("GpuRoutingTargetsPicker")
     if picker is not None and hasattr(picker, "rebuild_from_models"):
         picker.rebuild_from_models()
+    sec_combo = main_window.parameter_widgets.get("MultiGpuSecondaryGpuSelection")
+    if sec_combo is not None:
+        fill_secondary_gpu_combo(sec_combo, main_window)
+    sync_multi_gpu_mode_from_control(main_window)
+
+
+def _default_secondary_physical_index(main_window: MainWindow) -> int:
+    n = _physical_cuda_count()
+    if n <= 1:
+        return 0
+    prim = int(main_window.control.get("GpuPrimaryPhysicalIndex", 0))
+    prim = max(0, min(prim, n - 1))
+    for i in range(n):
+        if i != prim:
+            return i
+    return prim
+
+
+def secondary_gpu_combo_entries(main_window: MainWindow) -> list[tuple[int, str]]:
+    """(physical_index, label) for CUDA devices other than primary."""
+    n = _physical_cuda_count()
+    if n <= 0:
+        return [(0, "GPU 0 (CUDA not available)")]
+    prim = int(main_window.control.get("GpuPrimaryPhysicalIndex", 0))
+    prim = max(0, min(prim, n - 1))
+    out: list[tuple[int, str]] = []
+    for i in range(n):
+        if i == prim:
+            continue
+        try:
+            name = torch.cuda.get_device_name(i)
+        except Exception:
+            name = "Unknown"
+        out.append((i, f"{i}: {name}"))
+    if not out:
+        out.append((prim, f"{prim}: (primary only)"))
+    return out
+
+
+def fill_secondary_gpu_combo(combo: QtWidgets.QComboBox, main_window: MainWindow) -> None:
+    combo.blockSignals(True)
+    combo.clear()
+    entries = secondary_gpu_combo_entries(main_window)
+    for phys, label in entries:
+        combo.addItem(label, phys)
+    idx = int(main_window.control.get("MultiGpuSecondaryGpuPhysicalIndex", -1))
+    if idx < 0:
+        idx = _default_secondary_physical_index(main_window)
+    for j in range(combo.count()):
+        if combo.itemData(j) == idx:
+            combo.setCurrentIndex(j)
+            break
+    else:
+        combo.setCurrentIndex(0)
+    combo.blockSignals(False)
+
+
+def sync_multi_gpu_mode_from_control(main_window: MainWindow) -> None:
+    """Push multi-GPU mode / stage offload flags into ModelsProcessor."""
+    control = main_window.control
+    mode = resolve_multi_gpu_mode_key(control)
+    mp = main_window.models_processor
+    mp.ui_multi_gpu_mode = mode
+    mp.ui_multi_gpu_routing_enabled = mode == "frame"
+    control["MultiGpuRoutingEnableToggle"] = mode == "frame"
+    mp.ui_offload_face_restorer = bool(
+        control.get("MultiGpuOffloadFaceRestorerToggle", False)
+    )
+    mp.ui_offload_frame_enhancer = bool(
+        control.get("MultiGpuOffloadFrameEnhancerToggle", False)
+    )
+    n = _physical_cuda_count()
+    try:
+        sec = int(control.get("MultiGpuSecondaryGpuPhysicalIndex", -1))
+    except (TypeError, ValueError):
+        sec = -1
+    if n <= 1:
+        sec = int(control.get("GpuPrimaryPhysicalIndex", 0))
+    elif sec < 0:
+        sec = _default_secondary_physical_index(main_window)
+    else:
+        sec = max(0, min(sec, n - 1))
+    prim = int(control.get("GpuPrimaryPhysicalIndex", 0))
+    if n > 0:
+        prim = max(0, min(prim, n - 1))
+        if sec == prim:
+            sec = _default_secondary_physical_index(main_window)
+    control["MultiGpuSecondaryGpuPhysicalIndex"] = sec
+    mp.ui_stage_offload_secondary_phys = sec
+
+
+def on_multi_gpu_mode_changed(main_window: MainWindow, *_args) -> None:
+    sync_multi_gpu_mode_from_control(main_window)
+    picker = main_window.parameter_widgets.get("GpuRoutingTargetsPicker")
+    if picker is not None and hasattr(picker, "rebuild_from_models"):
+        picker.rebuild_from_models()
+    for key in ("GpuWeightsEditor", "GpuThreadsPerGpuEditor"):
+        w = main_window.parameter_widgets.get(key)
+        if w is not None and hasattr(w, "rebuild_from_models"):
+            w.rebuild_from_models()
+    _sync_scheduler_config(main_window)
+    refresh_gpu_spin_editors(main_window)
+    mode_widget = main_window.parameter_widgets.get("MultiGpuModeSelection")
+    if mode_widget is not None:
+        common_actions = __import__(
+            "app.ui.widgets.actions.common_actions",
+            fromlist=["show_hide_related_widgets"],
+        )
+        common_actions.show_hide_related_widgets(
+            main_window, mode_widget, "MultiGpuModeSelection"
+        )
+
+
+def on_stage_offload_toggle(main_window: MainWindow, *_args) -> None:
+    sync_multi_gpu_mode_from_control(main_window)
+
+
+def on_secondary_gpu_combo_changed(main_window: MainWindow, *_args) -> None:
+    combo = main_window.parameter_widgets.get("MultiGpuSecondaryGpuSelection")
+    if combo is None:
+        return
+    phys = _primary_combo_physical_index(combo)
+    if phys is None:
+        return
+    main_window.control["MultiGpuSecondaryGpuPhysicalIndex"] = phys
+    sync_multi_gpu_mode_from_control(main_window)
 
 
 def on_multi_gpu_routing_toggle(main_window: MainWindow, enabled: bool) -> None:
+    """Legacy toggle: maps to frame routing mode when changed directly."""
+    if enabled:
+        main_window.control["MultiGpuModeSelection"] = "Frame routing (legacy)"
+    elif resolve_multi_gpu_mode_key(main_window.control) == "frame":
+        main_window.control["MultiGpuModeSelection"] = "Off"
+    mode_widget = main_window.parameter_widgets.get("MultiGpuModeSelection")
+    if mode_widget is not None and hasattr(mode_widget, "setCurrentText"):
+        mode_widget.blockSignals(True)
+        mode_widget.setCurrentText(
+            str(main_window.control.get("MultiGpuModeSelection", "Off"))
+        )
+        mode_widget.blockSignals(False)
+    sync_multi_gpu_mode_from_control(main_window)
     mp = main_window.models_processor
-    mp.ui_multi_gpu_routing_enabled = bool(enabled)
     picker = main_window.parameter_widgets.get("GpuRoutingTargetsPicker")
     if picker is not None and hasattr(picker, "rebuild_from_models"):
         picker.rebuild_from_models()
@@ -119,6 +258,7 @@ def on_multi_gpu_routing_toggle(main_window: MainWindow, enabled: bool) -> None:
         if w is not None and hasattr(w, "rebuild_from_models"):
             w.rebuild_from_models()
     _sync_scheduler_config(main_window)
+    refresh_gpu_spin_editors(main_window)
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +353,7 @@ def on_threads_per_gpu_changed(main_window: MainWindow, data: dict[int, int]) ->
 
 def on_load_balancing_mode_changed(main_window: MainWindow, *_args) -> None:
     _sync_scheduler_config(main_window)
+    refresh_gpu_spin_editors(main_window)
 
 
 def _parse_routing_json(raw: object) -> list[int]:
@@ -264,8 +405,21 @@ def apply_saved_gpu_settings(main_window: MainWindow) -> None:
         pri = max(0, min(pri, n - 1))
     main_window.control["GpuPrimaryPhysicalIndex"] = pri
 
-    multi = bool(main_window.control.get("MultiGpuRoutingEnableToggle", False))
-    main_window.models_processor.ui_multi_gpu_routing_enabled = multi
+    if "MultiGpuModeSelection" not in main_window.control:
+        if bool(main_window.control.get("MultiGpuRoutingEnableToggle", False)):
+            main_window.control["MultiGpuModeSelection"] = "Frame routing (legacy)"
+        else:
+            main_window.control["MultiGpuModeSelection"] = "Off"
+    if "MultiGpuOffloadFaceRestorerToggle" not in main_window.control:
+        main_window.control["MultiGpuOffloadFaceRestorerToggle"] = False
+    if "MultiGpuOffloadFrameEnhancerToggle" not in main_window.control:
+        main_window.control["MultiGpuOffloadFrameEnhancerToggle"] = False
+    if "MultiGpuSecondaryGpuPhysicalIndex" not in main_window.control:
+        main_window.control["MultiGpuSecondaryGpuPhysicalIndex"] = (
+            _default_secondary_physical_index(main_window)
+        )
+
+    sync_multi_gpu_mode_from_control(main_window)
 
     sync_routing_json_to_models_processor(main_window)
     _sync_scheduler_config(main_window)
@@ -276,11 +430,19 @@ def apply_saved_gpu_settings(main_window: MainWindow) -> None:
         fill_primary_gpu_combo(combo, main_window)
         combo.blockSignals(False)
 
-    toggle = main_window.parameter_widgets.get("MultiGpuRoutingEnableToggle")
-    if toggle is not None and hasattr(toggle, "setChecked"):
-        toggle.blockSignals(True)
-        toggle.setChecked(multi)
-        toggle.blockSignals(False)
+    mode_widget = main_window.parameter_widgets.get("MultiGpuModeSelection")
+    if mode_widget is not None and hasattr(mode_widget, "setCurrentText"):
+        mode_widget.blockSignals(True)
+        mode_widget.setCurrentText(
+            str(main_window.control.get("MultiGpuModeSelection", "Off"))
+        )
+        mode_widget.blockSignals(False)
+
+    sec_combo = main_window.parameter_widgets.get("MultiGpuSecondaryGpuSelection")
+    if sec_combo is not None:
+        sec_combo.blockSignals(True)
+        fill_secondary_gpu_combo(sec_combo, main_window)
+        sec_combo.blockSignals(False)
 
     picker = main_window.parameter_widgets.get("GpuRoutingTargetsPicker")
     if picker is not None and hasattr(picker, "rebuild_from_models"):
@@ -340,6 +502,16 @@ def finalize_gpu_widgets_after_settings_layout(main_window: MainWindow) -> None:
         main_window.control["GpuRoutingTargetsJson"] = json.dumps([0])
     if "MultiGpuRoutingEnableToggle" not in main_window.control:
         main_window.control["MultiGpuRoutingEnableToggle"] = False
+    if "MultiGpuModeSelection" not in main_window.control:
+        main_window.control["MultiGpuModeSelection"] = "Off"
+    if "MultiGpuOffloadFaceRestorerToggle" not in main_window.control:
+        main_window.control["MultiGpuOffloadFaceRestorerToggle"] = False
+    if "MultiGpuOffloadFrameEnhancerToggle" not in main_window.control:
+        main_window.control["MultiGpuOffloadFrameEnhancerToggle"] = False
+    if "MultiGpuSecondaryGpuPhysicalIndex" not in main_window.control:
+        main_window.control["MultiGpuSecondaryGpuPhysicalIndex"] = (
+            _default_secondary_physical_index(main_window)
+        )
     if "MultiGpuAdvancedToggle" not in main_window.control:
         main_window.control["MultiGpuAdvancedToggle"] = False
     if "GpuLoadBalancingModeSelection" not in main_window.control:
@@ -360,3 +532,10 @@ def finalize_gpu_widgets_after_settings_layout(main_window: MainWindow) -> None:
         fill_primary_gpu_combo(combo, main_window)
 
     apply_saved_gpu_settings(main_window)
+    mode_widget = main_window.parameter_widgets.get("MultiGpuModeSelection")
+    if mode_widget is not None:
+        from app.ui.widgets.actions import common_actions
+
+        common_actions.show_hide_related_widgets(
+            main_window, mode_widget, "MultiGpuModeSelection"
+        )

@@ -760,6 +760,7 @@ class FrameWorker(threading.Thread):
                 _env_flag("VISIOMASTER_MULTI_GPU_LOG")
                 or self.models_processor.emulate_multi_gpu
                 or getattr(self.models_processor, "ui_multi_gpu_routing_enabled", False)
+                or self.models_processor.is_multi_gpu_stage_offload()
             ):
                 print(
                     "[MULTI-GPU] "
@@ -1737,7 +1738,7 @@ class FrameWorker(threading.Thread):
                     self.worker_stream.synchronize()
                 return img_numpy_rgb_uint8[..., ::-1]
 
-            processed_tensor_rgb_uint8 = self.frame_enhancers.enhance_core(
+            processed_tensor_rgb_uint8 = self._enhance_frame_maybe_offloaded(
                 processed_tensor_rgb_uint8, control=control
             )
         if perf_stages is not None:
@@ -3032,6 +3033,81 @@ class FrameWorker(threading.Thread):
             return id(stable_object)
         return 0
 
+    def _tensor_on_primary_device(self, tensor: torch.Tensor) -> torch.Tensor:
+        mp = self.models_processor
+        prim = mp.get_primary_torch_device()
+        if tensor.device.type != "cuda":
+            return tensor.to(prim, non_blocking=True)
+        if str(tensor.device) != prim:
+            return tensor.to(prim, non_blocking=True)
+        return tensor
+
+    def _apply_facerestorer_maybe_offloaded(
+        self,
+        swap: torch.Tensor,
+        control: dict,
+        parameters: dict,
+        *args,
+        **kwargs,
+    ) -> torch.Tensor:
+        mp = self.models_processor
+
+        def _run(t: torch.Tensor) -> torch.Tensor:
+            return mp.apply_facerestorer(t, *args, **kwargs)
+
+        if not mp.should_offload_stage(
+            "facerestorer", control=control, parameters=parameters
+        ):
+            return _run(swap)
+        with mp.gpu_stage_context("facerestorer"):
+            sec = mp.get_effective_torch_device()
+            t = swap.to(sec, non_blocking=True)
+            if t.device.type == "cuda":
+                torch.cuda.synchronize(t.device)
+            out = _run(t)
+            return self._tensor_on_primary_device(out)
+
+    def _try_apply_facerestorer_batched_maybe_offloaded(
+        self,
+        stacked: torch.Tensor,
+        restorer_type: str,
+        fidelity_weight: float,
+        control: dict,
+        parameters: dict,
+    ) -> torch.Tensor | None:
+        mp = self.models_processor
+        if not mp.should_offload_stage(
+            "facerestorer", control=control, parameters=parameters
+        ):
+            return mp.try_apply_facerestorer_batched_original_stack(
+                stacked, restorer_type, fidelity_weight
+            )
+        with mp.gpu_stage_context("facerestorer"):
+            sec = mp.get_effective_torch_device()
+            t = stacked.to(sec, non_blocking=True)
+            if t.device.type == "cuda":
+                torch.cuda.synchronize(t.device)
+            bo = mp.try_apply_facerestorer_batched_original_stack(
+                t, restorer_type, fidelity_weight
+            )
+            if bo is None:
+                return None
+            return self._tensor_on_primary_device(bo)
+
+    def _enhance_frame_maybe_offloaded(
+        self, tensor: torch.Tensor, control: dict
+    ) -> torch.Tensor:
+        mp = self.models_processor
+        if not mp.should_offload_stage("frame_enhancer", control=control):
+            return self.frame_enhancers.enhance_core(tensor, control=control)
+        with mp.gpu_stage_context("frame_enhancer"):
+            sec = mp.get_effective_torch_device()
+            t = tensor.to(sec, non_blocking=True)
+            if t.device.type == "cuda":
+                torch.cuda.synchronize(t.device)
+            out = self.frame_enhancers.enhance_core(t, control=control)
+            return self._tensor_on_primary_device(out)
+
     def _apply_primary_facerestorer_maybe_subsampled(
         self,
         swap: torch.Tensor,
@@ -3044,12 +3120,13 @@ class FrameWorker(threading.Thread):
         param_bucket_id: int | None,
     ) -> torch.Tensor:
         """PERF-009: run primary Face Restorer every N frames; reuse improvement delta in between."""
-        mp = self.models_processor
         det_type = parameters["FaceRestorerDetTypeSelection"]
 
         def _run_nn() -> torch.Tensor:
-            return mp.apply_facerestorer(
+            return self._apply_facerestorer_maybe_offloaded(
                 swap,
+                control,
+                parameters,
                 det_type,
                 _rt1,
                 parameters["FaceRestorerBlendSlider"],
@@ -3174,8 +3251,12 @@ class FrameWorker(threading.Thread):
                     is_live_stream=self._is_live_stream_face_input(),
                 )
                 stacked = torch.stack([t[0] for t in gather_tails], dim=0).float()
-                bo = self.models_processor.try_apply_facerestorer_batched_original_stack(
-                    stacked, rt0, fdw
+                bo = self._try_apply_facerestorer_batched_maybe_offloaded(
+                    stacked,
+                    rt0,
+                    fdw,
+                    ordered[0]["control"],
+                    p0,
                 )
             if bo is not None and bo.shape[0] == len(ordered):
                 out_img = img
@@ -8192,8 +8273,10 @@ class FrameWorker(threading.Thread):
                         float(tform.scale),
                         is_live_stream=self._is_live_stream_face_input(),
                     )
-                    swap2 = self.models_processor.apply_facerestorer(
+                    swap2 = self._apply_facerestorer_maybe_offloaded(
                         swap,
+                        control,
+                        parameters,
                         parameters["FaceRestorerDetType2Selection"],
                         _rt2,
                         parameters["FaceRestorerBlend2Slider"],
@@ -8676,8 +8759,10 @@ class FrameWorker(threading.Thread):
                         float(tform.scale),
                         is_live_stream=self._is_live_stream_face_input(),
                     )
-                    swap2 = self.models_processor.apply_facerestorer(
+                    swap2 = self._apply_facerestorer_maybe_offloaded(
                         swap,
+                        control,
+                        parameters,
                         parameters["FaceRestorerDetType2Selection"],
                         _rt2e,
                         parameters["FaceRestorerBlend2Slider"],

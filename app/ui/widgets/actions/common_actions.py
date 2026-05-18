@@ -659,6 +659,31 @@ def _layout_and_stretch_index_for_widget(
     return walk(top)
 
 
+def _vram_physical_display_order(num_gpus: int, primary_phys: int) -> list[int]:
+    """Bar slot 0 = primary CUDA device, then the rest (stable order)."""
+    if num_gpus <= 0:
+        return []
+    p = max(0, min(int(primary_phys), num_gpus - 1))
+    return [p] + [i for i in range(num_gpus) if i != p]
+
+
+def _vram_bar_gpu_label(phys_idx: int, *, is_primary: bool) -> str:
+    import torch
+
+    tag = f"GPU {phys_idx}"
+    if is_primary:
+        tag += " · primary"
+    if torch.cuda.is_available() and 0 <= phys_idx < int(torch.cuda.device_count()):
+        try:
+            name = torch.cuda.get_device_name(phys_idx)
+            tag = f"GPU {phys_idx}: {name}"
+            if is_primary:
+                tag += " · primary"
+        except Exception:
+            pass
+    return tag
+
+
 def setup_vram_progress_bars_layout(main_window: "MainWindow") -> None:
     """Replace the single VRAM bar slot with a vertical stack of one bar per CUDA GPU."""
     import torch
@@ -742,7 +767,7 @@ def _vram_bar_stylesheet_for_usage(
 
 @QtCore.Slot(object)
 def set_gpu_memory_progressbars_values(main_window: "MainWindow", memory_rows):
-    """*memory_rows*: list of ``(used_MB, total_MB)`` per GPU ordinal."""
+    """*memory_rows*: list of ``(used_MB, total_MB)`` per CUDA ordinal (index = device id)."""
     if not isinstance(memory_rows, list):
         memory_rows = list(memory_rows) if memory_rows else []
 
@@ -753,21 +778,31 @@ def set_gpu_memory_progressbars_values(main_window: "MainWindow", memory_rows):
     try:
         primary_phys = int(mp._primary_cuda_device_ordinal())
     except Exception:
-        primary_phys = 0
+        try:
+            primary_phys = int(
+                main_window.control.get("GpuPrimaryPhysicalIndex", 0)
+            )
+        except Exception:
+            primary_phys = 0
+    n_bars = len(bars)
+    if n_bars > 0:
+        primary_phys = max(0, min(primary_phys, n_bars - 1))
 
-    for i, bar in enumerate(bars):
-        if i >= len(memory_rows):
+    order = _vram_physical_display_order(n_bars, primary_phys)
+    for slot, phys_idx in enumerate(order):
+        if slot >= n_bars:
+            break
+        bar = bars[slot]
+        if phys_idx >= len(memory_rows):
             bar.setMaximum(1)
             bar.setValue(0)
-            bar.setFormat(f"GPU {i}: —")
+            bar.setFormat(f"GPU {phys_idx}: —")
             continue
-        memory_used, memory_total = memory_rows[i]
+        memory_used, memory_total = memory_rows[phys_idx]
         bar.setMaximum(max(1, memory_total))
         bar.setValue(min(memory_used, memory_total))
         bar.note_used_mb(memory_used)
-        tag = f"GPU {i}"
-        if i == primary_phys:
-            tag += " · primary"
+        tag = _vram_bar_gpu_label(phys_idx, is_primary=(phys_idx == primary_phys))
         bar.setFormat(
             f"{tag}: {round(memory_used / 1024, 2)} GB / "
             f"{round(memory_total / 1024, 2)} GB (%p%)"
@@ -775,6 +810,11 @@ def set_gpu_memory_progressbars_values(main_window: "MainWindow", memory_rows):
         st = _vram_bar_stylesheet_for_usage(memory_used, memory_total, bar)
         bar.setStyleSheet(st)
         bar.update()
+    for slot in range(len(order), n_bars):
+        bar = bars[slot]
+        bar.setMaximum(1)
+        bar.setValue(0)
+        bar.setFormat("GPU: —")
 
 
 def clear_gpu_memory(main_window: "MainWindow"):

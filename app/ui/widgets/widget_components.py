@@ -2264,7 +2264,9 @@ class GpuRoutingTargetsPicker(QtWidgets.QWidget, ParametersWidget):
             )
             cb_c.blockSignals(True)
             cb_c.setChecked(cpu_slot in enabled_set)
-            cb_c.setEnabled(self.main_window.models_processor.ui_multi_gpu_routing_enabled)
+            cb_c.setEnabled(
+                self.main_window.models_processor.is_multi_gpu_frame_routing()
+            )
             cb_c.blockSignals(False)
             cb_c.toggled.connect(self._on_any_toggled)
             self._outer.addWidget(cb_c)
@@ -2293,7 +2295,9 @@ class GpuRoutingTargetsPicker(QtWidgets.QWidget, ParametersWidget):
             )
             cb_e.blockSignals(True)
             cb_e.setChecked(em_slot in enabled_set)
-            cb_e.setEnabled(self.main_window.models_processor.ui_multi_gpu_routing_enabled)
+            cb_e.setEnabled(
+                self.main_window.models_processor.is_multi_gpu_frame_routing()
+            )
             cb_e.blockSignals(False)
             cb_e.toggled.connect(self._on_any_toggled)
             self._outer.addWidget(cb_e)
@@ -2305,7 +2309,9 @@ class GpuRoutingTargetsPicker(QtWidgets.QWidget, ParametersWidget):
         )
         cb_c.blockSignals(True)
         cb_c.setChecked(cpu_slot in enabled_set)
-        cb_c.setEnabled(self.main_window.models_processor.ui_multi_gpu_routing_enabled)
+        cb_c.setEnabled(
+            self.main_window.models_processor.is_multi_gpu_frame_routing()
+        )
         cb_c.blockSignals(False)
         cb_c.toggled.connect(self._on_any_toggled)
         self._outer.addWidget(cb_c)
@@ -2337,6 +2343,15 @@ class _SpinBoxNoScrollSteal(QtWidgets.QSpinBox):
         super().wheelEvent(event)
 
 
+def _per_gpu_spin_bounds(editor_cls: type) -> tuple[int, int, int]:
+    """(default, min, max) from a ``_PerGpuSpinTable`` subclass (not instance attrs)."""
+    return (
+        int(getattr(editor_cls, "default_value", 1)),
+        int(getattr(editor_cls, "min_value", 0)),
+        int(getattr(editor_cls, "max_value", 64)),
+    )
+
+
 class _PerGpuSpinTable(QtWidgets.QWidget, ParametersWidget):
     """Base helper: one labelled QSpinBox per active routing GPU.
 
@@ -2362,12 +2377,16 @@ class _PerGpuSpinTable(QtWidgets.QWidget, ParametersWidget):
         main_window: "MainWindow",
     ):
         QtWidgets.QWidget.__init__(self)
+        default_value, min_value, max_value = _per_gpu_spin_bounds(type(self))
         ParametersWidget.__init__(
             self,
             label_widget=label_widget,
             widget_name=widget_name,
             group_layout_data=group_layout_data,
             main_window=main_window,
+            default_value=default_value,
+            min_value=min_value,
+            max_value=max_value,
         )
         self.enable_refresh_frame = False
         self._outer = QtWidgets.QVBoxLayout(self)
@@ -2456,16 +2475,17 @@ class _PerGpuSpinTable(QtWidgets.QWidget, ParametersWidget):
         self._spins.clear()
 
         stored = self._load_stored()
+        default_value, min_value, max_value = _per_gpu_spin_bounds(type(self))
         for logical in self._active_targets():
             row = QtWidgets.QWidget()
             h = QtWidgets.QHBoxLayout(row)
             h.setContentsMargins(0, 0, 0, 0)
             lbl = QtWidgets.QLabel(self._label_for(logical))
             spin = _SpinBoxNoScrollSteal()
-            spin.setMinimum(self.min_value)
-            spin.setMaximum(self.max_value)
-            iv = int(stored.get(int(logical), self.default_value))
-            iv = max(int(self.min_value), min(int(self.max_value), iv))
+            spin.setMinimum(min_value)
+            spin.setMaximum(max_value)
+            iv = int(stored.get(int(logical), default_value))
+            iv = max(min_value, min(max_value, iv))
             spin.setValue(iv)
             if self.row_suffix:
                 spin.setSuffix(self.row_suffix)

@@ -89,6 +89,25 @@ def test_weighted_mode_biases_routing_to_faster_gpu():
     assert seq.count(1) == 4
 
 
+def test_resolve_assigned_gpu_index_primary_in_stage_offload_mode():
+    models_processor = SimpleNamespace(
+        gpu_index=0,
+        device="cuda",
+        emulate_multi_gpu=False,
+        ui_multi_gpu_routing_enabled=False,
+        is_multi_gpu_stage_offload=lambda: True,
+        _physical_cuda_device_count=lambda: 2,
+        _primary_cuda_device_ordinal=lambda: 0,
+        get_ui_routing_targets_sorted=lambda: [0, 1],
+        get_configured_gpu_count=lambda: 2,
+        clamp_gpu_index=lambda idx: idx,
+    )
+    dummy = SimpleNamespace(main_window=SimpleNamespace(models_processor=models_processor))
+
+    assert VideoProcessor._resolve_assigned_gpu_index(dummy, frame_number=5) == 0
+    assert VideoProcessor._resolve_assigned_gpu_index(dummy, frame_number=99) == 0
+
+
 def test_per_worker_flag_still_overrides_weighted(monkeypatch):
     """VISIOMASTER_MULTI_GPU_ASSIGN_PER_WORKER keeps the legacy worker_id % N path."""
     monkeypatch.setenv("VISIOMASTER_MULTI_GPU_ASSIGN_PER_WORKER", "1")

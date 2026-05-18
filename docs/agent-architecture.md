@@ -103,9 +103,17 @@ Vendored code (YOLOX, partial CLIP, VR, …). **Excluded from mypy** in `pyproje
 
 ## Multi-GPU and queues
 
-- `VideoProcessor` rebuilds queues from load-balancing mode (`models_processor.load_balancing_mode` and related).
-- `WeightedScheduler` assigns GPU targets deterministically (DRR).
-- Workers with `assigned_gpu_index` **pin** the device for inference consistent with the queue.
+Three modes (`MultiGpuModeSelection` in General settings, synced to `ModelsProcessor.ui_multi_gpu_mode`):
+
+| Mode | Behavior |
+|------|----------|
+| **Off** | All pipeline stages on the primary GPU. |
+| **Stage offload** (recommended) | Single frame queue; workers stay on the primary GPU. Optional face restorer / frame enhancer run on a secondary GPU via `ModelsProcessor.gpu_stage_context()` (distinct ORT keys `model__cuda{N}` only while the context is active). |
+| **Frame routing (legacy)** | Per-GPU subqueues, `WeightedScheduler`, hybrid steal — entire frames on each GPU. |
+
+- `VideoProcessor._rebuild_frame_queue_from_control` builds one queue for stage offload, proportional subqueues for weighted frame routing.
+- `WeightedScheduler` assigns GPU targets deterministically (DRR) in frame-routing modes only.
+- Workers with `assigned_gpu_index` **pin** the device for inference consistent with the queue (frame routing).
 
 ## Preview and OpenGL
 

@@ -2619,6 +2619,8 @@ class VideoProcessor(QObject):
             if phy_n > 0
             else 0
         )
+        if getattr(mp, "is_multi_gpu_stage_offload", None) and mp.is_multi_gpu_stage_offload():
+            return primary
         if getattr(mp, "ui_multi_gpu_routing_enabled", False):
             tg = mp.get_ui_routing_targets_sorted()
             if len(tg) >= 2:
@@ -2712,6 +2714,10 @@ class VideoProcessor(QObject):
             _env_flag("VISIOMASTER_MULTI_GPU_LOG")
             or mp.emulate_multi_gpu
             or getattr(mp, "ui_multi_gpu_routing_enabled", False)
+            or (
+                getattr(mp, "is_multi_gpu_stage_offload", None)
+                and mp.is_multi_gpu_stage_offload()
+            )
         ):
             return
         logical = int(assigned_gpu)
@@ -3905,6 +3911,27 @@ class VideoProcessor(QObject):
         mp = self.main_window.models_processor
         mode = normalize_mode(getattr(mp, "load_balancing_mode", "round_robin"))
         targets: List[int] = []
+        if (
+            getattr(mp, "is_multi_gpu_stage_offload", None)
+            and mp.is_multi_gpu_stage_offload()
+        ):
+            self.frame_queue = queue.Queue(maxsize=self.max_display_buffer_size)
+            primary_target = int(mp._primary_cuda_device_ordinal())
+            self.frame_queues_by_gpu = {primary_target: self.frame_queue}
+            self._queue_affinity_enabled = False
+            self.scheduler.set_targets([primary_target], {primary_target: 1})
+            self.gpu_metrics.reset()
+            print(
+                f"[INFO] Multi-GPU stage offload: single queue on primary GPU "
+                f"(maxsize={self.max_display_buffer_size}, secondary="
+                f"cuda:{mp.get_stage_offload_secondary_physical()})"
+            )
+            self._raw_frame_queue = queue.Queue(maxsize=self.max_display_buffer_size)
+            self._autotune_state = {
+                "last_snapshot_count": 0,
+                "first_reweight_done": False,
+            }
+            return
         if getattr(mp, "ui_multi_gpu_routing_enabled", False):
             try:
                 targets = list(mp.get_ui_routing_targets_sorted())
