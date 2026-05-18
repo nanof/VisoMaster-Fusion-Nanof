@@ -11,6 +11,29 @@ _PIPELINE_PROFILE_ACTIVE_OPTIONS = (
     pprofile_settings.PIPELINE_PROFILE_DISPLAY_MODE_BOTH,
 )
 
+EXPERIMENTAL_SETTINGS_CONTROL_KEYS = frozenset(
+    {
+        "ActivateexperimentalsettingsEnableToggle",
+        "AnalyseImageEnableToggle",
+        "get_cropped_face_kpsTypeSelection",
+        "original_face_128_384TypeSelection",
+        "original_face_512TypeSelection",
+        "UntransformTypeSelection",
+        "ScalebackFrameTypeSelection",
+        "expression_faceeditor_t256TypeSelection",
+        "expression_faceeditor_backTypeSelection",
+        "block_shiftTypeSelection",
+        "AntialiasTypeSelection",
+    }
+)
+REMOVED_SETTINGS_CONTROL_KEYS = frozenset(
+    {
+        "CommandLineDebugEnableToggle",
+        "DilatationTypeSelection",
+        *EXPERIMENTAL_SETTINGS_CONTROL_KEYS,
+    }
+)
+
 SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
     "Appearance": {
         "ThemeSelection": {
@@ -605,6 +628,12 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "default": False,
             "help": "Auto start over when video playing to the end.(Not work for recording)",
         },
+        "TheatreModeUsesFullscreenToggle": {
+            "level": 1,
+            "label": "Theatre Mode Uses Fullscreen",
+            "default": False,
+            "help": "When enabled, entering Theatre Mode also switches the window to fullscreen and restores the previous window state when Theatre Mode is turned off.",
+        },
         "VideoPlaybackBenchSameFrameToggle": {
             "level": 1,
             "label": "Benchmark: repeat same frame",
@@ -873,6 +902,12 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
         },
     },
     "Video Recording Settings": {
+        "ConfirmBeforeStoppingRecordingToggle": {
+            "level": 1,
+            "label": "Confirm Before Stopping Recording",
+            "default": True,
+            "help": "Show a confirmation prompt before manually stopping a recording.",
+        },
         "FrameEnhancerDownToggle": {
             "level": 1,
             "label": "Frame resize to 1920*1080",

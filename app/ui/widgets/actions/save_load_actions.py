@@ -42,6 +42,20 @@ def purge_removed_settings_controls(control_data: dict) -> None:
         control_data.pop(control_name, None)
 
 
+def _target_media_filter_checkbox(
+    main_window: "MainWindow",
+    checkbox_name: str,
+    legacy_checkbox_name: str,
+    default: bool,
+) -> bool:
+    checkbox = getattr(main_window, checkbox_name, None)
+    if checkbox is None:
+        checkbox = getattr(main_window, legacy_checkbox_name, None)
+    if checkbox is None:
+        return default
+    return checkbox.isChecked()
+
+
 def scrub_removed_settings_from_markers(markers: dict | None) -> dict:
     if not markers:
         return {}
@@ -875,18 +889,34 @@ def load_saved_workspace(
                 else:
                     checkbox.setChecked(checked)
 
-            restore_checkbox_without_emitting_signals(
-                main_window.targetVideosFilterImagesCheckBox,
-                window_state.get("filterImagesCheckBox", True),
-            )
-            restore_checkbox_without_emitting_signals(
-                main_window.targetVideosFilterVideosCheckBox,
-                window_state.get("filterVideosCheckBox", True),
-            )
-            restore_checkbox_without_emitting_signals(
-                main_window.targetVideosFilterWebcamsCheckBox,
-                window_state.get("filterWebcamsCheckBox", False),
-            )
+            for checkbox_name, state_key, legacy_name, default_checked in (
+                (
+                    "targetVideosFilterImagesCheckBox",
+                    "filterImagesCheckBox",
+                    "filterImagesCheckBox",
+                    True,
+                ),
+                (
+                    "targetVideosFilterVideosCheckBox",
+                    "filterVideosCheckBox",
+                    "filterVideosCheckBox",
+                    True,
+                ),
+                (
+                    "targetVideosFilterWebcamsCheckBox",
+                    "filterWebcamsCheckBox",
+                    "filterWebcamsCheckBox",
+                    False,
+                ),
+            ):
+                checkbox = getattr(main_window, checkbox_name, None)
+                if checkbox is None:
+                    checkbox = getattr(main_window, legacy_name, None)
+                if checkbox is not None:
+                    restore_checkbox_without_emitting_signals(
+                        checkbox,
+                        window_state.get(state_key, default_checked),
+                    )
             saved_face_thumbnail_size = window_state.get("face_thumbnail_size")
             if saved_face_thumbnail_size == "small":
                 list_view_actions.apply_face_thumbnail_size(
@@ -988,9 +1018,24 @@ def save_current_workspace(
         "jobs": main_window.panel_visibility_state.get("jobs", True),
         "faces": main_window.panel_visibility_state.get("faces", True),
         "parameters": main_window.panel_visibility_state.get("parameters", True),
-        "filterImagesCheckBox": main_window.targetVideosFilterImagesCheckBox.isChecked(),
-        "filterVideosCheckBox": main_window.targetVideosFilterVideosCheckBox.isChecked(),
-        "filterWebcamsCheckBox": main_window.targetVideosFilterWebcamsCheckBox.isChecked(),
+        "filterImagesCheckBox": _target_media_filter_checkbox(
+            main_window,
+            "targetVideosFilterImagesCheckBox",
+            "filterImagesCheckBox",
+            True,
+        ),
+        "filterVideosCheckBox": _target_media_filter_checkbox(
+            main_window,
+            "targetVideosFilterVideosCheckBox",
+            "filterVideosCheckBox",
+            True,
+        ),
+        "filterWebcamsCheckBox": _target_media_filter_checkbox(
+            main_window,
+            "targetVideosFilterWebcamsCheckBox",
+            "filterWebcamsCheckBox",
+            False,
+        ),
         "face_thumbnail_size": (
             "small"
             if getattr(

@@ -195,10 +195,11 @@ def test_parent_toggle_references_exist():
     all_keys = set(name for _, name, _ in _all_widget_entries())
     for cat, name, entry in _all_widget_entries():
         if "parentToggle" in entry:
-            parent = entry["parentToggle"]
-            assert parent in all_keys, (
-                f"{cat}/{name}.parentToggle='{parent}' does not exist as a widget key"
-            )
+            parents = [p.strip() for p in str(entry["parentToggle"]).split("&")]
+            for parent in parents:
+                assert parent in all_keys, (
+                    f"{cat}/{name}.parentToggle='{parent}' does not exist as a widget key"
+                )
 
 
 def test_theatre_mode_uses_fullscreen_toggle_exists_in_video_playback_settings():
