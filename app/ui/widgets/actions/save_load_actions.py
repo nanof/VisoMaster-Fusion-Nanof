@@ -713,17 +713,11 @@ def load_saved_workspace(
             main_window.last_input_media_folder_path = data.get(
                 "last_input_media_folder_path", ""
             )
-            main_window.targetVideosPathLineEdit.setText(
-                main_window.last_target_media_folder_path
+            list_view_actions.set_target_media_path_display(
+                main_window, main_window.last_target_media_folder_path
             )
-            main_window.targetVideosPathLineEdit.setToolTip(
-                main_window.last_target_media_folder_path
-            )
-            main_window.inputFacesPathLineEdit.setText(
-                main_window.last_input_media_folder_path
-            )
-            main_window.inputFacesPathLineEdit.setToolTip(
-                main_window.last_input_media_folder_path
+            list_view_actions.set_input_faces_path_display(
+                main_window, main_window.last_input_media_folder_path
             )
             main_window.loaded_embedding_filename = data.get(
                 "loaded_embedding_filename", ""

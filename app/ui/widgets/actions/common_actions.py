@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Callable, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Optional, cast
 
 import cv2
 import numpy as np
@@ -64,6 +64,106 @@ def create_control(main_window: "MainWindow", control_name, control_value):
     main_window.control[control_name] = control_value
 
 
+def register_control_widget_mirror(
+    main_window: "MainWindow", control_name: str, widget: QtWidgets.QWidget
+) -> None:
+    """Register an Essentials-tab widget mirrored to ``control[control_name]``."""
+    mirrors = getattr(main_window, "_control_widget_mirrors", None)
+    if mirrors is None:
+        mirrors = {}
+        main_window._control_widget_mirrors = mirrors
+    mirrors.setdefault(control_name, []).append(widget)
+
+
+def sync_all_widgets_for_control_key(
+    main_window: "MainWindow", control_name: str, control_value
+) -> None:
+    """Align the primary Settings control and Essentials mirrors with ``control_value``."""
+    mirrors = getattr(main_window, "_control_widget_mirrors", {}).get(control_name, ())
+    primary = main_window.parameter_widgets.get(control_name)
+    seen: set[int] = set()
+    for w in (*([primary] if primary is not None else []), *mirrors):
+        if w is None or id(w) in seen:
+            continue
+        seen.add(id(w))
+        w.blockSignals(True)
+        try:
+            _set_single_widget_value(w, control_value)
+        finally:
+            w.blockSignals(False)
+
+
+def sync_control_mirror_widgets_only(
+    main_window: "MainWindow", control_name: str, control_value
+) -> None:
+    for w in getattr(main_window, "_control_widget_mirrors", {}).get(control_name, ()):
+        w.blockSignals(True)
+        try:
+            _set_single_widget_value(w, control_value)
+        finally:
+            w.blockSignals(False)
+
+
+def get_current_parameter_value(
+    main_window: "MainWindow", parameter_name: str, default: Any
+) -> Any:
+    fid = main_window.selected_target_face_id
+    if (
+        fid
+        and fid in main_window.parameters
+        and parameter_name in main_window.parameters[fid]
+    ):
+        return main_window.parameters[fid][parameter_name]
+    if (
+        main_window.current_widget_parameters
+        and parameter_name in main_window.current_widget_parameters
+    ):
+        return main_window.current_widget_parameters[parameter_name]
+    return main_window.default_parameters.get(parameter_name, default)
+
+
+def register_parameter_widget_mirror(
+    main_window: "MainWindow", parameter_name: str, widget: QtWidgets.QWidget
+) -> None:
+    mirrors = getattr(main_window, "_parameter_widget_mirrors", None)
+    if mirrors is None:
+        mirrors = {}
+        main_window._parameter_widget_mirrors = mirrors
+    mirrors.setdefault(parameter_name, []).append(widget)
+
+
+def sync_all_widgets_for_parameter_key(
+    main_window: "MainWindow", parameter_name: str, parameter_value
+) -> None:
+    mirrors = getattr(main_window, "_parameter_widget_mirrors", {}).get(
+        parameter_name, ()
+    )
+    primary = main_window.parameter_widgets.get(parameter_name)
+    seen: set[int] = set()
+    for w in (*([primary] if primary is not None else []), *mirrors):
+        if w is None or id(w) in seen:
+            continue
+        seen.add(id(w))
+        w.blockSignals(True)
+        try:
+            _set_single_widget_value(w, parameter_value)
+        finally:
+            w.blockSignals(False)
+
+
+def sync_parameter_mirror_widgets_only(
+    main_window: "MainWindow", parameter_name: str, parameter_value
+) -> None:
+    for w in getattr(main_window, "_parameter_widget_mirrors", {}).get(
+        parameter_name, ()
+    ):
+        w.blockSignals(True)
+        try:
+            _set_single_widget_value(w, parameter_value)
+        finally:
+            w.blockSignals(False)
+
+
 def update_control(
     main_window: "MainWindow",
     control_name,
@@ -86,9 +186,10 @@ def update_control(
             exec_function_args = [main_window, control_value] + exec_function_args
             exec_function(*exec_function_args)
     main_window.control[control_name] = control_value
+    if control_name == "ScreenCaptureRegionRectText":
+        main_window.control["ScreenCaptureRegionRect"] = str(control_value)
     # Also update the feeder's state if it's running
     # BUG-16 / THREAD-03: feeder_control None check moved inside the lock to prevent TOCTOU race
-    main_window.control[control_name] = control_value
     if hasattr(main_window, "video_processor") and main_window.video_processor:
         # --- DIRTY FLAG ---
         main_window.video_processor.ui_state_is_dirty = True
@@ -100,6 +201,7 @@ def update_control(
                 cast(ControlTypes, main_window.video_processor.feeder_control)[
                     control_name
                 ] = control_value
+    sync_all_widgets_for_control_key(main_window, control_name, control_value)
     refresh_frame(main_window)
 
 
@@ -191,6 +293,8 @@ def update_parameter(
         # The first argument is always the main_window, followed by the new value
         final_exec_args: list = [main_window, parameter_value] + exec_function_args
         exec_function(*final_exec_args)
+
+    sync_all_widgets_for_parameter_key(main_window, parameter_name, parameter_value)
 
 
 def refresh_frame(main_window: "MainWindow", synchronous: bool = False):
@@ -521,22 +625,89 @@ def get_pixmap_from_frame(main_window: "MainWindow", frame: np.ndarray):
     return pixmap
 
 
-# QUAL-02: Inlined _update_gpu_memory_progressbar body directly; removed the redundant wrapper function
 def update_gpu_memory_progressbar(main_window: "MainWindow"):
-    memory_used, memory_total = main_window.models_processor.get_gpu_memory()
-    main_window.gpu_memory_update_signal.emit(memory_used, memory_total)
+    rows = main_window.models_processor.get_all_gpus_memory_mb()
+    main_window.gpu_memory_update_signal.emit(rows)
 
 
-@QtCore.Slot(int, int)
-def set_gpu_memory_progressbar_value(
-    main_window: "MainWindow", memory_used, memory_total
-):
-    main_window.vramProgressBar.setMaximum(memory_total)
-    main_window.vramProgressBar.setValue(memory_used)
-    main_window.vramProgressBar.setFormat(
-        f"{round(memory_used / 1024, 2)} GB / {round(memory_total / 1024, 2)} GB (%p%)"
-    )
-    palette = main_window.vramProgressBar.palette()
+def _layout_and_stretch_index_for_widget(
+    widget: QtWidgets.QWidget,
+) -> tuple[QtWidgets.QLayout | None, int]:
+    """Return the innermost layout that directly holds *widget* and its stretch index."""
+    parent_widget = widget.parentWidget()
+    if parent_widget is None:
+        return None, -1
+    top = parent_widget.layout()
+    if top is None:
+        return None, -1
+
+    def walk(layout: QtWidgets.QLayout) -> tuple[QtWidgets.QLayout | None, int]:
+        idx = layout.indexOf(widget)
+        if idx >= 0:
+            return layout, idx
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item is None:
+                continue
+            sub = item.layout()
+            if sub is not None:
+                inner, j = walk(sub)
+                if inner is not None and j >= 0:
+                    return inner, j
+        return None, -1
+
+    return walk(top)
+
+
+def setup_vram_progress_bars_layout(main_window: "MainWindow") -> None:
+    """Replace the single VRAM bar slot with a vertical stack of one bar per CUDA GPU."""
+    import torch
+
+    from app.ui.widgets.vram_progress_bar import VramPeakProgressBar
+
+    bar0 = main_window.vramProgressBar
+    if not torch.cuda.is_available() or int(torch.cuda.device_count()) <= 1:
+        main_window._vram_progress_bars = [bar0]
+        return
+
+    parent = bar0.parentWidget()
+    hlay, idx = _layout_and_stretch_index_for_widget(bar0)
+    if parent is None or hlay is None or idx < 0:
+        main_window._vram_progress_bars = [bar0]
+        return
+
+    n = int(torch.cuda.device_count())
+    container = QtWidgets.QWidget(parent)
+    vlay = QtWidgets.QVBoxLayout(container)
+    vlay.setContentsMargins(0, 0, 0, 0)
+    vlay.setSpacing(3)
+
+    hlay.removeWidget(bar0)
+    bars: list = []
+    for i in range(n):
+        if i == 0:
+            b = bar0
+        else:
+            b = VramPeakProgressBar(container)
+            b.setMinimumHeight(max(18, bar0.minimumHeight()))
+            mh = bar0.maximumHeight()
+            if mh > 0:
+                b.setMaximumHeight(mh)
+            sp = bar0.sizePolicy()
+            b.setSizePolicy(sp.horizontalPolicy(), sp.verticalPolicy())
+        b.setObjectName(f"vramProgressBar_gpu{i}")
+        b.setFont(bar0.font())
+        bars.append(b)
+        vlay.addWidget(b)
+
+    hlay.insertWidget(idx, container)
+    main_window._vram_progress_bars = bars
+
+
+def _vram_bar_stylesheet_for_usage(
+    memory_used: int, memory_total: int, bar: QtWidgets.QProgressBar
+) -> str:
+    palette = bar.palette()
     background_color = palette.color(QtGui.QPalette.ColorRole.Base).name()
     text_color = palette.color(QtGui.QPalette.ColorRole.Text).name()
     border_color = palette.color(QtGui.QPalette.ColorRole.Mid).name()
@@ -560,30 +731,62 @@ def set_gpu_memory_progressbar_value(
 
     chunk_style_high = """
         QProgressBar::chunk {
-            background-color: #911414; /* Red */
+            background-color: #911414;
             border-radius: 4px;
         }
     """
 
     is_high = memory_total > 0 and (memory_used / memory_total) > 0.85
-    was_high = getattr(main_window, "_vram_high_style_active", None)
-    current_style = base_style + (chunk_style_high if is_high else chunk_style_normal)
-    if (
-        is_high != was_high
-        or getattr(main_window, "_vram_progressbar_style", None) != current_style
-    ):
-        main_window._vram_high_style_active = is_high
-        main_window._vram_progressbar_style = current_style
-        main_window.vramProgressBar.setStyleSheet(current_style)
+    return base_style + (chunk_style_high if is_high else chunk_style_normal)
 
-    main_window.vramProgressBar.update()
+
+@QtCore.Slot(object)
+def set_gpu_memory_progressbars_values(main_window: "MainWindow", memory_rows):
+    """*memory_rows*: list of ``(used_MB, total_MB)`` per GPU ordinal."""
+    if not isinstance(memory_rows, list):
+        memory_rows = list(memory_rows) if memory_rows else []
+
+    bars = getattr(main_window, "_vram_progress_bars", None) or [
+        main_window.vramProgressBar
+    ]
+    mp = main_window.models_processor
+    try:
+        primary_phys = int(mp._primary_cuda_device_ordinal())
+    except Exception:
+        primary_phys = 0
+
+    for i, bar in enumerate(bars):
+        if i >= len(memory_rows):
+            bar.setMaximum(1)
+            bar.setValue(0)
+            bar.setFormat(f"GPU {i}: —")
+            continue
+        memory_used, memory_total = memory_rows[i]
+        bar.setMaximum(max(1, memory_total))
+        bar.setValue(min(memory_used, memory_total))
+        bar.note_used_mb(memory_used)
+        tag = f"GPU {i}"
+        if i == primary_phys:
+            tag += " · primary"
+        bar.setFormat(
+            f"{tag}: {round(memory_used / 1024, 2)} GB / "
+            f"{round(memory_total / 1024, 2)} GB (%p%)"
+        )
+        st = _vram_bar_stylesheet_for_usage(memory_used, memory_total, bar)
+        bar.setStyleSheet(st)
+        bar.update()
 
 
 def clear_gpu_memory(main_window: "MainWindow"):
     main_window.video_processor.stop_processing()
     main_window.models_processor.clear_gpu_memory()
+    for _b in getattr(main_window, "_vram_progress_bars", [main_window.vramProgressBar]):
+        _b.reset_peak()
     main_window.swapfacesButton.setChecked(False)
     main_window.editFacesButton.setChecked(False)
+    from app.ui.widgets.actions import preview_notification_actions as _preview_notify
+
+    _preview_notify.show_swap_faces_state(main_window, False)
     update_gpu_memory_progressbar(main_window)
 
     # main_window.videoSeekSlider.markers = set() # Comment this to keep markers visible after vram clear

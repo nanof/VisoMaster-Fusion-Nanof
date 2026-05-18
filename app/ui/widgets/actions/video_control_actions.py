@@ -55,6 +55,11 @@ def _get_target_media_root(main_window: "MainWindow") -> str:
         root = str(target_path_line_edit.text() or "").strip()
         if root:
             return os.path.abspath(root)
+    path_label = getattr(main_window, "labelTargetVideosPath", None)
+    if path_label is not None and hasattr(path_label, "toolTip"):
+        root = str(path_label.toolTip() or path_label.text() or "").strip()
+        if root:
+            return os.path.abspath(root)
     fallback = str(
         getattr(main_window, "last_target_media_folder_path", "") or ""
     ).strip()

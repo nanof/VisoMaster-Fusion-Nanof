@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from functools import partial
 from typing import TYPE_CHECKING, Dict, Type
 from pathlib import Path
@@ -26,9 +27,13 @@ if TYPE_CHECKING:
 
 _WORKER_STOP_TIMEOUT_MS = 1000
 _TARGET_BUTTON_SIZE = (90, 90)
-_FACE_BUTTON_SIZE = (70, 70)
+_SMALL_FACE_BUTTON_SIZE = (70, 70)
+_LARGE_FACE_BUTTON_SIZE = (96, 96)
+_FACE_BUTTON_SIZE = _SMALL_FACE_BUTTON_SIZE
 _EMBED_BUTTON_SIZE = (120, 25)
 _EMBED_LIST_HEIGHT = 140
+_TARGET_MEDIA_BATCH_SIZE = 24
+_TARGET_MEDIA_BATCH_INTERVAL_MS = 1
 _THUMB_ZOOM_MIN = 0.5
 _THUMB_ZOOM_MAX = 3.0
 
@@ -145,21 +150,148 @@ def apply_face_thumbnail_size(
         list_widget.viewport().update()
 
 
+def _get_target_media_batch_size(pending_count: int) -> int:
+    if pending_count >= 1500:
+        return 64
+    if pending_count >= 900:
+        return 48
+    if pending_count >= 400:
+        return 36
+    return _TARGET_MEDIA_BATCH_SIZE
+
+
+def _ensure_target_media_batch_timer(main_window: "MainWindow") -> QtCore.QTimer:
+    timer = getattr(main_window, "_target_media_batch_timer", None)
+    if timer is None:
+        timer = QtCore.QTimer(main_window)
+        timer.setSingleShot(True)
+        timer.timeout.connect(partial(_flush_target_media_thumbnail_batch, main_window))
+        main_window._target_media_batch_timer = timer
+    return timer
+
+
+def _flush_target_media_thumbnail_batch(main_window: "MainWindow") -> None:
+    pending_items = getattr(main_window, "_pending_target_media_thumbnails", None)
+    if not pending_items:
+        return
+
+    list_widget = main_window.targetVideosList
+    pending_before = len(pending_items)
+    list_widget.setUpdatesEnabled(False)
+    try:
+        batch_size = min(_get_target_media_batch_size(pending_before), pending_before)
+        for _ in range(batch_size):
+            media_path, q_image, file_type, media_id = pending_items.popleft()
+            add_media_thumbnail_button(
+                main_window,
+                widget_components.TargetMediaCardButton,
+                list_widget,
+                main_window.target_videos,
+                q_image,
+                media_path=media_path,
+                file_type=file_type,
+                media_id=media_id,
+            )
+    finally:
+        list_widget.setUpdatesEnabled(True)
+        list_widget.viewport().update()
+
+    if pending_items:
+        _ensure_target_media_batch_timer(main_window).start(
+            _TARGET_MEDIA_BATCH_INTERVAL_MS
+        )
+
+
+def _queue_target_media_thumbnail(
+    main_window: "MainWindow", media_path, q_image, file_type, media_id
+) -> None:
+    pending_items = getattr(main_window, "_pending_target_media_thumbnails", None)
+    if pending_items is None:
+        pending_items = deque()
+        main_window._pending_target_media_thumbnails = pending_items
+
+    pending_items.append((media_path, q_image, file_type, media_id))
+    timer = _ensure_target_media_batch_timer(main_window)
+    if not timer.isActive():
+        timer.start(_TARGET_MEDIA_BATCH_INTERVAL_MS)
+
+
+def _has_pending_target_media_thumbnail_work(main_window: "MainWindow") -> bool:
+    timer = getattr(main_window, "_target_media_batch_timer", None)
+    pending_items = getattr(main_window, "_pending_target_media_thumbnails", None)
+    return bool(pending_items) or bool(timer and timer.isActive())
+
+
+def _ensure_input_face_batch_timer(main_window: "MainWindow") -> QtCore.QTimer:
+    timer = getattr(main_window, "_input_face_batch_timer", None)
+    if timer is None:
+        timer = QtCore.QTimer(main_window)
+        timer.setSingleShot(True)
+        timer.timeout.connect(partial(_flush_input_face_thumbnail_batch, main_window))
+        main_window._input_face_batch_timer = timer
+    return timer
+
+
+def _flush_input_face_thumbnail_batch(main_window: "MainWindow") -> None:
+    pending_items = getattr(main_window, "_pending_input_face_thumbnails", None)
+    if not pending_items:
+        return
+
+    list_widget = main_window.inputFacesList
+    pending_before = len(pending_items)
+    list_widget.setUpdatesEnabled(False)
+    try:
+        batch_size = min(24, pending_before)
+        for _ in range(batch_size):
+            media_path, cropped_face, embedding_store, q_image, face_id = (
+                pending_items.popleft()
+            )
+            add_media_thumbnail_button(
+                main_window,
+                widget_components.InputFaceCardButton,
+                list_widget,
+                main_window.input_faces,
+                q_image,
+                media_path=media_path,
+                cropped_face=cropped_face,
+                embedding_store=embedding_store,
+                face_id=face_id,
+            )
+    finally:
+        list_widget.setUpdatesEnabled(True)
+        list_widget.viewport().update()
+
+    if pending_items:
+        _ensure_input_face_batch_timer(main_window).start(
+            _TARGET_MEDIA_BATCH_INTERVAL_MS
+        )
+
+
+def _queue_input_face_thumbnail(
+    main_window: "MainWindow",
+    media_path,
+    cropped_face,
+    embedding_store,
+    q_image,
+    face_id,
+) -> None:
+    pending_items = getattr(main_window, "_pending_input_face_thumbnails", None)
+    if pending_items is None:
+        pending_items = deque()
+        main_window._pending_input_face_thumbnails = pending_items
+
+    pending_items.append((media_path, cropped_face, embedding_store, q_image, face_id))
+    timer = _ensure_input_face_batch_timer(main_window)
+    if not timer.isActive():
+        timer.start(_TARGET_MEDIA_BATCH_INTERVAL_MS)
+
+
 # Functions to add Buttons with thumbnail for selecting videos/images and faces
 @QtCore.Slot(str, QtGui.QImage, str, str)
 def add_media_thumbnail_to_target_videos_list(
     main_window: "MainWindow", media_path, q_image, file_type, media_id
 ):
-    add_media_thumbnail_button(
-        main_window,
-        widget_components.TargetMediaCardButton,
-        main_window.targetVideosList,
-        main_window.target_videos,
-        q_image,
-        media_path=media_path,
-        file_type=file_type,
-        media_id=media_id,
-    )
+    _queue_target_media_thumbnail(main_window, media_path, q_image, file_type, media_id)
 
 
 # Functions to add Buttons with thumbnail for selecting videos/images and faces
@@ -259,16 +391,13 @@ def add_media_thumbnail_to_source_faces_list(
     q_image,
     face_id,
 ):
-    add_media_thumbnail_button(
+    _queue_input_face_thumbnail(
         main_window,
-        widget_components.InputFaceCardButton,
-        main_window.inputFacesList,
-        main_window.input_faces,
+        media_path,
+        cropped_face,
+        embedding_store,
         q_image,
-        media_path=media_path,
-        cropped_face=cropped_face,
-        embedding_store=embedding_store,
-        face_id=face_id,
+        face_id,
     )
 
 
@@ -550,6 +679,11 @@ def create_and_add_embed_button_to_list(
 
 
 def clear_stop_loading_target_media(main_window: "MainWindow", clear_list: bool = True):
+    batch_timer = getattr(main_window, "_target_media_batch_timer", None)
+    if batch_timer is not None:
+        batch_timer.stop()
+    main_window._pending_target_media_thumbnails = deque()
+
     if main_window.video_loader_worker is not None:
         worker = main_window.video_loader_worker
         worker.blockSignals(True)
@@ -622,6 +756,10 @@ def select_target_medias(
 def filter_target_videos(main_window):
     from app.ui.widgets.actions import video_control_actions
 
+    if _has_pending_target_media_thumbnail_work(main_window):
+        QtCore.QTimer.singleShot(0, partial(filter_target_videos, main_window))
+        return
+
     if video_control_actions.is_issue_scan_active(main_window):
         video_control_actions._mark_pending_target_media_refresh(main_window)
         return
@@ -682,6 +820,11 @@ def load_target_webcams(
 
 
 def clear_stop_loading_input_media(main_window: "MainWindow", clear_list: bool = True):
+    batch_timer = getattr(main_window, "_input_face_batch_timer", None)
+    if batch_timer is not None:
+        batch_timer.stop()
+    main_window._pending_input_face_thumbnails = deque()
+
     if main_window.input_faces_loader_worker is not None:
         worker = main_window.input_faces_loader_worker
         worker.blockSignals(True)
@@ -694,6 +837,43 @@ def clear_stop_loading_input_media(main_window: "MainWindow", clear_list: bool =
         if clear_list:
             main_window.inputFacesList.clear()
             main_window.inputFacesFavoritesList.clear()
+
+
+def _set_folder_path_display(
+    main_window: "MainWindow",
+    *,
+    line_edit_attr: str,
+    label_attr: str,
+    path: str,
+) -> None:
+    """Support dev QLineEdit path widgets and nanof QLabel path widgets."""
+    line_edit = getattr(main_window, line_edit_attr, None)
+    if line_edit is not None:
+        line_edit.setText(path)
+        line_edit.setToolTip(path)
+        return
+    label = getattr(main_window, label_attr, None)
+    if label is not None:
+        label.setText(misc_helpers.truncate_text(path) if path else "")
+        label.setToolTip(path)
+
+
+def set_target_media_path_display(main_window: "MainWindow", path: str) -> None:
+    _set_folder_path_display(
+        main_window,
+        line_edit_attr="targetVideosPathLineEdit",
+        label_attr="labelTargetVideosPath",
+        path=path,
+    )
+
+
+def set_input_faces_path_display(main_window: "MainWindow", path: str) -> None:
+    _set_folder_path_display(
+        main_window,
+        line_edit_attr="inputFacesPathLineEdit",
+        label_attr="labelInputFacesPath",
+        path=path,
+    )
 
 
 def _set_path_line_edit_value(line_edit: QtWidgets.QLineEdit, path: str) -> None:
@@ -740,7 +920,7 @@ def clear_all_target_media(main_window: "MainWindow") -> bool:
 
     main_window.target_videos.clear()
     main_window.selected_video_button = None
-    _set_path_line_edit_value(main_window.targetVideosPathLineEdit, "")
+    set_target_media_path_display(main_window, "")
     main_window.last_target_media_folder_path = ""
     main_window.placeholder_update_signal.emit(main_window.targetVideosList, False)
     return True
@@ -772,7 +952,7 @@ def clear_all_input_faces(main_window: "MainWindow") -> bool:
         input_face_button.deleteLater()
 
     common_widget_actions.refresh_frame(main_window)
-    _set_path_line_edit_value(main_window.inputFacesPathLineEdit, "")
+    set_input_faces_path_display(main_window, "")
     main_window.last_input_media_folder_path = ""
     main_window.placeholder_update_signal.emit(main_window.inputFacesList, False)
     return True

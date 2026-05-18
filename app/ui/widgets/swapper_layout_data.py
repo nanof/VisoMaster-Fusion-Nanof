@@ -185,6 +185,13 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
         },
     },
     "Masks": {
+        "MaskShowSelection": {
+            "level": 1,
+            "label": "Mask view selection",
+            "options": ["swap_mask", "diff", "texture"],
+            "default": "swap_mask",
+            "help": 'select what mask is shown in "view face mask".',
+        },
         "BordermaskEnableToggle": {
             "level": 1,
             "label": "Border Mask",
