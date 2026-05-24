@@ -40,7 +40,6 @@ from app.helpers.miscellaneous import (
     get_grid_for_pasting,
     read_image_file,
 )
-from app.helpers.sequential_rr_order import rr_spatial_order_key
 from app.helpers.cuda_timeline import nvtx_range
 from app.helpers.typing_helper import ParametersTypes
 from app.processors.frame_enhancers import FrameEnhancers
@@ -170,12 +169,6 @@ class FrameWorker(threading.Thread):
 
     # Q-IMP-04: minimum face bounding-box side length (pixels) to process
     _MIN_FACE_PIXELS: int = 20
-    # Swap all by index: remember assignments when a face briefly leaves frame (position + TTL).
-    _RR_SLOT_TTL_FRAMES: int = 90
-    _RR_SEEK_GAP_RESET_FRAMES: int = 150
-    _RR_MEMORY_MAX_SLOTS: int = 24
-    _RR_CENTROID_DIST_FRAC: float = 0.22
-    _RR_CENTROID_DIST_MIN_PX: float = 96.0
     # FW-PERF-11: Auto Restore sharpness search uses this max side (area resize) — ~4× fewer
     # pixels than 512² per score call; final blend still uses full-res tensors.
     _AUTO_RESTORE_SCORE_MAX_SIDE: int = 256
@@ -366,12 +359,8 @@ class FrameWorker(threading.Thread):
         # CHW uint8 frame tensor from feeder sequential detect (avoids duplicate H2D)
         self._feeder_chw_tensor: Optional[torch.Tensor] = None
 
-        # RR-TEMP: temporal coherence for "Swap all by index"
-        self._rr_memory_slots: list[tuple[np.ndarray, int, int]] = []
-        self._rr_track_to_input: dict[int, int] = {}
-        self._rr_track_last_seen: dict[int, int] = {}
-        self._rr_stabilize_last_fn: int = -999999
-        self._rr_stabilize_last_n_inputs: int = -1
+        # Feeder-ordered Swap-all-by-index indices (detection index → input slot)
+        self.precomputed_rr_input_indices: list[int] | None = None
 
         # --- OPTIMIZATION: Cached Convolution Kernels (VRAM) ---
         # Pre-allocating mathematical filters prevents massive CPU-to-GPU
@@ -513,7 +502,22 @@ class FrameWorker(threading.Thread):
                         # Stopped while waiting, discard task
                         break  # 'finally' will call task_done()
 
-                    if len(task) >= 11:
+                    if len(task) >= 12:
+                        (
+                            self.frame_number,
+                            self.frame,
+                            local_params_from_feeder,
+                            local_control_from_feeder,
+                            self.precomputed_bboxes,
+                            self.precomputed_kpss_5,
+                            self.precomputed_kpss,
+                            self.precomputed_kpss_203,
+                            _feeder_perf_task,
+                            self._feeder_chw_tensor,
+                            self.precomputed_track_ids,
+                            self.precomputed_rr_input_indices,
+                        ) = task[:12]
+                    elif len(task) >= 11:
                         (
                             self.frame_number,
                             self.frame,
@@ -527,6 +531,7 @@ class FrameWorker(threading.Thread):
                             self._feeder_chw_tensor,
                             self.precomputed_track_ids,
                         ) = task[:11]
+                        self.precomputed_rr_input_indices = None
                     elif len(task) >= 10:
                         (
                             self.frame_number,
@@ -541,6 +546,7 @@ class FrameWorker(threading.Thread):
                             self.precomputed_track_ids,
                         ) = task[:10]
                         self.precomputed_kpss_203 = None
+                        self.precomputed_rr_input_indices = None
                     elif len(task) >= 9:
                         (
                             self.frame_number,
@@ -555,6 +561,7 @@ class FrameWorker(threading.Thread):
                         ) = task[:9]
                         self.precomputed_kpss_203 = None
                         self.precomputed_track_ids = None
+                        self.precomputed_rr_input_indices = None
                     else:
                         (
                             self.frame_number,
@@ -569,6 +576,7 @@ class FrameWorker(threading.Thread):
                         self.precomputed_kpss_203 = None
                         self._feeder_chw_tensor = None
                         self.precomputed_track_ids = None
+                        self.precomputed_rr_input_indices = None
                     self._feeder_perf_from_task: dict[str, float] | None = (
                         _feeder_perf_task
                         if isinstance(_feeder_perf_task, dict)
@@ -917,135 +925,7 @@ class FrameWorker(threading.Thread):
         )
 
     def _reset_sequential_rotate_stabilizer(self) -> None:
-        self._rr_memory_slots.clear()
-        self._rr_track_to_input.clear()
-        self._rr_track_last_seen.clear()
-        self._rr_stabilize_last_fn = -999999
-        self._rr_stabilize_last_n_inputs = -1
-
-    @staticmethod
-    def _bbox_center_x(bbox: np.ndarray) -> float:
-        return float((float(bbox[0]) + float(bbox[2])) * 0.5)
-
-    @staticmethod
-    def _rr_bbox_center_xy(bbox: np.ndarray) -> tuple[float, float]:
-        bb = np.asarray(bbox, dtype=np.float64)
-        return (
-            float((bb[0] + bb[2]) * 0.5),
-            float((bb[1] + bb[3]) * 0.5),
-        )
-
-    @classmethod
-    def _rr_centroid_distance(cls, box_a: np.ndarray, box_b: np.ndarray) -> float:
-        ax, ay = cls._rr_bbox_center_xy(box_a)
-        bx, by = cls._rr_bbox_center_xy(box_b)
-        return float(math.hypot(ax - bx, ay - by))
-
-    def _rr_calculate_iou(self, box_a: np.ndarray, box_b: np.ndarray) -> float:
-        return float(
-            self.models_processor.face_detectors._calculate_iou(box_a, box_b)
-        )
-
-    def _rr_prune_expired_memory(self, frame_number: int) -> None:
-        ttl = self._RR_SLOT_TTL_FRAMES
-        self._rr_memory_slots = [
-            (bb, ix, ls)
-            for bb, ix, ls in self._rr_memory_slots
-            if frame_number - int(ls) <= ttl
-        ]
-
-    def _rr_prune_stale_tracks(self, frame_number: int) -> None:
-        ttl = self._RR_SLOT_TTL_FRAMES
-        stale = [
-            t
-            for t, ls in self._rr_track_last_seen.items()
-            if frame_number - int(ls) > ttl
-        ]
-        for t in stale:
-            self._rr_track_last_seen.pop(t, None)
-            self._rr_track_to_input.pop(t, None)
-
-    def _rr_cap_memory_slots(
-        self, slots: list[tuple[np.ndarray, int, int]]
-    ) -> list[tuple[np.ndarray, int, int]]:
-        cap = self._RR_MEMORY_MAX_SLOTS
-        if len(slots) <= cap:
-            return slots
-        return sorted(slots, key=lambda s: -int(s[2]))[:cap]
-
-    def _rr_merge_ghost_memory(
-        self,
-        curr_boxes: list[np.ndarray],
-        frame_number: int,
-        fresh: list[tuple[np.ndarray, int, int]],
-    ) -> list[tuple[np.ndarray, int, int]]:
-        ttl = self._RR_SLOT_TTL_FRAMES
-        overlap_cap = 0.15
-        merged = list(fresh)
-        for bb, ix, ls in self._rr_memory_slots:
-            if frame_number - int(ls) > ttl:
-                continue
-            bba = np.asarray(bb, dtype=np.float64)
-            if any(self._rr_calculate_iou(bba, cb) > overlap_cap for cb in curr_boxes):
-                continue
-            merged.append(
-                (np.asarray(bb, dtype=np.float32).copy(), int(ix), int(ls))
-            )
-        return self._rr_cap_memory_slots(merged)
-
-    def _rr_greedy_assign_from_memory(
-        self,
-        curr_boxes: list[np.ndarray],
-        mem: list[tuple[np.ndarray, int, int]],
-        n_in: int,
-        centroid_max: float,
-    ) -> tuple[list[int], list[bool]]:
-        """Greedy IoU then centroid match vs memory slots. Second list marks spatial matches."""
-        prev_boxes = [np.asarray(pb, dtype=np.float64).copy() for pb, _, _ in mem]
-        prev_inp = [int(ix) for _, ix, _ in mem]
-        n_curr = len(curr_boxes)
-        curr_assign: list[int | None] = [None] * n_curr
-        spatially_matched = [False] * n_curr
-        iou_floor = 0.08
-        scored: list[tuple[int, float, int, int]] = []
-        for ci in range(n_curr):
-            cb = curr_boxes[ci]
-            for mj in range(len(mem)):
-                mb = prev_boxes[mj]
-                iou_v = self._rr_calculate_iou(cb, mb)
-                if iou_v >= iou_floor:
-                    scored.append((0, -iou_v, ci, mj))
-                else:
-                    dist_v = self._rr_centroid_distance(cb, mb)
-                    if dist_v <= centroid_max:
-                        scored.append((1, dist_v, ci, mj))
-
-        scored.sort(key=lambda t: (t[0], t[1], t[2], t[3]))
-        assigned_c: set[int] = set()
-        assigned_m: set[int] = set()
-        for _tier, _sec, ci, mj in scored:
-            if ci in assigned_c or mj in assigned_m:
-                continue
-            assigned_c.add(ci)
-            assigned_m.add(mj)
-            curr_assign[ci] = prev_inp[mj]
-            spatially_matched[ci] = True
-
-        used_inp_rr: set[int] = set()
-        for ci in range(n_curr):
-            if curr_assign[ci] is not None:
-                used_inp_rr.add(int(curr_assign[ci]) % n_in)
-        for ci in range(n_curr):
-            if curr_assign[ci] is not None:
-                continue
-            cand = next((j for j in range(n_in) if j not in used_inp_rr), None)
-            if cand is None:
-                cand = ci % n_in
-            curr_assign[ci] = cand
-            used_inp_rr.add(int(cand) % n_in)
-
-        out = [int(curr_assign[ci]) % n_in for ci in range(n_curr)]
-        return out, spatially_matched
+        self.video_processor.reset_sequential_rotate_stabilizer()
 
     def _apply_sequential_rotate_temporal_alignment(
         self,
@@ -1056,129 +936,18 @@ class FrameWorker(threading.Thread):
         *,
         memory_without_tracking: bool = True,
     ) -> None:
-        """Assign stable _rr_input_idx per detection (ByteTrack, IoU, or screen position + TTL).
-
-        Indices are canonical 0..n-1; UI offset is applied when selecting the input button.
-        Memory slots keep (bbox, input_idx, last_seen_frame) so brief dropouts or frames
-        with no detections do not reshuffle remaining faces; large seeks reset state.
-        When ByteTrack IDs are present, assignment still uses the same memory-based match
-        first: new track IDs are seeded from that (not round-robin), and if a track's
-        mapped input disagrees with a spatial memory match, memory wins to avoid one-frame
-        identity flips when track state toggles.
-
-        Without valid unique ByteTrack IDs, optional IoU+ghost memory (``memory_without_tracking``)
-        keeps assignments coherent; if disabled, uses only per-frame left-to-right round-robin.
-        """
-        n_in = len(checked_inputs_ordered)
-        if n_in == 0:
+        """Assign ``_rr_input_idx`` (preview / single-frame / non-feeder paths)."""
+        if not checked_inputs_ordered or not det_faces:
             return
-
-        if frame_number < 0:
-            self._reset_sequential_rotate_stabilizer()
-            return
-
-        last_fn = self._rr_stabilize_last_fn
-        if last_fn >= 0:
-            if frame_number + 1 < last_fn:
-                self._reset_sequential_rotate_stabilizer()
-            elif frame_number - last_fn > self._RR_SEEK_GAP_RESET_FRAMES:
-                self._reset_sequential_rotate_stabilizer()
-
-        if (
-            self._rr_stabilize_last_n_inputs >= 0
-            and n_in != self._rr_stabilize_last_n_inputs
-        ):
-            self._reset_sequential_rotate_stabilizer()
-
-        self._rr_stabilize_last_fn = frame_number
-        self._rr_stabilize_last_n_inputs = n_in
-
-        self._rr_prune_expired_memory(frame_number)
-        self._rr_prune_stale_tracks(frame_number)
-
-        if not det_faces:
-            return
-
-        def _sort_key(fi: int) -> tuple[float, float, int]:
-            return rr_spatial_order_key(
-                det_faces[fi]["bbox"],
-                fi,
-                int(det_faces[fi].get("track_id", -1)),
+        with self.video_processor._sequential_rotate_lock:
+            self.video_processor._sequential_rotate_stabilizer.apply(
+                det_faces,
+                checked_inputs_ordered,
+                int(frame_number),
+                frame_wh,
+                self.video_processor._sequential_rotate_iou,
+                memory_without_tracking=memory_without_tracking,
             )
-
-        order = sorted(range(len(det_faces)), key=_sort_key)
-
-        all_tracks_ok = True
-        ordered_tids: list[int] = []
-        for fi in order:
-            tid = int(det_faces[fi].get("track_id", -1))
-            ordered_tids.append(tid)
-            if tid < 0:
-                all_tracks_ok = False
-
-        use_tracks = (
-            all_tracks_ok
-            and ordered_tids
-            and len(set(ordered_tids)) == len(ordered_tids)
-        )
-
-        curr_boxes = [
-            np.asarray(det_faces[fi]["bbox"], dtype=np.float64).copy() for fi in order
-        ]
-
-        n_curr = len(order)
-        img_w, img_h = int(frame_wh[0]), int(frame_wh[1])
-        centroid_max = max(
-            self._RR_CENTROID_DIST_MIN_PX,
-            self._RR_CENTROID_DIST_FRAC * float(min(img_w, img_h)),
-        )
-        if use_tracks:
-            base_assign, spatially_matched = self._rr_greedy_assign_from_memory(
-                curr_boxes, self._rr_memory_slots, n_in, centroid_max
-            )
-        elif memory_without_tracking:
-            base_assign, spatially_matched = self._rr_greedy_assign_from_memory(
-                curr_boxes, self._rr_memory_slots, n_in, centroid_max
-            )
-        else:
-            base_assign = [ci % n_in for ci in range(n_curr)]
-            spatially_matched = [False] * n_curr
-        if use_tracks:
-            final_assign = list(base_assign)
-            for ci, fi in enumerate(order):
-                tid = int(det_faces[fi]["track_id"])
-                self._rr_track_last_seen[tid] = frame_number
-                mem_inp = int(base_assign[ci]) % n_in
-                if tid not in self._rr_track_to_input:
-                    self._rr_track_to_input[tid] = mem_inp
-                    final_assign[ci] = mem_inp
-                else:
-                    track_inp = int(self._rr_track_to_input[tid]) % n_in
-                    if spatially_matched[ci] and track_inp != mem_inp:
-                        self._rr_track_to_input[tid] = mem_inp
-                        final_assign[ci] = mem_inp
-                    else:
-                        final_assign[ci] = track_inp
-            for ci, fi in enumerate(order):
-                det_faces[fi]["_rr_input_idx"] = int(final_assign[ci]) % n_in
-        else:
-            for ci, fi in enumerate(order):
-                det_faces[fi]["_rr_input_idx"] = int(base_assign[ci]) % n_in
-
-        fresh_mem = [
-            (
-                np.asarray(det_faces[fi]["bbox"], dtype=np.float32).copy(),
-                int(det_faces[fi]["_rr_input_idx"]),
-                frame_number,
-            )
-            for fi in order
-        ]
-        if use_tracks or memory_without_tracking:
-            self._rr_memory_slots = self._rr_merge_ghost_memory(
-                curr_boxes, frame_number, fresh_mem
-            )
-        else:
-            self._rr_memory_slots = self._rr_cap_memory_slots(fresh_mem)
 
     def _parameters_for_input_rotate_mode(self) -> ParametersDict:
         """Face swap toggles/sliders (restorers, masks, etc.) use data_type *parameter*,
@@ -4153,34 +3922,48 @@ class FrameWorker(threading.Thread):
                         track_id=int(_w.get("track_id", -1)),
                     )
 
+            _rr_pre = self.precomputed_rr_input_indices
             for _w in _work_faces:
-                det_faces_data_for_display.append(
-                    {
-                        "kps_5": _w["kps_5"],
-                        "kps_all": _w["kps_all"],
-                        "kps_203": _w.get("kps_203"),
-                        "embedding": _w["embedding"],
-                        "bbox": _w["bbox"],
-                        "track_id": int(_w.get("track_id", -1)),
-                        "original_face": None,
-                        "swap_mask": None,
-                        "matched_target": None,
-                    }
-                )
+                _entry: dict[str, Any] = {
+                    "kps_5": _w["kps_5"],
+                    "kps_all": _w["kps_all"],
+                    "kps_203": _w.get("kps_203"),
+                    "embedding": _w["embedding"],
+                    "bbox": _w["bbox"],
+                    "track_id": int(_w.get("track_id", -1)),
+                    "original_face": None,
+                    "swap_mask": None,
+                    "matched_target": None,
+                }
+                _det_i = int(_w["i"])
+                if (
+                    _rr_pre is not None
+                    and _det_i < len(_rr_pre)
+                    and int(_rr_pre[_det_i]) >= 0
+                ):
+                    _entry["_rr_input_idx"] = int(_rr_pre[_det_i])
+                det_faces_data_for_display.append(_entry)
 
         if perf_stages is not None:
             perf_stages.mark("std_recognize")
 
         if _sequential_match_active and _checked_inputs_ordered:
-            self._apply_sequential_rotate_temporal_alignment(
-                det_faces_data_for_display,
-                _checked_inputs_ordered,
-                self.frame_number,
-                (int(img.shape[-1]), int(img.shape[-2])),
-                memory_without_tracking=control.get(
-                    "SequentialStabilizeWithoutTrackingToggle", True
-                ),
-            )
+            _need_rr_apply = self.precomputed_rr_input_indices is None
+            if not _need_rr_apply:
+                for _ff in det_faces_data_for_display:
+                    if _ff.get("_rr_input_idx") is None:
+                        _need_rr_apply = True
+                        break
+            if _need_rr_apply:
+                self._apply_sequential_rotate_temporal_alignment(
+                    det_faces_data_for_display,
+                    _checked_inputs_ordered,
+                    self.frame_number,
+                    (int(img.shape[-1]), int(img.shape[-2])),
+                    memory_without_tracking=control.get(
+                        "SequentialStabilizeWithoutTrackingToggle", True
+                    ),
+                )
 
         # Swapping / Editing Loop
         if det_faces_data_for_display:

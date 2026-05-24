@@ -464,6 +464,22 @@ COMMON_LAYOUT_DATA: Any = {
             "requiredSelectionValue": "Simple",
             "help": "Threshold value for Normalize Lips.",
         },
+        "FaceExpressionAdvancedPerformanceEyesLipsOnlyToggle": {
+            "level": 3,
+            "label": "Advanced: eyes/lips only (faster)",
+            "default": False,
+            "parentToggle": "FaceExpressionEnableBothToggle",
+            "requiredToggleValue": True,
+            "parentSelection": "FaceExpressionModeSelection",
+            "requiredSelectionValue": "Advanced",
+            "help": (
+                "Ignores brow and general regions for this pass even if those toggles are on, "
+                "reducing LivePortrait stitching work. For motion, driving+target use one batched "
+                "run when the engine allows it. "
+                "VISIOMASTER_LP_MOTION_NO_BATCH2=1 forces two separate motion runs; "
+                "VISIOMASTER_LP_MOTION_TRT_STATIC_BATCH=1 omits TensorRT batch-2 profile (batch-1 cache only)."
+            ),
+        },
         # --- ADVANCED MODE WIDGETS (CURRENT LAYOUT) ---
         "FaceExpressionMicroExpressionBoostDecimalSlider": {
             "level": 3,

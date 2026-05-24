@@ -44,6 +44,7 @@ from app.ui.widgets.actions import save_load_actions
 from app.ui.widgets.settings_layout_data import CAMERA_BACKENDS
 import app.helpers.miscellaneous as misc_helpers
 from app.helpers.cuda_timeline import nvtx_range
+from app.helpers.sequential_rotate_stabilizer import SequentialRotateStabilizer
 from app.helpers.screen_capture import (
     create_screen_capture_from_control,
     mss_available,
@@ -265,6 +266,9 @@ class VideoProcessor(QObject):
         self.state_lock = threading.Lock()  # Lock for feeder state
         self.feeder_parameters: FacesParametersTypes | None = None
         self.feeder_control: ControlTypes | None = None
+        # Swap-all-by-index stabilizer (ordered detection thread only)
+        self._sequential_rotate_lock = threading.Lock()
+        self._sequential_rotate_stabilizer = SequentialRotateStabilizer()
 
         # --- Worker Thread Management ---
         self.num_threads = num_threads
@@ -1684,6 +1688,75 @@ class VideoProcessor(QObject):
         """
         self.last_detected_faces.clear()
         self._smoothed_kps.clear()
+        self.reset_sequential_rotate_stabilizer()
+
+    def reset_sequential_rotate_stabilizer(self) -> None:
+        with self._sequential_rotate_lock:
+            self._sequential_rotate_stabilizer.reset()
+
+    def _sequential_rotate_iou(self, box_a: numpy.ndarray, box_b: numpy.ndarray) -> float:
+        return float(
+            self.main_window.models_processor.face_detectors._calculate_iou(
+                box_a, box_b
+            )
+        )
+
+    def _feeder_checked_input_faces(self) -> list:
+        with self.state_lock:
+            return [
+                b
+                for _fid, b in self.main_window.input_faces.items()
+                if b.isChecked()
+            ]
+
+    def compute_feeder_rr_input_indices(
+        self,
+        bboxes: numpy.ndarray,
+        detect_track_ids: list[int],
+        frame_number: int,
+        frame_wh: tuple[int, int],
+        local_control: dict,
+    ) -> list[int] | None:
+        """Assign input indices on the ordered detection thread (before pool workers)."""
+        sequential_active = local_control.get(
+            "SequentialTargetMatchEnableToggle", False
+        ) and not local_control.get("SwapOnlyBestMatchEnableToggle", False)
+        if not sequential_active:
+            return None
+        if not isinstance(bboxes, numpy.ndarray) or bboxes.shape[0] == 0:
+            return None
+        checked = self._feeder_checked_input_faces()
+        if not checked:
+            return None
+        det_stubs: list[dict] = []
+        n = int(bboxes.shape[0])
+        for i in range(n):
+            tid = -1
+            if detect_track_ids and i < len(detect_track_ids):
+                tid = int(detect_track_ids[i])
+            det_stubs.append(
+                {
+                    "bbox": bboxes[i],
+                    "track_id": tid,
+                }
+            )
+        with self._sequential_rotate_lock:
+            self._sequential_rotate_stabilizer.apply(
+                det_stubs,
+                checked,
+                int(frame_number),
+                frame_wh,
+                self._sequential_rotate_iou,
+                memory_without_tracking=local_control.get(
+                    "SequentialStabilizeWithoutTrackingToggle", True
+                ),
+            )
+        out = [-1] * n
+        for i, stub in enumerate(det_stubs):
+            slot = stub.get("_rr_input_idx", None)
+            if slot is not None:
+                out[i] = int(slot)
+        return out
 
     def _sequential_detection_required(
         self,
@@ -2535,6 +2608,14 @@ class VideoProcessor(QObject):
                             flush=True,
                         )
 
+            _fh, _fw = int(frame_rgb.shape[0]), int(frame_rgb.shape[1])
+            rr_input_indices = self.compute_feeder_rr_input_indices(
+                bboxes,
+                detect_track_ids,
+                int(logical_fn),
+                (_fw, _fh),
+                local_control,
+            )
             task = (
                 display_fn,
                 frame_rgb,
@@ -2547,6 +2628,7 @@ class VideoProcessor(QObject):
                 feeder_perf,
                 feeder_chw_uint8,
                 detect_track_ids,
+                rr_input_indices,
             )
             self.frame_queue.put(task)
 
