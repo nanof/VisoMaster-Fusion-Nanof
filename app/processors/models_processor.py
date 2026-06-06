@@ -21,6 +21,7 @@ from app.processors.utils import faceutil
 from app.processors.ort_io_dtype_utils import (
     _numpy_scalar_type_to_torch_dtype,
     _ort_warmup_numpy_dtype_for_input,
+    normalize_ort_bind_device_type,
 )
 from app.processors.trt_dynamic_batch_profiles import merge_tensorrt_dynamic_shape_profiles
 
@@ -1440,7 +1441,9 @@ class ModelsProcessor(QtCore.QObject):
             dtype=self.get_ort_io_torch_dtype(model_name, input_name, is_output=False)
         ).contiguous()
         exp_np = self.get_ort_io_numpy_dtype(model_name, input_name, is_output=False)
-        dev_t = device_type if device_type is not None else self.get_ort_bind_device_type()
+        dev_t = normalize_ort_bind_device_type(
+            device_type if device_type is not None else self.get_ort_bind_device_type()
+        )
         cuda_id = (
             int(device_id)
             if device_id is not None
@@ -1475,7 +1478,9 @@ class ModelsProcessor(QtCore.QObject):
             )
         t = tensor.contiguous()
         exp_np = self.get_ort_io_numpy_dtype(model_name, output_name, is_output=True)
-        dev_t = device_type if device_type is not None else self.get_ort_bind_device_type()
+        dev_t = normalize_ort_bind_device_type(
+            device_type if device_type is not None else self.get_ort_bind_device_type()
+        )
         cuda_id = (
             int(device_id)
             if device_id is not None

@@ -423,7 +423,7 @@ class FaceMasks:
         try:
             if str(dev).startswith("cuda") and torch.cuda.is_available():
                 io = ort_session.io_binding()
-                dt = str(dev)
+                dt = self.models_processor.get_ort_bind_device_type()
                 cuda_id = self.models_processor.get_ort_bind_input_cuda_device_id()
                 src = self.models_processor.bind_ort_io_input(
                     io, model_name, ins["src"].name, src, device_type=dt, device_id=cuda_id
@@ -451,7 +451,7 @@ class FaceMasks:
                 outs_meta = ort_session.get_outputs()
                 for o in outs_meta:
                     if o.name != "pha":
-                        io.bind_output(o.name, dev)
+                        self.models_processor.bind_ort_output_dynamic(io, o.name)
                 self.models_processor.bind_ort_io_output(
                     io, model_name, "pha", pha, device_type=dt, device_id=cuda_id
                 )
@@ -500,7 +500,7 @@ class FaceMasks:
                 outs_meta = ort_session.get_outputs()
                 for o in outs_meta:
                     if o.name != "pha":
-                        io.bind_output(o.name, dt)
+                        self.models_processor.bind_ort_output_dynamic(io, o.name)
                 self.models_processor.bind_ort_io_output(
                     io, model_name, "pha", pha_buf, device_type=dt, device_id=cid
                 )
@@ -548,7 +548,7 @@ class FaceMasks:
 
         if str(dev).startswith("cuda") and torch.cuda.is_available():
             io = ort_session.io_binding()
-            dt = str(dev)
+            dt = self.models_processor.get_ort_bind_device_type()
             cuda_id = self.models_processor.get_ort_bind_input_cuda_device_id()
             x = self.models_processor.bind_ort_io_input(
                 io, model_name, in_name, x, device_type=dt, device_id=cuda_id
@@ -562,7 +562,7 @@ class FaceMasks:
                         io, model_name, name, out_t, device_type=dt, device_id=cuda_id
                     )
                 else:
-                    io.bind_output(name, dev)
+                    self.models_processor.bind_ort_output_dynamic(io, name)
             is_lazy = self.models_processor.check_and_clear_pending_build(model_name)
             if is_lazy:
                 self.models_processor.show_build_dialog.emit(
@@ -597,7 +597,7 @@ class FaceMasks:
                         io, model_name, name, out_t, device_type=dt, device_id=cid
                     )
                 else:
-                    io.bind_output(name, dt)
+                    self.models_processor.bind_ort_output_dynamic(io, name)
             if self.models_processor.uses_cuda_ep_for_thread():
                 torch.cuda.current_stream().synchronize()
             elif self.models_processor.device != "cpu":
@@ -1438,7 +1438,7 @@ class FaceMasks:
                         io, model_key, prim, out
                     )
                     for name in output_names[1:]:
-                        io.bind_output(name, dev)
+                        self.models_processor.bind_ort_output_dynamic(io, name)
                     is_lazy = self.models_processor.check_and_clear_pending_build(
                         model_key
                     )

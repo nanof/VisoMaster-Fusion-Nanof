@@ -2484,6 +2484,26 @@ class VideoProcessor(QObject):
                 rq.queue.clear()
                 rq.not_full.notify_all()
 
+    def _drain_raw_frame_queue(self) -> int:
+        """Drop raw detect tasks not yet consumed by the detection pipeline thread."""
+        rq = self._raw_frame_queue
+        if rq is None:
+            return 0
+        dropped = 0
+        while True:
+            try:
+                rq.get_nowait()
+                dropped += 1
+            except queue.Empty:
+                break
+        return dropped
+
+    def _prepare_detection_pipeline_join(self) -> int:
+        """Drop stale raw frames and signal shutdown so the detect thread can exit promptly."""
+        dropped = self._drain_raw_frame_queue()
+        self._signal_detection_pipeline_end()
+        return dropped
+
     def _signal_detection_pipeline_end(self) -> None:
         """Unblock the detection thread after the decode feeder exits (sentinel)."""
         t = self._detection_pipeline_thread
@@ -2516,9 +2536,15 @@ class VideoProcessor(QObject):
         )
         self._detection_pipeline_thread.start()
 
-    def _join_detection_pipeline_thread(self, timeout: float = 10.0) -> None:
+    def _join_detection_pipeline_thread(self, timeout: float = 5.0) -> None:
         t = self._detection_pipeline_thread
         if t is not None and t.is_alive():
+            dropped = self._prepare_detection_pipeline_join()
+            if dropped and _env_flag("VISIOMASTER_LIVE_DROP_LOG"):
+                print(
+                    f"[INFO] Detection shutdown: dropped {dropped} pending raw frame(s).",
+                    flush=True,
+                )
             t.join(timeout=timeout)
             if t.is_alive():
                 print(
@@ -3120,17 +3146,7 @@ class VideoProcessor(QObject):
         frame; without draining, sequential detection would still run on stale captures
         and waste GPU. Returns how many tasks were removed.
         """
-        rq = self._raw_frame_queue
-        if rq is None:
-            return 0
-        dropped = 0
-        while True:
-            try:
-                rq.get_nowait()
-                dropped += 1
-            except queue.Empty:
-                break
-        return dropped
+        return self._drain_raw_frame_queue()
 
     def _feed_webcam(self):
         """Feeder logic for webcam streaming."""
@@ -3992,7 +4008,7 @@ class VideoProcessor(QObject):
         print(f"[INFO] Starting {self.num_threads} persistent worker thread(s)...")
         # Ensure old workers are cleared (from a previous run)
         self.join_and_clear_threads()
-        self._join_detection_pipeline_thread(timeout=3.0)
+        self._join_detection_pipeline_thread()
         self.worker_threads = []
         self._rebuild_frame_queue_from_control()
         # Clear any stale tasks or poison pills left from the previous session.
@@ -4515,7 +4531,7 @@ class VideoProcessor(QObject):
         self.feeder_thread = None
         print("[INFO] Feeder thread joined.")
 
-        self._join_detection_pipeline_thread(timeout=3.0)
+        self._join_detection_pipeline_thread()
 
         self._clear_frames_to_display_and_profiles()
         self.clear_recognition_embedding_cache()
@@ -7211,7 +7227,7 @@ class VideoProcessor(QObject):
             self.feeder_thread = None
             print("[INFO] Feeder thread joined.")
 
-            self._join_detection_pipeline_thread(timeout=3.0)
+            self._join_detection_pipeline_thread()
 
             # 4. Clear buffers and join worker threads.
             self._clear_frames_to_display_and_profiles()
@@ -7809,7 +7825,7 @@ class VideoProcessor(QObject):
         )
         # Ensure old workers are cleaned up (if present)
         self.join_and_clear_threads()
-        self._join_detection_pipeline_thread(timeout=3.0)
+        self._join_detection_pipeline_thread()
         self.worker_threads = []
         self._rebuild_frame_queue_from_control()
         self._spawn_worker_pool()
@@ -7907,7 +7923,7 @@ class VideoProcessor(QObject):
 
         self.feeder_thread = None
 
-        self._join_detection_pipeline_thread(timeout=3.0)
+        self._join_detection_pipeline_thread()
 
         # 2b. Wait for workers
         print(f"[INFO] Waiting for workers from segment {segment_num}...")
@@ -8543,7 +8559,7 @@ class VideoProcessor(QObject):
         print(f"[INFO] Webcam target FPS: {self.fps}")
 
         self.join_and_clear_threads()
-        self._join_detection_pipeline_thread(timeout=3.0)
+        self._join_detection_pipeline_thread()
         self.worker_threads = []
         self._rebuild_frame_queue_from_control()
         self._spawn_worker_pool()
@@ -8613,7 +8629,7 @@ class VideoProcessor(QObject):
         print(f"[INFO] Screen capture target FPS: {self.fps}")
 
         self.join_and_clear_threads()
-        self._join_detection_pipeline_thread(timeout=3.0)
+        self._join_detection_pipeline_thread()
         self.worker_threads = []
         self._rebuild_frame_queue_from_control()
         self._spawn_worker_pool()

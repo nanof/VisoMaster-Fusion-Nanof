@@ -33,6 +33,16 @@ def session_declared_numpy_dtype_for_name(
     return np.float32
 
 
+def normalize_ort_bind_device_type(device_type: str) -> str:
+    """ORT IOBinding expects ``cuda`` / ``cpu``, not ``cuda:0`` torch device strings."""
+    dt = str(device_type).strip().lower()
+    if dt.startswith("cuda"):
+        return "cuda"
+    if dt == "cpu":
+        return "cpu"
+    return dt
+
+
 def _numpy_scalar_type_to_torch_dtype(np_scalar_type: type) -> torch.dtype:
     """Map numpy scalar kind (from ``_ort_warmup_numpy_dtype_for_input``) to ``torch.dtype``."""
     if np_scalar_type == np.float16:
