@@ -320,30 +320,22 @@ class FaceMasks:
                 (512, 512), dtype=torch.long, device=img_uint8_3x512x512.device
             )
 
-        # Binding I/O
+        # Binding I/O (use ModelsProcessor helpers — ORT expects device_type "cuda", not "cuda:0")
+        in0 = ort_session.get_inputs()[0].name
+        out_name = "output"
+        td_out = self.models_processor.get_ort_io_torch_dtype(
+            model_name, out_name, is_output=True
+        )
         out = torch.empty(
-            (1, 19, 512, 512), device=self.models_processor.get_effective_torch_device()
+            (1, 19, 512, 512),
+            dtype=td_out,
+            device=self.models_processor.get_effective_torch_device(),
         )
         io = ort_session.io_binding()
-        in0 = ort_session.get_inputs()[0].name
-        io.bind_input(
-            in0,
-            self.models_processor.get_effective_torch_device(),
-            0,
-            np.float32,
-            (1, 3, 512, 512),
-            x.data_ptr(),
-        )
+        x = self.models_processor.bind_ort_io_input(io, model_name, in0, x)
         for ometa in ort_session.get_outputs():
-            if ometa.name == "output":
-                io.bind_output(
-                    "output",
-                    self.models_processor.get_effective_torch_device(),
-                    0,
-                    np.float32,
-                    (1, 19, 512, 512),
-                    out.data_ptr(),
-                )
+            if ometa.name == out_name:
+                self.models_processor.bind_ort_io_output(io, model_name, out_name, out)
             else:
                 self.models_processor.bind_ort_output_dynamic(io, ometa.name)
 
