@@ -811,6 +811,11 @@ class ModelsProcessor(QtCore.QObject):
                 self._model_last_used_mono[storage_key] = time.monotonic()
                 return self.models[storage_key]
 
+            existing_trt = self.models_trt.get(storage_key)
+            if existing_trt is not None:
+                self._model_last_used_mono[storage_key] = time.monotonic()
+                return existing_trt
+
             if model_name == "DMDNetTorch":
                 return self.face_restorers.ensure_dmdnet_loaded()
 
@@ -850,6 +855,9 @@ class ModelsProcessor(QtCore.QObject):
                     # This will build the engine if it doesn't exist.
                     model_instance = self.load_model_trt(model_name)
                     if model_instance:
+                        old_trt = self.models_trt.get(storage_key)
+                        if old_trt is not None and old_trt is not model_instance:
+                            del old_trt
                         self.models_trt[storage_key] = model_instance
                         self._model_last_used_mono[storage_key] = time.monotonic()
                         self._schedule_ort_warmup_if_enabled(model_name, model_instance)
@@ -1705,6 +1713,13 @@ class ModelsProcessor(QtCore.QObject):
     def get_onnx_session(self, model_name: str):
         """Return the loaded InferenceSession for *model_name* on this thread's GPU (multi-GPU aware)."""
         return self.models.get(self._ort_session_storage_key(model_name))
+
+    def is_model_loaded(self, model_name: str) -> bool:
+        """True if an ONNX or TensorRT-native session exists for *model_name*."""
+        storage_key = self._ort_session_storage_key(model_name)
+        if self.models.get(storage_key):
+            return True
+        return self.models_trt.get(storage_key) is not None
 
     def get_trt_native_model(self, model_name: str):
         """TensorRT-native runtime object keyed like ONNX sessions (multi-GPU aware)."""

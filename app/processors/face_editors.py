@@ -183,12 +183,26 @@ class FaceEditors:
 
         return pickle.loads(file_bytes)
 
+    def iter_editor_model_names(self):
+        """Unique LivePortrait catalog names managed by this editor group."""
+        seen: set[str] = set()
+        for model_names in self.editor_models.values():
+            for model_name in model_names:
+                if model_name not in seen:
+                    seen.add(model_name)
+                    yield model_name
+
+    def are_models_loaded(self) -> bool:
+        """True if any LivePortrait session is still resident in memory."""
+        return any(
+            self.models_processor.is_model_loaded(model_name)
+            for model_name in self.iter_editor_model_names()
+        )
+
     def unload_models(self):
-        if self.current_face_editor_type:
-            models_to_unload = self.editor_models.get(self.current_face_editor_type, [])
-            for model_name in models_to_unload:
-                self.models_processor.unload_model(model_name)
-            self.current_face_editor_type = None
+        for model_name in self.iter_editor_model_names():
+            self.models_processor.unload_model(model_name)
+        self.current_face_editor_type = None
 
     def _manage_editor_models(self, face_editor_type: str):
         """
@@ -234,7 +248,7 @@ class FaceEditors:
             model_name = "LivePortraitMotionExtractor"
 
             if face_editor_type == "Human-Face":
-                if not self.models_processor.get_onnx_session(model_name):
+                if not self.models_processor.is_model_loaded(model_name):
                     self.models_processor.load_model(model_name)
 
             td_in = self.models_processor.get_ort_io_torch_dtype(
@@ -306,7 +320,7 @@ class FaceEditors:
             model_name = "LivePortraitAppearanceFeatureExtractor"
 
             if face_editor_type == "Human-Face":
-                if not self.models_processor.get_onnx_session(model_name):
+                if not self.models_processor.is_model_loaded(model_name):
                     self.models_processor.load_model(model_name)
 
             td_in = self.models_processor.get_ort_io_torch_dtype(
@@ -353,7 +367,7 @@ class FaceEditors:
             model_name = "LivePortraitStitchingEye"
 
             if face_editor_type == "Human-Face":
-                if not self.models_processor.get_onnx_session(model_name):
+                if not self.models_processor.is_model_loaded(model_name):
                     self.models_processor.load_model(model_name)
 
             td_in = self.models_processor.get_ort_io_torch_dtype(
@@ -400,7 +414,7 @@ class FaceEditors:
             model_name = "LivePortraitStitchingLip"
 
             if face_editor_type == "Human-Face":
-                if not self.models_processor.get_onnx_session(model_name):
+                if not self.models_processor.is_model_loaded(model_name):
                     self.models_processor.load_model(model_name)
 
             td_in = self.models_processor.get_ort_io_torch_dtype(
@@ -449,7 +463,7 @@ class FaceEditors:
             model_name = "LivePortraitStitching"
 
             if face_editor_type == "Human-Face":
-                if not self.models_processor.get_onnx_session(model_name):
+                if not self.models_processor.is_model_loaded(model_name):
                     self.models_processor.load_model(model_name)
 
             td_in = self.models_processor.get_ort_io_torch_dtype(
@@ -565,7 +579,7 @@ class FaceEditors:
             model_name = "LivePortraitWarpingSpade"
 
             if face_editor_type == "Human-Face":
-                if not self.models_processor.get_onnx_session(model_name):
+                if not self.models_processor.is_model_loaded(model_name):
                     self.models_processor.load_model(model_name)
 
             t_f = self.models_processor.get_ort_io_torch_dtype(

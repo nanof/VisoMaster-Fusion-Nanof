@@ -1004,6 +1004,37 @@ def handle_enhancer_model_selection_change(
         frame_enhancers.current_enhancer_model = new_model_name
 
 
+def _any_face_parameter_enabled(
+    main_window: "MainWindow", parameter_name: str
+) -> bool:
+    """True if any target-face parameter set has *parameter_name* enabled."""
+    params_map = getattr(main_window, "parameters", None) or {}
+    for params in params_map.values():
+        if isinstance(params, dict) and params.get(parameter_name, False):
+            return True
+    cwp = getattr(main_window, "current_widget_parameters", None)
+    return isinstance(cwp, dict) and bool(cwp.get(parameter_name, False))
+
+
+def _any_liveportrait_feature_active(main_window: "MainWindow") -> bool:
+    """True if any UI path still needs LivePortrait models loaded."""
+    if main_window.editFacesButton.isChecked() and _any_face_parameter_enabled(
+        main_window, "FaceEditorEnableToggle"
+    ):
+        return True
+    for toggle_name in (
+        "FaceExpressionEnableBothToggle",
+        "AutoMouthExpressionEnableToggle",
+        "FaceMakeupEnableToggle",
+        "HairMakeupEnableToggle",
+        "EyeBrowsMakeupEnableToggle",
+        "LipsMakeupEnableToggle",
+    ):
+        if _any_face_parameter_enabled(main_window, toggle_name):
+            return True
+    return False
+
+
 def _check_and_manage_face_editor_models(main_window: "MainWindow"):
     """
     Central function to load/unload FaceEditor (LivePortrait) models
@@ -1011,30 +1042,10 @@ def _check_and_manage_face_editor_models(main_window: "MainWindow"):
     """
     models_processor = main_window.models_processor
 
-    # 1. Check if the main 'Edit Face' button (outside the tab) is checked
-    is_edit_face_active = main_window.editFacesButton.isChecked()
+    any_editor_feature_active = _any_liveportrait_feature_active(main_window)
 
-    # 2. Check if the 'Enable Face Pose/Expression Editor' parameter toggle (inside the tab) is active
-    # We read from 'current_widget_parameters' to get the most up-to-date UI state
-    is_face_editor_param_active = main_window.current_widget_parameters.get(
-        "FaceEditorEnableToggle", False
-    )
-
-    # 3. Check if the 'Enable Face Expression Restorer' parameter toggle is active
-    is_expr_restore_active = main_window.current_widget_parameters.get(
-        "FaceExpressionEnableBothToggle", False
-    )
-
-    # The 'Edit Face' feature is only *truly* active if BOTH its buttons are on.
-    true_edit_active = is_edit_face_active and is_face_editor_param_active
-
-    # Any LivePortrait feature is active if (Edit Face is fully on) OR (Expression Restore is on)
-    any_editor_feature_active = true_edit_active or is_expr_restore_active
-
-    # Check the *actual* loaded state from the face_editors module
-    models_are_currently_loaded = (
-        models_processor.face_editors.current_face_editor_type is not None
-    )
+    # Check resident ONNX/TRT sessions, not only the editor-type bookkeeping flag.
+    models_are_currently_loaded = models_processor.face_editors.are_models_loaded()
 
     if any_editor_feature_active and not models_are_currently_loaded:
         # A feature is ON, but models are OFF.
