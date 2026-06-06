@@ -154,7 +154,6 @@ class FrameEdits:
         target: torch.Tensor,
         parameters: dict,
         driving_kps: np.ndarray = None,
-        target_kps: np.ndarray = None,
     ) -> torch.Tensor:
         """
         Restores the expression of the face using the LivePortrait model pipeline.
@@ -200,9 +199,6 @@ class FrameEdits:
                 micro_expression_boost = parameters.get(
                     "FaceExpressionMicroExpressionBoostDecimalSlider", 0.50
                 )
-    
-                # PARAMETER: Neutral Expression Factor (Anti-Surenchère)
-                neutral_factor = parameters.get("FaceExpressionNeutralDecimalSlider", 1.0)
 
                 if not _face_expression_has_active_work(parameters, mode):
                     return target
@@ -255,27 +251,22 @@ class FrameEdits:
     
                 # --- TARGET FACE ---
                 target = target.clamp(0, 255).type(torch.uint8)
-    
-                if target_kps is not None and not np.all(target_kps == 0):
-                    source_lmk = target_kps
-                else:
-                    _, source_lmk, _ = self.models_processor.run_detect_landmark(
-                        target,
-                        bbox=np.array([0, 0, 512, 512]),
-                        det_kpss=[],
-                        detect_mode="203",
-                        score=0.5,
-                        from_points=False,
-                        use_mean_eyes=use_mean_eyes,
-                    )
-                    _logger.debug(
-                        "Could not get kps_203, running separate detection on target face."
-                    )
-    
+
+                # Always run detection on the target face to get landmarks for warping
+                _, source_lmk, _ = self.models_processor.run_detect_landmark(
+                    target,
+                    bbox=np.array([0, 0, 512, 512], dtype=np.float32),
+                    det_kpss=None,
+                    detect_mode="203",
+                    score=0.5,
+                    from_points=False,
+                    use_mean_eyes=use_mean_eyes,
+                )
+
                 if source_lmk is None or (
                     hasattr(source_lmk, "__len__") and len(source_lmk) == 0
                 ):
-                    return target
+                    return target.type(torch.float32)
     
                 target_face_512, M_o2c, M_c2o = faceutil.warp_face_by_face_landmark_x(
                     target,
@@ -380,12 +371,19 @@ class FrameEdits:
                     is_relative=False,
                     neutral_ref=None,
                     use_boost=False,
+                    neutral_factor: float = 0.3,
                 ):
                     """
                     Helper to calculate motion with 'Smart Dynamic Boost' and 'Neutral Factor'.
                     """
                     delta_local = x_s_info["exp"].clone()
-    
+
+                    # If we dampen the expression towards neutral, the retargeting offsets
+                    # (extra_delta) must be dampened by the same ratio to prevent decoupled
+                    # floating features.
+                    if isinstance(extra_delta, torch.Tensor) or extra_delta != 0:
+                        extra_delta = extra_delta * neutral_factor
+
                     if is_relative:
                         # Relative Motion Calculation
                         ref = neutral_ref if neutral_ref is not None else 0
@@ -479,7 +477,10 @@ class FrameEdits:
                     driving_multiplier = parameters.get(
                         "FaceExpressionFriendlyFactorDecimalSlider", 1.0
                     )
-    
+                    neutral_factor = parameters.get(
+                        "FaceExpressionNeutralDecimalSlider", 1.0
+                    )
+
                     animation_region = parameters.get(
                         "FaceExpressionAnimationRegionSelection", "all"
                     )
@@ -513,8 +514,9 @@ class FrameEdits:
                             driving_multiplier,
                             is_relative=True,
                             use_boost=False,
+                            neutral_factor=neutral_factor,
                         )
-    
+
                     if has_lips:
                         accumulated_motion += get_component_motion(
                             lip_indices,
@@ -524,6 +526,7 @@ class FrameEdits:
                             is_relative=True,
                             neutral_ref=lp_lip_array,
                             use_boost=False,
+                            neutral_factor=neutral_factor,
                         )
     
                 else:
@@ -582,8 +585,20 @@ class FrameEdits:
                     eyes_normalize_max = parameters.get(
                         "FaceExpressionNormalizeEyesMaxBothDecimalSlider", 0.50
                     )
+                    neutral_factor_eyes = parameters.get(
+                        "FaceExpressionNeutral_EyesDecimalSlider", 0.3
+                    )
+                    neutral_factor_lips = parameters.get(
+                        "FaceExpressionNeutral_LipsDecimalSlider", 0.3
+                    )
+                    neutral_factor_brows = parameters.get(
+                        "FaceExpressionNeutral_BrowsDecimalSlider", 0.3
+                    )
+                    neutral_factor_general = parameters.get(
+                        "FaceExpressionNeutral_GeneralDecimalSlider", 0.3
+                    )
                     combined_eyes_ratio_normalize = None
-    
+
                     if flag_normalize_eyes and source_lmk is not None:
                         c_d_eyes_normalize = c_d_eyes_lst
                         eyes_ratio = np.array([c_d_eyes_normalize[0][0]], dtype=np.float32)
@@ -647,6 +662,7 @@ class FrameEdits:
                                 is_relative=True,
                                 neutral_ref=0,
                                 use_boost=True,
+                                neutral_factor=neutral_factor_eyes,
                             )
                             absolute_retarget_eye_motion = get_component_motion(
                                 eye_indices,
@@ -656,6 +672,7 @@ class FrameEdits:
                                 is_relative=False,
                                 neutral_ref=0,
                                 use_boost=True,
+                                neutral_factor=neutral_factor_eyes,
                             )
                             accumulated_motion += (
                                 merge_eye_motion_candidates(
@@ -674,8 +691,9 @@ class FrameEdits:
                                 is_relative=flag_relative_eyes,
                                 neutral_ref=0,
                                 use_boost=True,
+                                neutral_factor=neutral_factor_eyes,
                             )
-    
+
                     if flag_activate_lips:
                         lips_retarget_delta = 0
                         if parameters.get(
@@ -700,8 +718,9 @@ class FrameEdits:
                             is_relative=flag_relative_lips,
                             neutral_ref=lp_lip_array,
                             use_boost=True,
+                            neutral_factor=neutral_factor_lips,
                         )
-    
+
                     if flag_activate_brows:
                         accumulated_motion += get_component_motion(
                             brow_indices,
@@ -710,8 +729,9 @@ class FrameEdits:
                             is_relative=flag_relative_brows,
                             neutral_ref=0,
                             use_boost=True,
+                            neutral_factor=neutral_factor_brows,
                         )
-    
+
                     if flag_activate_general and len(general_indices) > 0:
                         accumulated_motion += get_component_motion(
                             general_indices,
@@ -720,6 +740,7 @@ class FrameEdits:
                             is_relative=flag_relative_general,
                             neutral_ref=0,
                             use_boost=True,
+                            neutral_factor=neutral_factor_general,
                         )
     
                 # --- GENERATE FINAL IMAGE ---
@@ -768,7 +789,6 @@ class FrameEdits:
         swap_restorecalc: torch.Tensor,
         parameters: dict,
         control: dict,
-        kps_crop: np.ndarray = None,
         **kwargs,
     ) -> torch.Tensor:
         """
@@ -809,18 +829,15 @@ class FrameEdits:
                 init_source_lip_ratio = 0.0
 
                 # Detection
-                if kps_crop is not None:
-                    lmk_crop = kps_crop
-                else:
-                    _, lmk_crop, _ = self.models_processor.run_detect_landmark(
-                        swap_restorecalc,
-                        bbox=np.array([0, 0, 512, 512]),
-                        det_kpss=[],
-                        detect_mode="203",
-                        score=0.5,
-                        from_points=False,
-                        use_mean_eyes=use_mean_eyes,
-                    )
+                _, lmk_crop, _ = self.models_processor.run_detect_landmark(
+                    swap_restorecalc,
+                    bbox=np.array([0, 0, 512, 512]),
+                    det_kpss=[],
+                    detect_mode="203",
+                    score=0.5,
+                    from_points=False,
+                    use_mean_eyes=use_mean_eyes,
+                )
                 source_eye_ratio = faceutil.calc_eye_close_ratio(lmk_crop[None])
                 source_lip_ratio = faceutil.calc_lip_close_ratio(lmk_crop[None])
                 init_source_eye_ratio = round(float(source_eye_ratio.mean()), 2)

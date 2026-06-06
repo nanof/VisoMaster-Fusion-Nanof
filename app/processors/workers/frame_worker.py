@@ -7102,9 +7102,6 @@ class FrameWorker(threading.Thread):
                 if debug:
                     print(f"[DEBUG] DMDNet landmark build failed: {_e}")
 
-        # STATE TRACKER: Suit si le tenseur 'swap' a subi une modification géométrique
-        is_geometry_altered = False
-
         # FW-PERF-5: use promoted instance-attribute transforms (initialized in
         # set_scaling_transforms) instead of constructing new objects each call
         t512_mask = self.t512_mask
@@ -7378,9 +7375,7 @@ class FrameWorker(threading.Thread):
                 swap,
                 cast(dict, parameters),
                 driving_kps=kps_all_crop,
-                target_kps=None if is_geometry_altered else kps_all_crop,
             )
-            is_geometry_altered = True
 
         # Face editor beginning
         if (
@@ -7401,9 +7396,7 @@ class FrameWorker(threading.Thread):
                 swap,
                 parameters,
                 control,
-                kps_all=None if is_geometry_altered else kps_all_crop,
             )
-            is_geometry_altered = True
 
         # First Denoiser pass - Before Restorers
         if control.get("DenoiserUNetEnableBeforeRestorersToggle", False):
@@ -7481,7 +7474,7 @@ class FrameWorker(threading.Thread):
         def _swap_core_after_primary_restorer(
             swap_restorecalc_in: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-            nonlocal swap, swap_mask, swap_mask_noFP, is_geometry_altered, debug_info, texture_exclude_512, diff_mask, texture_mask_view, calc_mask, calc_mask_dill, mask_forcalc_512, border_mask
+            nonlocal swap, swap_mask, swap_mask_noFP, debug_info, texture_exclude_512, diff_mask, texture_mask_view, calc_mask, calc_mask_dill, mask_forcalc_512, border_mask
             swap_restorecalc = swap_restorecalc_in
             # Occluder
             if parameters["OccluderEnableToggle"]:
@@ -7834,9 +7827,7 @@ class FrameWorker(threading.Thread):
                     swap,
                     cast(dict, parameters),
                     driving_kps=kps_all_crop,
-                    target_kps=None if is_geometry_altered else kps_all_crop,
                 )
-                is_geometry_altered = True
 
             # Face Editor (After First)
             if (
@@ -7857,9 +7848,7 @@ class FrameWorker(threading.Thread):
                     swap_restorecalc,
                     parameters,
                     control,
-                    kps_all=None if is_geometry_altered else kps_all_crop,
                 )
-                is_geometry_altered = True
                 if swap_mask_noFP.shape[-1] != swap.shape[-1]:
                     swap_mask = self._get_cached_resize_bilinear_aa(
                         swap.shape[-2], swap.shape[-1]
@@ -7935,9 +7924,7 @@ class FrameWorker(threading.Thread):
                     swap,
                     cast(dict, parameters),
                     driving_kps=kps_all_crop,
-                    target_kps=None if is_geometry_altered else kps_all_crop,
                 )
-                is_geometry_altered = True
 
             # Editor (After Second)
             if (
@@ -7958,9 +7945,7 @@ class FrameWorker(threading.Thread):
                     swap,
                     parameters,
                     control,
-                    kps_all=None if is_geometry_altered else kps_all_crop,
                 )
-                is_geometry_altered = True
                 if swap_mask_noFP.shape[-1] != swap.shape[-1]:
                     swap_mask = self._get_cached_resize_bilinear_aa(
                         swap.shape[-2], swap.shape[-1]
@@ -8311,9 +8296,7 @@ class FrameWorker(threading.Thread):
                     swap,
                     parameters,
                     control,
-                    kps_all=None if is_geometry_altered else kps_all_crop,
                 )
-                is_geometry_altered = True
 
                 if swap_mask_noFP.shape[-1] != swap.shape[-1]:
                     swap_mask = self._get_cached_resize_bilinear_aa(
