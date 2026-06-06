@@ -1584,9 +1584,10 @@ def advance_video_slider_by_n_frames(main_window: "MainWindow", n=None):
         # 2. Check if this is a single frame step (like 'V' key)
         is_single_frame_step = n == 1
 
-        # 3. Run AI models. Explicitly suppress raw preview if special mode is active!
+        # 3. Run AI models. Raw preview flash during stepping is suppressed in
+        # on_change_video_seek_slider via _is_stepping_media when compare/mask is active.
         main_window.video_processor.process_current_frame(
-            synchronous=is_single_frame_step, suppress_raw_preview=suppress_flash
+            synchronous=is_single_frame_step
         )
 
 
@@ -1628,9 +1629,10 @@ def rewind_video_slider_by_n_frames(main_window: "MainWindow", n=None):
         # 2. Check if this is a single frame step (like 'C' key)
         is_single_frame_step = n == 1
 
-        # 3. Run AI models. Explicitly suppress raw preview if special mode is active!
+        # 3. Run AI models. Raw preview flash during stepping is suppressed in
+        # on_change_video_seek_slider via _is_stepping_media when compare/mask is active.
         main_window.video_processor.process_current_frame(
-            synchronous=is_single_frame_step, suppress_raw_preview=suppress_flash
+            synchronous=is_single_frame_step
         )
 
 

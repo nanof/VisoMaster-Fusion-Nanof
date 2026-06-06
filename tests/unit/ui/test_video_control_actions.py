@@ -1572,3 +1572,38 @@ def test_process_batch_images_cancelled_video_is_not_counted_completed(
     )
     assert "Batch processing cancelled." in message
     assert "Processed: 0" in message
+
+
+def test_single_frame_step_calls_process_current_frame_with_valid_kwargs(
+    video_actions_env,
+):
+    """C/V stepping must not pass unsupported kwargs to process_current_frame."""
+    process_calls: list[dict] = []
+
+    class _Slider:
+        def __init__(self, value: int = 10):
+            self._value = value
+
+        def value(self) -> int:
+            return self._value
+
+        def setValue(self, value: int) -> None:
+            self._value = value
+
+    video_processor = SimpleNamespace(
+        media_capture=object(),
+        max_frame_number=100,
+        process_current_frame=lambda **kwargs: process_calls.append(kwargs),
+    )
+    main_window = SimpleNamespace(
+        control={"FrameSkipStepSlider": 30},
+        videoSeekSlider=_Slider(),
+        video_processor=video_processor,
+    )
+
+    video_actions_env.module.advance_video_slider_by_n_frames(main_window, n=1)
+    video_actions_env.module.rewind_video_slider_by_n_frames(main_window, n=1)
+
+    assert len(process_calls) == 2
+    assert process_calls[0] == {"synchronous": True}
+    assert process_calls[1] == {"synchronous": True}
