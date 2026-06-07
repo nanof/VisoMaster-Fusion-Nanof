@@ -8,6 +8,8 @@ from PySide6 import QtWidgets, QtCore, QtGui
 from app.ui.widgets import widget_components
 from app.ui.widgets.settings_layout_data import SETTINGS_LAYOUT_DATA
 from app.ui.widgets.common_layout_data import COMMON_LAYOUT_DATA
+from app.ui.widgets.denoiser_layout_data import DENOISER_LAYOUT_DATA
+from app.ui.widgets.essentials_layout_data import ESSENTIALS_CONTROL_LAYOUT_DATA
 import app.helpers.miscellaneous as misc_helpers
 from app.helpers.miscellaneous import get_video_rotation
 from app.helpers.typing_helper import ControlTypes
@@ -17,7 +19,12 @@ if TYPE_CHECKING:
 
 # PERF-01: Module-level constant built once from layout data, reused in set_control_widgets_values
 _ALL_CONTROL_WIDGET_OPTIONS: dict = {}
-for _layout_source in [SETTINGS_LAYOUT_DATA, COMMON_LAYOUT_DATA]:
+for _layout_source in [
+    SETTINGS_LAYOUT_DATA,
+    COMMON_LAYOUT_DATA,
+    DENOISER_LAYOUT_DATA,
+    ESSENTIALS_CONTROL_LAYOUT_DATA,
+]:
     for _group_data in _layout_source.values():
         for _widget_key, _widget_data in _group_data.items():
             _ALL_CONTROL_WIDGET_OPTIONS[_widget_key] = _widget_data
@@ -174,9 +181,9 @@ def update_control(
     exec_function_args = exec_function_args or []
     current_position = main_window.videoSeekSlider.value()
 
-    # Update marker control too
-    # Do not update values of control with exec_function (like max threads count) as it would slow down the app heavily
-    if main_window.markers.get(current_position) and not exec_function:
+    # Update marker control too — always persist the dict value (including exec_function
+    # controls); skipping exec_function keys made marker state stale on seek.
+    if main_window.markers.get(current_position):
         main_window.markers[current_position]["control"][control_name] = control_value
 
     if exec_function:

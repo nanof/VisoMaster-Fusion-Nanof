@@ -412,6 +412,14 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "requiredToggleValue": True,
             "help": "Prevents XSeg from masking out the inner mouth area. Fixes artifacts where open mouths are mistaken for obstacles.",
         },
+        "XSegExcludeInnerObstaclesToggle": {
+            "level": 2,
+            "label": "Face Obstacles Protection",
+            "default": False,
+            "parentToggle": "DFLXSegEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Prevents XSeg from masking out the face obstacles that cover the face like glasses, microphone, hand on face, etc. when using positive values.",
+        },
         "DFLXSegSizeSlider": {
             "level": 2,
             "label": "Size",

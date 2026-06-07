@@ -1465,10 +1465,20 @@ class FaceMasks:
         else:
             print("[ERROR] FaceParser model not found or failed to load.")
 
-    def apply_dfl_xseg(self, img, amount, mouth, parameters, inner_mouth_mask=None):
+    def apply_dfl_xseg(
+        self,
+        img: torch.Tensor,
+        amount: float,
+        mouth: torch.Tensor,
+        parameters: dict,
+        inner_mouth_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        import cv2
+
         # FM-07: use .get() for all parameter accesses to avoid KeyError
         amount2 = -parameters.get("DFLXSeg2SizeSlider", 0)
         amount_calc = -parameters.get("BackgroundParserTextureSlider", 0)
+        exclude_obstacles = parameters.get("XSegExcludeInnerObstaclesToggle", False)
 
         img = img.type(torch.float32)
         img = torch.div(img, 255)
@@ -1489,10 +1499,11 @@ class FaceMasks:
         outpred[outpred < 0.1] = 0
         outpred_calc = outpred.clone()
 
+        # Invert: Face becomes 0, Background/Obstacles become 1
         outpred = 1.0 - outpred
         outpred = torch.unsqueeze(outpred, 0).type(torch.float32)
 
-        outpred_calc = torch.where(outpred_calc < 0.1, 0, 1).float()
+        outpred_calc = torch.where(outpred_calc < 0.1, 0.0, 1.0).float()
         outpred_calc = 1.0 - outpred_calc
         outpred_calc = torch.unsqueeze(outpred_calc, 0).type(torch.float32)
 
@@ -1501,23 +1512,78 @@ class FaceMasks:
         if amount2 != amount:
             outpred2 = outpred.clone()
 
+        needs_smart_expand_1 = (amount < 0) and exclude_obstacles
+        needs_smart_expand_2 = (
+            amount2 != amount and amount2 < 0
+        ) and exclude_obstacles
+
+        true_obstacles = None
+        if needs_smart_expand_1 or needs_smart_expand_2:
+            face_mask = 1.0 - outpred
+            mask_np_uint8 = (face_mask.squeeze() * 255).to(torch.uint8).cpu().numpy()
+
+            contours, _ = cv2.findContours(
+                mask_np_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+
+            hull_mask_np = mask_np_uint8.copy()
+            if len(contours) > 0:
+                largest_contour = max(contours, key=cv2.contourArea)
+                hull = cv2.convexHull(largest_contour)
+                cv2.drawContours(hull_mask_np, [hull], -1, 255, thickness=cv2.FILLED)
+
+            raw_obstacles_np = cv2.bitwise_and(
+                hull_mask_np, cv2.bitwise_not(mask_np_uint8)
+            )
+
+            kernel_morph = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            true_obstacles_np = cv2.morphologyEx(
+                raw_obstacles_np, cv2.MORPH_OPEN, kernel_morph
+            )
+
+            true_obstacles = (
+                torch.from_numpy(true_obstacles_np).to(
+                    device=outpred.device, dtype=torch.float32, non_blocking=True
+                )
+                / 255.0
+            )
+            true_obstacles = true_obstacles.unsqueeze(0)
+
         if amount > 0:
             r = int(amount)
             k = 2 * r + 1
             outpred = F.max_pool2d(outpred, kernel_size=k, stride=1, padding=r)
-            outpred = outpred.clamp(0, 1)
+            outpred = outpred.clamp(0.0, 1.0)
 
         elif amount < 0:
             r = int(-amount)
             k = 2 * r + 1
-            outpred = 1 - outpred
-            outpred = F.max_pool2d(outpred, kernel_size=k, stride=1, padding=r)
-            outpred = 1 - outpred
-            outpred = outpred.clamp(0, 1)
+
+            if exclude_obstacles and true_obstacles is not None:
+                shield_r = max(1, r // 2)
+                shield_k = 2 * shield_r + 1
+
+                face_mask = 1.0 - outpred
+                dilated_face = F.max_pool2d(
+                    face_mask, kernel_size=k, stride=1, padding=r
+                )
+                shield = F.max_pool2d(
+                    true_obstacles, kernel_size=shield_k, stride=1, padding=shield_r
+                )
+
+                expanded_safe = torch.clamp(dilated_face - shield, 0.0, 1.0)
+                final_face = torch.maximum(face_mask, expanded_safe)
+
+                outpred = 1.0 - final_face
+                outpred = outpred.clamp(0.0, 1.0)
+            else:
+                outpred = 1.0 - outpred
+                outpred = F.max_pool2d(outpred, kernel_size=k, stride=1, padding=r)
+                outpred = 1.0 - outpred
+                outpred = outpred.clamp(0.0, 1.0)
 
         blur_amount = parameters.get("OccluderXSegBlurSlider", 0)
         if blur_amount > 0:
-            # OPTIMIZED: Zero-overhead functional blur (bypasses class instantiation and dict caching)
             k_size = blur_amount * 2 + 1
             sigma = (blur_amount + 1) * 0.2
             outpred = v2.functional.gaussian_blur(
@@ -1530,19 +1596,42 @@ class FaceMasks:
                 r2 = int(amount2)
                 k2 = 2 * r2 + 1
                 outpred2 = F.max_pool2d(outpred2, kernel_size=k2, stride=1, padding=r2)
-                outpred2 = outpred2.clamp(0, 1)
+                outpred2 = outpred2.clamp(0.0, 1.0)
 
             elif amount2 < 0:
                 r2 = int(-amount2)
                 k2 = 2 * r2 + 1
-                outpred2 = 1 - outpred2
-                outpred2 = F.max_pool2d(outpred2, kernel_size=k2, stride=1, padding=r2)
-                outpred2 = 1 - outpred2
-                outpred2 = outpred2.clamp(0, 1)
+
+                if exclude_obstacles and true_obstacles is not None:
+                    shield_r2 = max(1, r2 // 2)
+                    shield_k2 = 2 * shield_r2 + 1
+
+                    face_mask2 = 1.0 - outpred2
+                    dilated_face2 = F.max_pool2d(
+                        face_mask2, kernel_size=k2, stride=1, padding=r2
+                    )
+                    shield2 = F.max_pool2d(
+                        true_obstacles,
+                        kernel_size=shield_k2,
+                        stride=1,
+                        padding=shield_r2,
+                    )
+
+                    expanded_safe2 = torch.clamp(dilated_face2 - shield2, 0.0, 1.0)
+                    final_face2 = torch.maximum(face_mask2, expanded_safe2)
+
+                    outpred2 = 1.0 - final_face2
+                    outpred2 = outpred2.clamp(0.0, 1.0)
+                else:
+                    outpred2 = 1.0 - outpred2
+                    outpred2 = F.max_pool2d(
+                        outpred2, kernel_size=k2, stride=1, padding=r2
+                    )
+                    outpred2 = 1.0 - outpred2
+                    outpred2 = outpred2.clamp(0.0, 1.0)
 
             blur_amount2 = parameters.get("XSeg2BlurSlider", 0)
             if blur_amount2 > 0:
-                # OPTIMIZED: Zero-overhead functional blur
                 k_size2 = blur_amount2 * 2 + 1
                 sigma2 = (blur_amount2 + 1) * 0.2
                 outpred2 = v2.functional.gaussian_blur(
@@ -1554,13 +1643,11 @@ class FaceMasks:
         outpred = torch.reshape(outpred, (1, 256, 256))
 
         if inner_mouth_mask is not None:
-            # Mouth mask protection
             outpred = outpred * (1.0 - inner_mouth_mask)
             if outpred_noFP.dim() == 2:
                 outpred_noFP = outpred_noFP.unsqueeze(0)
             outpred_noFP = outpred_noFP * (1.0 - inner_mouth_mask)
 
-        # FM-07: use .get() for BgExcludeEnableToggle and BGExcludeBlurAmountSlider
         if parameters.get("BgExcludeEnableToggle", False) and amount_calc != 0:
             if amount_calc > 0:
                 r2 = int(amount_calc)
@@ -1568,7 +1655,7 @@ class FaceMasks:
                 outpred_calc_dill = F.max_pool2d(
                     outpred_calc_dill, kernel_size=k2, stride=1, padding=r2
                 )
-                outpred_calc_dill = outpred_calc_dill.clamp(0, 1)
+                outpred_calc_dill = outpred_calc_dill.clamp(0.0, 1.0)
                 bg_blur = parameters.get("BGExcludeBlurAmountSlider", 0)
                 if bg_blur > 0:
                     k_bg = bg_blur * 2 + 1
@@ -1578,15 +1665,15 @@ class FaceMasks:
                         [k_bg, k_bg],
                         [s_bg, s_bg],
                     )
-                outpred_calc_dill = outpred_calc_dill.clamp(0, 1)
+                outpred_calc_dill = outpred_calc_dill.clamp(0.0, 1.0)
             elif amount_calc < 0:
                 r2 = int(-amount_calc)
                 k2 = 2 * r2 + 1
-                outpred_calc_dill = 1 - outpred_calc_dill
+                outpred_calc_dill = 1.0 - outpred_calc_dill
                 outpred_calc_dill = F.max_pool2d(
                     outpred_calc_dill, kernel_size=k2, stride=1, padding=r2
                 )
-                outpred_calc_dill = 1 - outpred_calc_dill
+                outpred_calc_dill = 1.0 - outpred_calc_dill
                 bg_blur = parameters.get("BGExcludeBlurAmountSlider", 0)
                 if bg_blur > 0:
                     orig = outpred_calc_dill.clone()
@@ -1598,7 +1685,8 @@ class FaceMasks:
                         [s_bg, s_bg],
                     )
                     outpred_calc_dill = torch.max(outpred_calc_dill, orig)
-                outpred_calc_dill = outpred_calc_dill.clamp(0, 1)
+                outpred_calc_dill = outpred_calc_dill.clamp(0.0, 1.0)
+
         return outpred, outpred_calc, outpred_calc_dill, outpred_noFP
 
     def run_dfl_xseg(self, image, output):

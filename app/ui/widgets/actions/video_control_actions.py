@@ -406,7 +406,7 @@ def add_video_slider_marker(main_window: "MainWindow"):
         add_marker(
             main_window,
             copy.deepcopy(main_window.parameters),
-            main_window.control.copy(),
+            copy.deepcopy(main_window.control),
             current_position,
         )
 
