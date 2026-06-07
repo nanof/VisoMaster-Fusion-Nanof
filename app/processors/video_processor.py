@@ -41,6 +41,7 @@ from app.ui.widgets.actions import video_control_actions
 from app.ui.widgets.actions import layout_actions
 from app.ui.widgets.actions import list_view_actions
 from app.ui.widgets.actions import save_load_actions
+from app.ui.widgets import widget_components
 from app.ui.widgets.settings_layout_data import CAMERA_BACKENDS
 import app.helpers.miscellaneous as misc_helpers
 from app.helpers.cuda_timeline import nvtx_range
@@ -345,6 +346,7 @@ class VideoProcessor(QObject):
 
         # --- Subprocesses ---
         self.virtcam: pyvirtualcam.Camera | None = None
+        self._virtcam_error_latch: bool = False
         self.recording_sp: subprocess.Popen | None = (
             None  # FFmpeg process for both recording styles
         )
@@ -3859,29 +3861,30 @@ class VideoProcessor(QObject):
         Removed sleep_until_next_frame() to prevent blocking the Main GUI Thread.
         The UI metronome (QTimer) already handles perfect timing and synchronization.
         """
-        if self.main_window.control["SendVirtCamFramesEnableToggle"] and self.virtcam:
-            height, width, _ = frame.shape
-            if self.virtcam.height != height or self.virtcam.width != width:
-                # Resolution changed (e.g. source swap / restorer output differs).
-                # Avoid hammering OBS with rapid close/reopen cycles — schedule a
-                # single deferred restart so the driver gets adequate settling time.
-                # We skip this frame rather than sending one with the wrong size.
-                print(
-                    f"[INFO] VirtCam resolution changed "
-                    f"({self.virtcam.width}x{self.virtcam.height} → {width}x{height}). "
-                    f"Restarting virtual camera…"
-                )
+        if self.main_window.control.get("SendVirtCamFramesEnableToggle", False):
+            if not self.virtcam and not getattr(self, "_virtcam_error_latch", False):
                 self.enable_virtualcam()
-                return  # Frame already consumed; next tick will send at the new size.
 
-            # Need to check again if virtcam was successfully re-enabled
             if self.virtcam:
-                try:
-                    self.virtcam.send(frame)
-                    # REMOVED: self.virtcam.sleep_until_next_frame()
-                    # It forces the UI thread to freeze and fights the metronome.
-                except Exception as e:
-                    print(f"[WARN] Failed sending frame to virtualcam: {e}")
+                height, width, _ = frame.shape
+                if self.virtcam.height != height or self.virtcam.width != width:
+                    print(
+                        f"[INFO] VirtCam resolution changed "
+                        f"({self.virtcam.width}x{self.virtcam.height} → {width}x{height}). "
+                        f"Restarting virtual camera…"
+                    )
+                    self.enable_virtualcam()
+                    return
+
+                if self.virtcam:
+                    try:
+                        self.virtcam.send(frame)
+                    except Exception as e:
+                        print(
+                            f"[WARN] Catastrophic failure sending frame to virtualcam: {e}"
+                        )
+                        self._virtcam_error_latch = True
+                        self.disable_virtualcam()
 
     def set_number_of_threads(self, value):
         """Updates the thread count for the *next* worker pool."""
@@ -8041,6 +8044,7 @@ class VideoProcessor(QObject):
 
     def enable_virtualcam(self, backend=False):
         """Starts the pyvirtualcam device."""
+        self._virtcam_error_latch = False
 
         # Guard: Only run if the user has actually enabled the virtual cam
         if not self.main_window.control.get("SendVirtCamFramesEnableToggle", False):
@@ -8121,9 +8125,12 @@ class VideoProcessor(QObject):
                 else:
                     print(f"[ERROR] Failed to enable virtual camera: {e}")
                     self.virtcam = None
+                    self._virtcam_error_latch = True
 
     def disable_virtualcam(self):
         """Stops the pyvirtualcam device."""
+        self._virtcam_error_latch = False
+
         if self.virtcam:
             print(f"[INFO] Disabling virtual camera '{self.virtcam.device}'.")
             try:
@@ -8978,12 +8985,34 @@ class VideoProcessor(QObject):
             f"[INFO] Init Webcam: Device={webcam_index}, Backend={backend_name}, Target={target_width}x{target_height} @ {target_fps}fps"
         )
 
-        # 2. Initialize VideoCapture with the selected Backend
-        try:
-            self.media_capture = cv2.VideoCapture(webcam_index, backend_id)
-        except Exception as e:
-            print(f"[ERROR] Failed to init webcam with backend {backend_name}: {e}")
-            self.media_capture = cv2.VideoCapture(webcam_index)
+        # 2. Initialize VideoCapture with the selected Backend (prevent race condition)
+        reinitialize_needed = True
+
+        if self.media_capture and self.media_capture.isOpened():
+            selected_btn = getattr(self.main_window, "selected_video_button", None)
+            if isinstance(
+                selected_btn, widget_components.TargetMediaCardButton
+            ) and getattr(selected_btn, "is_webcam", False):
+                if (
+                    selected_btn.webcam_index == webcam_index
+                    and selected_btn.webcam_backend == backend_id
+                ):
+                    reinitialize_needed = False
+                    print(
+                        "[INFO] Reusing existing webcam capture to prevent hardware lock issues."
+                    )
+
+        if reinitialize_needed:
+            if self.media_capture:
+                misc_helpers.release_capture(self.media_capture)
+                self.media_capture = None
+                time.sleep(0.5)
+
+            try:
+                self.media_capture = cv2.VideoCapture(webcam_index, backend_id)
+            except Exception as e:
+                print(f"[ERROR] Failed to init webcam with backend {backend_name}: {e}")
+                self.media_capture = cv2.VideoCapture(webcam_index)
 
         if not (self.media_capture and self.media_capture.isOpened()):
             print("[ERROR] Unable to open webcam source.")

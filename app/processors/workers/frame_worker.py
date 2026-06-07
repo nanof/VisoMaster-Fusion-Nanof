@@ -783,19 +783,22 @@ class FrameWorker(threading.Thread):
             traceback.print_exc()
             # Emit the original (unprocessed) frame as a fallback so the recording
             # metronome is never blocked waiting for a frame that will never arrive.
-            # Only do this for pool/video mode — single-frame and webcam have their
-            # own error recovery paths.
+            # Single-frame mode has its own error recovery path.
             if (
                 not self.stop_event.is_set()
                 and not self.is_single_frame
-                and self.video_processor.file_type not in ("webcam", "screen")
                 and isinstance(_fallback_frame_rgb, np.ndarray)
             ):
                 try:
                     fallback_bgr = rgb_uint8_to_bgr_contiguous(_fallback_frame_rgb)
-                    self.video_processor.frame_processed_signal.emit(
-                        self.frame_number, fallback_bgr, None
-                    )
+                    if self.video_processor.file_type in ("webcam", "screen"):
+                        self.video_processor.webcam_frame_processed_signal.emit(
+                            fallback_bgr
+                        )
+                    else:
+                        self.video_processor.frame_processed_signal.emit(
+                            self.frame_number, fallback_bgr, None
+                        )
                 except Exception as fb_err:
                     print(
                         f"[WARN] Fallback emit also failed for frame "
