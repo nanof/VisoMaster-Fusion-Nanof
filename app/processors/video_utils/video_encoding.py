@@ -502,12 +502,22 @@ class FFmpegPostProcessor:
         fps: float,
         segments: List[Tuple[int, int]],
         temp_audio_dir: str,
+        frame_origin: int = 0,
+        time_offset_sec: float = 0.0,
     ) -> Tuple[bool, List[str]]:
         """Extract audio from the original media for each frame segment."""
         audio_files = []
         for idx, (start_frame, end_frame) in enumerate(segments):
-            start_time = start_frame / fps if fps > 0 else 0
-            end_time = (end_frame + 1) / fps if fps > 0 else 0
+            if fps > 0:
+                start_time = time_offset_sec + max(
+                    0.0, (start_frame - frame_origin) / fps
+                )
+                end_time = time_offset_sec + max(
+                    0.0, ((end_frame + 1) - frame_origin) / fps
+                )
+            else:
+                start_time = time_offset_sec
+                end_time = time_offset_sec
 
             if start_time >= end_time:
                 continue

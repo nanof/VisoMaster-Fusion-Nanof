@@ -62,6 +62,28 @@ def _face_expression_has_active_work(parameters: dict, mode: str) -> bool:
     return False
 
 
+def _merge_lip_motion_candidates(
+    relative_lip_motion: torch.Tensor,
+    absolute_retarget_lip_motion: torch.Tensor,
+    lip_indices: list[int],
+    blend_factor: float = 0.50,
+) -> torch.Tensor:
+    """
+    Structural decoupling merge for Advanced lips:
+    relative branch keeps shape (smirk, width, pout) on X;
+    absolute retargeting keeps jaw drop and mouth opening on Y/Z.
+    """
+    merged_lip_motion = relative_lip_motion.clone()
+    for idx in lip_indices:
+        merged_lip_motion[:, idx, 1] = torch.lerp(
+            relative_lip_motion[:, idx, 1],
+            absolute_retarget_lip_motion[:, idx, 1],
+            blend_factor,
+        )
+        merged_lip_motion[:, idx, 2] = absolute_retarget_lip_motion[:, idx, 2]
+    return merged_lip_motion
+
+
 class FrameEdits:
     """
     Manages Face Editing operations (Expression restoration, LivePortrait editing, Makeup).
@@ -696,9 +718,11 @@ class FrameEdits:
 
                     if flag_activate_lips:
                         lips_retarget_delta = 0
-                        if parameters.get(
+                        flag_retarget_lips = parameters.get(
                             "FaceExpressionRetargetingLipsBothEnableToggle", False
-                        ):
+                        )
+
+                        if flag_retarget_lips:
                             lip_mult = parameters.get(
                                 "FaceExpressionRetargetingLipsMultiplierBothDecimalSlider",
                                 1.0,
@@ -709,17 +733,47 @@ class FrameEdits:
                             lips_retarget_delta = self.models_processor.lp_retarget_lip(
                                 x_s, c_d_lip * lip_mult, face_editor_type
                             )
-    
-                        accumulated_motion += get_component_motion(
-                            lip_indices,
-                            x_d_i_info["exp"],
-                            driving_multiplier_lips,
-                            extra_delta=lips_retarget_delta,
-                            is_relative=flag_relative_lips,
-                            neutral_ref=lp_lip_array,
-                            use_boost=True,
-                            neutral_factor=neutral_factor_lips,
-                        )
+
+                        if flag_relative_lips and flag_retarget_lips:
+                            relative_lip_motion = get_component_motion(
+                                lip_indices,
+                                x_d_i_info["exp"],
+                                1.0,
+                                extra_delta=0,
+                                is_relative=True,
+                                neutral_ref=lp_lip_array,
+                                use_boost=True,
+                                neutral_factor=neutral_factor_lips,
+                            )
+                            absolute_retarget_lip_motion = get_component_motion(
+                                lip_indices,
+                                x_d_i_info["exp"],
+                                1.0,
+                                extra_delta=lips_retarget_delta,
+                                is_relative=False,
+                                neutral_ref=lp_lip_array,
+                                use_boost=True,
+                                neutral_factor=neutral_factor_lips,
+                            )
+                            merged_lip_motion = _merge_lip_motion_candidates(
+                                relative_lip_motion,
+                                absolute_retarget_lip_motion,
+                                lip_indices,
+                            )
+                            accumulated_motion += (
+                                merged_lip_motion * driving_multiplier_lips
+                            )
+                        else:
+                            accumulated_motion += get_component_motion(
+                                lip_indices,
+                                x_d_i_info["exp"],
+                                driving_multiplier_lips,
+                                extra_delta=lips_retarget_delta,
+                                is_relative=flag_relative_lips,
+                                neutral_ref=lp_lip_array,
+                                use_boost=True,
+                                neutral_factor=neutral_factor_lips,
+                            )
 
                     if flag_activate_brows:
                         accumulated_motion += get_component_motion(

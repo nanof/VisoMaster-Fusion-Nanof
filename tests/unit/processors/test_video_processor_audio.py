@@ -272,9 +272,13 @@ def test_finalize_default_style_recording_uses_rebuilt_audio_when_frames_skipped
         frames_to_display=[],
         frame_queue=q,
         join_and_clear_threads=lambda: None,
+        _clear_frames_to_display_and_profiles=lambda: None,
+        _clear_frame_and_raw_queues=lambda: None,
         gpu_memory_update_timer=SimpleNamespace(stop=lambda: None),
         preroll_timer=SimpleNamespace(stop=lambda: None),
         stop_live_sound=lambda: None,
+        _stop_recording_ffmpeg_input_stream=lambda: None,
+        _join_detection_pipeline_thread=lambda: None,
         media_capture=None,
         recording_sp=None,
         recording=True,
@@ -287,6 +291,9 @@ def test_finalize_default_style_recording_uses_rebuilt_audio_when_frames_skipped
         play_start_time=0.0,
         play_end_time=0.0,
         total_skipped_frames=2,
+        tail_force_finalize_due_to_stall=False,
+        consecutive_read_errors=0,
+        _used_ffmpeg_cap=False,
         manual_dropped_skip_count=1,
         read_error_skip_count=1,
         temp_file=str(temp_file),
@@ -306,7 +313,7 @@ def test_finalize_default_style_recording_uses_rebuilt_audio_when_frames_skipped
         _identify_frame_segments=lambda actual_end_frame: (
             identify_calls.append(actual_end_frame) or [(10, 14), (16, 29)]
         ),
-        _extract_audio_segments=lambda segments, temp_audio_dir: (
+        _extract_audio_segments=lambda segments, temp_audio_dir, **kwargs: (
             extract_calls.append((segments, temp_audio_dir))
             or (True, [str(tmp_path / "seg_0000.m4a"), str(tmp_path / "seg_0001.m4a")])
         ),
@@ -363,9 +370,13 @@ def _make_finalize_default_style_recording_dummy(
         frames_to_display=[],
         frame_queue=queue.Queue(),
         join_and_clear_threads=lambda: None,
+        _clear_frames_to_display_and_profiles=lambda: None,
+        _clear_frame_and_raw_queues=lambda: None,
         gpu_memory_update_timer=SimpleNamespace(stop=lambda: None),
         preroll_timer=SimpleNamespace(stop=lambda: None),
         stop_live_sound=lambda: None,
+        _stop_recording_ffmpeg_input_stream=lambda: None,
+        _join_detection_pipeline_thread=lambda: None,
         media_capture=None,
         recording_sp=None,
         recording=True,
@@ -378,6 +389,9 @@ def _make_finalize_default_style_recording_dummy(
         play_start_time=0.0,
         play_end_time=0.0,
         total_skipped_frames=total_skipped_frames,
+        tail_force_finalize_due_to_stall=False,
+        consecutive_read_errors=0,
+        _used_ffmpeg_cap=False,
         manual_dropped_skip_count=0,
         read_error_skip_count=0,
         temp_file=str(temp_file),

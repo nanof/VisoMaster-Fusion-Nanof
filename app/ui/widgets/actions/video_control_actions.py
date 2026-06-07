@@ -126,7 +126,17 @@ def update_video_time_line_edit(
         )
 
     fps = float(getattr(main_window.video_processor, "fps", 0.0) or 0.0)
-    total_seconds = max(0.0, float(current_frame_number) / fps) if fps > 0 else 0.0
+    vp = getattr(main_window, "video_processor", None)
+    source_fps = None
+    if vp is not None:
+        source_fps = float(getattr(vp, "recording_source_fps", 0.0) or 0.0)
+    if getattr(vp, "_used_ffmpeg_cap", False) and source_fps and source_fps > 0:
+        fps_to_use = source_fps
+    else:
+        fps_to_use = fps
+    total_seconds = (
+        max(0.0, float(current_frame_number) / fps_to_use) if fps_to_use > 0 else 0.0
+    )
     minutes = int(total_seconds // 60)
     seconds = int(total_seconds % 60)
     video_time_line_edit.setText(f"{minutes:02d}:{seconds:02d}")
