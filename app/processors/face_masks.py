@@ -1497,17 +1497,10 @@ class FaceMasks:
 
         outpred = torch.clamp(outpred, min=0.0, max=1.0)
         outpred[outpred < 0.1] = 0
-        outpred_calc = outpred.clone()
 
         # Invert: Face becomes 0, Background/Obstacles become 1
         outpred = 1.0 - outpred
         outpred = torch.unsqueeze(outpred, 0).type(torch.float32)
-
-        outpred_calc = torch.where(outpred_calc < 0.1, 0.0, 1.0).float()
-        outpred_calc = 1.0 - outpred_calc
-        outpred_calc = torch.unsqueeze(outpred_calc, 0).type(torch.float32)
-
-        outpred_calc_dill = outpred_calc.clone()
 
         if amount2 != amount:
             outpred2 = outpred.clone()
@@ -1581,6 +1574,12 @@ class FaceMasks:
                 outpred = F.max_pool2d(outpred, kernel_size=k, stride=1, padding=r)
                 outpred = 1.0 - outpred
                 outpred = outpred.clamp(0.0, 1.0)
+
+        # Derivar las máscaras de cálculo (color stats) DESPUÉS del procesado
+        # de tamaño, pero ANTES del blur. Así las estadísticas de color nunca
+        # muestrean píxeles de fondo excluidos. (importado de dev edc27bf)
+        outpred_calc = torch.where(outpred < 0.5, 0.0, 1.0).float()
+        outpred_calc_dill = outpred_calc.clone()
 
         blur_amount = parameters.get("OccluderXSegBlurSlider", 0)
         if blur_amount > 0:

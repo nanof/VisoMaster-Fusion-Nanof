@@ -372,11 +372,12 @@ COMMON_LAYOUT_DATA: Any = {
         "FaceExpressionModeSelection": {
             "level": 2,
             "label": "Mode",
-            "options": ["Simple", "Advanced"],
+            "options": ["Simple", "Advanced", "Recast"],
             "default": "Simple",
             "parentToggle": "FaceExpressionEnableBothToggle",
             "requiredToggleValue": True,
-            "help": "Choose 'Advanced' for fine-tuning and retargeting options.",
+            "help": "Choose 'Advanced' for fine-tuning and retargeting options. "
+            "'Recast' uses the PerformRecast model for expression-only transfer.",
         },
         "FaceExpressionCropScaleBothDecimalSlider": {
             "level": 2,
@@ -401,6 +402,47 @@ COMMON_LAYOUT_DATA: Any = {
             "parentToggle": "FaceExpressionEnableBothToggle",
             "requiredToggleValue": True,
             "help": "Changes the vy ratio for crop scale. Increase the value to capture the face more distantly.",
+        },
+        # --- RECAST MODE WIDGETS (PerformRecast model) ---
+        "RecastModeSelection": {
+            "level": 3,
+            "label": "Recast Mode",
+            "options": ["Enhancement", "Replacement"],
+            "default": "Enhancement",
+            "parentToggle": "FaceExpressionEnableBothToggle",
+            "requiredToggleValue": True,
+            "parentSelection": "FaceExpressionModeSelection",
+            "requiredSelectionValue": "Recast",
+            "help": "Enhancement adds the driving expression on top of the swapped face's "
+            "expression. Replacement starts from the driving expression and blends back "
+            "the swapped face's eye/lip/jaw identity cues.",
+        },
+        "RecastExpressionFactorDecimalSlider": {
+            "level": 3,
+            "label": "Expression Factor",
+            "min_value": "0.0",
+            "max_value": "2.0",
+            "default": "1.0",
+            "step": 0.1,
+            "decimals": 1,
+            "parentToggle": "FaceExpressionEnableBothToggle",
+            "requiredToggleValue": True,
+            "parentSelection": "FaceExpressionModeSelection",
+            "requiredSelectionValue": "Recast",
+            "help": "Strength of the transferred expression. 0.0 keeps the swapped face's "
+            "expression, 1.0 applies the full driving expression, >1.0 exaggerates it.",
+        },
+        "RecastAnimationRegionSelection": {
+            "level": 3,
+            "label": "Animation Region",
+            "options": ["all", "eyes", "lips"],
+            "default": "all",
+            "parentToggle": "FaceExpressionEnableBothToggle",
+            "requiredToggleValue": True,
+            "parentSelection": "FaceExpressionModeSelection",
+            "requiredSelectionValue": "Recast",
+            "help": "Restrict the transferred expression to a facial region. The swapped "
+            "face's own expression is kept outside the selected region.",
         },
         # --- SIMPLE MODE WIDGETS (RESTORING OLD FUNCTIONALITY) ---
         "FaceExpressionNeutralDecimalSlider": {

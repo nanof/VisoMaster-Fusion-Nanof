@@ -837,6 +837,151 @@ class FrameEdits:
 
         return out.type(torch.float32)
 
+    def apply_perform_recast(
+        self,
+        driving: torch.Tensor,
+        target: torch.Tensor,
+        parameters: dict,
+        driving_kps: np.ndarray = None,
+    ) -> torch.Tensor:
+        """Transfer expression onto the swapped face using PerformRecast.
+
+        This is the "Recast" mode of the Face Expression Restorer. Unlike the
+        LivePortrait path it uses the PerformRecast 49-keypoint sub-networks
+        (appearance F, motion M, warping W, SPADE generator G) and composes the
+        expression with either the Enhancement (additive delta) or Replacement
+        (absolute driving expression with source-side identity blending) mode.
+
+        Args:
+            driving: The original pre-swap face tensor (source of expression).
+            target: The swapped face tensor (identity/pose to preserve).
+            parameters: Dictionary containing UI parameters.
+            driving_kps: Optional pre-computed 203-point driving landmarks.
+
+        Returns:
+            torch.Tensor: The expression-recast face image (float32, [0,255]).
+        """
+        import contextlib
+
+        recast = self.models_processor.perform_recast
+
+        # Use the current stream (see apply_face_expression_restorer for why a
+        # per-frame cuda.Stream() fragments the allocator).
+        local_stream = (
+            torch.cuda.current_stream() if torch.cuda.is_available() else None
+        )
+        stream_context = (
+            torch.cuda.stream(local_stream)
+            if local_stream
+            else contextlib.nullcontext()
+        )
+
+        with stream_context, torch.inference_mode():
+            use_mean_eyes = parameters.get("LandmarkMeanEyesToggle", False)
+
+            mode = parameters.get("RecastModeSelection", "Enhancement")
+            if isinstance(mode, str):
+                mode = mode.strip()
+            factor = float(parameters.get("RecastExpressionFactorDecimalSlider", 1.0))
+            region = parameters.get("RecastAnimationRegionSelection", "all")
+
+            crop_scale = parameters.get("FaceExpressionCropScaleBothDecimalSlider", 2.3)
+            vy_ratio = parameters.get("FaceExpressionVYRatioBothDecimalSlider", -0.125)
+            interp_mode = (
+                self.interpolation_expression_faceeditor_back
+                if self.interpolation_expression_faceeditor_back is not None
+                else v2.InterpolationMode.BILINEAR
+            )
+
+            # --- DRIVING FACE (source of expression) ---
+            if driving_kps is not None and not np.all(driving_kps == 0):
+                driving_lmk_crop = driving_kps
+            else:
+                _, driving_lmk_crop, _ = self.models_processor.run_detect_landmark(
+                    driving,
+                    bbox=np.array([0, 0, 512, 512]),
+                    det_kpss=[],
+                    detect_mode="203",
+                    score=0.5,
+                    from_points=False,
+                    use_mean_eyes=use_mean_eyes,
+                )
+
+            if driving_lmk_crop is None or (
+                hasattr(driving_lmk_crop, "__len__") and len(driving_lmk_crop) == 0
+            ):
+                return target
+
+            driving_face_512, _, _ = faceutil.warp_face_by_face_landmark_x(
+                driving,
+                driving_lmk_crop,
+                dsize=512,
+                scale=crop_scale,
+                vy_ratio=vy_ratio,
+                interpolation=interp_mode,
+            )
+            driving_face_256 = self.t256_face(driving_face_512)
+            x_d_info = recast.motion(driving_face_256)
+            exp_d = x_d_info["exp"]
+
+            # --- TARGET FACE (identity / pose to preserve) ---
+            target = target.clamp(0, 255).type(torch.uint8)
+            _, source_lmk, _ = self.models_processor.run_detect_landmark(
+                target,
+                bbox=np.array([0, 0, 512, 512], dtype=np.float32),
+                det_kpss=None,
+                detect_mode="203",
+                score=0.5,
+                from_points=False,
+                use_mean_eyes=use_mean_eyes,
+            )
+            if source_lmk is None or (
+                hasattr(source_lmk, "__len__") and len(source_lmk) == 0
+            ):
+                return target.type(torch.float32)
+
+            target_face_512, M_o2c, M_c2o = faceutil.warp_face_by_face_landmark_x(
+                target,
+                source_lmk,
+                dsize=512,
+                scale=crop_scale,
+                vy_ratio=vy_ratio,
+                interpolation=interp_mode,
+            )
+            target_face_256 = self.t256_face(target_face_512)
+
+            # Source motion + appearance. Appearance (F) takes the 512 crop.
+            x_s_info = recast.motion(target_face_256)
+            source_info = recast.build_source_info(x_s_info)
+            f_s = recast.extract_appearance(target_face_512)
+
+            # --- COMPOSE + GENERATE ---
+            x_d_i = recast.compose_driven_keypoints(
+                source_info, exp_d, mode=mode, factor=factor, region=region
+            )
+            out = recast.warp_decode(f_s, source_info["x_s"], x_d_i)
+            out = torch.squeeze(out)
+
+            # Guard against numerically unstable inference (NaN/Inf), which is
+            # common when the F/M sub-networks run in fp16 or via TensorRT and
+            # would otherwise paste a black/garbage square over the face. Skip
+            # the recast for this frame and keep the swapped face instead.
+            if not torch.isfinite(out).all():
+                return target.type(torch.float32)
+            out = out.clamp_(0, 1)
+
+            # --- PASTE BACK ---
+            dsize = (target.shape[1], target.shape[2])
+            out = self._apply_kornia_warp(out, M_c2o, dsize)
+            out = out.mul_(255.0).clamp_(0, 255)
+
+        # Sync the stream safely (mirrors apply_face_expression_restorer).
+        if local_stream:
+            local_stream.synchronize()
+
+        out = out.type(torch.float32)
+        return out
+
     def swap_edit_face_core(
         self,
         img: torch.Tensor,

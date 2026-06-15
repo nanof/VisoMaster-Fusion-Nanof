@@ -58,12 +58,14 @@ from app.processors.face_swappers import FaceSwappers
 from app.processors.frame_enhancers import FrameEnhancers
 from app.processors.face_editors import FaceEditors
 from app.processors.face_reaging import FaceReaging
+from app.processors.perform_recast import PerformRecast
 from app.processors.utils.dfm_model import DFMModel
 from app.processors.models_data import (
     models_list,
     models_trt_list,
     arcface_mapping_model_dict,
     fp16_safe_models_list,
+    tensorrt_shape_infer_models,
 )
 from app.helpers.miscellaneous import is_file_exists
 from app.helpers.downloader import download_file
@@ -166,6 +168,14 @@ def gamma_decode_srgb_to_linear_rgb(srgb: torch.Tensor, gamma=SRGB_GAMMA):
 # producir mosaicos/trozos desordenados; CUDA EP es estable (mismo patrón que SPAN).
 # GPEN-BFR-*: ORT TensorRT EP + trt_fp16_enable has been observed to hang the process (no further
 # log lines after FP16 ENABLED) on some Windows stacks; CUDA EP is stable for these restorers.
+# PerformRecast (all four sub-networks) run on the CUDA EP. W/G are required to: the warping
+# module's 5-D GridSample and the SPADE generator are poorly supported by the TensorRT EP —
+# for certain head poses TRT produces a corrupt (black) crop while CUDA EP is stable, and they
+# run fp32 anyway so TRT brings little benefit. F/M are kept on CUDA EP too so the whole Recast
+# pipeline uses one consistent, stable EP. NOTE: the CUDA EP allocates a per-thread execution
+# context, and the video pipeline spawns fresh worker / single-frame threads on every play and
+# slider reprocess — so PerformRecast funnels every inference through one dedicated thread (see
+# PerformRecast._run / _get_ort_executor) to stop ORT accumulating GBs of per-thread contexts.
 ONNX_MODELS_SKIP_TENSORRT_EP = frozenset(
     {
         "RvmPortraitMatting",
@@ -177,6 +187,10 @@ ONNX_MODELS_SKIP_TENSORRT_EP = frozenset(
         "GPENBFR512",
         "GPENBFR1024",
         "GPENBFR2048",
+        "PerformRecastAppearanceFeatureExtractor",
+        "PerformRecastMotionExtractor",
+        "PerformRecastWarpingModule",
+        "PerformRecastSpadeGenerator",
     }
 )
 
@@ -434,6 +448,7 @@ class ModelsProcessor(QtCore.QObject):
         self.frame_enhancers = FrameEnhancers(self)
         self.face_editors = FaceEditors(self)
         self.face_reaging = FaceReaging(self)
+        self.perform_recast = PerformRecast(self)
 
         # Initialize Mask Latent
         self.lp_mask_crop_latent = faceutil.create_faded_inner_mask(
@@ -657,6 +672,61 @@ class ModelsProcessor(QtCore.QObject):
         self.rgb_to_linear_rgb_converter = None
         self.linear_rgb_to_rgb_converter = None
 
+    def _ensure_trt_ready_onnx(self, model_name: str, onnx_path: str) -> str:
+        """Return an ONNX path that the TensorRT EP can build an engine from.
+
+        Some models (see ``tensorrt_shape_infer_models``) contain ops — notably
+        5-D ``GridSample`` in the PerformRecast warping module — whose output
+        tensors carry no static shape. The TensorRT EP refuses such graphs with
+        "has no shape specified. Please run shape inference on the onnx model
+        first." We fix this once by pinning the batch dimension to 1 (the app
+        always feeds a single face) and running ONNX Runtime's symbolic shape
+        inference, then caching the result next to the original as
+        ``*.trtshape.onnx``. The cached file is reused unless the source ONNX is
+        newer. For models not in the list, the original path is returned as-is.
+        """
+        if model_name not in tensorrt_shape_infer_models:
+            return onnx_path
+        if not onnx_path.lower().endswith(".onnx"):
+            return onnx_path
+
+        sidecar_path = onnx_path[: -len(".onnx")] + ".trtshape.onnx"
+        try:
+            if os.path.exists(sidecar_path) and (
+                os.path.getmtime(sidecar_path) >= os.path.getmtime(onnx_path)
+            ):
+                return sidecar_path
+
+            print(
+                f"[INFO] Preparing TensorRT-ready (shape-inferred) ONNX for {model_name}..."
+            )
+            from onnxruntime.tools.onnx_model_utils import make_dim_param_fixed
+            from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
+
+            model = onnx.load(onnx_path)
+            # Pin the dynamic 'batch' axis to 1 so symbolic dims (e.g. "50*batch")
+            # resolve to concrete values the TensorRT builder accepts.
+            try:
+                make_dim_param_fixed(model.graph, "batch", 1)
+            except Exception as dim_err:
+                # Not fatal — symbolic shape inference may still add the shapes.
+                print(f"[WARN] Could not pin batch dim for {model_name}: {dim_err}")
+            model = SymbolicShapeInference.infer_shapes(
+                model, auto_merge=True, guess_output_rank=True
+            )
+            onnx.save(model, sidecar_path)
+            del model
+            gc.collect()
+            print(f"[INFO] Wrote shape-inferred ONNX: {os.path.basename(sidecar_path)}")
+            return sidecar_path
+        except Exception as e:
+            print(
+                f"[WARN] Shape-inference preprocessing failed for {model_name} ({e}). "
+                f"Falling back to the original ONNX."
+            )
+            traceback.print_exc()
+            return onnx_path
+
     def _check_tensorrt_cache(
         self,
         model_name: str,
@@ -828,6 +898,13 @@ class ModelsProcessor(QtCore.QObject):
                 )
                 return None
 
+            # Some models need a shape-inferred graph before the TensorRT EP can
+            # build an engine. This transparently swaps in a cached sidecar so the
+            # whole TRT chain (profiles, cache key, probe, session) stays
+            # coherent; the original path is untouched for download/integrity
+            # checks. No-op for every model not in tensorrt_shape_infer_models.
+            onnx_path = self._ensure_trt_ready_onnx(model_name, onnx_path)
+
             session_phys = self._session_phys_for_ort_load()
             trt_cache_dir = self._tensorrt_cache_root_for_physical(session_phys)
 
@@ -958,7 +1035,7 @@ class ModelsProcessor(QtCore.QObject):
                                 probe_process = ctx.Process(
                                     target=_probe_onnx_model_worker,
                                     args=(
-                                        self.models_path[model_name],
+                                        onnx_path,
                                         current_providers_list,
                                         model_trt_options,  # On passe les options dynamiques
                                         sess_options_dict,
@@ -1055,11 +1132,11 @@ class ModelsProcessor(QtCore.QObject):
                 def _create_ort_session(providers_list):
                     if session_options is None:
                         return onnxruntime.InferenceSession(
-                            self.models_path[model_name],
+                            onnx_path,
                             providers=providers_list,
                         )
                     return onnxruntime.InferenceSession(
-                        self.models_path[model_name],
+                        onnx_path,
                         sess_options=session_options,
                         providers=providers_list,
                     )
@@ -2068,6 +2145,7 @@ class ModelsProcessor(QtCore.QObject):
             self.frame_enhancers.unload_models()
             self.frame_enhancers.unload_rife_preview_model()
             self.face_editors.unload_models()
+            self.perform_recast.unload_models()
 
             # Unload any remaining models in the main dictionaries
             self.delete_models()
@@ -2236,6 +2314,11 @@ class ModelsProcessor(QtCore.QObject):
         """Unloads all loaded face editor models under the model lock."""
         with self.model_lock:
             self.face_editors.unload_models()
+
+    def unload_perform_recast_models(self):
+        """Unloads all loaded PerformRecast (Recast mode) models under the lock."""
+        with self.model_lock:
+            self.perform_recast.unload_models()
 
     def unload_face_mask_models(self):
         """Unloads all loaded face mask models under the model lock."""

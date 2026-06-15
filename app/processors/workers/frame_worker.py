@@ -7367,18 +7367,27 @@ class FrameWorker(threading.Thread):
             and (
                 parameters["FaceExpressionLipsToggle"]
                 or parameters["FaceExpressionEyesToggle"]
-                or parameters["FaceExpressionBrowsToggle"]
+                or                 parameters["FaceExpressionBrowsToggle"]
                 or parameters["FaceExpressionGeneralToggle"]
                 or parameters.get("FaceExpressionModeSelection", "Advanced") == "Simple"
+                or parameters.get("FaceExpressionModeSelection", "Advanced") == "Recast"
             )
             and parameters["FaceExpressionBeforeTypeSelection"] == "Beginning"
         ):
-            swap = self.frame_edits.apply_face_expression_restorer(
-                original_face_512,
-                swap,
-                cast(dict, parameters),
-                driving_kps=kps_all_crop,
-            )
+            if parameters.get("FaceExpressionModeSelection", "Advanced") == "Recast":
+                swap = self.frame_edits.apply_perform_recast(
+                    original_face_512,
+                    swap,
+                    cast(dict, parameters),
+                    driving_kps=kps_all_crop,
+                )
+            else:
+                swap = self.frame_edits.apply_face_expression_restorer(
+                    original_face_512,
+                    swap,
+                    cast(dict, parameters),
+                    driving_kps=kps_all_crop,
+                )
 
         # Face editor beginning
         if (
@@ -7741,6 +7750,24 @@ class FrameWorker(threading.Thread):
                         outpred_noFP_res.shape[-2], outpred_noFP_res.shape[-1]
                     )(swap_mask_noFP)
 
+                # Alineación del blur de borde (importado de dev edc27bf):
+                # el Occluder estándar difumina el swap_mask global, suavizando
+                # los bordes duros del border_mask. DFLXSeg difumina su máscara
+                # internamente, dejando afilados los bordes base del swap_mask.
+                # Aplicamos el blur aquí para suavizar los límites ANTES de
+                # multiplicar XSeg, evitando doble difuminado de los bordes
+                # internos de XSeg.
+                if not parameters.get("OccluderEnableToggle", False):
+                    _xseg_blur = parameters.get("OccluderXSegBlurSlider", 0)
+                    if _xseg_blur > 0:
+                        _xseg_k = _xseg_blur * 2 + 1
+                        _xseg_sigma = (_xseg_blur + 1) * 0.2
+                        _xseg_gauss = self._get_cached_gaussian_blur(
+                            _xseg_k, _xseg_sigma
+                        )
+                        swap_mask = _xseg_gauss(swap_mask)
+                        swap_mask_noFP = _xseg_gauss(swap_mask_noFP)
+
                 swap_mask_noFP.mul_(1.0 - outpred_noFP_res)
                 swap_mask.mul_(1.0 - img_mask_res)
             else:
@@ -7818,19 +7845,28 @@ class FrameWorker(threading.Thread):
                 and (
                     parameters["FaceExpressionLipsToggle"]
                     or parameters["FaceExpressionEyesToggle"]
-                    or parameters["FaceExpressionBrowsToggle"]
+                    or                     parameters["FaceExpressionBrowsToggle"]
                     or parameters["FaceExpressionGeneralToggle"]
                     or parameters.get("FaceExpressionModeSelection", "Advanced") == "Simple"
+                    or parameters.get("FaceExpressionModeSelection", "Advanced") == "Recast"
                 )
                 and parameters["FaceExpressionBeforeTypeSelection"]
                 == "After First Restorer"
             ):
-                swap = self.frame_edits.apply_face_expression_restorer(
-                    original_face_512,
-                    swap,
-                    cast(dict, parameters),
-                    driving_kps=kps_all_crop,
-                )
+                if parameters.get("FaceExpressionModeSelection", "Advanced") == "Recast":
+                    swap = self.frame_edits.apply_perform_recast(
+                        original_face_512,
+                        swap,
+                        cast(dict, parameters),
+                        driving_kps=kps_all_crop,
+                    )
+                else:
+                    swap = self.frame_edits.apply_face_expression_restorer(
+                        original_face_512,
+                        swap,
+                        cast(dict, parameters),
+                        driving_kps=kps_all_crop,
+                    )
 
             # Face Editor (After First)
             if (
@@ -7915,19 +7951,28 @@ class FrameWorker(threading.Thread):
                 and (
                     parameters["FaceExpressionLipsToggle"]
                     or parameters["FaceExpressionEyesToggle"]
-                    or parameters["FaceExpressionBrowsToggle"]
+                    or                     parameters["FaceExpressionBrowsToggle"]
                     or parameters["FaceExpressionGeneralToggle"]
                     or parameters.get("FaceExpressionModeSelection", "Advanced") == "Simple"
+                    or parameters.get("FaceExpressionModeSelection", "Advanced") == "Recast"
                 )
                 and parameters["FaceExpressionBeforeTypeSelection"]
                 == "After Second Restorer"
             ):
-                swap = self.frame_edits.apply_face_expression_restorer(
-                    original_face_512,
-                    swap,
-                    cast(dict, parameters),
-                    driving_kps=kps_all_crop,
-                )
+                if parameters.get("FaceExpressionModeSelection", "Advanced") == "Recast":
+                    swap = self.frame_edits.apply_perform_recast(
+                        original_face_512,
+                        swap,
+                        cast(dict, parameters),
+                        driving_kps=kps_all_crop,
+                    )
+                else:
+                    swap = self.frame_edits.apply_face_expression_restorer(
+                        original_face_512,
+                        swap,
+                        cast(dict, parameters),
+                        driving_kps=kps_all_crop,
+                    )
 
             # Editor (After Second)
             if (

@@ -59,6 +59,13 @@ def download_file(
 
     print(f"\n[INFO] Downloading '{model_name}' from {url}")
 
+    # Ensure the destination directory exists. Models stored in a new
+    # subfolder (e.g. performrecast_onnx/) would otherwise fail with
+    # FileNotFoundError when opening the target file for writing.
+    dir_name = os.path.dirname(file_path)
+    if dir_name:
+        os.makedirs(dir_name, exist_ok=True)
+
     # Use a for loop for a fixed number of retries. It's cleaner than a while loop with a counter.
     for attempt in range(1, MAX_DOWNLOAD_ATTEMPTS + 1):
         try:
