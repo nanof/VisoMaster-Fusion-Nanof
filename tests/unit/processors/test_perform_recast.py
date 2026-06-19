@@ -197,6 +197,35 @@ class TestComposeDrivenKeypoints:
         assert x_d.shape == (1, NUM_KP, 3)
         assert not torch.allclose(x_d, info["x_s"], atol=1e-4)
 
+    def test_modes_produce_different_results(self):
+        """Enhancement (additive) must differ from Replacement at factor=1 —
+        the regression that made switching modes a no-op."""
+        recast = _make_recast()
+        info = recast.build_source_info(_torch_motion(13))
+        exp_d = _torch_motion(77)["exp"]
+        x_enh = recast.compose_driven_keypoints(
+            info, exp_d, mode=MODE_ENHANCEMENT, factor=1.0
+        )
+        x_rep = recast.compose_driven_keypoints(
+            info, exp_d, mode=MODE_REPLACEMENT, factor=1.0
+        )
+        assert not torch.allclose(x_enh, x_rep, atol=1e-4)
+
+    def test_enhancement_is_additive(self):
+        """Enhancement adds the driver's expression on top of the source."""
+        recast = _make_recast()
+        info = recast.build_source_info(_torch_motion(14))
+        exp_d = _torch_motion(88)["exp"]
+        x_d = recast.compose_driven_keypoints(
+            info, exp_d, mode=MODE_ENHANCEMENT, factor=1.0
+        )
+        # Reconstruct expected: kp + (exp_s + exp_d) through the same geometry.
+        kp_e = info["kp"] + (info["exp"] + exp_d)
+        R, scale, t = info["R"], info["scale"], info["t"]
+        kp_rot = torch.einsum("bmp,bkp->bkm", R, kp_e) * scale.unsqueeze(1)
+        x_expected = kp_rot + t.unsqueeze(1)
+        assert torch.allclose(x_d, x_expected, atol=1e-5)
+
     def test_replacement_returns_correct_shape(self):
         recast = _make_recast()
         info = recast.build_source_info(_torch_motion(4))
@@ -212,6 +241,65 @@ class TestComposeDrivenKeypoints:
         exp_d = _torch_motion(7)["exp"]
         with pytest.raises(ValueError):
             recast.compose_driven_keypoints(info, exp_d, mode="Bogus")
+
+    def test_replacement_eye_lip_weight_zero_keeps_source(self):
+        """eye/lip driving weight 0 -> the eye/lip planar channels stay at the
+        source expression; weight 1 -> they follow the driver."""
+        recast = _make_recast()
+        info = recast.build_source_info(_torch_motion(8))
+        exp_d = _torch_motion(123)["exp"]
+
+        x_keep = recast.compose_driven_keypoints(
+            info,
+            exp_d,
+            mode=MODE_REPLACEMENT,
+            factor=1.0,
+            eye_driving_weight=0.0,
+            lip_driving_weight=0.0,
+        )
+        x_follow = recast.compose_driven_keypoints(
+            info,
+            exp_d,
+            mode=MODE_REPLACEMENT,
+            factor=1.0,
+            eye_driving_weight=1.0,
+            lip_driving_weight=1.0,
+        )
+        # With weight 0 the eye planar channels equal the source; with weight 1
+        # they differ (driver), so the two compositions must differ on the eyes.
+        assert not torch.allclose(x_keep[:, 31:34, :], x_follow[:, 31:34, :], atol=1e-4)
+
+    def test_replacement_default_weights_match_legacy_constants(self):
+        """Default weights (0.7 eyes / 0.8 lips) reproduce the original
+        hardcoded 0.3/0.7 and 0.2/0.8 blend exactly."""
+        recast = _make_recast()
+        info = recast.build_source_info(_torch_motion(11))
+        exp_s = info["exp"]
+        exp_d = _torch_motion(222)["exp"]
+
+        # Recompute the legacy modulated expression directly.
+        modulated = exp_d.clone()
+        modulated[:, 31:34, 2] = exp_s[:, 31:34, 2]
+        modulated[:, 36:39, 2] = exp_s[:, 36:39, 2]
+        modulated[:, 44:47, 2] = exp_s[:, 44:47, 2]
+        modulated[:, 44:47, 0] = exp_s[:, 44:47, 0]
+        modulated[:, 44:47, 1] = exp_s[:, 44:47, 1] * 0.2 + exp_d[:, 44:47, 1] * 0.8
+        modulated[:, 31:34, :2] = exp_s[:, 31:34, :2] * 0.3 + exp_d[:, 31:34, :2] * 0.7
+        modulated[:, 36:39, :2] = exp_s[:, 36:39, :2] * 0.3 + exp_d[:, 36:39, :2] * 0.7
+        legacy_new_exp = exp_s + 1.0 * (modulated - exp_s)
+
+        # The composed driven keypoints use the same transform, so compare the
+        # internal new_exp by reconstructing it through a region='all' compose
+        # against a hand-built reference transform.
+        x_default = recast.compose_driven_keypoints(
+            info, exp_d, mode=MODE_REPLACEMENT, factor=1.0
+        )
+        # Build expected x_d from legacy_new_exp using the same geometry.
+        kp_e = info["kp"] + legacy_new_exp
+        R, scale, t = info["R"], info["scale"], info["t"]
+        kp_rot = torch.einsum("bmp,bkp->bkm", R, kp_e) * scale.unsqueeze(1)
+        x_expected = kp_rot + t.unsqueeze(1)
+        assert torch.allclose(x_default, x_expected, atol=1e-5)
 
     def test_region_eyes_keeps_non_eye_keypoints_at_source(self):
         """With region='eyes', keypoints outside the eye group are unchanged."""
@@ -264,6 +352,15 @@ class TestModelAPI:
         assert arr.dtype == np.float32
         assert pytest.approx(arr.max(), abs=1e-6) == 1.0
 
+    def test_prewarm_loads_all_models(self):
+        recast = _make_recast()
+        assert all(
+            recast.models_processor.models.get(n) is None for n in recast.model_group
+        )
+        recast.prewarm()
+        for name in recast.model_group:
+            assert recast.models_processor.models.get(name) is not None
+
     def test_unload_models_calls_unload_for_each(self):
         recast = _make_recast()
         # Pretend all four are loaded.
@@ -280,7 +377,12 @@ class TestModelAPI:
 
 _WARPING_ONNX = os.path.join(
     os.path.dirname(__file__),
-    "..", "..", "..", "model_assets", "performrecast_onnx", "warping_module.onnx",
+    "..",
+    "..",
+    "..",
+    "model_assets",
+    "performrecast_onnx",
+    "warping_module.onnx",
 )
 
 

@@ -81,5 +81,42 @@ def test_recast_region_options_and_default():
 def test_recast_expression_factor_range():
     entry = FACE_EXPR["RecastExpressionFactorDecimalSlider"]
     assert float(entry["min_value"]) == 0.0
-    assert float(entry["max_value"]) == 2.0
+    # Range was raised to 3.0 to allow stylization/exaggeration.
+    assert float(entry["max_value"]) == 3.0
     assert float(entry["default"]) == 1.0
+
+
+def test_recast_crop_scale_defaults_to_safe_framing():
+    entry = FACE_EXPR["RecastCropScaleDecimalSlider"]
+    # Default matches the proven 2.3 framing (best viable similarity). Too-tight
+    # crops drive the generator into black frames (handled by the guard); wider
+    # is safer. Default must stay within range.
+    assert float(entry["default"]) == 2.3
+    assert (
+        float(entry["min_value"])
+        <= float(entry["default"])
+        <= float(entry["max_value"])
+    )
+
+
+def test_recast_blend_weight_defaults_match_upstream():
+    eye = FACE_EXPR["RecastEyeDrivingWeightDecimalSlider"]
+    lip = FACE_EXPR["RecastLipDrivingWeightDecimalSlider"]
+    assert float(eye["default"]) == 0.7
+    assert float(lip["default"]) == 0.8
+    for entry in (eye, lip):
+        assert float(entry["min_value"]) == 0.0
+        assert float(entry["max_value"]) == 1.0
+
+
+def test_recast_smoothing_widgets_exist_and_default_off():
+    toggle = FACE_EXPR["RecastExpressionSmoothToggle"]
+    assert toggle["default"] is False
+    strength = FACE_EXPR["RecastSmoothStrengthDecimalSlider"]
+    # Strength is additionally gated on the smoothing toggle.
+    assert "RecastExpressionSmoothToggle" in strength["parentToggle"]
+
+
+def test_recast_paste_back_feather_defaults_off():
+    entry = FACE_EXPR["RecastPasteBackFeatherDecimalSlider"]
+    assert float(entry["default"]) == 0.0

@@ -700,23 +700,38 @@ class ModelsProcessor(QtCore.QObject):
             print(
                 f"[INFO] Preparing TensorRT-ready (shape-inferred) ONNX for {model_name}..."
             )
-            from onnxruntime.tools.onnx_model_utils import make_dim_param_fixed
-            from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
-
-            model = onnx.load(onnx_path)
-            # Pin the dynamic 'batch' axis to 1 so symbolic dims (e.g. "50*batch")
-            # resolve to concrete values the TensorRT builder accepts.
-            try:
-                make_dim_param_fixed(model.graph, "batch", 1)
-            except Exception as dim_err:
-                # Not fatal — symbolic shape inference may still add the shapes.
-                print(f"[WARN] Could not pin batch dim for {model_name}: {dim_err}")
-            model = SymbolicShapeInference.infer_shapes(
-                model, auto_merge=True, guess_output_rank=True
+            # Shape inference can take several seconds on large graphs (e.g. the
+            # ~200 MB PerformRecast warping module). Surface a dialog so the UI
+            # does not appear frozen during this one-time preprocessing step.
+            self.show_build_dialog.emit(
+                "Preparing TensorRT Model",
+                f"Running shape inference for:\n{model_name}\n\n"
+                f"This one-time step prepares the model for the TensorRT engine "
+                f"build and may take a moment.",
             )
-            onnx.save(model, sidecar_path)
-            del model
-            gc.collect()
+            try:
+                from onnxruntime.tools.onnx_model_utils import make_dim_param_fixed
+                from onnxruntime.tools.symbolic_shape_infer import (
+                    SymbolicShapeInference,
+                )
+
+                model = onnx.load(onnx_path)
+                # Pin the dynamic 'batch' axis to 1 so symbolic dims (e.g.
+                # "50*batch") resolve to concrete values the TensorRT builder
+                # accepts.
+                try:
+                    make_dim_param_fixed(model.graph, "batch", 1)
+                except Exception as dim_err:
+                    # Not fatal — symbolic shape inference may still add shapes.
+                    print(f"[WARN] Could not pin batch dim for {model_name}: {dim_err}")
+                model = SymbolicShapeInference.infer_shapes(
+                    model, auto_merge=True, guess_output_rank=True
+                )
+                onnx.save(model, sidecar_path)
+                del model
+                gc.collect()
+            finally:
+                self.hide_build_dialog.emit()
             print(f"[INFO] Wrote shape-inferred ONNX: {os.path.basename(sidecar_path)}")
             return sidecar_path
         except Exception as e:

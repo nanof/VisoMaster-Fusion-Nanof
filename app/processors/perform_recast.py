@@ -108,24 +108,28 @@ class PerformRecast:
             raise RuntimeError(f"Model {model_name} could not be loaded")
         return session
 
-    def _run(self, model_name: str, feeds: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
-        """Run a model and return ``{output_name: np.ndarray}``.
+    def _infer(
+        self,
+        model_name: str,
+        inputs: Dict[str, "torch.Tensor"],
+        output_specs: Dict[str, tuple],
+    ) -> Dict[str, "torch.Tensor"]:
+        """Run a model and return the requested outputs as torch tensors.
 
-        The exported graphs always take/return float32 (``keep_io_types=True``
-        for the fp16 variants), so every feed is coerced to contiguous float32.
-        Feeds and results cross the thread boundary as numpy (host) arrays, so
-        there are no cross-thread CUDA tensor hazards: all device work happens
-        on the single inference thread (see ``__init__``).
+        On CUDA uses zero-copy IO binding so tensors stay on GPU instead of
+        round-tripping through host numpy buffers (matching
+        ``FaceEditors._run_onnx_io_binding``).  On CPU the call is dispatched
+        through the single persistent worker thread (``_get_ort_executor``) so
+        ORT only ever sees one thread and never grows its per-thread CUDA
+        context pool across play/reprocess cycles.
 
         TensorRT "lazy build" models compile their engine on the first real
         inference (not during the isolated probe). We surface the build dialog
         around that first run so the UI does not appear frozen.
         """
         session = self._session(model_name)
-        feeds = {k: np.ascontiguousarray(v, dtype=np.float32) for k, v in feeds.items()}
-        names = [o.name for o in session.get_outputs()]
-
         mp = self.models_processor
+
         is_lazy_build = False
         check_pending = getattr(mp, "check_and_clear_pending_build", None)
         if callable(check_pending):
@@ -137,20 +141,103 @@ class PerformRecast:
                 f"This may take several minutes.",
             )
         try:
-            if getattr(mp, "device", "cpu") == "cuda":
-                # Run on the dedicated inference thread so the CUDA EP only ever
-                # creates one per-thread context (no per-play / per-reprocess
-                # VRAM growth).
-                outs = self._get_ort_executor().submit(
-                    session.run, None, feeds
-                ).result()
-            else:
-                outs = session.run(None, feeds)
+            if getattr(mp, "device_type", "cpu") == "cuda":
+                return self._infer_iobinding(session, inputs, output_specs)
+            # CPU path: route through persistent thread so ORT keeps a single
+            # per-thread context for the whole app lifetime.
+            return self._get_ort_executor().submit(
+                self._infer_numpy, session, inputs, output_specs
+            ).result()
         finally:
             if is_lazy_build:
                 mp.hide_build_dialog.emit()
 
-        return dict(zip(names, outs))
+    def _infer_iobinding(
+        self, session, inputs: Dict[str, "torch.Tensor"], output_specs: Dict[str, tuple]
+    ) -> Dict[str, "torch.Tensor"]:
+        """Zero-copy CUDA inference path (see :meth:`_infer`)."""
+        mp = self.models_processor
+        io_binding = session.io_binding()
+
+        # Keep references to the coerced input tensors alive until run() — the
+        # binding only stores raw data pointers.
+        kept = []
+        for name, tensor in inputs.items():
+            t = tensor.detach().to(mp.device, torch.float32).contiguous()
+            kept.append(t)
+            io_binding.bind_input(
+                name=name,
+                device_type=mp.device_type,
+                device_id=mp.binding_device_id,
+                element_type=np.float32,
+                shape=tuple(t.shape),
+                buffer_ptr=t.data_ptr(),
+            )
+
+        out_buffers: Dict[str, "torch.Tensor"] = {}
+        for o in session.get_outputs():
+            name = o.name
+            if name in output_specs:
+                buf = torch.empty(
+                    output_specs[name], dtype=torch.float32, device=mp.device
+                ).contiguous()
+                out_buffers[name] = buf
+                io_binding.bind_output(
+                    name=name,
+                    device_type=mp.device_type,
+                    device_id=mp.binding_device_id,
+                    element_type=np.float32,
+                    shape=tuple(buf.shape),
+                    buffer_ptr=buf.data_ptr(),
+                )
+            else:
+                # Output we never read — let ORT allocate it on the device.
+                io_binding.bind_output(
+                    name=name,
+                    device_type=mp.device_type,
+                    device_id=mp.binding_device_id,
+                )
+
+        # Ensure PyTorch has finished writing the input buffers before ORT reads
+        # from the bound pointers.
+        if mp.device_type == "cuda":
+            torch.cuda.current_stream().synchronize()
+        session.run_with_iobinding(io_binding)
+        return out_buffers
+
+    def _infer_numpy(
+        self, session, inputs: Dict[str, "torch.Tensor"], output_specs: Dict[str, tuple]
+    ) -> Dict[str, "torch.Tensor"]:
+        """Host (CPU / mocked-session) fallback path (see :meth:`_infer`)."""
+        device = self.models_processor.device
+        feeds = {}
+        for name, tensor in inputs.items():
+            if isinstance(tensor, torch.Tensor):
+                arr = tensor.detach().cpu().numpy()
+            else:
+                arr = tensor
+            feeds[name] = np.ascontiguousarray(arr, dtype=np.float32)
+
+        names = [o.name for o in session.get_outputs()]
+        outs = dict(zip(names, session.run(None, feeds)))
+        return {
+            name: torch.from_numpy(np.asarray(outs[name])).to(device)
+            for name in output_specs
+        }
+
+    def prewarm(self):
+        """Load all four sub-networks up front (no inference).
+
+        Loading each model triggers its TensorRT engine build / cache probe (and
+        the associated "Building TensorRT Cache" dialog) inside
+        ``models_processor.load_model``. Doing this once, eagerly and in a fixed
+        order at the start of a Recast frame — instead of lazily interleaved with
+        inference — guarantees the build dialog is shown for *every* PerformRecast
+        model so the user knows what the app is doing during the (multi-minute)
+        engine builds. It is a cheap dict lookup once the models are loaded.
+        """
+        for model_name in self.model_group:
+            self._session(model_name)
 
     def unload_models(self):
         """Release all four PerformRecast models from VRAM."""
@@ -169,45 +256,70 @@ class PerformRecast:
             x = x.unsqueeze(0)
         return x.contiguous().cpu().numpy()
 
-    def extract_appearance(self, img512: torch.Tensor) -> np.ndarray:
+    def _to_input_t(self, img: torch.Tensor) -> torch.Tensor:
+        """(C,H,W) uint8/float [0,255] -> (1,3,H,W) float32 [0,1] on device."""
+        x = img.detach().to(self.models_processor.device, torch.float32) / 255.0
+        x = torch.clamp(x, 0.0, 1.0)
+        if x.dim() == 3:
+            x = x.unsqueeze(0)
+        return x.contiguous()
+
+    def extract_appearance(self, img512: torch.Tensor) -> torch.Tensor:
         """F: source crop (C,512,512)[0,255] -> feature_3d (1,32,16,64,64)."""
-        feeds = {"source_image": self._to_input(img512)}
-        return self._run(APPEARANCE_MODEL, feeds)["feature_3d"]
+        out = self._infer(
+            APPEARANCE_MODEL,
+            {"source_image": self._to_input_t(img512)},
+            {"feature_3d": (1, 32, 16, 64, 64)},
+        )
+        return out["feature_3d"]
 
     def motion(self, img256: torch.Tensor) -> Dict[str, torch.Tensor]:
         """M: crop (C,256,256)[0,255] -> raw motion dict as torch tensors.
 
-        Keys: pitch, yaw, roll (1,66); t (1,3); scale (1,1);
+        Keys: pitch, yaw, roll (1,66); t (1,3); scale (1,3);
         exp, kp reshaped to (1, NUM_KP, 3).
         """
-        out = self._run(MOTION_MODEL, {"image": self._to_input(img256)})
-        device = self.models_processor.device
-        kp_info = {
-            k: torch.from_numpy(out[k]).to(device)
-            for k in ("pitch", "yaw", "roll", "t", "exp", "scale", "kp")
-        }
+        kp_info = self._infer(
+            MOTION_MODEL,
+            {"image": self._to_input_t(img256)},
+            {
+                "pitch": (1, 66),
+                "yaw": (1, 66),
+                "roll": (1, 66),
+                "t": (1, 3),
+                "exp": (1, NUM_KP * 3),
+                "scale": (1, 3),
+                "kp": (1, NUM_KP * 3),
+            },
+        )
         kp_info["exp"] = kp_info["exp"].reshape(1, -1, 3)
         kp_info["kp"] = kp_info["kp"].reshape(1, -1, 3)
         return kp_info
 
     def warp_decode(
-        self, feature_3d: np.ndarray, kp_source: torch.Tensor, kp_driving: torch.Tensor
+        self, feature_3d, kp_source: torch.Tensor, kp_driving: torch.Tensor
     ) -> torch.Tensor:
         """W + G: D(W(f_s; x_s, x_d)) -> RGB image (1,3,512,512) torch [0,1].
 
-        Note the upstream input ordering: the warping module receives
-        ``kp_driving`` first and ``kp_source`` second.
+        ``feature_3d`` may be a torch tensor (IO-binding path) or a numpy array
+        (legacy/fallback). Note the upstream input ordering: the warping module
+        receives ``kp_driving`` first and ``kp_source`` second. The intermediate
+        warp feature stays on the GPU between W and G on the CUDA path.
         """
-        warped = self._run(
+        device = self.models_processor.device
+        if not isinstance(feature_3d, torch.Tensor):
+            feature_3d = torch.from_numpy(np.asarray(feature_3d)).to(device)
+        warped = self._infer(
             WARPING_MODEL,
             {
                 "feature_3d": feature_3d,
-                "kp_driving": kp_driving.detach().cpu().numpy(),
-                "kp_source": kp_source.detach().cpu().numpy(),
+                "kp_driving": kp_driving,
+                "kp_source": kp_source,
             },
+            {"out": (1, 256, 64, 64)},
         )["out"]
-        out = self._run(SPADE_MODEL, {"feature": warped})["out"]
-        return torch.from_numpy(out).to(self.models_processor.device)
+        out = self._infer(SPADE_MODEL, {"feature": warped}, {"out": (1, 3, 512, 512)})
+        return out["out"]
 
     # ------------------------------------------------------------------ #
     # Geometry — ported verbatim from src/pipeline.py (HopeNet -99 binning)
@@ -233,24 +345,53 @@ class PerformRecast:
         ones = torch.ones_like(pitch)
 
         pitch_mat = torch.cat(
-            [ones, zeros, zeros,
-             zeros, torch.cos(pitch), -torch.sin(pitch),
-             zeros, torch.sin(pitch), torch.cos(pitch)], dim=1
+            [
+                ones,
+                zeros,
+                zeros,
+                zeros,
+                torch.cos(pitch),
+                -torch.sin(pitch),
+                zeros,
+                torch.sin(pitch),
+                torch.cos(pitch),
+            ],
+            dim=1,
         ).view(-1, 3, 3)
         yaw_mat = torch.cat(
-            [torch.cos(yaw), zeros, torch.sin(yaw),
-             zeros, ones, zeros,
-             -torch.sin(yaw), zeros, torch.cos(yaw)], dim=1
+            [
+                torch.cos(yaw),
+                zeros,
+                torch.sin(yaw),
+                zeros,
+                ones,
+                zeros,
+                -torch.sin(yaw),
+                zeros,
+                torch.cos(yaw),
+            ],
+            dim=1,
         ).view(-1, 3, 3)
         roll_mat = torch.cat(
-            [torch.cos(roll), -torch.sin(roll), zeros,
-             torch.sin(roll), torch.cos(roll), zeros,
-             zeros, zeros, ones], dim=1
+            [
+                torch.cos(roll),
+                -torch.sin(roll),
+                zeros,
+                torch.sin(roll),
+                torch.cos(roll),
+                zeros,
+                zeros,
+                zeros,
+                ones,
+            ],
+            dim=1,
         ).view(-1, 3, 3)
 
         return torch.einsum("bij,bjk,bkm->bim", pitch_mat, yaw_mat, roll_mat)
 
-    def build_source_info(self, kp_info: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def build_source_info(
+        self, kp_info: Dict[str, torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
         """Compute the per-frame source descriptor used during animation.
 
         Returns a dict with the canonical keypoints ``kp`` (1,N,3), expression
@@ -279,7 +420,7 @@ class PerformRecast:
     # ------------------------------------------------------------------ #
     # Implicit-keypoint channel groups referenced by the upstream
     # "Replacement" modulation. Used here for optional region gating.
-    EYE_INDICES = list(range(31, 39))    # 31..38 (eye channels)
+    EYE_INDICES = list(range(31, 39))  # 31..38 (eye channels)
     MOUTH_INDICES = list(range(44, 47))  # 44..46 (jaw / lip-contour channels)
 
     def compose_driven_keypoints(
@@ -289,6 +430,8 @@ class PerformRecast:
         mode: str = MODE_ENHANCEMENT,
         factor: float = 1.0,
         region: str = "all",
+        eye_driving_weight: float = 0.7,
+        lip_driving_weight: float = 0.8,
     ) -> torch.Tensor:
         """Build the driven keypoints ``x_d_i`` fed to the warping module.
 
@@ -300,12 +443,24 @@ class PerformRecast:
                 the full transfer; values >1 exaggerate it.
             region: ``"all"`` | ``"eyes"`` | ``"lips"`` — restrict where the
                 driving expression is applied (source expression kept elsewhere).
+            eye_driving_weight: in Replacement mode, how strongly the driver
+                overrides the source eye-channel identity (0 keeps source eyes,
+                1 fully follows the driver). Upstream default 0.7.
+            lip_driving_weight: same, for the lip/jaw channels. Upstream
+                default 0.8.
 
-        Per-frame note: the upstream video pipeline uses the driving video's
-        first frame as the neutral reference for the relative delta. VisoMaster
-        processes frames independently, so the source (swapped) face's own
-        expression is used as that reference — making ``factor`` a clean
-        interpolation between "keep source" and "full driving expression".
+        Mode semantics:
+          * Replacement — ``factor=1`` yields the driver's expression with the
+            swapped face's eye/lip identity blended back (``eye/lip_driving_weight``).
+            ``factor`` interpolates source -> that target.
+          * Enhancement — adds the driver's expression on top of the swapped
+            face's own expression (``exp_s + factor*exp_d``); ``factor=0`` keeps
+            the source, higher values stack/boost the driver's expression.
+
+        The upstream video pipeline uses the driving video's first frame as a
+        neutral reference; VisoMaster is stateless per frame, so Enhancement
+        treats the implicit keypoint ``exp_d`` (already a delta from the
+        canonical keypoints) as the additive delta directly.
         """
         x_s_c = source_info["kp"]
         exp_s = source_info["exp"]
@@ -315,21 +470,43 @@ class PerformRecast:
 
         if mode == MODE_REPLACEMENT:
             # Start from the absolute driving expression and blend back
-            # source-side eye / lip / jaw channels (identity micro-cues).
+            # source-side eye / lip / jaw channels (identity micro-cues). The
+            # blend weights default to the upstream 0.7 (eyes) / 0.8 (lips), but
+            # are exposed so users can dial how strongly the driver overrides
+            # the swapped face's own eye/lip identity (similarity preservation).
+            ew = float(eye_driving_weight)
+            lw = float(lip_driving_weight)
             modulated = exp_d.clone()
             modulated[:, 31:34, 2] = exp_s[:, 31:34, 2]
             modulated[:, 36:39, 2] = exp_s[:, 36:39, 2]
             modulated[:, 44:47, 2] = exp_s[:, 44:47, 2]
             modulated[:, 44:47, 0] = exp_s[:, 44:47, 0]
-            modulated[:, 44:47, 1] = exp_s[:, 44:47, 1] * 0.2 + exp_d[:, 44:47, 1] * 0.8
-            modulated[:, 31:34, :2] = exp_s[:, 31:34, :2] * 0.3 + exp_d[:, 31:34, :2] * 0.7
-            modulated[:, 36:39, :2] = exp_s[:, 36:39, :2] * 0.3 + exp_d[:, 36:39, :2] * 0.7
+            modulated[:, 44:47, 1] = (
+                exp_s[:, 44:47, 1] * (1.0 - lw) + exp_d[:, 44:47, 1] * lw
+            )
+            modulated[:, 31:34, :2] = (
+                exp_s[:, 31:34, :2] * (1.0 - ew) + exp_d[:, 31:34, :2] * ew
+            )
+            modulated[:, 36:39, :2] = (
+                exp_s[:, 36:39, :2] * (1.0 - ew) + exp_d[:, 36:39, :2] * ew
+            )
             # Interpolate from source toward the modulated target by `factor`.
             new_exp = exp_s + factor * (modulated - exp_s)
         elif mode == MODE_ENHANCEMENT:
-            # Add the driving expression delta (relative to source) on top of
-            # the source expression, scaled by `factor`.
-            new_exp = exp_s + factor * (exp_d - exp_s)
+            # ENHANCEMENT = keep the swapped face's own expression and ADD the
+            # driving expression on top of it (scaled by `factor`). This is
+            # genuinely additive, so it stays distinct from Replacement (which
+            # *replaces* the expression with the driver's). The implicit keypoint
+            # `exp` is already a delta from the canonical keypoints, so the
+            # driver's `exp_d` acts as the additive expression delta directly —
+            # no explicit neutral-reference frame is needed.
+            #
+            # (Previously this used `exp_s + factor*(exp_d - exp_s)`, i.e. the
+            # source's own expression as the neutral reference. At factor=1 that
+            # cancels `exp_s` and collapses to `exp_d` — making Enhancement
+            # nearly identical to Replacement, which is why switching modes
+            # appeared to do nothing.)
+            new_exp = exp_s + factor * exp_d
         else:
             raise ValueError(f"Unsupported recast mode: {mode!r}")
 
