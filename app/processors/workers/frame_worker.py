@@ -284,6 +284,7 @@ class FrameWorker(threading.Thread):
         ] = {}  # Will be populated from main_window.parameters or task
 
         self.last_processed_frame_number = -1
+        self._recast_last_frame_number = -1
         self.last_detected_faces: list = []
 
         # VR-specific tracking state (kept separate from standard-mode state so
@@ -662,6 +663,7 @@ class FrameWorker(threading.Thread):
             )
 
             with nvtx_range("VisoMaster/worker/process_frame"), stream_context:
+                self._maybe_reset_recast_ref_for_timeline_jump()
                 local_control_state = self.local_control_state_from_feeder
                 _profile_collect = _pipeline_profile_collect_enabled(self.main_window)
 
@@ -929,6 +931,16 @@ class FrameWorker(threading.Thread):
 
     def _reset_sequential_rotate_stabilizer(self) -> None:
         self.video_processor.reset_sequential_rotate_stabilizer()
+
+    def _maybe_reset_recast_ref_for_timeline_jump(self) -> None:
+        """Reset Recast driver ref on frame 0 or backward timeline jumps."""
+        fn = int(self.frame_number)
+        if fn < 0:
+            return
+        prev = self._recast_last_frame_number
+        if fn == 0 or (prev >= 0 and fn < prev):
+            self.frame_edits.reset_recast_driver_reference()
+        self._recast_last_frame_number = fn
 
     def _apply_sequential_rotate_temporal_alignment(
         self,

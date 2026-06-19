@@ -28,6 +28,20 @@ def _lp_motion_batch2_disabled() -> bool:
     )
 
 
+def _recast_driver_ref_enabled(parameters: dict | None = None) -> bool:
+    """VISIOMASTER_RECAST_DRIVER_REF=0 forces legacy absolute driver expression."""
+    if os.environ.get("VISIOMASTER_RECAST_DRIVER_REF", "1").strip().lower() in (
+        "0",
+        "false",
+        "no",
+        "off",
+    ):
+        return False
+    if parameters is not None:
+        return bool(parameters.get("RecastDriverNeutralRefToggle", True))
+    return True
+
+
 def _env_truthy_local(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -116,6 +130,9 @@ class FrameEdits:
         # (``RecastExpressionSmoothToggle``). Keyed by a quantized face centroid
         # so multiple faces in a frame are smoothed independently.
         self._recast_exp_state: dict = {}
+        # Per-face neutral driver expression reference for Enhancement mode
+        # (first-frame exp_d from motion). Same centroid matching as EMA.
+        self._recast_driver_exp_ref: dict = {}
 
     def set_transforms(self, t256_face, interpolation_expression_faceeditor_back):
         """
@@ -842,6 +859,57 @@ class FrameEdits:
 
         return out.type(torch.float32)
 
+    def reset_recast_driver_reference(self) -> None:
+        """Drop Recast driver neutral-expression refs and EMA smoothing state."""
+        self._recast_driver_exp_ref.clear()
+        self._recast_exp_state.clear()
+
+    @staticmethod
+    def _recast_face_centroid(source_lmk) -> tuple[float, float]:
+        try:
+            centroid = np.asarray(source_lmk, dtype=np.float32).reshape(-1, 2).mean(0)
+            return float(centroid[0]), float(centroid[1])
+        except Exception:
+            return 0.0, 0.0
+
+    def _recast_match_face_slot(
+        self, state: dict, cx: float, cy: float, tol: float = 120.0
+    ) -> int | None:
+        best_key = None
+        best_dist = tol
+        for k, entry in state.items():
+            pcx, pcy = entry[0], entry[1]
+            dist = ((pcx - cx) ** 2 + (pcy - cy) ** 2) ** 0.5
+            if dist <= best_dist:
+                best_dist = dist
+                best_key = k
+        return best_key
+
+    def _get_or_capture_recast_exp_ref(
+        self,
+        cx: float,
+        cy: float,
+        exp_d: torch.Tensor,
+        use_ref: bool,
+    ) -> torch.Tensor | None:
+        """Return stored ref or capture ``exp_d`` from the first driver frame."""
+        if not use_ref:
+            return None
+
+        best_key = self._recast_match_face_slot(self._recast_driver_exp_ref, cx, cy)
+        if best_key is not None:
+            return self._recast_driver_exp_ref[best_key][2]
+
+        ref = exp_d.detach().clone().cpu()
+        key = max(self._recast_driver_exp_ref.keys(), default=-1) + 1
+        self._recast_driver_exp_ref[key] = (cx, cy, ref)
+
+        if len(self._recast_driver_exp_ref) > 16:
+            self._recast_driver_exp_ref.clear()
+            self._recast_driver_exp_ref[0] = (cx, cy, ref)
+
+        return ref
+
     def _recast_smooth_exp(
         self, exp_d: torch.Tensor, source_lmk, strength: float
     ) -> torch.Tensor:
@@ -858,20 +926,8 @@ class FrameEdits:
         if strength <= 0.0:
             return exp_d
 
-        try:
-            centroid = np.asarray(source_lmk, dtype=np.float32).reshape(-1, 2).mean(0)
-            cx, cy = float(centroid[0]), float(centroid[1])
-        except Exception:
-            cx, cy = 0.0, 0.0
-
-        tol = 120.0
-        best_key = None
-        best_dist = tol
-        for k, (pcx, pcy, _exp) in self._recast_exp_state.items():
-            dist = ((pcx - cx) ** 2 + (pcy - cy) ** 2) ** 0.5
-            if dist <= best_dist:
-                best_dist = dist
-                best_key = k
+        cx, cy = self._recast_face_centroid(source_lmk)
+        best_key = self._recast_match_face_slot(self._recast_exp_state, cx, cy)
 
         if best_key is not None:
             _pcx, _pcy, prev = self._recast_exp_state[best_key]
@@ -1047,19 +1103,40 @@ class FrameEdits:
             source_info = recast.build_source_info(x_s_info)
             f_s = recast.extract_appearance(target_face_512)
 
-            # Optional temporal smoothing of the driving expression.
-            if smooth_on:
-                exp_d = self._recast_smooth_exp(exp_d, source_lmk, smooth_strength)
+            driver_ref_enabled = _recast_driver_ref_enabled(parameters)
+            use_driver_ref = driver_ref_enabled and mode == "Enhancement"
+            cx, cy = self._recast_face_centroid(source_lmk)
+            exp_ref = self._get_or_capture_recast_exp_ref(
+                cx, cy, exp_d, use_driver_ref
+            )
+
+            # Enhancement: smooth the relative expression delta (upstream smooths
+            # the relative sequence). Replacement: smooth absolute exp_d.
+            exp_for_compose = exp_d
+            compose_exp_ref: torch.Tensor | None = None
+            if use_driver_ref and exp_ref is not None:
+                exp_d_rel = exp_d - exp_ref.to(exp_d.device)
+                if smooth_on:
+                    exp_d_rel = self._recast_smooth_exp(
+                        exp_d_rel, source_lmk, smooth_strength
+                    )
+                exp_for_compose = exp_d_rel + exp_ref.to(exp_d.device)
+                compose_exp_ref = exp_ref
+            elif smooth_on:
+                exp_for_compose = self._recast_smooth_exp(
+                    exp_d, source_lmk, smooth_strength
+                )
 
             # --- COMPOSE + GENERATE ---
             x_d_i = recast.compose_driven_keypoints(
                 source_info,
-                exp_d,
+                exp_for_compose,
                 mode=mode,
                 factor=factor,
                 region=region,
                 eye_driving_weight=eye_weight,
                 lip_driving_weight=lip_weight,
+                exp_ref=compose_exp_ref,
             )
             out = recast.warp_decode(f_s, source_info["x_s"], x_d_i)
             out = torch.squeeze(out)

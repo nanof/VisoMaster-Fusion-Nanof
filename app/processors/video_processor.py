@@ -1709,6 +1709,14 @@ class VideoProcessor(QObject):
         self.last_detected_faces.clear()
         self._smoothed_kps.clear()
         self.reset_sequential_rotate_stabilizer()
+        self._reset_workers_recast_driver_reference()
+
+    def _reset_workers_recast_driver_reference(self) -> None:
+        """Drop per-worker Recast driver neutral-expression refs after timeline jumps."""
+        for thread in self.worker_threads:
+            frame_edits = getattr(thread, "frame_edits", None)
+            if frame_edits is not None:
+                frame_edits.reset_recast_driver_reference()
 
     def reset_sequential_rotate_stabilizer(self) -> None:
         with self._sequential_rotate_lock:

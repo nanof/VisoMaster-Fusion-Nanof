@@ -413,9 +413,23 @@ COMMON_LAYOUT_DATA: Any = {
             "requiredToggleValue": True,
             "parentSelection": "FaceExpressionModeSelection",
             "requiredSelectionValue": "Recast",
-            "help": "Enhancement adds the driving expression on top of the swapped face's "
-            "expression. Replacement starts from the driving expression and blends back "
+            "help": "Enhancement adds the driving expression delta on top of the swapped "
+            "face's expression (relative to the first driver frame by default). "
+            "Replacement starts from the driving expression and blends back "
             "the swapped face's eye/lip/jaw identity cues.",
+        },
+        "RecastDriverNeutralRefToggle": {
+            "level": 3,
+            "label": "Neutral Driver Reference",
+            "default": True,
+            "parentToggle": "FaceExpressionEnableBothToggle",
+            "requiredToggleValue": True,
+            "parentSelection": "FaceExpressionModeSelection",
+            "requiredSelectionValue": "Recast",
+            "help": "Enhancement only: use the first processed driver frame as a neutral "
+            "expression reference (upstream PerformRecast default). Gestures transfer "
+            "as deltas from that frame. Turn off to use the driver's absolute expression "
+            "on every frame (legacy VisoMaster behavior).",
         },
         "RecastExpressionFactorDecimalSlider": {
             "level": 3,

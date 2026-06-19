@@ -432,6 +432,7 @@ class PerformRecast:
         region: str = "all",
         eye_driving_weight: float = 0.7,
         lip_driving_weight: float = 0.8,
+        exp_ref: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Build the driven keypoints ``x_d_i`` fed to the warping module.
 
@@ -448,6 +449,9 @@ class PerformRecast:
                 1 fully follows the driver). Upstream default 0.7.
             lip_driving_weight: same, for the lip/jaw channels. Upstream
                 default 0.8.
+            exp_ref: optional neutral driver expression (1,N,3). Enhancement
+                subtracts this from ``exp_d`` before applying ``factor``.
+                Ignored in Replacement mode.
 
         Mode semantics:
           * Replacement — ``factor=1`` yields the driver's expression with the
@@ -458,9 +462,11 @@ class PerformRecast:
             the source, higher values stack/boost the driver's expression.
 
         The upstream video pipeline uses the driving video's first frame as a
-        neutral reference; VisoMaster is stateless per frame, so Enhancement
-        treats the implicit keypoint ``exp_d`` (already a delta from the
-        canonical keypoints) as the additive delta directly.
+        neutral reference. When ``exp_ref`` is supplied (Enhancement only), the
+        driving expression is relative to that reference:
+        ``exp_d_rel = exp_d - exp_ref``, ``new_exp = exp_s + factor * exp_d_rel``.
+        Replacement always uses the absolute driving expression and ignores
+        ``exp_ref``.
         """
         x_s_c = source_info["kp"]
         exp_s = source_info["exp"]
@@ -494,19 +500,15 @@ class PerformRecast:
             new_exp = exp_s + factor * (modulated - exp_s)
         elif mode == MODE_ENHANCEMENT:
             # ENHANCEMENT = keep the swapped face's own expression and ADD the
-            # driving expression on top of it (scaled by `factor`). This is
-            # genuinely additive, so it stays distinct from Replacement (which
-            # *replaces* the expression with the driver's). The implicit keypoint
-            # `exp` is already a delta from the canonical keypoints, so the
-            # driver's `exp_d` acts as the additive expression delta directly —
-            # no explicit neutral-reference frame is needed.
-            #
-            # (Previously this used `exp_s + factor*(exp_d - exp_s)`, i.e. the
-            # source's own expression as the neutral reference. At factor=1 that
-            # cancels `exp_s` and collapses to `exp_d` — making Enhancement
-            # nearly identical to Replacement, which is why switching modes
-            # appeared to do nothing.)
-            new_exp = exp_s + factor * exp_d
+            # driver's expression delta relative to the first driver frame
+            # (upstream inference_mode 2: kp_e = x_s_c + exp_s + exp_d_rel).
+            if exp_ref is not None:
+                exp_d_use = exp_d - exp_ref.to(exp_d.device)
+            else:
+                # No reference captured yet (or VISIOMASTER_RECAST_DRIVER_REF=0):
+                # fall back to absolute driving expression.
+                exp_d_use = exp_d
+            new_exp = exp_s + factor * exp_d_use
         else:
             raise ValueError(f"Unsupported recast mode: {mode!r}")
 

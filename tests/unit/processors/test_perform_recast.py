@@ -22,6 +22,7 @@ from app.processors.perform_recast import (  # noqa: E402
     MODE_REPLACEMENT,
     PerformRecast,
 )
+from app.processors.frame_edits import FrameEdits  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +65,10 @@ class _FakeModelsProcessor:
         self._sessions[name] = session
 
     def load_model(self, name):
-        return self._sessions.get(name)
+        session = self._sessions.get(name)
+        if session is not None:
+            self.models[name] = session
+        return session
 
     def unload_model(self, name, force_immediate=False):
         self.models[name] = None
@@ -197,6 +201,70 @@ class TestComposeDrivenKeypoints:
         assert x_d.shape == (1, NUM_KP, 3)
         assert not torch.allclose(x_d, info["x_s"], atol=1e-4)
 
+    def test_enhancement_with_exp_ref_zero_rel_equals_source(self):
+        """factor=1 and exp_d == exp_ref -> exp_d_rel=0 -> driven kp == source x_s."""
+        recast = _make_recast()
+        info = recast.build_source_info(_torch_motion(3))
+        exp_d = _torch_motion(99)["exp"]
+        x_d = recast.compose_driven_keypoints(
+            info,
+            exp_d,
+            mode=MODE_ENHANCEMENT,
+            factor=1.0,
+            exp_ref=exp_d.clone(),
+        )
+        assert torch.allclose(x_d, info["x_s"], atol=1e-5)
+
+    def test_enhancement_with_exp_ref_nonzero_rel_differs_from_source(self):
+        recast = _make_recast()
+        info = recast.build_source_info(_torch_motion(3))
+        exp_d = _torch_motion(99)["exp"]
+        exp_ref = _torch_motion(50)["exp"]
+        x_d = recast.compose_driven_keypoints(
+            info,
+            exp_d,
+            mode=MODE_ENHANCEMENT,
+            factor=1.0,
+            exp_ref=exp_ref,
+        )
+        assert not torch.allclose(x_d, info["x_s"], atol=1e-4)
+
+    def test_enhancement_with_exp_ref_matches_upstream_formula(self):
+        """new_exp = exp_s + (exp_d - exp_ref) at factor=1."""
+        recast = _make_recast()
+        info = recast.build_source_info(_torch_motion(14))
+        exp_d = _torch_motion(88)["exp"]
+        exp_ref = _torch_motion(12)["exp"]
+        x_d = recast.compose_driven_keypoints(
+            info,
+            exp_d,
+            mode=MODE_ENHANCEMENT,
+            factor=1.0,
+            exp_ref=exp_ref,
+        )
+        kp_e = info["kp"] + (info["exp"] + (exp_d - exp_ref))
+        R, scale, t = info["R"], info["scale"], info["t"]
+        kp_rot = torch.einsum("bmp,bkp->bkm", R, kp_e) * scale.unsqueeze(1)
+        x_expected = kp_rot + t.unsqueeze(1)
+        assert torch.allclose(x_d, x_expected, atol=1e-5)
+
+    def test_replacement_ignores_exp_ref(self):
+        recast = _make_recast()
+        info = recast.build_source_info(_torch_motion(4))
+        exp_d = _torch_motion(7)["exp"]
+        exp_ref = _torch_motion(1)["exp"]
+        x_no_ref = recast.compose_driven_keypoints(
+            info, exp_d, mode=MODE_REPLACEMENT, factor=1.0
+        )
+        x_with_ref = recast.compose_driven_keypoints(
+            info,
+            exp_d,
+            mode=MODE_REPLACEMENT,
+            factor=1.0,
+            exp_ref=exp_ref,
+        )
+        assert torch.allclose(x_no_ref, x_with_ref, atol=1e-5)
+
     def test_modes_produce_different_results(self):
         """Enhancement (additive) must differ from Replacement at factor=1 —
         the regression that made switching modes a no-op."""
@@ -212,15 +280,33 @@ class TestComposeDrivenKeypoints:
         assert not torch.allclose(x_enh, x_rep, atol=1e-4)
 
     def test_enhancement_is_additive(self):
-        """Enhancement adds the driver's expression on top of the source."""
+        """Enhancement without ref adds absolute driver expression on source."""
         recast = _make_recast()
         info = recast.build_source_info(_torch_motion(14))
         exp_d = _torch_motion(88)["exp"]
         x_d = recast.compose_driven_keypoints(
             info, exp_d, mode=MODE_ENHANCEMENT, factor=1.0
         )
-        # Reconstruct expected: kp + (exp_s + exp_d) through the same geometry.
         kp_e = info["kp"] + (info["exp"] + exp_d)
+        R, scale, t = info["R"], info["scale"], info["t"]
+        kp_rot = torch.einsum("bmp,bkp->bkm", R, kp_e) * scale.unsqueeze(1)
+        x_expected = kp_rot + t.unsqueeze(1)
+        assert torch.allclose(x_d, x_expected, atol=1e-5)
+
+    def test_enhancement_is_additive_with_exp_ref(self):
+        """Enhancement with ref adds relative driver expression on source."""
+        recast = _make_recast()
+        info = recast.build_source_info(_torch_motion(14))
+        exp_d = _torch_motion(88)["exp"]
+        exp_ref = _torch_motion(12)["exp"]
+        x_d = recast.compose_driven_keypoints(
+            info,
+            exp_d,
+            mode=MODE_ENHANCEMENT,
+            factor=1.0,
+            exp_ref=exp_ref,
+        )
+        kp_e = info["kp"] + (info["exp"] + (exp_d - exp_ref))
         R, scale, t = info["R"], info["scale"], info["t"]
         kp_rot = torch.einsum("bmp,bkp->bkm", R, kp_e) * scale.unsqueeze(1)
         x_expected = kp_rot + t.unsqueeze(1)
@@ -315,6 +401,32 @@ class TestComposeDrivenKeypoints:
         # expression channels map to the unchanged source keypoints.
         assert torch.allclose(x_d[:, non_eye, :], info["x_s"][:, non_eye, :], atol=1e-5)
         assert not torch.allclose(x_d[:, eye, :], info["x_s"][:, eye, :], atol=1e-4)
+
+
+class TestRecastDriverReferenceState:
+    def test_reset_clears_ref_and_recaptures(self):
+        mp = _FakeModelsProcessor()
+        edits = FrameEdits(mp)  # type: ignore[arg-type]
+        exp = torch.randn(1, NUM_KP, 3)
+        edits._recast_driver_exp_ref[0] = (0.0, 0.0, exp.clone())
+        edits._recast_exp_state[0] = (0.0, 0.0, exp.clone())
+        edits.reset_recast_driver_reference()
+        assert not edits._recast_driver_exp_ref
+        assert not edits._recast_exp_state
+
+        exp_new = torch.randn(1, NUM_KP, 3)
+        ref = edits._get_or_capture_recast_exp_ref(10.0, 20.0, exp_new, True)
+        assert ref is not None
+        assert torch.allclose(ref, exp_new.cpu())
+        ref_again = edits._get_or_capture_recast_exp_ref(10.0, 20.0, exp_new, True)
+        assert torch.allclose(ref_again, exp_new.cpu())
+
+        edits.reset_recast_driver_reference()
+        exp_other = torch.randn(1, NUM_KP, 3)
+        ref_after_reset = edits._get_or_capture_recast_exp_ref(
+            10.0, 20.0, exp_other, True
+        )
+        assert torch.allclose(ref_after_reset, exp_other.cpu())
 
 
 # ---------------------------------------------------------------------------

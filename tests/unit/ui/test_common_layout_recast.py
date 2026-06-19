@@ -43,6 +43,7 @@ from app.ui.widgets.common_layout_data import COMMON_LAYOUT_DATA  # noqa: E402
 FACE_EXPR = COMMON_LAYOUT_DATA["Face expressions"]
 RECAST_WIDGETS = [
     "RecastModeSelection",
+    "RecastDriverNeutralRefToggle",
     "RecastExpressionFactorDecimalSlider",
     "RecastAnimationRegionSelection",
 ]
@@ -107,6 +108,12 @@ def test_recast_blend_weight_defaults_match_upstream():
     for entry in (eye, lip):
         assert float(entry["min_value"]) == 0.0
         assert float(entry["max_value"]) == 1.0
+
+
+def test_recast_neutral_ref_toggle_defaults_on():
+    entry = FACE_EXPR["RecastDriverNeutralRefToggle"]
+    assert entry["default"] is True
+    assert "Enhancement" in entry["help"]
 
 
 def test_recast_smoothing_widgets_exist_and_default_off():
