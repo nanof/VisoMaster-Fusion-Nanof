@@ -40,10 +40,6 @@ from app.ui.widgets.common_layout_data import COMMON_LAYOUT_DATA
 from app.ui.widgets.denoiser_layout_data import DENOISER_LAYOUT_DATA
 from app.ui.widgets.swapper_layout_data import SWAPPER_LAYOUT_DATA
 from app.ui.widgets.settings_layout_data import SETTINGS_LAYOUT_DATA
-from app.ui.widgets.essentials_layout_data import (
-    ESSENTIALS_CONTROL_LAYOUT_DATA,
-    ESSENTIALS_PARAMETER_LAYOUT_DATA,
-)
 from app.ui.widgets.face_editor_layout_data import FACE_EDITOR_LAYOUT_DATA
 from app.helpers.app_metadata import get_app_display_metadata
 from app.helpers import input_face_favorites_storage
@@ -594,12 +590,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             layoutWidget=self.swapWidgetsLayout,
             data_type="parameter",
         )
-        layout_actions.add_widgets_to_tab_layout(
-            self,
-            LAYOUT_DATA=ESSENTIALS_PARAMETER_LAYOUT_DATA,
-            layoutWidget=self.essentialsWidgetsLayout,
-            data_type="parameter",
-        )
         self._connect_mask_show_selection_sync()
         layout_actions.add_widgets_to_tab_layout(
             self,
@@ -608,12 +598,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             data_type="control",
         )
         gpu_settings_actions.finalize_gpu_widgets_after_settings_layout(self)
-        layout_actions.add_widgets_to_tab_layout(
-            self,
-            LAYOUT_DATA=ESSENTIALS_CONTROL_LAYOUT_DATA,
-            layoutWidget=self.essentialsWidgetsLayout,
-            data_type="control",
-        )
         pipeline_profile_actions.migrate_pipeline_profile_display_mode(self.control)
         QtCore.QTimer.singleShot(
             0,

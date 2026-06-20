@@ -9,7 +9,6 @@ from app.ui.widgets import widget_components
 from app.ui.widgets.settings_layout_data import SETTINGS_LAYOUT_DATA
 from app.ui.widgets.common_layout_data import COMMON_LAYOUT_DATA
 from app.ui.widgets.denoiser_layout_data import DENOISER_LAYOUT_DATA
-from app.ui.widgets.essentials_layout_data import ESSENTIALS_CONTROL_LAYOUT_DATA
 import app.helpers.miscellaneous as misc_helpers
 from app.helpers.miscellaneous import get_video_rotation
 from app.helpers.typing_helper import ControlTypes
@@ -23,7 +22,6 @@ for _layout_source in [
     SETTINGS_LAYOUT_DATA,
     COMMON_LAYOUT_DATA,
     DENOISER_LAYOUT_DATA,
-    ESSENTIALS_CONTROL_LAYOUT_DATA,
 ]:
     for _group_data in _layout_source.values():
         for _widget_key, _widget_data in _group_data.items():
@@ -74,7 +72,7 @@ def create_control(main_window: "MainWindow", control_name, control_value):
 def register_control_widget_mirror(
     main_window: "MainWindow", control_name: str, widget: QtWidgets.QWidget
 ) -> None:
-    """Register an Essentials-tab widget mirrored to ``control[control_name]``."""
+    """Register a mirrored widget bound to ``control[control_name]``."""
     mirrors = getattr(main_window, "_control_widget_mirrors", None)
     if mirrors is None:
         mirrors = {}
@@ -85,7 +83,7 @@ def register_control_widget_mirror(
 def sync_all_widgets_for_control_key(
     main_window: "MainWindow", control_name: str, control_value
 ) -> None:
-    """Align the primary Settings control and Essentials mirrors with ``control_value``."""
+    """Align the primary control and any mirrored widgets with ``control_value``."""
     mirrors = getattr(main_window, "_control_widget_mirrors", {}).get(control_name, ())
     primary = main_window.parameter_widgets.get(control_name)
     seen: set[int] = set()

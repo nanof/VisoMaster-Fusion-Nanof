@@ -1341,16 +1341,6 @@
          </item>
         </layout>
        </widget>
-       <widget class="QWidget" name="essentials_tab">
-        <attribute name="title">
-         <string>Essentials</string>
-        </attribute>
-        <layout class="QVBoxLayout" name="essentialsWidgetsLayout_1">
-         <item>
-          <layout class="QVBoxLayout" name="essentialsWidgetsLayout"/>
-         </item>
-        </layout>
-       </widget>
        <widget class="QWidget" name="settings_tab">
         <attribute name="title">
          <string>Settings</string>
