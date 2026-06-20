@@ -122,6 +122,9 @@ _FEEDER_PLAYBACK_LIVE_CONTROL_KEYS = frozenset(
         "KPSSmoothingEnableToggle",
         "KPSEmaAlphaSlider",
         "RecognitionModelSelection",
+        "SequentialTargetMatchEnableToggle",
+        "SequentialStabilizeWithoutTrackingToggle",
+        "SequentialInputRotateOffsetSlider",
     }
 )
 

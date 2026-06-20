@@ -94,6 +94,11 @@ def add_widgets_to_tab_layout(
             spacing_level = cast(int, widget_data["level"])
             label = QtWidgets.QLabel(cast(str, widget_data["label"]))
             label.setToolTip(cast(str, widget_data["help"]))
+            # Per-widget data_type override: a widget can opt into global "control"
+            # storage even when its tab layout is registered as "parameter" (and
+            # vice-versa). Used e.g. for global swap-matching toggles that live in
+            # the per-face Face Swap tab but must be read from main_window.control.
+            widget_data_type = cast(str, widget_data.get("data_type", data_type))
             mirror_chk = cast(
                 Union[str, None], widget_data.get("mirror_checkable_button")
             )
@@ -157,10 +162,12 @@ def add_widgets_to_tab_layout(
 
             if "Toggle" in widget_name:
                 init_toggle = cast(bool, widget_data["default"])
-                if bind_control and data_type == "control":
+                if widget_data_type == "control" and (
+                    bind_control or widget_data.get("data_type") == "control"
+                ):
                     raw = main_window.control.get(storage_key, widget_data["default"])
                     init_toggle = bool(raw)
-                elif bind_control and data_type == "parameter":
+                elif bind_control and widget_data_type == "parameter":
                     init_toggle = bool(
                         common_widget_actions.get_current_parameter_value(
                             main_window, storage_key, widget_data["default"]
@@ -182,7 +189,7 @@ def add_widgets_to_tab_layout(
                     category_layout, widget, label, widget.reset_default_button
                 )
 
-                if data_type == "parameter":
+                if widget_data_type == "parameter":
                     if not bind_control:
                         common_widget_actions.create_default_parameter(
                             main_window, widget_name, cast(bool, widget_data["default"])
@@ -201,7 +208,8 @@ def add_widgets_to_tab_layout(
                     toggle_state = toggle_widget.isChecked()
                     bc = cast(Union[str, None], widget_data.get("bind_control"))
                     control_key = bc or toggle_widget_name
-                    if data_type == "parameter":
+                    _dt = cast(str, widget_data.get("data_type", data_type))
+                    if _dt == "parameter":
                         common_widget_actions.update_parameter(
                             main_window,
                             control_key,
@@ -220,7 +228,7 @@ def add_widgets_to_tab_layout(
                                     primary_toggle,
                                     bc,
                                 )
-                    elif data_type == "control":
+                    elif _dt == "control":
                         common_widget_actions.update_control(
                             main_window,
                             control_key,
@@ -554,7 +562,9 @@ def add_widgets_to_tab_layout(
                     )
                     widget.below_row_widget = _below_row_widget
 
-                if bind_control and data_type == "control":
+                if widget_data_type == "control" and (
+                    bind_control or widget_data.get("data_type") == "control"
+                ):
                     try:
                         _iv = int(
                             float(
@@ -567,7 +577,7 @@ def add_widgets_to_tab_layout(
                         _iv = int(cast(Union[int, float, str], widget_data["default"]))
                     widget.set_value(_iv)
 
-                if data_type == "parameter":
+                if widget_data_type == "parameter":
                     common_widget_actions.create_default_parameter(
                         main_window,
                         widget_name,
@@ -588,14 +598,15 @@ def add_widgets_to_tab_layout(
                 ):
                     bc_sl = cast(Union[str, None], widget_data.get("bind_control"))
                     control_key_sl = bc_sl or slider_widget_name
-                    if data_type == "parameter":
+                    _dt = cast(str, widget_data.get("data_type", data_type))
+                    if _dt == "parameter":
                         common_widget_actions.update_parameter(
                             main_window,
                             slider_widget_name,
                             new_value,
                             enable_refresh_frame=slider_widget.enable_refresh_frame,
                         )
-                    elif data_type == "control":
+                    elif _dt == "control":
                         common_widget_actions.update_control(
                             main_window,
                             control_key_sl,
@@ -631,14 +642,15 @@ def add_widgets_to_tab_layout(
                     slider_widget.setValue(int(new_value))
                     bc_le = cast(Union[str, None], widget_data.get("bind_control"))
                     control_key_le = bc_le or slider_widget_name
-                    if data_type == "parameter":
+                    _dt = cast(str, widget_data.get("data_type", data_type))
+                    if _dt == "parameter":
                         common_widget_actions.update_parameter(
                             main_window,
                             slider_widget_name,
                             new_value,
                             enable_refresh_frame=slider_widget.enable_refresh_frame,
                         )
-                    elif data_type == "control":
+                    elif _dt == "control":
                         common_widget_actions.update_control(
                             main_window,
                             control_key_le,
