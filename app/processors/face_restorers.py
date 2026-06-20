@@ -244,6 +244,15 @@ class FaceRestorers:
             model_name, output_name, is_output=True
         )
 
+    def _gfpgan_prefers_torch(self) -> bool:
+        return self.models_processor.device == "cuda" and torch.cuda.is_available()
+
+    def _gfpgan_output_dtype(self, is_1024: bool) -> torch.dtype:
+        if self._gfpgan_prefers_torch():
+            return torch.float32
+        model_name = "GFPGAN1024" if is_1024 else "GFPGANv1.4"
+        return self._ort_output_dtype(model_name, "output")
+
     def _get_gfpgan_runner(self, is_1024: bool = False):
         """Lazily load GFPGANTorch + CUDA graph runner (FP16 PyTorch kernel)."""
         model_attr = "_gfpgan1024_torch" if is_1024 else "_gfpgan_torch"
@@ -254,7 +263,7 @@ class FaceRestorers:
         if runner is not None:
             return runner
         self.models_processor.show_build_dialog.emit(
-            "Finalizing Custom Provider",
+            "Loading face restorer",
             f"Compiling & capturing CUDA graph for {label}…\nFirst run only — future sessions load instantly from cache.",
         )
         try:
@@ -290,8 +299,14 @@ class FaceRestorers:
                     )
 
                     with self.models_processor.cuda_graph_capture_lock:
+                        compile_1024 = os.environ.get(
+                            "GFPGAN1024_TORCH_COMPILE", ""
+                        ).strip().lower() in ("1", "true", "yes", "on")
+                        use_compile = (not is_1024) or compile_1024
                         r = build_cuda_graph_runner(
-                            model, inp_shape=(1, 3, 512, 512), torch_compile=True
+                            model,
+                            inp_shape=(1, 3, 512, 512),
+                            torch_compile=use_compile,
                         )
                     setattr(self, runner_attr, r)
                     runner = r
@@ -380,6 +395,23 @@ class FaceRestorers:
         finally:
             self.models_processor.hide_build_dialog.emit()
         return self._gpen_runner.get(cache_key)
+
+    def _run_gfpgan_custom(
+        self,
+        image: torch.Tensor,
+        output: torch.Tensor,
+        *,
+        is_1024: bool = False,
+    ) -> bool:
+        """Run GFPGAN via GFPGANTorch + CUDA graph (CUDA devices)."""
+        runner = self._get_gfpgan_runner(is_1024=is_1024)
+        if runner is None:
+            return False
+        with torch.no_grad():
+            with self._custom_inference_lock:
+                result = runner(image)
+        output.copy_(result)
+        return True
 
     def _run_gpen_custom(
         self,
@@ -826,7 +858,7 @@ class FaceRestorers:
         if restorer_type == "GFPGAN-v1.4":
             outpred = torch.empty(
                 (1, 3, 512, 512),
-                dtype=self._ort_output_dtype("GFPGANv1.4", "output"),
+                dtype=self._gfpgan_output_dtype(is_1024=False),
                 device=dev,
             ).contiguous()
             self.run_GFPGAN(temp, outpred)
@@ -834,7 +866,7 @@ class FaceRestorers:
         elif restorer_type == "GFPGAN-1024":
             outpred = torch.empty(
                 (1, 3, 1024, 1024),
-                dtype=self._ort_output_dtype("GFPGAN1024", "output"),
+                dtype=self._gfpgan_output_dtype(is_1024=True),
                 device=dev,
             ).contiguous()
             self.run_GFPGAN1024(temp, outpred)
@@ -1327,6 +1359,10 @@ class FaceRestorers:
         return out.contiguous()
 
     def run_GFPGAN(self, image, output):
+        if self._gfpgan_prefers_torch():
+            if self._run_gfpgan_custom(image, output, is_1024=False):
+                return
+
         model_name = "GFPGANv1.4"
 
         ort_session = self._get_model_session(model_name)
@@ -1345,6 +1381,10 @@ class FaceRestorers:
         self._run_model_with_lazy_build_check(model_name, ort_session, io_binding)
 
     def run_GFPGAN1024(self, image, output):
+        if self._gfpgan_prefers_torch():
+            if self._run_gfpgan_custom(image, output, is_1024=True):
+                return
+
         model_name = "GFPGAN1024"
 
         ort_session = self._get_model_session(model_name)
