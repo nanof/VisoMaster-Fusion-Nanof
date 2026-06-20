@@ -27,6 +27,7 @@ from app.ui.widgets.actions import common_actions as common_widget_actions
 # uses GPENTorch + lazy init — eager ORT InferenceSession on the GUI thread (especially
 # FP16) can block the UI for a long time or appear frozen; ORT is still loaded on demand
 # from the worker if Custom inference fails.
+_GFPGAN_ORT_MODELS: frozenset[str] = frozenset({"GFPGANv1.4", "GFPGAN1024"})
 _GPEN_ORT_SKIP_WHEN_CUSTOM: frozenset[str] = frozenset(
     {
         "GPENBFR256",
@@ -41,9 +42,35 @@ _GPEN_ORT_SKIP_WHEN_CUSTOM: frozenset[str] = frozenset(
 def _skip_eager_ort_load_for_gpen_custom(
     main_window: "MainWindow", onnx_model_name: str
 ) -> bool:
-    if main_window.models_processor.provider_name != "Custom":
+    mp = main_window.models_processor
+    if onnx_model_name in _GFPGAN_ORT_MODELS:
+        return mp.device == "cuda" and torch.cuda.is_available()
+    if mp.provider_name != "Custom":
         return False
     return onnx_model_name in _GPEN_ORT_SKIP_WHEN_CUSTOM
+
+
+def _maybe_warm_gfpgan_torch_restorer(
+    main_window: "MainWindow", restorer_display_name: str
+) -> None:
+    """Build GFPGANTorch in the background after UI selection (avoids ORT/TRT on select)."""
+    if restorer_display_name not in ("GFPGAN-v1.4", "GFPGAN-1024"):
+        return
+    mp = main_window.models_processor
+    if mp.device != "cuda" or not torch.cuda.is_available():
+        return
+    is_1024 = restorer_display_name == "GFPGAN-1024"
+    import threading
+
+    def _warm() -> None:
+        try:
+            mp.face_restorers._get_gfpgan_runner(is_1024=is_1024)
+        except Exception as e:
+            print(f"[GFPGANTorch] Warm-up failed (non-fatal): {e}", flush=True)
+
+    threading.Thread(
+        target=_warm, daemon=True, name="GFPGANWarmUp"
+    ).start()
 
 
 def on_detector_model_selection_change(main_window: "MainWindow", new_model: str):
@@ -585,10 +612,17 @@ def handle_restorer_state_change(
             elif not _skip_eager_ort_load_for_gpen_custom(main_window, model_to_change):
                 main_window.models_processor.load_model(model_to_change)
             else:
-                print(
-                    f"[INFO] Custom provider: skipping eager ORT load for {model_to_change} "
-                    "(GPENTorch on demand)."
-                )
+                if model_to_change in _GFPGAN_ORT_MODELS:
+                    print(
+                        f"[INFO] Skipping eager ORT load for {model_to_change} "
+                        "(GFPGANTorch on demand)."
+                    )
+                    _maybe_warm_gfpgan_torch_restorer(main_window, str(model_type))
+                else:
+                    print(
+                        f"[INFO] Custom provider: skipping eager ORT load for {model_to_change} "
+                        "(GPENTorch on demand)."
+                    )
 
             if active_model_attr:
                 setattr(
@@ -663,10 +697,17 @@ def handle_model_selection_change(
             if not _skip_eager_ort_load_for_gpen_custom(main_window, new_model_name):
                 main_window.models_processor.load_model(new_model_name)
             else:
-                print(
-                    f"[INFO] Custom provider: skipping eager ORT load for {new_model_name} "
-                    "(GPENTorch on demand)."
-                )
+                if new_model_name in _GFPGAN_ORT_MODELS:
+                    print(
+                        f"[INFO] Skipping eager ORT load for {new_model_name} "
+                        "(GFPGANTorch on demand)."
+                    )
+                    _maybe_warm_gfpgan_torch_restorer(main_window, str(new_model_type))
+                else:
+                    print(
+                        f"[INFO] Custom provider: skipping eager ORT load for {new_model_name} "
+                        "(GPENTorch on demand)."
+                    )
         else:
             print(
                 f"[WARN] Model '{new_model_name}' is already loaded by the other restorer slot. Skipping redundant load."

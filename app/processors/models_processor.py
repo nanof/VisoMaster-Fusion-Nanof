@@ -166,8 +166,9 @@ def gamma_decode_srgb_to_linear_rgb(srgb: torch.Tensor, gamma=SRGB_GAMMA):
 # SPAN ×4: grafo dinámico + PixelShuffle; TensorRT EP (p. ej. FP16) suele dar salida corrupta con IOBinding.
 # RealEsrx4v3 (realesr-general-x4v3): con TensorRT EP + teselas + buffer de salida reutilizado suele
 # producir mosaicos/trozos desordenados; CUDA EP es estable (mismo patrón que SPAN).
-# GPEN-BFR-*: ORT TensorRT EP + trt_fp16_enable has been observed to hang the process (no further
-# log lines after FP16 ENABLED) on some Windows stacks; CUDA EP is stable for these restorers.
+# GPEN-BFR-* / GFPGAN-*: ORT TensorRT EP has been observed to hang or crash the process
+# on some Windows stacks (especially large GFPGAN-1024 engine builds). CUDA EP / GFPGANTorch
+# are stable for these restorers.
 # PerformRecast (all four sub-networks) run on the CUDA EP. W/G are required to: the warping
 # module's 5-D GridSample and the SPADE generator are poorly supported by the TensorRT EP —
 # for certain head poses TRT produces a corrupt (black) crop while CUDA EP is stable, and they
@@ -182,6 +183,8 @@ ONNX_MODELS_SKIP_TENSORRT_EP = frozenset(
         "SPANx4Nomo",
         "SPANFx4Mssim",
         "RealEsrx4v3",
+        "GFPGANv1.4",
+        "GFPGAN1024",
         "GPENBFR256",
         "GPENBFR256FP16",
         "GPENBFR512",

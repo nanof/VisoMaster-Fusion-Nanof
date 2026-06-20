@@ -806,16 +806,6 @@ class Ui_MainWindow(object):
         self.denoiserWidgetsLayout_1.addLayout(self.denoiserWidgetsLayout)
 
         self.tabWidget.addTab(self.denoiser_tab, "")
-        self.essentials_tab = QWidget()
-        self.essentials_tab.setObjectName(u"essentials_tab")
-        self.essentialsWidgetsLayout_1 = QVBoxLayout(self.essentials_tab)
-        self.essentialsWidgetsLayout_1.setObjectName(u"essentialsWidgetsLayout_1")
-        self.essentialsWidgetsLayout = QVBoxLayout()
-        self.essentialsWidgetsLayout.setObjectName(u"essentialsWidgetsLayout")
-
-        self.essentialsWidgetsLayout_1.addLayout(self.essentialsWidgetsLayout)
-
-        self.tabWidget.addTab(self.essentials_tab, "")
         self.settings_tab = QWidget()
         self.settings_tab.setObjectName(u"settings_tab")
         self.verticalLayout_2 = QVBoxLayout(self.settings_tab)
@@ -969,7 +959,7 @@ class Ui_MainWindow(object):
     # setupUi
 
     def retranslateUi(self, MainWindow):
-        MainWindow.setWindowTitle(QCoreApplication.translate("MainWindow", u"VisoMaster - Fusion", None))
+        MainWindow.setWindowTitle(QCoreApplication.translate("MainWindow", u"VisoMaster - Fusion - 1.0.0", None))
         self.actionExit.setText(QCoreApplication.translate("MainWindow", u"Exit", None))
         self.actionLoad_Embeddings.setText(QCoreApplication.translate("MainWindow", u"Load Embeddings", None))
         self.actionSave_Embeddings.setText(QCoreApplication.translate("MainWindow", u"Save Embeddings", None))
@@ -1057,11 +1047,7 @@ class Ui_MainWindow(object):
 #endif // QT_CONFIG(tooltip)
         self.openEmbeddingButton.setText("")
 #if QT_CONFIG(tooltip)
-        self.saveEmbeddingButton.setToolTip(
-            QCoreApplication.translate(
-                "MainWindow", u"Save all embeddings to the current file", None
-            )
-        )
+        self.saveEmbeddingButton.setToolTip(QCoreApplication.translate("MainWindow", u"Save all embeddings to the current file", None))
 #endif // QT_CONFIG(tooltip)
         self.saveEmbeddingButton.setText("")
 #if QT_CONFIG(tooltip)
@@ -1120,7 +1106,6 @@ class Ui_MainWindow(object):
         self.tabWidget.setTabText(self.tabWidget.indexOf(self.face_editor_tab), QCoreApplication.translate("MainWindow", u"Face Editor", None))
         self.tabWidget.setTabText(self.tabWidget.indexOf(self.common_tab), QCoreApplication.translate("MainWindow", u"Restorers", None))
         self.tabWidget.setTabText(self.tabWidget.indexOf(self.denoiser_tab), QCoreApplication.translate("MainWindow", u"Denoiser", None))
-        self.tabWidget.setTabText(self.tabWidget.indexOf(self.essentials_tab), QCoreApplication.translate("MainWindow", u"Essentials", None))
         self.label.setText(QCoreApplication.translate("MainWindow", u"Output Directory", None))
         self.outputFolderButton.setText(QCoreApplication.translate("MainWindow", u"Browse Folder", None))
         self.outputOpenButton.setText(QCoreApplication.translate("MainWindow", u"Open Folder", None))
