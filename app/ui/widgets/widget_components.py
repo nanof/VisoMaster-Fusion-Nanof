@@ -994,6 +994,15 @@ class TargetFaceCardButton(CardButton):
         if main_window.selected_target_face_id == self.face_id:
             main_window.current_kv_tensors_map = self.assigned_kv_map
 
+        # The single-frame preview caches the primary face-restorer output keyed only by
+        # restorer params / frame / face bucket (see FrameWorker._restorer_infer_cache_key),
+        # NOT by the swap source. When the assigned input face/embedding changes, the swapped
+        # face changes but that cache would still hit, so the paused preview keeps showing the
+        # previously restored face. Drop it so the next refresh re-runs the restorer.
+        video_processor = getattr(main_window, "video_processor", None)
+        if video_processor is not None:
+            video_processor.clear_restorer_infer_cache()
+
     def create_context_menu(self):
         # create context menu
         from app.ui.widgets.actions import list_view_actions
