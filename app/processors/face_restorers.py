@@ -217,6 +217,28 @@ class FaceRestorers:
             self.models_processor.unload_model(self.active_model_slot2)
             self.active_model_slot2 = None
         self.unload_dmdnet()
+        self._unload_custom_torch_kernels()
+
+    def _unload_custom_torch_kernels(self) -> None:
+        """Release Custom-provider PyTorch restorers (GPEN/GFPGAN/etc.) held outside ORT."""
+        with self._custom_init_lock:
+            self._gfpgan_torch = None
+            self._gfpgan1024_torch = None
+            self._gfpgan_runner = None
+            self._gfpgan1024_runner = None
+            self._gpen_torch.clear()
+            self._gpen_runner.clear()
+            self._ref_ldm_encoder_torch = None
+            self._ref_ldm_encoder_runner = None
+            self._ref_ldm_decoder_torch = None
+            self._ref_ldm_decoder_runner = None
+            self._ref_ldm_unet_torch = None
+            self._ref_ldm_unet_runner.clear()
+            self._codeformer_torch = None
+            self._codeformer_runner = None
+            self._codeformer_runner_w = None
+            self._restoreformer_torch = None
+            self._restoreformer_runner = None
 
     def _get_model_session(self, model_name: str):
         """
@@ -412,6 +434,28 @@ class FaceRestorers:
                 result = runner(image)
         output.copy_(result)
         return True
+
+    def _prefer_custom_gpen(self) -> bool:
+        """Whether GPEN should run via the custom torch CUDA-graph kernel.
+
+        GPEN is in ``ONNX_MODELS_SKIP_TENSORRT_EP`` — TensorRT cannot run its graph,
+        so under any GPU provider ORT falls back to the **CUDA EP**, which leaks
+        ~0.5-1GB of intermediate activations on EVERY inference (confirmed via
+        VRAM tracing) until the device OOMs; only destroying the session reclaims it.
+        The custom torch CUDA-graph kernel is leak-free (torch-managed, reused
+        memory) and faster, so prefer it on CUDA. Set VISIOMASTER_GPEN_FORCE_ORT=1
+        to force the legacy (leaky) ORT path.
+        """
+        if self.models_processor.provider_name == "Custom":
+            return True
+        if os.environ.get("VISIOMASTER_GPEN_FORCE_ORT", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        ):
+            return False
+        return self.models_processor.device == "cuda" and torch.cuda.is_available()
 
     def _run_gpen_custom(
         self,
@@ -1410,7 +1454,7 @@ class FaceRestorers:
         model_name: str = "GPENBFR256",
         gpen_variant: str = "std",
     ):
-        if self.models_processor.provider_name == "Custom":
+        if self._prefer_custom_gpen():
             if self._run_gpen_custom(256, image, output, variant=gpen_variant):
                 return
 
@@ -1444,7 +1488,7 @@ class FaceRestorers:
     def run_GPEN_512(self, image, output):
         model_name = "GPENBFR512"
 
-        if self.models_processor.provider_name == "Custom":
+        if self._prefer_custom_gpen():
             if self._run_gpen_custom(512, image, output, variant="std"):
                 return
 
@@ -1466,7 +1510,7 @@ class FaceRestorers:
     def run_GPEN_1024(self, image, output):
         model_name = "GPENBFR1024"
 
-        if self.models_processor.provider_name == "Custom":
+        if self._prefer_custom_gpen():
             if self._run_gpen_custom(1024, image, output, variant="std"):
                 return
 
@@ -1488,7 +1532,7 @@ class FaceRestorers:
     def run_GPEN_2048(self, image, output):
         model_name = "GPENBFR2048"
 
-        if self.models_processor.provider_name == "Custom":
+        if self._prefer_custom_gpen():
             if self._run_gpen_custom(2048, image, output, variant="std"):
                 return
 

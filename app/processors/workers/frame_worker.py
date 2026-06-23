@@ -2584,6 +2584,66 @@ class FrameWorker(threading.Thread):
             bool(parameters.get("FaceRestorerSubsampleEnableToggle", False)),
         )
 
+    @staticmethod
+    def _restorer_infer_cache_key(
+        parameters: dict, control: dict, effective_restorer_type: str
+    ) -> tuple:
+        """Primary-restorer inputs that affect NN output — excludes blend / auto-blend UI."""
+        return (
+            str(effective_restorer_type),
+            str(parameters.get("FaceRestorerDetTypeSelection", "")),
+            float(parameters.get("FaceFidelityWeightDecimalSlider", 0.9)),
+            bool(parameters.get("FaceRestorerUltraLightOnnxToggle", False)),
+            bool(parameters.get("FaceRestorerUltraLightOnLiveToggle", True)),
+            bool(parameters.get("FaceRestorerUltraLightOnSmallFaceToggle", False)),
+            float(parameters.get("FaceRestorerUltraLightScaleGeDecimalSlider", 2.0)),
+            bool(parameters.get("FaceRestorerUltraLightPreferFp16Toggle", True)),
+            float(control.get("DetectorScoreSlider", 0.5)),
+        )
+
+    def _try_reuse_cached_primary_restorer_output(
+        self,
+        *,
+        infer_key: tuple,
+        face_bucket_id: int | None,
+    ) -> torch.Tensor | None:
+        if not self.is_single_frame:
+            return None
+        cache = getattr(self.video_processor, "_restorer_infer_cache", None)
+        if not isinstance(cache, dict):
+            return None
+        bucket = int(face_bucket_id) if face_bucket_id is not None else 0
+        if (
+            cache.get("frame_number") != self.frame_number
+            or cache.get("face_bucket_id") != bucket
+            or cache.get("infer_key") != infer_key
+        ):
+            return None
+        cached = cache.get("swap_restorecalc")
+        if not isinstance(cached, torch.Tensor):
+            return None
+        dev = self.models_processor.get_effective_torch_device()
+        return cached.to(device=dev, non_blocking=False)
+
+    def _store_primary_restorer_infer_cache(
+        self,
+        swap_restorecalc: torch.Tensor,
+        *,
+        infer_key: tuple,
+        face_bucket_id: int | None,
+    ) -> None:
+        if not self.is_single_frame:
+            return
+        bucket = int(face_bucket_id) if face_bucket_id is not None else 0
+        self.video_processor.clear_restorer_infer_cache()
+        self.video_processor._restorer_infer_cache = {
+            "frame_number": self.frame_number,
+            "face_bucket_id": bucket,
+            "infer_key": infer_key,
+            # CPU staging: blend-only reuse without pinning another 512² GPU tensor.
+            "swap_restorecalc": swap_restorecalc.detach().cpu().contiguous().clone(),
+        }
+
     def _plane_ordered_share_primary_restorer_batch_key(self, ordered: list[dict]) -> bool:
         if len(ordered) < 2:
             return False
@@ -8849,16 +8909,29 @@ class FrameWorker(threading.Thread):
                     )
                 )
                 raise _GatherPrePrimaryRestorer()
-            swap_restorecalc = self._apply_primary_facerestorer_maybe_subsampled(
-                swap,
-                parameters,
-                control,
-                kps_ref,
-                dmd_lm68_crop,
-                _rt1,
-                swapper_autores_track_id,
-                face_restorer_param_bucket_id,
+            infer_key = self._restorer_infer_cache_key(parameters, control, _rt1)
+            cached_restorecalc = self._try_reuse_cached_primary_restorer_output(
+                infer_key=infer_key,
+                face_bucket_id=face_restorer_param_bucket_id,
             )
+            if cached_restorecalc is not None:
+                swap_restorecalc = cached_restorecalc
+            else:
+                swap_restorecalc = self._apply_primary_facerestorer_maybe_subsampled(
+                    swap,
+                    parameters,
+                    control,
+                    kps_ref,
+                    dmd_lm68_crop,
+                    _rt1,
+                    swapper_autores_track_id,
+                    face_restorer_param_bucket_id,
+                )
+                self._store_primary_restorer_infer_cache(
+                    swap_restorecalc,
+                    infer_key=infer_key,
+                    face_bucket_id=face_restorer_param_bucket_id,
+                )
         elif _swap_restore_needs_clone:
             swap_restorecalc = swap.clone()
         else:

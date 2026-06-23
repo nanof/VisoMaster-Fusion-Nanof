@@ -18,6 +18,8 @@ class _RunResult:
 
 def test_clear_single_frame_preview_caches_resets_all_preview_state():
     dummy = SimpleNamespace(
+        _restorer_infer_cache={"frame_number": 1},
+        _sync_preview_worker=object(),
         _last_requested_frame_num=7,
         _cached_raw_frame_media_path="video_a.mp4",
         _cached_raw_frame_number=12,
@@ -28,9 +30,25 @@ def test_clear_single_frame_preview_caches_resets_all_preview_state():
         _cached_raw_image_bgr=np.ones((2, 2, 3), dtype=np.uint8),
         _seek_cached_frame=(12, np.ones((2, 2, 3), dtype=np.uint8)),
     )
+    calls = {"cancel": 0, "clear_restorer": 0}
+
+    def clear_restorer_infer_cache():
+        dummy._restorer_infer_cache = None
+        calls["clear_restorer"] += 1
+
+    def cancel_single_frame_preview_state():
+        dummy._sync_preview_worker = None
+        calls["cancel"] += 1
+
+    dummy.clear_restorer_infer_cache = clear_restorer_infer_cache
+    dummy._cancel_single_frame_preview_state = cancel_single_frame_preview_state
 
     VideoProcessor._clear_single_frame_preview_caches(dummy)
 
+    assert calls["clear_restorer"] == 1
+    assert calls["cancel"] == 1
+    assert dummy._restorer_infer_cache is None
+    assert dummy._sync_preview_worker is None
     assert dummy._last_requested_frame_num is None
     assert dummy._cached_raw_frame_media_path is None
     assert dummy._cached_raw_frame_number is None
@@ -40,6 +58,41 @@ def test_clear_single_frame_preview_caches_resets_all_preview_state():
     assert dummy._cached_raw_image_target_height is None
     assert dummy._cached_raw_image_bgr is None
     assert dummy._seek_cached_frame is None
+
+
+def test_idle_stop_processing_preserves_sync_preview_worker():
+    sync_worker = object()
+    dummy = SimpleNamespace(
+        processing=False,
+        is_processing_segments=False,
+        recording=False,
+        _async_stop_in_progress=False,
+        _sync_preview_worker=sync_worker,
+        _current_single_frame_worker=None,
+        _heavy_stop_thread=None,
+        file_type="video",
+        media_path="clip.mp4",
+        media_capture=SimpleNamespace(isOpened=lambda: True),
+        main_window=SimpleNamespace(videoSeekSlider=SimpleNamespace(value=lambda: 0)),
+    )
+    released = {"sync": False, "async": False}
+
+    dummy._cancel_async_single_frame_preview = lambda: released.update({"async": True})
+    dummy._cancel_single_frame_preview_state = lambda: (
+        released.update({"async": True, "sync": True})
+    )
+    dummy._stop_recording_ffmpeg_input_stream = lambda: None
+    dummy._wait_if_async_stop_pending = lambda: None
+
+    import app.ui.widgets.actions.video_control_actions as vca
+
+    vca.reset_media_buttons = lambda mw: None
+
+    VideoProcessor.stop_processing(dummy)
+
+    assert released["async"] is True
+    assert released["sync"] is False
+    assert dummy._sync_preview_worker is sync_worker
 
 
 def test_process_current_frame_ignores_cached_video_frame_from_other_media(monkeypatch):

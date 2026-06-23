@@ -297,6 +297,8 @@ class VideoProcessor(QObject):
         # Single-frame (scrubbing) worker — tracked so a new seek can stop the old one
         # before starting a fresh worker, preventing concurrent model inference crashes.
         self._current_single_frame_worker: "FrameWorker | None" = None
+        # Reused for synchronous preview (C/V frame step) to avoid per-step worker alloc.
+        self._sync_preview_worker: "FrameWorker | None" = None
         self._single_frame_request_generation: int = 0
         self._active_single_frame_request_generation: int = 0
         self._fit_on_single_frame_request_generation: int | None = None
@@ -306,6 +308,11 @@ class VideoProcessor(QObject):
         self._single_frame_handoff_timer.timeout.connect(
             self._try_start_pending_single_frame_worker
         )
+        # Cached GPEN/restorer NN output for paused preview — blend-only tweaks reuse it.
+        self._restorer_infer_cache: dict[str, Any] | None = None
+        self._preview_gpu_cleanup_timer = QTimer(self)
+        self._preview_gpu_cleanup_timer.setSingleShot(True)
+        self._preview_gpu_cleanup_timer.timeout.connect(self._run_preview_gpu_cleanup)
 
         # --- Media State ---
         self.media_capture: cv2.VideoCapture | None = None
@@ -1119,6 +1126,7 @@ class VideoProcessor(QObject):
             )
         self.current_frame = frame
         common_widget_actions.update_gpu_memory_progressbar(self.main_window)
+        self.schedule_preview_gpu_cleanup()
         graphics_view_actions.update_pipeline_profile_overlay(
             self.main_window, preview_cache
         )
@@ -4140,6 +4148,8 @@ class VideoProcessor(QObject):
 
         # 6b. START WORKER POOL
         print(f"[INFO] Starting {self.num_threads} persistent worker thread(s)...")
+        self.clear_restorer_infer_cache()
+        self._release_sync_preview_worker()
         # Ensure old workers are cleared (from a previous run)
         self.join_and_clear_threads()
         self._join_detection_pipeline_thread()
@@ -4374,7 +4384,8 @@ class VideoProcessor(QObject):
             request["generation"],
         )
 
-    def _cancel_single_frame_preview_state(self):
+    def _cancel_async_single_frame_preview(self) -> None:
+        """Stop async scrub-preview workers only (keeps sync C/V worker for reuse)."""
         self._single_frame_request_generation += 1
         self._active_single_frame_request_generation = (
             self._single_frame_request_generation
@@ -4394,14 +4405,63 @@ class VideoProcessor(QObject):
 
         self._current_single_frame_worker = None
 
+    def _cancel_single_frame_preview_state(self) -> None:
+        """Full preview teardown: async workers + reused sync worker."""
+        self._cancel_async_single_frame_preview()
+        self._release_sync_preview_worker()
+
+    def clear_restorer_infer_cache(self) -> None:
+        """Drop cached primary-restorer tensors (preview blend fast path)."""
+        self._restorer_infer_cache = None
+
+    _SYNC_WORKER_GPU_CACHE_ATTRS = (
+        "_gabor_kernels_cache",
+        "_dynamic_side_mask_cache",
+        "_face_restorer_subsample_cache",
+        "_color_stats_ema",
+        "_gaussian_blur_cache",
+        "_resize_cache",
+        "_border_mask_128_cache",
+    )
+
+    def _finalize_sync_single_frame_worker(self, worker: "FrameWorker") -> None:
+        """Drop per-step GPU caches after synchronous preview (C/V frame step)."""
+        for attr in self._SYNC_WORKER_GPU_CACHE_ATTRS:
+            cache = getattr(worker, attr, None)
+            if hasattr(cache, "clear"):
+                cache.clear()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def _release_sync_preview_worker(self) -> None:
+        worker = self._sync_preview_worker
+        if worker is None:
+            return
+        self._finalize_sync_single_frame_worker(worker)
+        self._sync_preview_worker = None
+
+    def schedule_preview_gpu_cleanup(self, delay_ms: int = 800) -> None:
+        """Debounce CUDA cache flush after scrub/preview so VRAM does not creep upward."""
+        if self.processing or self.is_processing_segments:
+            return
+        self._preview_gpu_cleanup_timer.start(max(int(delay_ms), 100))
+
+    @Slot()
+    def _run_preview_gpu_cleanup(self) -> None:
+        if self.processing or self.is_processing_segments:
+            return
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     def _clear_single_frame_preview_caches(self) -> None:
         """
         Invalidate single-frame / seek preview state when switching target media (UI).
         Cancels async single-frame workers and clears seek-peek / legacy preview fields.
         """
-        cancel = getattr(self, "_cancel_single_frame_preview_state", None)
-        if callable(cancel):
-            cancel()
+        self.clear_restorer_infer_cache()
+        self._cancel_single_frame_preview_state()
         if hasattr(self, "_seek_cached_frame"):
             self._seek_cached_frame = None
         for attr in (
@@ -4443,20 +4503,28 @@ class VideoProcessor(QObject):
                 prev.stop_event.set()
                 prev.join()
             self._current_single_frame_worker = None
-            worker = FrameWorker(
-                frame=frame,  # Pass frame directly
-                main_window=self.main_window,
-                frame_number=frame_number,
-                frame_queue=None,  # No queue for single frame
-                is_single_frame=is_single_frame,
-                worker_id=-1,  # Indicates single-frame mode
-            )
+            worker = self._sync_preview_worker
+            if worker is None:
+                worker = FrameWorker(
+                    frame=frame,
+                    main_window=self.main_window,
+                    frame_number=frame_number,
+                    frame_queue=None,
+                    is_single_frame=is_single_frame,
+                    worker_id=-1,
+                )
+                self._sync_preview_worker = worker
+            else:
+                worker.frame = frame
+                worker.frame_number = frame_number
+                worker.stop_event.clear()
             if fit_on_complete:
                 self._fit_on_single_frame_request_generation = 0
             else:
                 self._fit_on_single_frame_request_generation = None
             worker.preview_generation = 0
             worker.run()
+            self._finalize_sync_single_frame_worker(worker)
             return worker
         else:
             self._single_frame_request_generation += 1
@@ -4624,13 +4692,28 @@ class VideoProcessor(QObject):
 
         # --- Process if read was successful ---
         if read_successful and frame_to_process is not None:
-            return self.start_frame_worker(
+            _mp = self.main_window.models_processor
+            _vram_trace = bool(getattr(_mp, "_vram_trace_enabled", False))
+            if _vram_trace and synchronous:
+                _r_before = _mp.device_used_gb()
+                _loads_before = _mp._real_model_loads
+            _result = self.start_frame_worker(
                 self.current_frame_number,
                 frame_to_process,
                 is_single_frame=True,
                 synchronous=synchronous,
                 fit_on_complete=fit_on_complete,
             )
+            if _vram_trace and synchronous:
+                _r_after = _mp.device_used_gb()
+                _loads_step = _mp._real_model_loads - _loads_before
+                print(
+                    f"[VRAM] SINGLE-FRAME step frame={self.current_frame_number}: "
+                    f"device_used {_r_before:.2f} -> {_r_after:.2f}GB "
+                    f"({_r_after - _r_before:+.2f}GB) | models_loaded_this_step={_loads_step}",
+                    flush=True,
+                )
+            return _result
 
         return None
 
@@ -4712,7 +4795,8 @@ class VideoProcessor(QObject):
         self._clear_frame_and_raw_queues()
 
         print("[INFO] Waiting for worker threads to complete...")
-        self.join_and_clear_threads(skip_post_join_gpu_cleanup=True)
+        self.join_and_clear_threads()
+        self.clear_restorer_infer_cache()
         print("[INFO] Worker threads joined.")
 
         if self.recording_sp:
@@ -4884,7 +4968,9 @@ class VideoProcessor(QObject):
         was_processing_segments = self.is_processing_segments
 
         if not was_active:
-            self._cancel_single_frame_preview_state()
+            # Slider seek / C/V: cancel async scrub workers only — do not destroy the
+            # reused sync preview worker (_sync_preview_worker).
+            self._cancel_async_single_frame_preview()
             self._stop_recording_ffmpeg_input_stream()
             if self._async_stop_in_progress:
                 return False

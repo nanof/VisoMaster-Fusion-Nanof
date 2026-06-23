@@ -56,3 +56,24 @@ def test_effective_type_manual_fast_unchanged():
         )
         == "GPEN-256 Fast (128→256)"
     )
+
+
+def test_restorer_infer_cache_key_ignores_blend_slider():
+    base_params = {
+        "FaceRestorerDetTypeSelection": "Original",
+        "FaceFidelityWeightDecimalSlider": 0.9,
+        "FaceRestorerUltraLightOnnxToggle": False,
+        "FaceRestorerUltraLightOnLiveToggle": True,
+        "FaceRestorerUltraLightOnSmallFaceToggle": False,
+        "FaceRestorerUltraLightScaleGeDecimalSlider": 2.0,
+        "FaceRestorerUltraLightPreferFp16Toggle": True,
+    }
+    control = {"DetectorScoreSlider": 0.5}
+    key_a = FrameWorker._restorer_infer_cache_key(
+        {**base_params, "FaceRestorerBlendSlider": 40}, control, "GPEN-512"
+    )
+    key_b = FrameWorker._restorer_infer_cache_key(
+        {**base_params, "FaceRestorerBlendSlider": 90}, control, "GPEN-512"
+    )
+    assert key_a == key_b
+    assert "GPEN-512" in key_a

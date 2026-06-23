@@ -237,19 +237,56 @@ def _providers_with_trt_options(providers_for_model, trt_opts: dict):
     return out
 
 
+def _cuda_ep_memory_options() -> dict:
+    """CUDA EP options that prevent unbounded per-inference VRAM growth.
+
+    Root cause (observed with GPENBFR512 and other TensorRT-EP-incompatible models
+    that fall back to the CUDA EP): ONNX Runtime's CUDA EP defaults to
+    ``cudnn_conv_algo_search=EXHAUSTIVE`` and ``arena_extend_strategy=kNextPowerOfTwo``.
+    EXHAUSTIVE re-benchmarks convolutions and allocates large workspace that is not
+    reused across runs (the output tensor address changes every call), so the BFC
+    arena grows ~1GB on every inference until the device OOMs. Only destroying the
+    session ("Clear VRAM") reclaims it.
+
+    These options are safe for every CUDA EP session (including the CUDA fallback in
+    the TensorRT provider list). Each is overridable via env var for experimentation.
+    """
+    return {
+        "arena_extend_strategy": os.environ.get(
+            "VISIOMASTER_CUDA_ARENA_STRATEGY", "kSameAsRequested"
+        ).strip()
+        or "kSameAsRequested",
+        "cudnn_conv_algo_search": os.environ.get(
+            "VISIOMASTER_CUDNN_CONV_ALGO_SEARCH", "DEFAULT"
+        ).strip()
+        or "DEFAULT",
+        "cudnn_conv_use_max_workspace": os.environ.get(
+            "VISIOMASTER_CUDNN_CONV_MAX_WORKSPACE", "0"
+        ).strip()
+        or "0",
+    }
+
+
 def _patch_providers_cuda_device_id(providers_for_model, cuda_phys: int):
-    """Ensure CUDAExecutionProvider uses the same ordinal as IOBinding / TensorRT EP."""
+    """Ensure CUDAExecutionProvider uses the same ordinal as IOBinding / TensorRT EP.
+
+    Also injects memory-bounding CUDA EP options (see ``_cuda_ep_memory_options``)
+    so CUDA-EP sessions do not leak VRAM on every inference.
+    """
     out = []
     cid = int(cuda_phys)
+    mem_opts = _cuda_ep_memory_options()
     for p in providers_for_model:
         name = p[0] if isinstance(p, (tuple, list)) else p
         if name == "CUDAExecutionProvider":
             if isinstance(p, (tuple, list)) and len(p) >= 2 and isinstance(p[1], dict):
                 opts = dict(p[1])
-                opts["device_id"] = cid
-                out.append(("CUDAExecutionProvider", opts))
             else:
-                out.append(("CUDAExecutionProvider", {"device_id": cid}))
+                opts = {}
+            for _k, _v in mem_opts.items():
+                opts.setdefault(_k, _v)
+            opts["device_id"] = cid
+            out.append(("CUDAExecutionProvider", opts))
         else:
             out.append(p)
     return out
@@ -359,6 +396,15 @@ class ModelsProcessor(QtCore.QObject):
         self._ort_inference_calls = 0
         self._triton_dialog_hooks_registered = False
         self._compile_callbacks_registered = False
+
+        # VRAM diagnostics (opt-in via VISIOMASTER_VRAM_TRACE=1). Counts how many
+        # times a *new* ONNX/TRT session was actually built/loaded (cache misses),
+        # so a caller can tell apart one-time working-set growth from per-action
+        # reload churn.
+        self._real_model_loads = 0
+        self._vram_trace_enabled = os.environ.get(
+            "VISIOMASTER_VRAM_TRACE", ""
+        ).strip().lower() in ("1", "true", "yes", "on")
 
         # Keep Triton and torch.compile callback setup off the default startup path.
         # Both are registered lazily when the Custom provider is selected.
@@ -889,6 +935,47 @@ class ModelsProcessor(QtCore.QObject):
             return [("CPUExecutionProvider")]
         return [("CUDAExecutionProvider"), ("CPUExecutionProvider")]
 
+    def device_used_gb(self) -> float:
+        """Total VRAM in use on the current CUDA device (GB), across ALL libraries.
+
+        Uses ``torch.cuda.mem_get_info`` (free/total of the physical device), so it
+        captures ONNX Runtime / TensorRT / CUDA-EP allocations that live OUTSIDE
+        PyTorch's caching allocator — the memory ``torch.cuda.empty_cache()`` can
+        never reclaim and that the VRAM monitor actually shows. Returns 0 on CPU.
+        """
+        if not torch.cuda.is_available():
+            return 0.0
+        try:
+            free_b, total_b = torch.cuda.mem_get_info()
+            return (total_b - free_b) / (1024.0**3)
+        except Exception:
+            return 0.0
+
+    def vram_snapshot_gb(self) -> Tuple[float, float]:
+        """Return ``(device_used_gb, torch_reserved_gb)`` for the current CUDA device.
+
+        First element = real device usage (incl. ORT/TRT). Second = PyTorch's own
+        caching-allocator reservation (usually tiny here, since inference runs on
+        ORT/TRT sessions rather than torch tensors).
+        """
+        if not torch.cuda.is_available():
+            return (0.0, 0.0)
+        return (
+            self.device_used_gb(),
+            torch.cuda.memory_reserved() / (1024.0**3),
+        )
+
+    def vram_trace(self, tag: str) -> None:
+        """Print a real-device VRAM snapshot when VISIOMASTER_VRAM_TRACE=1."""
+        if not self._vram_trace_enabled or not torch.cuda.is_available():
+            return
+        device_used, torch_reserved = self.vram_snapshot_gb()
+        print(
+            f"[VRAM] {tag}: device_used={device_used:.2f}GB "
+            f"torch_reserved={torch_reserved:.2f}GB real_loads={self._real_model_loads}",
+            flush=True,
+        )
+
     def load_model(self, model_name, session_options=None):
         """
         Loads an AI model (ONNX) with thread safety.
@@ -949,6 +1036,7 @@ class ModelsProcessor(QtCore.QObject):
                         f"[INFO] Provider is TensorRT-Engine, attempting to load TRT model for '{model_name}'..."
                     )
                     # This will build the engine if it doesn't exist.
+                    _vram_before = self.device_used_gb()
                     model_instance = self.load_model_trt(model_name)
                     if model_instance:
                         old_trt = self.models_trt.get(storage_key)
@@ -956,6 +1044,16 @@ class ModelsProcessor(QtCore.QObject):
                             del old_trt
                         self.models_trt[storage_key] = model_instance
                         self._model_last_used_mono[storage_key] = time.monotonic()
+                        self._real_model_loads += 1
+                        if self._vram_trace_enabled:
+                            _vram_after = self.device_used_gb()
+                            print(
+                                f"[VRAM] LOAD(trt) {model_name}: device_used "
+                                f"{_vram_before:.2f} -> {_vram_after:.2f}GB "
+                                f"(+{_vram_after - _vram_before:.2f}GB) "
+                                f"real_loads={self._real_model_loads}",
+                                flush=True,
+                            )
                         self._schedule_ort_warmup_if_enabled(model_name, model_instance)
                         # No need to load ONNX version if TRT succeeds
                         return model_instance
@@ -1267,6 +1365,8 @@ class ModelsProcessor(QtCore.QObject):
                     del graph
                     gc.collect()
                 self._model_last_used_mono[storage_key] = time.monotonic()
+                self._real_model_loads += 1
+                self.vram_trace(f"LOAD(onnx) {model_name}")
                 self._schedule_ort_warmup_if_enabled(model_name, model_instance)
                 return model_instance
 
@@ -1474,9 +1574,18 @@ class ModelsProcessor(QtCore.QObject):
                         unloaded = True
 
             if unloaded:
+                _vram_before_unload = self.device_used_gb()
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+                if self._vram_trace_enabled and torch.cuda.is_available():
+                    _vram_after_unload = self.device_used_gb()
+                    print(
+                        f"[VRAM] UNLOAD {model_name_to_unload}: device_used "
+                        f"{_vram_before_unload:.2f} -> {_vram_after_unload:.2f}GB "
+                        f"({_vram_after_unload - _vram_before_unload:+.2f}GB)",
+                        flush=True,
+                    )
 
     def get_ort_session_io_numpy_dtype_maps(
         self, model_name: str
@@ -1902,7 +2011,9 @@ class ModelsProcessor(QtCore.QObject):
         cuda_dev = self._logical_to_physical_cuda_index(
             self.clamp_gpu_index(self.gpu_index)
         )
-        cuda_provider = ("CUDAExecutionProvider", {"device_id": cuda_dev})
+        _cuda_opts = _cuda_ep_memory_options()
+        _cuda_opts["device_id"] = cuda_dev
+        cuda_provider = ("CUDAExecutionProvider", _cuda_opts)
         if provider_name in ("TensorRT", "TensorRT-Engine"):
             return [
                 ("TensorrtExecutionProvider", self.trt_ep_options),
@@ -2065,10 +2176,34 @@ class ModelsProcessor(QtCore.QObject):
         if metrics_on:
             with self._ort_metrics_lock:
                 self._ort_lock_wait_s_accum += t1 - t0
+        _vram_dbg = self._vram_trace_enabled
+        _dev_before = self.device_used_gb() if _vram_dbg else 0.0
         try:
             with torch.cuda.device(active_gpu_id):
                 session.run_with_iobinding(io_binding)
         finally:
+            if _vram_dbg:
+                _dev_after = self.device_used_gb()
+                if _dev_after - _dev_before > 0.02:
+                    _mname = "?"
+                    try:
+                        for _k, _v in list(self.models.items()):
+                            if _v is session:
+                                _mname = _k
+                                break
+                        else:
+                            for _k, _v in list(self.models_trt.items()):
+                                if _v is session:
+                                    _mname = _k
+                                    break
+                    except Exception:
+                        pass
+                    print(
+                        f"[VRAM] INFER-GROWTH {_mname}: device_used "
+                        f"{_dev_before:.2f} -> {_dev_after:.2f}GB "
+                        f"(+{_dev_after - _dev_before:.2f}GB)",
+                        flush=True,
+                    )
             t2 = time.perf_counter()
             if metrics_on:
                 with self._ort_metrics_lock:

@@ -1046,6 +1046,7 @@ def build_cuda_graph_runner(
     def runner(x: torch.Tensor) -> torch.Tensor:
         static_inp.copy_(x)
         graph.replay()
-        return static_out.clone()
+        # Caller copies via output.copy_(result) under _custom_inference_lock.
+        return static_out
 
     return runner
