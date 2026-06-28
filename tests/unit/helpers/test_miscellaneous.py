@@ -16,8 +16,10 @@ from app.helpers.miscellaneous import (
     is_video_file,
     get_file_type,
     get_scaling_transforms,
+    target_media_path_sort_key,
     image_extensions,
     normalize_issue_scan_ranges,
+    refresh_target_media_file_stats,
     video_extensions,
     _transform_cache,
 )
@@ -408,6 +410,50 @@ def test_detector_input_size_fast_cap_min_of_user_and_cap():
         "PerformanceFastDetectCapSideSelection": "384",
     }
     assert detector_input_size_from_control(c) == (256, 256)
+
+
+def test_target_media_path_sort_key_orders_by_name_date_and_size(tmp_path):
+    older = tmp_path / "alpha.png"
+    newer = tmp_path / "beta.png"
+    older.write_bytes(b"a")
+    newer.write_bytes(b"abcd")
+
+    name_keys = [
+        target_media_path_sort_key(str(older), "name"),
+        target_media_path_sort_key(str(newer), "name"),
+    ]
+    assert name_keys == sorted(name_keys)
+
+    date_keys = [
+        target_media_path_sort_key(str(older), "date"),
+        target_media_path_sort_key(str(newer), "date"),
+    ]
+    assert date_keys == sorted(date_keys)
+
+    size_keys = [
+        target_media_path_sort_key(str(older), "size"),
+        target_media_path_sort_key(str(newer), "size"),
+    ]
+    assert size_keys == sorted(size_keys)
+    assert size_keys[0][1] < size_keys[1][1]
+
+
+def test_refresh_target_media_file_stats_reads_file_metadata(tmp_path):
+    from types import SimpleNamespace
+
+    media_file = tmp_path / "clip.mp4"
+    media_file.write_bytes(b"12345678")
+
+    button = SimpleNamespace(
+        media_path=str(media_file),
+        is_webcam=False,
+        is_screen_capture=False,
+    )
+    refresh_target_media_file_stats(button)
+
+    assert button._file_stats_loaded is True
+    assert button._file_size == 8
+    assert button._file_mtime > 0
 
 
 def test_detector_input_size_fast_cap_off_uses_user_only():

@@ -688,6 +688,39 @@ def get_file_type(file_name):
     return None
 
 
+def target_media_path_sort_key(media_path: str, mode: str) -> tuple:
+    """Sort key for filesystem media paths (name, date, or size)."""
+    if mode == "date":
+        try:
+            return (0, os.path.getmtime(media_path), media_path.lower())
+        except OSError:
+            return (0, 0, media_path.lower())
+    if mode == "size":
+        try:
+            return (0, os.path.getsize(media_path), media_path.lower())
+        except OSError:
+            return (0, 0, media_path.lower())
+    return (0, os.path.basename(media_path).lower())
+
+
+def refresh_target_media_file_stats(button) -> None:
+    """Read file mtime/size once for target media cards used in list sorting."""
+    if getattr(button, "is_webcam", False) or getattr(button, "is_screen_capture", False):
+        button._file_mtime = 0.0
+        button._file_size = 0
+        button._file_stats_loaded = True
+        return
+
+    path = str(getattr(button, "media_path", ""))
+    try:
+        button._file_mtime = os.path.getmtime(path)
+        button._file_size = os.path.getsize(path)
+    except OSError:
+        button._file_mtime = 0.0
+        button._file_size = 0
+    button._file_stats_loaded = True
+
+
 def get_scaled_resolution(
     media_width: Optional[int] = None,
     media_height: Optional[int] = None,

@@ -34,6 +34,7 @@ class TargetMediaLoaderWorker(qtc.QThread):
         folder_name=False,
         files_list=None,
         media_ids=None,
+        sort_mode="name",
         sort_files_list_by_name=True,
         webcam_mode=False,
         parent=None,
@@ -43,7 +44,14 @@ class TargetMediaLoaderWorker(qtc.QThread):
         self.folder_name = folder_name
         self.files_list = files_list or []
         self.media_ids = media_ids or []
-        self.sort_files_list_by_name = sort_files_list_by_name
+        if sort_mode is None:
+            self.sort_mode = None
+        elif sort_mode in ("name", "date", "size"):
+            self.sort_mode = sort_mode
+        elif sort_files_list_by_name:
+            self.sort_mode = "name"
+        else:
+            self.sort_mode = None
         self.webcam_mode = webcam_mode
         self._running = True  # Flag to control the running state
         self.control_snapshot = (
@@ -78,13 +86,18 @@ class TargetMediaLoaderWorker(qtc.QThread):
 
         i = 0
         if recursive_toggle:
-            media_files = self._iter_sorted_recursive_media_files(folder_name)
+            media_files = list(self._iter_sorted_recursive_media_files(folder_name))
         else:
             video_files = misc_helpers.get_video_files(folder_name, recursive_toggle)
             image_files = misc_helpers.get_image_files(folder_name, recursive_toggle)
             media_files = video_files + image_files
-            # Sorting the list
-            media_files.sort(key=lambda x: os.path.basename(str(x)).lower())
+
+        if self.sort_mode:
+            media_files.sort(
+                key=lambda path: misc_helpers.target_media_path_sort_key(
+                    str(path), self.sort_mode
+                )
+            )
 
         for media_file in media_files:
             if not self._running:  # Check if the thread is still running
@@ -121,8 +134,12 @@ class TargetMediaLoaderWorker(qtc.QThread):
             paired_files_ids.append((path, m_id))
 
         # Keep existing behavior by default; allow callers to preserve original order.
-        if self.sort_files_list_by_name:
-            paired_files_ids.sort(key=lambda x: os.path.basename(str(x[0])).lower())
+        if self.sort_mode:
+            paired_files_ids.sort(
+                key=lambda pair: misc_helpers.target_media_path_sort_key(
+                    str(pair[0]), self.sort_mode
+                )
+            )
 
         for media_file_path, media_id in paired_files_ids:
             if not self._running:  # Check if the thread is still running
@@ -536,5 +553,5 @@ class FilterWorker(qtc.QThread):
         self.filtered_results.emit(visible_indices, len(self.items_snapshot))
 
     def stop_thread(self):
-        self.quit()
-        self.wait()
+        if self.isRunning():
+            self.quit()

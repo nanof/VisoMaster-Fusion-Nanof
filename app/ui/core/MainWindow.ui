@@ -963,6 +963,25 @@
           </widget>
          </item>
          <item>
+          <widget class="QComboBox" name="targetMediaSortComboBox">
+           <property name="sizePolicy">
+            <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+             <horstretch>0</horstretch>
+             <verstretch>0</verstretch>
+            </sizepolicy>
+           </property>
+           <property name="minimumSize">
+            <size>
+             <width>72</width>
+             <height>0</height>
+            </size>
+           </property>
+           <property name="toolTip">
+            <string>Sort target media by name, date, or file size</string>
+           </property>
+          </widget>
+         </item>
+         <item>
           <widget class="QCheckBox" name="filterImagesCheckBox">
            <property name="toolTip">
             <string>Include Images</string>

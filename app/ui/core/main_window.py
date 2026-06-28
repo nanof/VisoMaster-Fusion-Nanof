@@ -16,12 +16,12 @@ from PySide6.QtGui import (QAction, QBrush, QColor, QConicalGradient,
     QIcon, QImage, QKeySequence, QLinearGradient,
     QPainter, QPalette, QPixmap, QRadialGradient,
     QTransform)
-from PySide6.QtWidgets import (QApplication, QCheckBox, QDockWidget, QGraphicsView,
-    QGridLayout, QGroupBox, QHBoxLayout, QLabel,
-    QLineEdit, QListView, QListWidget, QListWidgetItem,
-    QMainWindow, QMenu, QMenuBar, QPushButton,
-    QSizePolicy, QSlider, QSpacerItem, QTabWidget,
-    QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDockWidget,
+    QGraphicsView, QGridLayout, QGroupBox, QHBoxLayout,
+    QLabel, QLineEdit, QListView, QListWidget,
+    QListWidgetItem, QMainWindow, QMenu, QMenuBar,
+    QPushButton, QSizePolicy, QSlider, QSpacerItem,
+    QTabWidget, QVBoxLayout, QWidget)
 
 from app.ui.widgets.vram_progress_bar import VramPeakProgressBar
 from app.ui.core import media_rc
@@ -559,6 +559,14 @@ class Ui_MainWindow(object):
 
         self.horizontalLayout_9.addWidget(self.targetVideosSearchBox)
 
+        self.targetMediaSortComboBox = QComboBox(self.dockWidgetContents)
+        self.targetMediaSortComboBox.setObjectName(u"targetMediaSortComboBox")
+        sizePolicy8.setHeightForWidth(self.targetMediaSortComboBox.sizePolicy().hasHeightForWidth())
+        self.targetMediaSortComboBox.setSizePolicy(sizePolicy8)
+        self.targetMediaSortComboBox.setMinimumSize(QSize(72, 0))
+
+        self.horizontalLayout_9.addWidget(self.targetMediaSortComboBox)
+
         self.filterImagesCheckBox = QCheckBox(self.dockWidgetContents)
         self.filterImagesCheckBox.setObjectName(u"filterImagesCheckBox")
         icon15 = QIcon()
@@ -1067,6 +1075,9 @@ class Ui_MainWindow(object):
         self.buttonBatchAv1ToH264.setText(QCoreApplication.translate("MainWindow", u"To H.264", None))
         self.targetVideosSearchBox.setText("")
         self.targetVideosSearchBox.setPlaceholderText(QCoreApplication.translate("MainWindow", u"Search Videos/Images", None))
+#if QT_CONFIG(tooltip)
+        self.targetMediaSortComboBox.setToolTip(QCoreApplication.translate("MainWindow", u"Sort target media by name, date, or file size", None))
+#endif // QT_CONFIG(tooltip)
 #if QT_CONFIG(tooltip)
         self.filterImagesCheckBox.setToolTip(QCoreApplication.translate("MainWindow", u"Include Images", None))
 #endif // QT_CONFIG(tooltip)

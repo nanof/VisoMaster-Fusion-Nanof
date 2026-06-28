@@ -161,11 +161,20 @@ class ListWidgetEventFilter(QtCore.QObject):
                                 main_window=self.main_window,
                                 folder_name=False,
                                 files_list=file_paths,
+                                sort_mode=list_view_actions.get_target_media_sort_mode(
+                                    self.main_window
+                                ),
                             )
                         )
                         self.main_window.video_loader_worker.thumbnail_ready.connect(
                             partial(
                                 list_view_actions.add_media_thumbnail_to_target_videos_list,
+                                self.main_window,
+                            )
+                        )
+                        self.main_window.video_loader_worker.finished.connect(
+                            partial(
+                                list_view_actions.filter_target_videos,
                                 self.main_window,
                             )
                         )

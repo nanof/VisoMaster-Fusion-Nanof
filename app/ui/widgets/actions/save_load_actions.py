@@ -404,8 +404,12 @@ def load_parameters_and_settings(
     if data_filename:
         with open(data_filename, "r") as data_file:  # pylint: disable=unspecified-encoding
             data = json.load(data_file)
+            loaded_parameters = data["parameters"].copy()
+            common_widget_actions.strip_control_backed_keys_from_parameters(
+                main_window, loaded_parameters
+            )
             main_window.parameters[face_id] = convert_parameters_to_supported_type(
-                main_window, data["parameters"].copy(), misc_helpers.ParametersDict
+                main_window, loaded_parameters, misc_helpers.ParametersDict
             )
             if main_window.selected_target_face_id == face_id:
                 common_widget_actions.set_widgets_values_using_face_id_parameters(
@@ -485,7 +489,7 @@ def load_saved_workspace(
                 folder_name=False,
                 files_list=target_medias_files_list,
                 media_ids=target_media_ids,
-                sort_files_list_by_name=False,
+                sort_mode=None,
             )
             main_window.video_loader_worker.thumbnail_ready.connect(
                 partial(
@@ -608,9 +612,15 @@ def load_saved_workspace(
                 list_view_actions.add_media_thumbnail_to_target_faces_list(
                     main_window, cropped_face, embedding_store, pixmap, face_id
                 )
+                loaded_face_parameters = data["target_faces_data"][face_id][
+                    "parameters"
+                ].copy()
+                common_widget_actions.strip_control_backed_keys_from_parameters(
+                    main_window, loaded_face_parameters
+                )
                 main_window.parameters[face_id] = convert_parameters_to_supported_type(
                     main_window,
-                    data["target_faces_data"][face_id]["parameters"],
+                    loaded_face_parameters,
                     misc_helpers.ParametersDict,
                 )
 
@@ -820,9 +830,14 @@ def load_saved_workspace(
                     first_face_id
                 ].copy()
             else:
-                main_window.current_widget_parameters = data.get(
+                loaded_current_parameters = data.get(
                     "current_widget_parameters", main_window.default_parameters.copy()
                 )
+                if isinstance(loaded_current_parameters, dict):
+                    common_widget_actions.strip_control_backed_keys_from_parameters(
+                        main_window, loaded_current_parameters
+                    )
+                main_window.current_widget_parameters = loaded_current_parameters
                 main_window.current_widget_parameters = cast(
                     ParametersTypes,
                     misc_helpers.ParametersDict(
@@ -911,6 +926,13 @@ def load_saved_workspace(
                         checkbox,
                         window_state.get(state_key, default_checked),
                     )
+            list_view_actions.set_target_media_sort_mode(
+                main_window,
+                window_state.get(
+                    "targetMediaSort",
+                    list_view_actions.TARGET_MEDIA_SORT_DEFAULT,
+                ),
+            )
             saved_face_thumbnail_size = window_state.get("face_thumbnail_size")
             if saved_face_thumbnail_size == "small":
                 list_view_actions.apply_face_thumbnail_size(
@@ -1030,6 +1052,7 @@ def save_current_workspace(
             "filterWebcamsCheckBox",
             False,
         ),
+        "targetMediaSort": list_view_actions.get_target_media_sort_mode(main_window),
         "face_thumbnail_size": (
             "small"
             if getattr(
@@ -1176,6 +1199,9 @@ def save_current_workspace(
         print(
             f"[WARN] Unexpected type for current widget parameters: {type(main_window.current_widget_parameters)}. Saving empty dict."
         )
+    common_widget_actions.strip_control_backed_keys_from_parameters(
+        main_window, current_params_to_save
+    )
 
     data = {
         "control": sanitize_removed_settings_controls(main_window.control.copy()),

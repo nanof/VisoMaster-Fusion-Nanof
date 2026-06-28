@@ -8,6 +8,9 @@ import sys
 import os
 import uuid
 import subprocess
+import time
+import traceback
+import faulthandler
 
 import numpy as np
 from PySide6 import QtWidgets, QtGui, QtCore
@@ -36,6 +39,265 @@ _TARGET_MEDIA_BATCH_SIZE = 24
 _TARGET_MEDIA_BATCH_INTERVAL_MS = 1
 _THUMB_ZOOM_MIN = 0.5
 _THUMB_ZOOM_MAX = 3.0
+TARGET_MEDIA_SORT_NAME = "name"
+TARGET_MEDIA_SORT_DATE = "date"
+TARGET_MEDIA_SORT_SIZE = "size"
+TARGET_MEDIA_SORT_DEFAULT = TARGET_MEDIA_SORT_NAME
+_TARGET_SORT_LOG_PROGRESS_EVERY = 25
+
+
+def _target_sort_debug_enabled() -> bool:
+    return os.environ.get("VISIOMASTER_TARGET_SORT_DEBUG", "").strip() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _target_sort_log(phase: str, **details) -> None:
+    if not details and not _target_sort_debug_enabled():
+        return
+    parts = " ".join(f"{k}={v}" for k, v in details.items())
+    message = f"[TARGET-SORT] {phase}"
+    if parts:
+        message = f"{message} {parts}"
+    print(message, flush=True)
+
+
+def get_target_media_sort_mode(main_window: "MainWindow") -> str:
+    combo = getattr(main_window, "targetMediaSortComboBox", None)
+    if combo is None:
+        return TARGET_MEDIA_SORT_DEFAULT
+    mode = combo.currentData(QtCore.Qt.ItemDataRole.UserRole)
+    if mode in (TARGET_MEDIA_SORT_NAME, TARGET_MEDIA_SORT_DATE, TARGET_MEDIA_SORT_SIZE):
+        return str(mode)
+    return TARGET_MEDIA_SORT_DEFAULT
+
+
+def target_media_path_sort_key(media_path: str, mode: str) -> tuple:
+    return misc_helpers.target_media_path_sort_key(media_path, mode)
+
+
+def _target_media_button_sort_key(button, mode: str) -> tuple:
+    if getattr(button, "is_webcam", False) or getattr(button, "file_type", None) == "webcam":
+        return (2, getattr(button, "webcam_index", 0), str(button.media_path).lower())
+    if getattr(button, "is_screen_capture", False) or getattr(
+        button, "file_type", None
+    ) == "screen":
+        return (2, 999, str(button.media_path).lower())
+
+    path = str(button.media_path)
+    if mode == TARGET_MEDIA_SORT_DATE:
+        if not getattr(button, "_file_stats_loaded", False):
+            misc_helpers.refresh_target_media_file_stats(button)
+        return (0, float(getattr(button, "_file_mtime", 0.0) or 0.0), path.lower())
+    if mode == TARGET_MEDIA_SORT_SIZE:
+        if not getattr(button, "_file_stats_loaded", False):
+            misc_helpers.refresh_target_media_file_stats(button)
+        return (0, int(getattr(button, "_file_size", 0) or 0), path.lower())
+    return (0, os.path.basename(path).lower())
+
+
+def sort_target_media_list(main_window: "MainWindow") -> None:
+    if getattr(main_window, "_target_media_sort_in_progress", False):
+        _target_sort_log("skip_reentrant")
+        return
+
+    list_widget = main_window.targetVideosList
+    count = list_widget.count()
+    if count <= 1:
+        _target_sort_log("skip_small_list", count=count)
+        return
+
+    mode = get_target_media_sort_mode(main_window)
+    started = time.perf_counter()
+    _target_sort_log("start", mode=mode, count=count)
+
+    if _target_sort_debug_enabled():
+        faulthandler.enable()
+
+    entries: list[tuple[tuple, QtWidgets.QListWidgetItem, QtWidgets.QWidget]] = []
+    missing_widgets = 0
+    try:
+        phase_started = time.perf_counter()
+        if mode in (TARGET_MEDIA_SORT_DATE, TARGET_MEDIA_SORT_SIZE):
+            for i in range(count):
+                item = list_widget.item(i)
+                if item is None:
+                    continue
+                button = list_widget.itemWidget(item)
+                if button is not None:
+                    misc_helpers.refresh_target_media_file_stats(button)
+
+        for i in range(count):
+            item = list_widget.item(i)
+            if item is None:
+                missing_widgets += 1
+                _target_sort_log("missing_item", index=i)
+                continue
+            button = list_widget.itemWidget(item)
+            if button is None:
+                missing_widgets += 1
+                if _target_sort_debug_enabled():
+                    _target_sort_log("missing_widget", index=i)
+                continue
+            entries.append((_target_media_button_sort_key(button, mode), item, button))
+
+        _target_sort_log(
+            "keys_collected",
+            entries=len(entries),
+            missing_widgets=missing_widgets,
+            elapsed_ms=int((time.perf_counter() - phase_started) * 1000),
+        )
+        if mode == TARGET_MEDIA_SORT_DATE and entries:
+            unique_mtimes = len({entry[0][1] for entry in entries})
+            _target_sort_log("date_stats", unique_mtimes=unique_mtimes)
+        elif mode == TARGET_MEDIA_SORT_SIZE and entries:
+            unique_sizes = len({entry[0][1] for entry in entries})
+            _target_sort_log("size_stats", unique_sizes=unique_sizes)
+
+        if len(entries) <= 1:
+            _target_sort_log("skip_few_entries", entries=len(entries))
+            return
+
+        phase_started = time.perf_counter()
+        entries.sort(key=lambda entry: entry[0])
+        _target_sort_log(
+            "sorted",
+            entries=len(entries),
+            elapsed_ms=int((time.perf_counter() - phase_started) * 1000),
+        )
+
+        sorted_items = [item for _, item, _ in entries]
+        button_by_id = {id(item): button for _, item, button in entries}
+
+        main_window._target_media_sort_in_progress = True
+        list_widget.setUpdatesEnabled(False)
+        try:
+            phase_started = time.perf_counter()
+            moves = 0
+            reattached = 0
+            for target_index, item in enumerate(sorted_items):
+                current_index = list_widget.row(item)
+                if current_index == target_index:
+                    continue
+                if current_index < 0:
+                    _target_sort_log(
+                        "warn_item_not_in_list",
+                        target_index=target_index,
+                    )
+                    continue
+
+                button = list_widget.itemWidget(item)
+                if button is None:
+                    button = button_by_id.get(id(item))
+
+                taken = list_widget.takeItem(current_index)
+                if taken is None:
+                    _target_sort_log(
+                        "warn_take_failed",
+                        target_index=target_index,
+                        current_index=current_index,
+                    )
+                    continue
+
+                list_widget.insertItem(target_index, taken)
+                if list_widget.itemWidget(taken) is None and button is not None:
+                    list_widget.setItemWidget(taken, button)
+                    reattached += 1
+                moves += 1
+
+                if (
+                    _target_sort_debug_enabled()
+                    and moves % _TARGET_SORT_LOG_PROGRESS_EVERY == 0
+                ):
+                    _target_sort_log(
+                        "move_progress",
+                        moves=moves,
+                        target_index=target_index,
+                    )
+
+            _target_sort_log(
+                "reordered",
+                moves=moves,
+                reattached=reattached,
+                elapsed_ms=int((time.perf_counter() - phase_started) * 1000),
+            )
+        finally:
+            list_widget.setUpdatesEnabled(True)
+            list_widget.viewport().update()
+            main_window._target_media_sort_in_progress = False
+
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        _target_sort_log("done", mode=mode, count=count, elapsed_ms=elapsed_ms)
+    except Exception:
+        _target_sort_log(
+            "error",
+            mode=mode,
+            count=count,
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+        )
+        traceback.print_exc()
+        main_window._target_media_sort_in_progress = False
+        raise
+
+
+def on_target_media_sort_changed(main_window: "MainWindow", *args) -> None:
+    combo_index = args[0] if args else "?"
+    _target_sort_log(
+        "combo_changed",
+        index=combo_index,
+        mode=get_target_media_sort_mode(main_window),
+    )
+    if getattr(main_window, "_target_media_sort_in_progress", False):
+        _target_sort_log("skip_combo_reentrant", index=combo_index)
+        return
+    try:
+        sort_target_media_list(main_window)
+    except Exception:
+        _target_sort_log("combo_handler_failed", index=combo_index)
+        raise
+
+
+def initialize_target_media_sort_combo(main_window: "MainWindow") -> None:
+    combo = getattr(main_window, "targetMediaSortComboBox", None)
+    if combo is None or combo.count() > 0:
+        return
+    combo.blockSignals(True)
+    try:
+        combo.clear()
+        for label, mode in (
+            ("Name", TARGET_MEDIA_SORT_NAME),
+            ("Date", TARGET_MEDIA_SORT_DATE),
+            ("Size", TARGET_MEDIA_SORT_SIZE),
+        ):
+            combo.addItem(label)
+            combo.setItemData(
+                combo.count() - 1,
+                mode,
+                QtCore.Qt.ItemDataRole.UserRole,
+            )
+        combo.setCurrentIndex(0)
+    finally:
+        combo.blockSignals(False)
+
+
+def set_target_media_sort_mode(main_window: "MainWindow", mode: str) -> None:
+    combo = getattr(main_window, "targetMediaSortComboBox", None)
+    if combo is None:
+        return
+    initialize_target_media_sort_combo(main_window)
+    for index in range(combo.count()):
+        if (
+            combo.itemData(index, QtCore.Qt.ItemDataRole.UserRole)
+            == mode
+        ):
+            combo.blockSignals(True)
+            try:
+                combo.setCurrentIndex(index)
+            finally:
+                combo.blockSignals(False)
+            return
 
 
 def thumbnail_size_for_zoom(base_size: tuple[int, int], zoom: float) -> QtCore.QSize:
@@ -617,6 +879,7 @@ def initialize_media_list_widgets(main_window: "MainWindow"):
         main_window, main_window.targetVideosList, "target_media"
     )
     _set_up_panel_context_menu(main_window, main_window.inputFacesList, "input_faces")
+    initialize_target_media_sort_combo(main_window)
 
 
 def initialize_embeddings_list_widget(main_window: "MainWindow"):
@@ -741,7 +1004,10 @@ def select_target_medias(
     main_window.target_videos = {}
 
     main_window.video_loader_worker = ui_workers.TargetMediaLoaderWorker(
-        main_window=main_window, folder_name=folder_name, files_list=files_list
+        main_window=main_window,
+        folder_name=folder_name,
+        files_list=files_list,
+        sort_mode=get_target_media_sort_mode(main_window),
     )
     main_window.video_loader_worker.thumbnail_ready.connect(
         partial(add_media_thumbnail_to_target_videos_list, main_window)
@@ -763,6 +1029,11 @@ def filter_target_videos(main_window):
     if video_control_actions.is_issue_scan_active(main_window):
         video_control_actions._mark_pending_target_media_refresh(main_window)
         return
+    try:
+        sort_target_media_list(main_window)
+    except Exception:
+        _target_sort_log("filter_wrapper_sort_failed")
+        raise
     filter_actions.filter_target_videos(main_window)
     load_target_webcams(main_window)
     load_target_screen_capture(main_window)

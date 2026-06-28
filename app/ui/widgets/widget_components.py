@@ -198,6 +198,11 @@ class TargetMediaCardButton(CardButton):
         self.webcam_index = webcam_index
         self.webcam_backend = webcam_backend
         self.is_screen_capture = is_screen_capture
+        self._file_mtime = None
+        self._file_size = None
+        self._file_stats_loaded = False
+        if not is_webcam and not is_screen_capture:
+            misc_helpers.refresh_target_media_file_stats(self)
         self.media_capture: cv2.VideoCapture | bool = False
         self._thumbnail_pixmap = QtGui.QPixmap()
         self.setCheckable(True)

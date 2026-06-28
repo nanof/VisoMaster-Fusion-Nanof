@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 from PySide6 import QtWidgets
 
 from app.ui.widgets.actions import list_view_actions
@@ -80,6 +81,77 @@ class _DummyEmbedButton:
 
     def deleteLater(self):
         self.deleted += 1
+
+
+def test_get_target_media_sort_mode_defaults_without_combo():
+    main_window = SimpleNamespace()
+    assert (
+        list_view_actions.get_target_media_sort_mode(main_window)
+        == list_view_actions.TARGET_MEDIA_SORT_NAME
+    )
+
+
+def test_get_target_media_sort_mode_reads_combo_data():
+    combo = SimpleNamespace(
+        currentData=lambda *_args, **_kwargs: list_view_actions.TARGET_MEDIA_SORT_DATE
+    )
+    main_window = SimpleNamespace(targetMediaSortComboBox=combo)
+    assert (
+        list_view_actions.get_target_media_sort_mode(main_window)
+        == list_view_actions.TARGET_MEDIA_SORT_DATE
+    )
+
+
+def test_sort_target_media_list_preserves_item_widgets():
+    from PySide6 import QtCore, QtWidgets
+
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+
+    list_widget = QtWidgets.QListWidget()
+    buttons = {}
+
+    def add_entry(name: str, media_id: str) -> None:
+        item = QtWidgets.QListWidgetItem(list_widget)
+        button = QtWidgets.QPushButton(name)
+        button.media_path = f"C:/media/{name}.mp4"
+        button.file_type = "video"
+        button.is_webcam = False
+        button.is_screen_capture = False
+        button._file_mtime = float(ord(name[0]))
+        button._file_size = len(name)
+        list_widget.setItemWidget(item, button)
+        buttons[media_id] = button
+
+    add_entry("charlie", "3")
+    add_entry("alpha", "1")
+    add_entry("bravo", "2")
+
+    combo = QtWidgets.QComboBox()
+    combo.addItem("Name")
+    combo.setItemData(
+        0,
+        list_view_actions.TARGET_MEDIA_SORT_NAME,
+        QtCore.Qt.ItemDataRole.UserRole,
+    )
+
+    main_window = SimpleNamespace(
+        targetVideosList=list_widget,
+        targetMediaSortComboBox=combo,
+    )
+
+    list_view_actions.sort_target_media_list(main_window)
+
+    labels = [
+        list_widget.itemWidget(list_widget.item(i)).text()
+        for i in range(list_widget.count())
+    ]
+    assert labels == ["alpha", "bravo", "charlie"]
+    assert all(
+        list_widget.itemWidget(list_widget.item(i)) is not None
+        for i in range(list_widget.count())
+    )
 
 
 def test_clear_all_target_media_cancel_leaves_state_unchanged(monkeypatch):

@@ -109,6 +109,21 @@ def sync_control_mirror_widgets_only(
             w.blockSignals(False)
 
 
+def strip_control_backed_keys_from_parameters(
+    main_window: "MainWindow", parameters: dict
+) -> dict:
+    """Drop keys owned by ``main_window.control`` from a parameter payload.
+
+    Face-parameter panels and saved workspaces may still carry stale entries for
+    widgets that were migrated to global controls (e.g. Swap all by index).
+    """
+    control_keys = main_window.control
+    for key in list(parameters.keys()):
+        if key in control_keys:
+            parameters.pop(key, None)
+    return parameters
+
+
 def get_current_parameter_value(
     main_window: "MainWindow", parameter_name: str, default: Any
 ) -> Any:
@@ -1000,6 +1015,10 @@ def set_widgets_values_using_face_id_parameters(
     main_window._batch_update_in_progress = True
     try:
         for parameter_name, parameter_value in parameters.items():
+            # Global controls (including Face Swap widgets with data_type "control")
+            # must not be overwritten from face/current parameter dicts.
+            if parameter_name in main_window.control:
+                continue
             widget = parameter_widgets.get(parameter_name)
             if widget:
                 # temporarily disable refreshing the frame to prevent slowing due to unnecessary processing

@@ -508,6 +508,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.filterScreenCaptureCheckBox.clicked.connect(
             partial(list_view_actions.load_target_screen_capture, self)
         )
+        self.targetMediaSortComboBox.currentIndexChanged.connect(
+            partial(list_view_actions.on_target_media_sort_changed, self)
+        )
 
         self.inputFacesSearchBox.textChanged.connect(
             partial(filter_actions.filter_input_faces, self)
