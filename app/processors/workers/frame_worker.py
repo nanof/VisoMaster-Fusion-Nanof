@@ -41,6 +41,11 @@ from app.helpers.miscellaneous import (
     read_image_file,
 )
 from app.helpers.cuda_timeline import nvtx_range
+from app.helpers.swap_all_match import (
+    pinned_indices_from_checked,
+    swap_all_assignment_mode,
+    swap_all_match_active,
+)
 from app.helpers.typing_helper import ParametersTypes
 from app.processors.frame_enhancers import FrameEnhancers
 from app.processors.frame_edits import FrameEdits
@@ -871,9 +876,7 @@ class FrameWorker(threading.Thread):
         ArcFace model; target lookup must use the same key or similarity is meaningless
         and swap never matches.
         """
-        _sequential_match_active = control.get(
-            "SequentialTargetMatchEnableToggle", False
-        ) and not control.get("SwapOnlyBestMatchEnableToggle", False)
+        _sequential_match_active = swap_all_match_active(control)
         if _sequential_match_active:
             _swap_name_for_arc = control.get("SwapModelSelection")
             if _swap_name_for_arc is None:
@@ -950,10 +953,17 @@ class FrameWorker(threading.Thread):
         frame_wh: tuple[int, int],
         *,
         memory_without_tracking: bool = True,
+        assignment_mode: str = "index",
+        pinned_input_indices: set[int] | frozenset[int] | None = None,
     ) -> None:
         """Assign ``_rr_input_idx`` (preview / single-frame / non-feeder paths)."""
         if not checked_inputs_ordered or not det_faces:
             return
+        pinned = (
+            pinned_input_indices
+            if pinned_input_indices is not None
+            else pinned_indices_from_checked(checked_inputs_ordered)
+        )
         with self.video_processor._sequential_rotate_lock:
             self.video_processor._sequential_rotate_stabilizer.apply(
                 det_faces,
@@ -962,6 +972,8 @@ class FrameWorker(threading.Thread):
                 frame_wh,
                 self.video_processor._sequential_rotate_iou,
                 memory_without_tracking=memory_without_tracking,
+                assignment_mode=assignment_mode,
+                pinned_input_indices=pinned,
             )
 
     def _parameters_for_input_rotate_mode(self) -> ParametersDict:
@@ -3452,12 +3464,13 @@ class FrameWorker(threading.Thread):
                 if b.isChecked()
             ]
 
-        _sequential_match_active = control.get(
-            "SequentialTargetMatchEnableToggle", False
-        ) and not control.get("SwapOnlyBestMatchEnableToggle", False)
+        _sequential_match_active = swap_all_match_active(control)
+        _rr_assignment_mode = (
+            swap_all_assignment_mode(control) if _sequential_match_active else "index"
+        )
         _rr_input_rotate_offset = (
             int(control.get("SequentialInputRotateOffsetSlider", 0))
-            if _sequential_match_active
+            if _sequential_match_active and _rr_assignment_mode == "index"
             else 0
         )
         if not _sequential_match_active:
@@ -4037,6 +4050,10 @@ class FrameWorker(threading.Thread):
                     (int(img.shape[-1]), int(img.shape[-2])),
                     memory_without_tracking=control.get(
                         "SequentialStabilizeWithoutTrackingToggle", True
+                    ),
+                    assignment_mode=_rr_assignment_mode,
+                    pinned_input_indices=pinned_indices_from_checked(
+                        _checked_inputs_ordered
                     ),
                 )
 
@@ -4715,9 +4732,7 @@ class FrameWorker(threading.Thread):
         Helper to determine which landmarks to draw and in what color based on matches.
         """
         _rotate_mode_params = None
-        if control.get(
-            "SequentialTargetMatchEnableToggle", False
-        ) and not control.get("SwapOnlyBestMatchEnableToggle", False):
+        if swap_all_match_active(control):
             _rotate_mode_params = self._parameters_for_input_rotate_mode()
 
         landmarks_to_draw = []
@@ -4791,9 +4806,7 @@ class FrameWorker(threading.Thread):
         Returns the original *img* unchanged if no matched faces are found.
         """
         _rotate_mode_params_cmp = None
-        if control.get(
-            "SequentialTargetMatchEnableToggle", False
-        ) and not control.get("SwapOnlyBestMatchEnableToggle", False):
+        if swap_all_match_active(control):
             _rotate_mode_params_cmp = self._parameters_for_input_rotate_mode()
 
         imgs_to_vstack = []

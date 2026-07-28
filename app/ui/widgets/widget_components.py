@@ -351,6 +351,11 @@ class TargetMediaCardButton(CardButton):
                 media_capture.set(cv2.CAP_PROP_ORIENTATION_AUTO, 1)
             if not media_capture.isOpened():
                 print(f"[ERROR] Error opening video {self.media_path}")
+                from app.ui.widgets.actions import list_view_actions
+
+                list_view_actions.apply_main_window_title_for_selected_media(
+                    main_window
+                )
                 return  # If the video cannot be opened, exit the function
 
             media_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -434,6 +439,9 @@ class TargetMediaCardButton(CardButton):
 
         # Append the selected video button to the list
         main_window.selected_video_button = self
+        from app.ui.widgets.actions import list_view_actions
+
+        list_view_actions.apply_main_window_title_for_selected_media(main_window)
 
         # Update the graphics frame after the reset
         main_window.graphicsViewFrame.update()
@@ -503,6 +511,9 @@ class TargetMediaCardButton(CardButton):
             main_window.videoSeekSlider.blockSignals(False)  # Unblock signals
             # Append the selected video button to the list
             main_window.selected_video_button = False
+            from app.ui.widgets.actions import list_view_actions
+
+            list_view_actions.apply_main_window_title_for_selected_media(main_window)
 
             # Update the graphics frame after the reset
             main_window.graphicsViewFrame.update()
@@ -1207,9 +1218,11 @@ class InputFaceCardButton(CardButton):
         self.media_path = media_path
         self.kv_map: Dict | None = None
         self.is_favorite_clip = bool(kwargs.get("is_favorite_clip", False))
+        self.random_fixed = False
+        self._base_tooltip = str(media_path)
 
         self.setCheckable(True)
-        self.setToolTip(media_path)
+        self.setToolTip(self._base_tooltip)
         self.clicked.connect(self.load_input_face)
 
         # Set the context menu policy to trigger the custom context menu on right-click
@@ -1223,6 +1236,51 @@ class InputFaceCardButton(CardButton):
 
     def get_embedding(self, embedding_swap_model: str) -> np.ndarray:
         return self.embedding_store.get(embedding_swap_model, np.array([]))
+
+    def toggle_random_fixed(self, pinned: bool | None = None) -> bool:
+        """Mark/unmark this input as fixed for Swap-all-by-random assignment."""
+        self.random_fixed = (
+            (not self.random_fixed) if pinned is None else bool(pinned)
+        )
+        self._update_random_fixed_visual()
+        # Fixed faces must be checked so they enter the ordered input list used by swap.
+        if self.random_fixed and not self.isChecked():
+            self.setChecked(True)
+        common_widget_actions.refresh_frame(self.main_window)
+        from app.ui.widgets.actions import preview_notification_actions
+
+        state = "fixed" if self.random_fixed else "unfixed"
+        preview_notification_actions.show_preview_notification(
+            self.main_window,
+            f"Input face {state} for random (Ctrl+Alt+Left-click)",
+        )
+        return self.random_fixed
+
+    def _update_random_fixed_visual(self) -> None:
+        tip = self._base_tooltip
+        if self.random_fixed:
+            tip = f"{tip}\n[Fixed for random — survives X reshuffle]"
+            self.setStyleSheet(
+                "QPushButton { border: 2px solid #e6b422; border-radius: 4px; }"
+            )
+            self.setProperty("randomFixed", True)
+        else:
+            self.setStyleSheet("")
+            self.setProperty("randomFixed", False)
+        self.setToolTip(tip)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            mods = event.modifiers()
+            if (mods & QtCore.Qt.KeyboardModifier.ControlModifier) and (
+                mods & QtCore.Qt.KeyboardModifier.AltModifier
+            ):
+                self.toggle_random_fixed()
+                event.accept()
+                return
+        super().mousePressEvent(event)
 
     def load_input_face(self):
         main_window = self.main_window
@@ -1457,6 +1515,13 @@ class InputFaceCardButton(CardButton):
         self.popMenu.addAction(self.open_path_action)
         self.popMenu.addSeparator()
 
+        self.random_fixed_action = QtGui.QAction(
+            "Toggle fixed for random (Ctrl+Alt+Left-click)", self
+        )
+        self.random_fixed_action.triggered.connect(lambda: self.toggle_random_fixed())
+        self.popMenu.addAction(self.random_fixed_action)
+        self.popMenu.addSeparator()
+
         current_face_size = getattr(
             self.main_window, "face_thumbnail_button_size", None
         )
@@ -1501,6 +1566,12 @@ class InputFaceCardButton(CardButton):
         self.create_embed_action.setEnabled(not scan_active)
         self.remove_action.setEnabled(not scan_active)
         self.delete_action.setEnabled(not scan_active)
+        self.random_fixed_action.setText(
+            "Unpin fixed for random (Ctrl+Alt+Left-click)"
+            if self.random_fixed
+            else "Pin fixed for random (Ctrl+Alt+Left-click)"
+        )
+        self.random_fixed_action.setEnabled(not scan_active)
         self.small_thumbnails_action.setChecked(current_face_size == (70, 70))
         self.large_thumbnails_action.setChecked(current_face_size == (96, 96))
         self.clear_all_faces_action.setEnabled(

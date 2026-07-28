@@ -113,6 +113,21 @@ def set_up_video_seek_line_edit(main_window: "MainWindow"):
     )  # Restrict input to numbers
 
 
+ARROW_SEEK_SECONDS = 20.0
+
+
+def _timeline_fps(main_window: "MainWindow") -> float:
+    """FPS used for timeline time display and second-based seeking."""
+    fps = float(getattr(main_window.video_processor, "fps", 0.0) or 0.0)
+    vp = getattr(main_window, "video_processor", None)
+    source_fps = 0.0
+    if vp is not None:
+        source_fps = float(getattr(vp, "recording_source_fps", 0.0) or 0.0)
+    if getattr(vp, "_used_ffmpeg_cap", False) and source_fps > 0:
+        return source_fps
+    return fps if fps > 0 else 30.0
+
+
 def update_video_time_line_edit(
     main_window: "MainWindow", current_frame_number: int | None = None
 ):
@@ -125,18 +140,8 @@ def update_video_time_line_edit(
             getattr(main_window.videoSeekSlider, "value", lambda: 0)()
         )
 
-    fps = float(getattr(main_window.video_processor, "fps", 0.0) or 0.0)
-    vp = getattr(main_window, "video_processor", None)
-    source_fps = None
-    if vp is not None:
-        source_fps = float(getattr(vp, "recording_source_fps", 0.0) or 0.0)
-    if getattr(vp, "_used_ffmpeg_cap", False) and source_fps and source_fps > 0:
-        fps_to_use = source_fps
-    else:
-        fps_to_use = fps
-    total_seconds = (
-        max(0.0, float(current_frame_number) / fps_to_use) if fps_to_use > 0 else 0.0
-    )
+    fps_to_use = _timeline_fps(main_window)
+    total_seconds = max(0.0, float(current_frame_number) / fps_to_use)
     minutes = int(total_seconds // 60)
     seconds = int(total_seconds % 60)
     video_time_line_edit.setText(f"{minutes:02d}:{seconds:02d}")
@@ -403,10 +408,26 @@ def add_video_slider_marker(main_window: "MainWindow"):
             main_window.videoSeekSlider,
         )
     else:
+        # Deepcopy both parameters and control to guarantee total memory
+        # isolation and prevent state bleeding across timeline boundaries.
+        control_snapshot = copy.deepcopy(main_window.control)
+
+        # Remove environment/output specific keys from the snapshot.
+        # These settings dictate global I/O state for the batch/render session
+        # and must never be tied to specific timeline frames.
+        keys_to_exclude = [
+            "OutputMediaFolder",
+            "OutputToTargetLocationToggle",
+            "PreserveOutputDirectoryStructureToggle",
+            "ClusterOutputBySourceToggle",
+        ]
+        for key in keys_to_exclude:
+            control_snapshot.pop(key, None)
+
         add_marker(
             main_window,
             copy.deepcopy(main_window.parameters),
-            copy.deepcopy(main_window.control),
+            control_snapshot,
             current_position,
         )
 
@@ -1555,6 +1576,40 @@ def adjust_sequential_input_rotate_offset(main_window: "MainWindow", delta: int)
     common_widget_actions.update_control(main_window, key, newv)
 
 
+def reshuffle_random_target_match(main_window: "MainWindow") -> bool:
+    """Clear Swap-all-by-random sticky assignments so the next frame re-rolls inputs.
+
+    Input faces marked fixed (Ctrl+Alt+Left-click) keep their current sticky
+    assignments. Returns True when a reshuffle was performed (Random mode must
+    be active).
+    """
+    if not main_window.control.get("RandomTargetMatchEnableToggle", False):
+        return False
+    if main_window.control.get("SwapOnlyBestMatchEnableToggle", False):
+        return False
+
+    from app.helpers.swap_all_match import pinned_checked_input_indices
+
+    pinned = pinned_checked_input_indices(main_window)
+    reset = getattr(
+        main_window.video_processor, "reset_sequential_rotate_stabilizer", None
+    )
+    if callable(reset):
+        reset(preserve_input_indices=pinned or None)
+
+    common_widget_actions.refresh_frame(main_window)
+    from app.ui.widgets.actions import preview_notification_actions
+
+    if pinned:
+        msg = (
+            f"Random assignments reshuffled (X) — kept {len(pinned)} fixed"
+        )
+    else:
+        msg = "Random face assignments reshuffled (X)"
+    preview_notification_actions.show_preview_notification(main_window, msg)
+    return True
+
+
 def advance_video_slider_by_n_frames(main_window: "MainWindow", n=None):
     """
     Advances the seek slider forward by *n* frames (clamped to the last frame).
@@ -1644,6 +1699,61 @@ def rewind_video_slider_by_n_frames(main_window: "MainWindow", n=None):
         main_window.video_processor.process_current_frame(
             synchronous=is_single_frame_step
         )
+
+
+def resume_playback_after_seek_if_applicable(main_window: "MainWindow") -> None:
+    """
+    Restart playback after a seek when a caller marked that playback should resume.
+
+    Callers set `_resume_playback_after_seek_pending` (or `_seek_gesture_had_playback`
+    for drag seeks) before invoking this. No-op when neither flag is set.
+    """
+    gesture = getattr(main_window, "_seek_gesture_had_playback", False)
+    pending = getattr(main_window, "_resume_playback_after_seek_pending", False)
+    should_resume = gesture or pending
+    main_window._seek_gesture_had_playback = False
+    main_window._resume_playback_after_seek_pending = False
+    if not should_resume:
+        return
+    vp = main_window.video_processor
+    if vp.file_type != "video" or vp.processing:
+        return
+    if not vp.media_capture or not vp.media_capture.isOpened():
+        return
+    if vp.current_frame_number >= vp.max_frame_number:
+        return
+    main_window.buttonMediaPlay.blockSignals(True)
+    main_window.buttonMediaPlay.setChecked(True)
+    main_window.buttonMediaPlay.blockSignals(False)
+    play_video(main_window, True)
+
+
+def seek_video_by_seconds(main_window: "MainWindow", seconds: float) -> None:
+    """
+    Seek forward/backward by *seconds* of timeline time.
+
+    If the video was playing (and not recording), playback resumes after the seek.
+    """
+    video_processor = main_window.video_processor
+    if not video_processor.media_capture:
+        return
+
+    frames = max(1, int(round(abs(float(seconds)) * _timeline_fps(main_window))))
+    should_resume = (
+        video_processor.file_type == "video"
+        and video_processor.processing
+        and not video_processor.recording
+        and not getattr(video_processor, "is_processing_segments", False)
+    )
+
+    if seconds >= 0:
+        advance_video_slider_by_n_frames(main_window, n=frames)
+    else:
+        rewind_video_slider_by_n_frames(main_window, n=frames)
+
+    if should_resume:
+        main_window._resume_playback_after_seek_pending = True
+        resume_playback_after_seek_if_applicable(main_window)
 
 
 def delete_all_markers(main_window: "MainWindow"):
@@ -2388,8 +2498,22 @@ def update_parameters_and_control_from_marker(
     """
     # Find marker only at the *exact* new position
     marker_data = _get_marker_data_for_position(main_window, new_position)
-    # Save the Global Marker Track toggle
-    current_track_markers_value = main_window.control.get("TrackMarkersToggle", False)
+
+    # Protect global environment variables from being overwritten by older markers.
+    # This acts as a shield against previously saved project files that might still
+    # contain these keys, preventing silent directory swaps mid-render.
+    protected_keys = [
+        "TrackMarkersToggle",
+        "OutputMediaFolder",
+        "OutputToTargetLocationToggle",
+        "PreserveOutputDirectoryStructureToggle",
+        "ClusterOutputBySourceToggle",
+    ]
+    saved_protected_state = {
+        key: main_window.control[key]
+        for key in protected_keys
+        if key in main_window.control
+    }
 
     if marker_data:
         # --- A marker was found, load its parameters AND controls ---
@@ -2423,8 +2547,10 @@ def update_parameters_and_control_from_marker(
 
     # If no marker_data is found, DO NOTHING.
     # This preserves the user's current settings (manual or from a previous marker).
-    # Re-apply the saved Global Marker Track toggle
-    main_window.control["TrackMarkersToggle"] = current_track_markers_value
+
+    # Re-apply the protected global keys so they remain untouched during playback/recording
+    for key, value in saved_protected_state.items():
+        main_window.control[key] = value
 
 
 def update_widget_values_from_markers(main_window: "MainWindow", new_position: int):

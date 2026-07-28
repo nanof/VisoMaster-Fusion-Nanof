@@ -19,6 +19,7 @@ import torch
 from app.processors.perform_recast import (  # noqa: E402
     NUM_KP,
     MODE_ENHANCEMENT,
+    MODE_RELATIVE,
     MODE_REPLACEMENT,
     PerformRecast,
 )
@@ -320,6 +321,33 @@ class TestComposeDrivenKeypoints:
             info, exp_d, mode=MODE_REPLACEMENT, factor=1.0
         )
         assert x_d.shape == (1, NUM_KP, 3)
+
+    def test_relative_mode_factor_zero_equals_source(self):
+        recast = _make_recast()
+        info = recast.build_source_info(_torch_motion(4))
+        exp_d = _torch_motion(7)["exp"]
+        x_d = recast.compose_driven_keypoints(
+            info,
+            exp_d,
+            mode=MODE_RELATIVE,
+            factor=0.0,
+            structural_blend=0.0,
+        )
+        assert torch.allclose(x_d, info["x_s"], atol=1e-5)
+
+    def test_relative_mode_returns_correct_shape(self):
+        recast = _make_recast()
+        info = recast.build_source_info(_torch_motion(4))
+        exp_d = _torch_motion(7)["exp"]
+        x_d = recast.compose_driven_keypoints(
+            info,
+            exp_d,
+            mode=MODE_RELATIVE,
+            factor=1.0,
+            structural_blend=0.5,
+        )
+        assert x_d.shape == (1, NUM_KP, 3)
+        assert not torch.allclose(x_d, info["x_s"], atol=1e-4)
 
     def test_unknown_mode_raises(self):
         recast = _make_recast()

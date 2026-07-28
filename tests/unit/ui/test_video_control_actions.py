@@ -1607,3 +1607,171 @@ def test_single_frame_step_calls_process_current_frame_with_valid_kwargs(
     assert len(process_calls) == 2
     assert process_calls[0] == {"synchronous": True}
     assert process_calls[1] == {"synchronous": True}
+
+
+def test_seek_video_by_seconds_advances_frames_and_resumes_playback(
+    video_actions_env, monkeypatch
+):
+    class _Slider:
+        def __init__(self, value: int = 100):
+            self._value = value
+
+        def value(self) -> int:
+            return self._value
+
+        def setValue(self, value: int) -> None:
+            self._value = value
+
+    class _Capture:
+        def isOpened(self) -> bool:
+            return True
+
+    play_calls: list[bool] = []
+
+    video_processor = SimpleNamespace(
+        media_capture=_Capture(),
+        max_frame_number=10_000,
+        current_frame_number=100,
+        file_type="video",
+        processing=True,
+        recording=False,
+        is_processing_segments=False,
+        fps=25.0,
+        recording_source_fps=25.0,
+        _used_ffmpeg_cap=False,
+        process_current_frame=MagicMock(),
+    )
+    play_button = SimpleNamespace(
+        blockSignals=MagicMock(),
+        setChecked=MagicMock(),
+    )
+    main_window = SimpleNamespace(
+        control={},
+        videoSeekSlider=_Slider(100),
+        video_processor=video_processor,
+        buttonMediaPlay=play_button,
+        view_face_compare_enabled=False,
+        view_face_mask_enabled=False,
+    )
+
+    monkeypatch.setattr(
+        video_actions_env.module,
+        "play_video",
+        lambda mw, checked: play_calls.append(checked),
+    )
+
+    # Seeking stops playback via on_change_video_seek_slider in the real app;
+    # here setValue does not stop processing, so simulate that boundary.
+    original_set_value = main_window.videoSeekSlider.setValue
+
+    def _set_value_and_stop(value: int) -> None:
+        original_set_value(value)
+        video_processor.processing = False
+        video_processor.current_frame_number = value
+
+    main_window.videoSeekSlider.setValue = _set_value_and_stop
+
+    video_actions_env.module.seek_video_by_seconds(main_window, 20.0)
+
+    assert main_window.videoSeekSlider.value() == 100 + 20 * 25
+    assert play_calls == [True]
+    play_button.setChecked.assert_called_once_with(True)
+
+
+def test_seek_video_by_seconds_does_not_resume_when_paused(video_actions_env, monkeypatch):
+    class _Slider:
+        def __init__(self, value: int = 1000):
+            self._value = value
+
+        def value(self) -> int:
+            return self._value
+
+        def setValue(self, value: int) -> None:
+            self._value = value
+
+    play_video = MagicMock()
+    monkeypatch.setattr(video_actions_env.module, "play_video", play_video)
+
+    video_processor = SimpleNamespace(
+        media_capture=object(),
+        max_frame_number=10_000,
+        current_frame_number=1000,
+        file_type="video",
+        processing=False,
+        recording=False,
+        is_processing_segments=False,
+        fps=30.0,
+        recording_source_fps=30.0,
+        _used_ffmpeg_cap=False,
+        process_current_frame=MagicMock(),
+    )
+    main_window = SimpleNamespace(
+        control={},
+        videoSeekSlider=_Slider(1000),
+        video_processor=video_processor,
+        buttonMediaPlay=SimpleNamespace(
+            blockSignals=MagicMock(), setChecked=MagicMock()
+        ),
+        view_face_compare_enabled=False,
+        view_face_mask_enabled=False,
+    )
+
+    video_actions_env.module.seek_video_by_seconds(main_window, -20.0)
+
+    assert main_window.videoSeekSlider.value() == 1000 - 20 * 30
+    play_video.assert_not_called()
+
+def test_reshuffle_random_target_match_resets_when_random_mode_on(
+    video_actions_env, monkeypatch
+):
+    reset = MagicMock()
+    refresh = MagicMock()
+    notify = MagicMock()
+    monkeypatch.setattr(
+        video_actions_env.common_widget_actions, "refresh_frame", refresh
+    )
+
+    import types
+
+    fake_preview = types.ModuleType("app.ui.widgets.actions.preview_notification_actions")
+    fake_preview.show_preview_notification = notify
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "app.ui.widgets.actions.preview_notification_actions",
+        fake_preview,
+    )
+
+    # Ensure real helper module is importable (env stubs app.helpers).
+    import app.helpers.swap_all_match as swap_all_match
+
+    monkeypatch.setitem(
+        __import__("sys").modules, "app.helpers.swap_all_match", swap_all_match
+    )
+    monkeypatch.setattr(
+        swap_all_match, "pinned_checked_input_indices", lambda _mw: {1}
+    )
+
+    main_window = SimpleNamespace(
+        control={
+            "RandomTargetMatchEnableToggle": True,
+            "SwapOnlyBestMatchEnableToggle": False,
+        },
+        video_processor=SimpleNamespace(reset_sequential_rotate_stabilizer=reset),
+        input_faces={},
+    )
+
+    assert video_actions_env.module.reshuffle_random_target_match(main_window) is True
+    reset.assert_called_once_with(preserve_input_indices={1})
+    refresh.assert_called_once_with(main_window)
+    notify.assert_called_once()
+    assert "fixed" in notify.call_args[0][1].lower()
+
+
+def test_reshuffle_random_target_match_noop_when_mode_off(video_actions_env):
+    reset = MagicMock()
+    main_window = SimpleNamespace(
+        control={"RandomTargetMatchEnableToggle": False},
+        video_processor=SimpleNamespace(reset_sequential_rotate_stabilizer=reset),
+    )
+    assert video_actions_env.module.reshuffle_random_target_match(main_window) is False
+    reset.assert_not_called()

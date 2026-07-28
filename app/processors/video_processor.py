@@ -46,6 +46,11 @@ from app.ui.widgets.settings_layout_data import CAMERA_BACKENDS
 import app.helpers.miscellaneous as misc_helpers
 from app.helpers.cuda_timeline import nvtx_range
 from app.helpers.sequential_rotate_stabilizer import SequentialRotateStabilizer
+from app.helpers.swap_all_match import (
+    pinned_indices_from_checked,
+    swap_all_assignment_mode,
+    swap_all_match_active,
+)
 from app.helpers.screen_capture import (
     create_screen_capture_from_control,
     mss_available,
@@ -123,6 +128,7 @@ _FEEDER_PLAYBACK_LIVE_CONTROL_KEYS = frozenset(
         "KPSEmaAlphaSlider",
         "RecognitionModelSelection",
         "SequentialTargetMatchEnableToggle",
+        "RandomTargetMatchEnableToggle",
         "SequentialStabilizeWithoutTrackingToggle",
         "SequentialInputRotateOffsetSlider",
     }
@@ -1729,9 +1735,13 @@ class VideoProcessor(QObject):
             if frame_edits is not None:
                 frame_edits.reset_recast_driver_reference()
 
-    def reset_sequential_rotate_stabilizer(self) -> None:
+    def reset_sequential_rotate_stabilizer(
+        self, *, preserve_input_indices: set[int] | frozenset[int] | None = None
+    ) -> None:
         with self._sequential_rotate_lock:
-            self._sequential_rotate_stabilizer.reset()
+            self._sequential_rotate_stabilizer.reset(
+                preserve_input_indices=preserve_input_indices
+            )
 
     def _sequential_rotate_iou(self, box_a: numpy.ndarray, box_b: numpy.ndarray) -> float:
         return float(
@@ -1757,9 +1767,7 @@ class VideoProcessor(QObject):
         local_control: dict,
     ) -> list[int] | None:
         """Assign input indices on the ordered detection thread (before pool workers)."""
-        sequential_active = local_control.get(
-            "SequentialTargetMatchEnableToggle", False
-        ) and not local_control.get("SwapOnlyBestMatchEnableToggle", False)
+        sequential_active = swap_all_match_active(local_control)
         if not sequential_active:
             return None
         if not isinstance(bboxes, numpy.ndarray) or bboxes.shape[0] == 0:
@@ -1789,6 +1797,8 @@ class VideoProcessor(QObject):
                 memory_without_tracking=local_control.get(
                     "SequentialStabilizeWithoutTrackingToggle", True
                 ),
+                assignment_mode=swap_all_assignment_mode(local_control),
+                pinned_input_indices=pinned_indices_from_checked(checked),
             )
         out = [-1] * n
         for i, stub in enumerate(det_stubs):

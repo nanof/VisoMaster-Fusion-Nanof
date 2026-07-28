@@ -33,6 +33,9 @@ def _load_main_ui_module():
             Key_A=7,
             Key_Z=8,
             Key_Space=9,
+            Key_Left=10,
+            Key_Right=11,
+            Key_X=12,
         ),
         Signal=lambda *args, **kwargs: object(),
         Slot=lambda *args, **kwargs: lambda func: func,
@@ -85,6 +88,9 @@ def _load_main_ui_module():
             toggle_theatre_mode=MagicMock(),
             advance_video_slider_by_n_frames=MagicMock(),
             rewind_video_slider_by_n_frames=MagicMock(),
+            seek_video_by_seconds=MagicMock(),
+            reshuffle_random_target_match=MagicMock(return_value=False),
+            ARROW_SEEK_SECONDS=20.0,
         ),
         "app.ui.widgets.actions.filter_actions": _module(
             "app.ui.widgets.actions.filter_actions"
@@ -98,11 +104,23 @@ def _load_main_ui_module():
         "app.ui.widgets.actions.graphics_view_actions": _module(
             "app.ui.widgets.actions.graphics_view_actions"
         ),
+        "app.ui.widgets.actions.preview_notification_actions": _module(
+            "app.ui.widgets.actions.preview_notification_actions"
+        ),
+        "app.ui.widgets.actions.transcode_actions": _module(
+            "app.ui.widgets.actions.transcode_actions"
+        ),
+        "app.ui.widgets.actions.pipeline_profile_actions": _module(
+            "app.ui.widgets.actions.pipeline_profile_actions"
+        ),
         "app.ui.widgets.actions.job_manager_actions": _module(
             "app.ui.widgets.actions.job_manager_actions"
         ),
         "app.ui.widgets.actions.preset_actions": _module(
             "app.ui.widgets.actions.preset_actions"
+        ),
+        "app.ui.widgets.actions.gpu_settings_actions": _module(
+            "app.ui.widgets.actions.gpu_settings_actions"
         ),
         "app.ui.widgets.advanced_embedding_editor": _module(
             "app.ui.widgets.advanced_embedding_editor",
@@ -154,6 +172,12 @@ def _load_main_ui_module():
                 window_title="VisoMaster"
             ),
         ),
+        "app.helpers.input_face_favorites_storage": _module(
+            "app.helpers.input_face_favorites_storage"
+        ),
+        "app.helpers.detector_internal_size_ui": _module(
+            "app.helpers.detector_internal_size_ui"
+        ),
         "app.helpers.miscellaneous": _module(
             "app.helpers.miscellaneous",
             DFMModelManager=type("DFMModelManager", (), {}),
@@ -172,16 +196,56 @@ def _load_main_ui_module():
         ),
     }
 
+    # Load real parent packages first (namespace packages), then attach stubs as attrs.
+    for parent_name in (
+        "app",
+        "app.ui",
+        "app.ui.core",
+        "app.ui.widgets",
+        "app.ui.widgets.actions",
+        "app.helpers",
+        "app.processors",
+    ):
+        if parent_name not in sys.modules:
+            importlib.import_module(parent_name)
+
     saved_modules = {
         name: sys.modules.get(name) for name in [*stub_modules, "app.ui.main_ui"]
     }
+    saved_package_attrs: dict[tuple[str, str], tuple[bool, object | None]] = {}
+    for module_name in stub_modules:
+        parent_name, _, attr_name = module_name.rpartition(".")
+        if not parent_name:
+            continue
+        parent_module = sys.modules.get(parent_name)
+        had_attr = parent_module is not None and hasattr(parent_module, attr_name)
+        saved_package_attrs[(parent_name, attr_name)] = (
+            had_attr,
+            getattr(parent_module, attr_name) if had_attr else None,
+        )
 
     try:
         for name, module in stub_modules.items():
             sys.modules[name] = module
+        for module_name, module in stub_modules.items():
+            parent_name, _, attr_name = module_name.rpartition(".")
+            parent_module = sys.modules.get(parent_name)
+            if parent_module is not None and attr_name:
+                setattr(parent_module, attr_name, module)
         sys.modules.pop("app.ui.main_ui", None)
         return importlib.import_module("app.ui.main_ui")
     finally:
+        for (parent_name, attr_name), (
+            had_attr,
+            original_attr,
+        ) in saved_package_attrs.items():
+            parent_module = sys.modules.get(parent_name)
+            if parent_module is None:
+                continue
+            if had_attr:
+                setattr(parent_module, attr_name, original_attr)
+            elif hasattr(parent_module, attr_name):
+                delattr(parent_module, attr_name)
         for name, original in saved_modules.items():
             if original is None:
                 sys.modules.pop(name, None)
@@ -227,3 +291,52 @@ def test_escape_keeps_existing_fullscreen_behavior_when_combined_mode_is_disable
 
     fullscreen_toggle.assert_called_once_with(main_window)
     theatre_toggle.assert_not_called()
+
+
+def test_arrow_keys_seek_twenty_seconds_when_focus_is_not_text_input():
+    main_ui = _load_main_ui_module()
+    seek = MagicMock()
+    main_ui.video_control_actions.seek_video_by_seconds = seek
+    main_ui.video_control_actions.ARROW_SEEK_SECONDS = 20.0
+
+    main_window = SimpleNamespace(
+        _focus_blocks_media_arrow_seek=staticmethod(lambda: False),
+    )
+
+    main_ui.MainWindow._on_media_arrow_seek_shortcut(main_window, -20.0)
+    main_ui.MainWindow._on_media_arrow_seek_shortcut(main_window, 20.0)
+
+    assert seek.call_args_list == [
+        ((main_window, -20.0),),
+        ((main_window, 20.0),),
+    ]
+
+
+def test_arrow_keys_do_not_seek_when_focus_is_text_input():
+    main_ui = _load_main_ui_module()
+    seek = MagicMock()
+    main_ui.video_control_actions.seek_video_by_seconds = seek
+
+    main_window = SimpleNamespace(
+        _focus_blocks_media_arrow_seek=staticmethod(lambda: True),
+    )
+
+    main_ui.MainWindow._on_media_arrow_seek_shortcut(main_window, 20.0)
+
+    seek.assert_not_called()
+
+def test_x_key_reshuffles_random_assignments():
+    main_ui = _load_main_ui_module()
+    reshuffle = MagicMock(return_value=True)
+    main_ui.video_control_actions.reshuffle_random_target_match = reshuffle
+
+    main_window = SimpleNamespace()
+    event = SimpleNamespace(
+        key=lambda: main_ui.QtCore.Qt.Key_X,
+        accept=MagicMock(),
+    )
+
+    main_ui.MainWindow.keyPressEvent(main_window, event)
+
+    reshuffle.assert_called_once_with(main_window)
+    event.accept.assert_called_once()

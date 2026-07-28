@@ -3,11 +3,41 @@
 from __future__ import annotations
 
 import math
+import random
 from typing import Callable
 
 import numpy as np
 
 IoUFn = Callable[[np.ndarray, np.ndarray], float]
+
+
+def pick_new_input_index(
+    n_in: int,
+    *,
+    assignment_mode: str,
+    spatial_fallback: int,
+    used: set[int] | None = None,
+    rng: random.Random | None = None,
+) -> int:
+    """Choose an input index for a newly seen face.
+
+    * ``index``: prefer an unused input, else ``spatial_fallback % n_in``.
+    * ``random``: uniform pick among unused inputs; if none left, among all.
+    """
+    if n_in <= 0:
+        return 0
+    if assignment_mode == "random":
+        picker = rng if rng is not None else random
+        if used is not None:
+            available = [j for j in range(n_in) if j not in used]
+            if available:
+                return int(picker.choice(available))
+        return int(picker.randrange(n_in))
+    if used is not None:
+        cand = next((j for j in range(n_in) if j not in used), None)
+        if cand is not None:
+            return int(cand)
+    return int(spatial_fallback) % n_in
 
 
 def rr_spatial_order_key(
@@ -63,6 +93,8 @@ def rr_greedy_assign_from_memory(
     *,
     iou_floor: float = 0.08,
     centroid_soft_factor: float = 1.35,
+    assignment_mode: str = "index",
+    rng: random.Random | None = None,
 ) -> tuple[list[int], list[bool]]:
     """Greedy IoU then centroid match vs memory slots; stable fallbacks for leftovers.
 
@@ -132,9 +164,13 @@ def rr_greedy_assign_from_memory(
             used_inp_rr.add(int(prev_inp[best_mj]) % n_in)
             continue
 
-        cand = next((j for j in range(n_in) if j not in used_inp_rr), None)
-        if cand is None:
-            cand = int(spatial_rank[ci]) % n_in
+        cand = pick_new_input_index(
+            n_in,
+            assignment_mode=assignment_mode,
+            spatial_fallback=int(spatial_rank[ci]),
+            used=used_inp_rr,
+            rng=rng,
+        )
         curr_assign[ci] = cand
         used_inp_rr.add(int(cand) % n_in)
 

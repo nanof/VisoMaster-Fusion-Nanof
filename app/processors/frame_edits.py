@@ -1013,6 +1013,9 @@ class FrameEdits:
             feather_amount = float(
                 parameters.get("RecastPasteBackFeatherDecimalSlider", 0.0)
             )
+            structural_blend = float(
+                parameters.get("RecastRelativeStructuralBlendDecimalSlider", 0.50)
+            )
 
             # Dedicated Recast crop scale, independent of the shared expression
             # crop used by Simple/Advanced (LivePortrait) modes. Falls back to
@@ -1137,6 +1140,7 @@ class FrameEdits:
                 eye_driving_weight=eye_weight,
                 lip_driving_weight=lip_weight,
                 exp_ref=compose_exp_ref,
+                structural_blend=structural_blend,
             )
             out = recast.warp_decode(f_s, source_info["x_s"], x_d_i)
             out = torch.squeeze(out)

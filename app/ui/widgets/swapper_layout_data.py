@@ -115,16 +115,27 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "label": "Swap all by index",
             "default": False,
             "data_type": "control",
-            "help": "No Find Faces required. Uses only checked Input Faces in list order: detection 0 gets input 0, detection 1 gets input 1, and if there are more detections than inputs, wraps to input 0 again (round-robin). Cosine similarity is not used. When Face Tracking is on and ByteTrack IDs are valid and unique, assignments are further stabilized per track. IoU + remembered bounding boxes (TTL ~90 frames, ghost slots when a face briefly disappears) keep the same input on the same physical face when 'Stabilize without Face Tracking' is on; turn that off for pure per-frame left-to-right round-robin with no memory (can reshuffle when faces appear/disappear). Large timeline jumps or backward seeks clear stabilization state. Swap/restorer/mask settings use the same parameter set as normal swap: the selected Find Faces card if any, otherwise the current face-parameter panel (current_widget_parameters). Recognition uses the active swapper's ArcFace model for the target embedding. Ignored when 'Swap Input Face only once' is enabled (Settings → Swap settings). Use 'Input rotate start offset' (or window keys comma / full stop) to shift which checked input is treated as index 0 for the first detection.",
+            "exec_function": control_actions.handle_swap_all_match_mode_toggle,
+            "exec_function_args": ["index"],
+            "help": "No Find Faces required. Uses only checked Input Faces in list order: detection 0 gets input 0, detection 1 gets input 1, and if there are more detections than inputs, wraps to input 0 again (round-robin). Cosine similarity is not used. When Face Tracking is on and ByteTrack IDs are valid and unique, assignments are further stabilized per track. IoU + remembered bounding boxes (TTL ~90 frames, ghost slots when a face briefly disappears) keep the same input on the same physical face when 'Stabilize without Face Tracking' is on; turn that off for pure per-frame left-to-right round-robin with no memory (can reshuffle when faces appear/disappear). Large timeline jumps or backward seeks clear stabilization state. Swap/restorer/mask settings use the same parameter set as normal swap: the selected Find Faces card if any, otherwise the current face-parameter panel (current_widget_parameters). Recognition uses the active swapper's ArcFace model for the target embedding. Ignored when 'Swap Input Face only once' is enabled (Settings → Swap settings). Use 'Input rotate start offset' (or window keys comma / full stop) to shift which checked input is treated as index 0 for the first detection. Mutually exclusive with 'Swap all by random'.",
+        },
+        "RandomTargetMatchEnableToggle": {
+            "level": 1,
+            "label": "Swap all by random",
+            "default": False,
+            "data_type": "control",
+            "exec_function": control_actions.handle_swap_all_match_mode_toggle,
+            "exec_function_args": ["random"],
+            "help": "Same pipeline as 'Swap all by index' (no Find Faces, checked Input Faces only, no cosine matching), but each new physical face is assigned a random checked input that is not already used by another face in the frame (no repeats while enough inputs remain; if there are more detections than checked inputs, leftover faces may reuse). Existing faces keep their assignment while tracking/stabilization can match them. Press X to reshuffle all random assignments. Ctrl+Alt+Left-click an Input Face card (or use its context menu) to mark it fixed so X does not reassign it. Mutually exclusive with 'Swap all by index'. Ignored when 'Swap Input Face only once' is enabled.",
         },
         "SequentialStabilizeWithoutTrackingToggle": {
             "level": 2,
             "label": "Stabilize without Face Tracking",
             "default": True,
             "data_type": "control",
-            "parentToggle": "SequentialTargetMatchEnableToggle",
+            "parentToggle": "SequentialTargetMatchEnableToggle | RandomTargetMatchEnableToggle",
             "requiredToggleValue": True,
-            "help": "When Face Tracking is off, still match detections to recent positions (IoU / centroid, same memory budget as with ByteTrack) so the same person keeps the same checked input when faces briefly drop out or the count changes. Disable only if you prefer strict per-frame spatial round-robin with no temporal memory (may avoid rare wrong locks in chaotic scenes at the cost of shuffling).",
+            "help": "When Face Tracking is off, still match detections to recent positions (IoU / centroid, same memory budget as with ByteTrack) so the same person keeps the same checked input when faces briefly drop out or the count changes. Disable only if you prefer strict per-frame spatial round-robin/random with no temporal memory (may avoid rare wrong locks in chaotic scenes at the cost of shuffling).",
         },
         "SequentialInputRotateOffsetSlider": {
             "level": 2,
@@ -136,7 +147,7 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "data_type": "control",
             "parentToggle": "SequentialTargetMatchEnableToggle",
             "requiredToggleValue": True,
-            "help": "Adds a circular shift to input assignment: effective input index is (assignment + offset) modulo number of checked inputs. Example with 3 inputs: offset 1 maps the first detection (by stabilized order) to the second checked face. Window keys , (comma) and . (full stop) decrease/increase this value with wraparound — same physical keys on ES and US layouts; they do nothing if this slider is hidden or disabled.",
+            "help": "Adds a circular shift to input assignment: effective input index is (assignment + offset) modulo number of checked inputs. Example with 3 inputs: offset 1 maps the first detection (by stabilized order) to the second checked face. Window keys , (comma) and . (full stop) decrease/increase this value with wraparound — same physical keys on ES and US layouts; they do nothing if this slider is hidden or disabled. Only applies to 'Swap all by index'.",
         },
         "PreSwapSharpnessDecimalSlider": {
             "level": 1,
@@ -212,7 +223,7 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "help": "Mix equalized L with original L (1 = full CLAHE).",
         },
     },
-    "Swap strenght and likeness": {
+    "Swap strength and likeness": {
         "StrengthEnableToggle": {
             "level": 1,
             "label": "Strength",

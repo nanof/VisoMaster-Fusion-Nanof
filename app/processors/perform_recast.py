@@ -46,6 +46,7 @@ SPADE_MODEL = "PerformRecastSpadeGenerator"
 # Mapping of the user-facing mode label -> upstream inference_mode integer.
 MODE_REPLACEMENT = "Replacement"  # inference_mode 1
 MODE_ENHANCEMENT = "Enhancement"  # inference_mode 2
+MODE_RELATIVE = "Relative"  # Relative mode
 
 
 class PerformRecast:
@@ -433,13 +434,15 @@ class PerformRecast:
         eye_driving_weight: float = 0.7,
         lip_driving_weight: float = 0.8,
         exp_ref: torch.Tensor | None = None,
+        structural_blend: float = 0.50,
     ) -> torch.Tensor:
         """Build the driven keypoints ``x_d_i`` fed to the warping module.
 
         Args:
             source_info: output of :meth:`build_source_info` (the swapped face).
             exp_d: driving expression (1,N,3) from the original face's motion.
-            mode: ``"Replacement"`` (upstream mode 1) or ``"Enhancement"`` (mode 2).
+            mode: ``"Replacement"`` (upstream mode 1), ``"Enhancement"`` (mode 2),
+                or ``"Relative"`` (mode 3).
             factor: expression strength. 0 keeps the source expression, 1 applies
                 the full transfer; values >1 exaggerate it.
             region: ``"all"`` | ``"eyes"`` | ``"lips"`` — restrict where the
@@ -498,6 +501,64 @@ class PerformRecast:
             )
             # Interpolate from source toward the modulated target by `factor`.
             new_exp = exp_s + factor * (modulated - exp_s)
+
+        elif mode == MODE_RELATIVE:
+            ew = float(eye_driving_weight)
+            lw = float(lip_driving_weight)
+
+            # Build the new expression additively on top of the source.
+            new_exp = exp_s.clone()
+
+            # --- 1. MOUTH ANIMATION (Indices 44-46) ---
+            mouth_idx = list(range(44, 47))
+
+            s_mouth_center = exp_s[:, mouth_idx, :].mean(dim=1, keepdim=True)
+            d_mouth_center = exp_d[:, mouth_idx, :].mean(dim=1, keepdim=True)
+
+            # Only align X (horizontal) and Z (depth) axes.
+            # Aligning the Y axis cancels out the jaw drop.
+            pos_offset_mouth = s_mouth_center - d_mouth_center
+            pos_offset_mouth[..., 1] = 0.0
+
+            aligned_d_mouth = exp_d[:, mouth_idx, :] + pos_offset_mouth
+            mouth_delta = aligned_d_mouth - exp_s[:, mouth_idx, :]
+
+            new_exp[:, mouth_idx, :] = exp_s[:, mouth_idx, :] + (
+                mouth_delta * lw * factor
+            )
+
+            # --- 2. EYE ANIMATION (Indices 31-38) ---
+            eye_idx = list(range(31, 39))
+
+            s_eye_center = exp_s[:, eye_idx, :].mean(dim=1, keepdim=True)
+            d_eye_center = exp_d[:, eye_idx, :].mean(dim=1, keepdim=True)
+
+            pos_offset_eye = s_eye_center - d_eye_center
+            pos_offset_eye[..., 1] = 0.0
+
+            aligned_d_eye = exp_d[:, eye_idx, :] + pos_offset_eye
+            eye_delta = aligned_d_eye - exp_s[:, eye_idx, :]
+
+            new_exp[:, eye_idx, :] = exp_s[:, eye_idx, :] + (eye_delta * ew * factor)
+
+            # --- 3. STRUCTURAL BLEND (All remaining indices) ---
+            struct_idx = [i for i in range(49) if i not in (mouth_idx + eye_idx)]
+
+            s_head_center = exp_s.mean(dim=1, keepdim=True)
+            d_head_center = exp_d.mean(dim=1, keepdim=True)
+
+            pos_offset_struct = s_head_center - d_head_center
+
+            aligned_d_struct = exp_d[:, struct_idx, :] + pos_offset_struct
+            struct_delta = aligned_d_struct - exp_s[:, struct_idx, :]
+
+            blended_struct = exp_s[:, struct_idx, :] + (struct_delta * structural_blend)
+
+            # Rigidly lock Z-axis (skull depth) for the structure to preserve likeness.
+            blended_struct[..., 2] = exp_s[:, struct_idx, 2]
+
+            new_exp[:, struct_idx, :] = blended_struct
+
         elif mode == MODE_ENHANCEMENT:
             # ENHANCEMENT = keep the swapped face's own expression and ADD the
             # driver's expression delta relative to the first driver frame

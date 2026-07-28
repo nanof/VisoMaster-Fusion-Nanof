@@ -69,8 +69,15 @@ def test_recast_widgets_gated_on_recast_selection():
 
 def test_recast_mode_options_and_default():
     entry = FACE_EXPR["RecastModeSelection"]
-    assert entry["options"] == ["Enhancement", "Replacement"]
+    assert entry["options"] == ["Enhancement", "Replacement", "Relative"]
     assert entry["default"] in entry["options"]
+
+
+def test_recast_relative_structural_blend_slider_gated_on_relative_mode():
+    entry = FACE_EXPR["RecastRelativeStructuralBlendDecimalSlider"]
+    assert entry.get("parentSelection") == "RecastModeSelection"
+    assert entry.get("requiredSelectionValue") == "Relative"
+    assert float(entry["default"]) == 0.50
 
 
 def test_recast_region_options_and_default():

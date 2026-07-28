@@ -22,6 +22,7 @@ class GraphicsViewEventFilter(QtCore.QObject):
             graphics_view_actions.position_preview_overlay_labels(self.main_window)
         if event.type() == QtCore.QEvent.Type.MouseButtonPress:
             if event.button() == QtCore.Qt.MouseButton.LeftButton:
+                graphics_object.setFocus(QtCore.Qt.FocusReason.MouseFocusReason)
                 self.main_window.buttonMediaPlay.click()
                 # You can emit a signal or call another function here
                 return True  # Mark the event as handled
@@ -67,22 +68,7 @@ class VideoSeekSliderEventFilter(QtCore.QObject):
         self.main_window = main_window
 
     def eventFilter(self, slider, event):
-        if event.type() == QtCore.QEvent.Type.KeyPress:
-            if event.key() == QtCore.Qt.Key_Right:
-                # Force strictly 1 frame advance through our controlled pipeline
-                video_control_actions.advance_video_slider_by_n_frames(
-                    self.main_window, 1
-                )
-                return True  # Stop QT from applying default values
-
-            elif event.key() == QtCore.Qt.Key_Left:
-                # Force strictly 1 frame rewind through our controlled pipeline
-                video_control_actions.rewind_video_slider_by_n_frames(
-                    self.main_window, 1
-                )
-                return True  # Stop QT from applying default values
-
-        elif event.type() == QtCore.QEvent.Type.Wheel:
+        if event.type() == QtCore.QEvent.Type.Wheel:
             # Intercept mousewheel to use FrameSkipStepSlider logic
             delta = event.angleDelta().y()
             if delta > 0:
@@ -94,6 +80,7 @@ class VideoSeekSliderEventFilter(QtCore.QObject):
 
             return True  # Stop QT from applying default values
 
+        # Arrow keys: handled by MainWindow window-level shortcuts (±20s).
         # For other events, use the default behavior
         return super().eventFilter(slider, event)
 

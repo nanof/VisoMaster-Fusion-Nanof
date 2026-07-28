@@ -279,6 +279,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         # Initialize graphics frame to view frames
         self.scene = QtWidgets.QGraphicsScene()
         self.graphicsViewFrame.setScene(self.scene)
+        self.graphicsViewFrame.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
         # Event filter to start playing when clicking on frame
         graphics_event_filter = GraphicsViewEventFilter(
             self,
@@ -435,6 +436,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             partial(video_control_actions.on_slider_released, self)
         )
         video_control_actions.set_up_video_seek_slider(self)
+        self._setup_media_arrow_seek_shortcuts()
         self.frameAdvanceButton.clicked.connect(
             partial(video_control_actions.advance_video_slider_by_n_frames, self)
         )
@@ -1028,7 +1030,82 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.app_display_metadata = get_app_display_metadata(
             self.project_root_path, base_title
         )
-        self.setWindowTitle(self.app_display_metadata.window_title)
+        list_view_actions.apply_main_window_title_for_selected_media(self)
+
+    @staticmethod
+    def _focus_is_text_input() -> bool:
+        """True when keyboard focus is on a text/number field (arrows move the caret)."""
+        focus_widget = QtWidgets.QApplication.focusWidget()
+        if focus_widget is None:
+            return False
+        return isinstance(
+            focus_widget,
+            (
+                QtWidgets.QLineEdit,
+                QtWidgets.QTextEdit,
+                QtWidgets.QPlainTextEdit,
+                QtWidgets.QAbstractSpinBox,
+            ),
+        )
+
+    @staticmethod
+    def _focus_blocks_media_arrow_seek() -> bool:
+        """True when the focused widget needs Left/Right for its own navigation."""
+        focus_widget = QtWidgets.QApplication.focusWidget()
+        if focus_widget is None:
+            return False
+        if MainWindow._focus_is_text_input():
+            return True
+        if isinstance(
+            focus_widget,
+            (
+                QtWidgets.QAbstractItemView,
+                QtWidgets.QComboBox,
+                QtWidgets.QMenu,
+                QtWidgets.QMenuBar,
+            ),
+        ):
+            return True
+        # Parameter sliders use arrows to nudge values.
+        cls_name = type(focus_widget).__name__
+        if cls_name in (
+            "ParameterSlider",
+            "ParameterDecimalSlider",
+            "ParameterLineEdit",
+            "ParameterLineDecimalEdit",
+        ):
+            return True
+        return False
+
+    def _setup_media_arrow_seek_shortcuts(self) -> None:
+        """Window-level ←/→ seek so arrows work even when a child widget has focus.
+
+        ``keyPressEvent`` only runs if the focused widget does not consume the key
+        (lists/sliders usually do), so these shortcuts are required for reliable seek.
+        """
+        self._media_arrow_seek_shortcuts = []
+        for key, seconds in (
+            (
+                QtCore.Qt.Key_Left,
+                -video_control_actions.ARROW_SEEK_SECONDS,
+            ),
+            (
+                QtCore.Qt.Key_Right,
+                video_control_actions.ARROW_SEEK_SECONDS,
+            ),
+        ):
+            shortcut = QtGui.QShortcut(QtGui.QKeySequence(key), self)
+            shortcut.setContext(QtCore.Qt.ShortcutContext.WindowShortcut)
+            shortcut.setAutoRepeat(True)
+            shortcut.activated.connect(
+                partial(self._on_media_arrow_seek_shortcut, seconds)
+            )
+            self._media_arrow_seek_shortcuts.append(shortcut)
+
+    def _on_media_arrow_seek_shortcut(self, seconds: float) -> None:
+        if self._focus_blocks_media_arrow_seek():
+            return
+        video_control_actions.seek_video_by_seconds(self, seconds)
 
     def keyPressEvent(self, event):
         match event.key():
@@ -1049,6 +1126,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 video_control_actions.advance_video_slider_by_n_frames(self)
             case QtCore.Qt.Key_A:
                 video_control_actions.rewind_video_slider_by_n_frames(self)
+            case QtCore.Qt.Key_X:
+                if video_control_actions.reshuffle_random_target_match(self):
+                    event.accept()
+                    return
             case QtCore.Qt.Key_Z:
                 self.videoSeekSlider.setValue(0)
             case QtCore.Qt.Key_Space:

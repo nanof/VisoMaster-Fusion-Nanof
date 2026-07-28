@@ -1191,6 +1191,7 @@ def clear_all_target_media(main_window: "MainWindow") -> bool:
 
     main_window.target_videos.clear()
     main_window.selected_video_button = None
+    apply_main_window_title_for_selected_media(main_window)
     set_target_media_path_display(main_window, "")
     main_window.last_target_media_folder_path = ""
     main_window.placeholder_update_signal.emit(main_window.targetVideosList, False)
@@ -1555,8 +1556,9 @@ def apply_main_window_title_for_selected_media(main_window: "MainWindow") -> Non
     """Window title: app name (with optional git hash) plus selected target media filename."""
     meta = getattr(main_window, "app_display_metadata", None)
     if meta is None:
-        main_window._apply_runtime_window_title()
-        meta = main_window.app_display_metadata
+        base_title = getattr(main_window, "_base_window_title", main_window.windowTitle())
+        meta = get_app_display_metadata(main_window.project_root_path, base_title)
+        main_window.app_display_metadata = meta
     base = meta.window_title
 
     btn = getattr(main_window, "selected_video_button", None)

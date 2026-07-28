@@ -93,6 +93,36 @@ def handle_face_detector_tracking_reset(main_window: "MainWindow", value):
     common_widget_actions.refresh_frame(main_window)
 
 
+def handle_swap_all_match_mode_toggle(
+    main_window: "MainWindow", toggle_value: bool, mode: str
+) -> None:
+    """Keep Swap-all-by-index and Swap-all-by-random mutually exclusive."""
+    if not toggle_value:
+        return
+
+    other_key = (
+        "RandomTargetMatchEnableToggle"
+        if mode == "index"
+        else "SequentialTargetMatchEnableToggle"
+    )
+    if not main_window.control.get(other_key, False):
+        return
+
+    main_window.control[other_key] = False
+    other_widget = main_window.parameter_widgets.get(other_key)
+    if other_widget is not None:
+        other_widget.blockSignals(True)
+        other_widget.setChecked(False)
+        other_widget.blockSignals(False)
+        common_widget_actions.show_hide_related_widgets(
+            main_window, other_widget, other_key, False
+        )
+
+    reset = getattr(main_window.video_processor, "reset_sequential_rotate_stabilizer", None)
+    if callable(reset):
+        reset()
+
+
 def change_execution_provider(main_window: "MainWindow", new_provider):
     if new_provider == main_window.models_processor.provider_name:
         common_widget_actions.update_gpu_memory_progressbar(main_window)

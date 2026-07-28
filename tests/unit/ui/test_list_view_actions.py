@@ -453,3 +453,48 @@ def test_clear_all_embeddings_blocked_leaves_state_unchanged(monkeypatch):
 
     assert list_view_actions.clear_all_embeddings(main_window) is False
     assert list(main_window.merged_embeddings) == ["embed_1"]
+
+def test_selected_target_media_title_suffix_uses_basename():
+    btn = SimpleNamespace(
+        media_path=r"C:\videos\my clip.mp4",
+        file_type="video",
+    )
+    assert (
+        list_view_actions._selected_target_media_title_suffix(btn) == "my clip.mp4"
+    )
+
+
+def test_apply_main_window_title_includes_selected_media_name(monkeypatch):
+    titles: list[str] = []
+
+    class _Btn:
+        media_path = r"/media/selected_video.mp4"
+        file_type = "video"
+
+    main_window = SimpleNamespace(
+        app_display_metadata=SimpleNamespace(window_title="VisoMaster"),
+        selected_video_button=_Btn(),
+        setWindowTitle=lambda title: titles.append(title),
+    )
+    monkeypatch.setattr(
+        list_view_actions.widget_components,
+        "TargetMediaCardButton",
+        _Btn,
+    )
+
+    list_view_actions.apply_main_window_title_for_selected_media(main_window)
+
+    assert titles == ["VisoMaster — selected_video.mp4"]
+
+
+def test_apply_main_window_title_resets_when_no_media_selected():
+    titles: list[str] = []
+    main_window = SimpleNamespace(
+        app_display_metadata=SimpleNamespace(window_title="VisoMaster"),
+        selected_video_button=None,
+        setWindowTitle=lambda title: titles.append(title),
+    )
+
+    list_view_actions.apply_main_window_title_for_selected_media(main_window)
+
+    assert titles == ["VisoMaster"]

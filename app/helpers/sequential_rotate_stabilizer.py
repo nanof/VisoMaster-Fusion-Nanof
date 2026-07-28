@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import math
+import random
 from typing import Any, Callable
 
 import numpy as np
 
 from app.helpers.sequential_rr_order import (
+    pick_new_input_index,
     rr_greedy_assign_from_memory,
     rr_spatial_order_key,
     rr_spatial_sort_indices,
@@ -17,7 +19,7 @@ IoUFn = Callable[[np.ndarray, np.ndarray], float]
 
 
 class SequentialRotateStabilizer:
-    """Keeps input-face indices stable across frames for Swap all by index.
+    """Keeps input-face indices stable across frames for Swap all by index/random.
 
     Must run on a single ordered thread (video detection pipeline). Pool workers only
     consume precomputed ``_rr_input_idx`` values from the feeder task.
@@ -34,18 +36,51 @@ class SequentialRotateStabilizer:
     _NO_TRACK_IOU_FLOOR: float = 0.14
     _NO_TRACK_PREV_IOU_FLOOR: float = 0.10
 
-    def __init__(self) -> None:
+    def __init__(self, rng: random.Random | None = None) -> None:
+        self._rng = rng if rng is not None else random.Random()
         self.reset()
 
-    def reset(self) -> None:
-        self._memory_slots: list[tuple[np.ndarray, int, int]] = []
-        self._prev_frame_slots: list[tuple[np.ndarray, int]] = []
-        self._track_to_input: dict[int, int] = {}
-        self._track_last_seen: dict[int, int] = {}
-        self._spatial_slots: dict[int, tuple[np.ndarray, int, int]] = {}
-        self._next_spatial_slot_id: int = 0
-        self._stabilize_last_fn: int = -999999
-        self._stabilize_last_n_inputs: int = -1
+    def reset(
+        self, *, preserve_input_indices: set[int] | frozenset[int] | None = None
+    ) -> None:
+        preserve = {int(i) for i in (preserve_input_indices or ())}
+        if not preserve:
+            self._memory_slots = []
+            self._prev_frame_slots = []
+            self._track_to_input = {}
+            self._track_last_seen = {}
+            self._spatial_slots = {}
+            self._next_spatial_slot_id = 0
+            self._stabilize_last_fn = -999999
+            self._stabilize_last_n_inputs = -1
+            self._stabilize_last_assignment_mode = "index"
+            return
+
+        self._track_to_input = {
+            tid: int(ix)
+            for tid, ix in self._track_to_input.items()
+            if int(ix) in preserve
+        }
+        self._track_last_seen = {
+            tid: ls
+            for tid, ls in self._track_last_seen.items()
+            if tid in self._track_to_input
+        }
+        self._memory_slots = [
+            (bb, int(ix), ls)
+            for bb, ix, ls in self._memory_slots
+            if int(ix) in preserve
+        ]
+        self._prev_frame_slots = [
+            (bb, int(ix))
+            for bb, ix in self._prev_frame_slots
+            if int(ix) in preserve
+        ]
+        self._spatial_slots = {
+            sid: (bb, int(ix), ls)
+            for sid, (bb, ix, ls) in self._spatial_slots.items()
+            if int(ix) in preserve
+        }
 
     @staticmethod
     def _centroid_distance(box_a: np.ndarray, box_b: np.ndarray) -> float:
@@ -126,6 +161,8 @@ class SequentialRotateStabilizer:
         order: list[int],
         n_in: int,
         iou_fn: IoUFn,
+        *,
+        assignment_mode: str = "index",
     ) -> list[int]:
         """Slot-based matching: one persistent slot per physical face (no ByteTrack)."""
         assign: dict[int, int] = {}
@@ -169,13 +206,46 @@ class SequentialRotateStabilizer:
         for fi in order:
             if fi in assign:
                 continue
-            cand = next((j for j in range(n_in) if j not in used_inp), None)
-            if cand is None:
-                cand = int(spatial_rank.get(fi, 0)) % n_in
-            assign[fi] = int(cand) % n_in
+            assign[fi] = pick_new_input_index(
+                n_in,
+                assignment_mode=assignment_mode,
+                spatial_fallback=int(spatial_rank.get(fi, 0)),
+                used=used_inp,
+                rng=self._rng,
+            )
             used_inp.add(int(assign[fi]) % n_in)
 
         return [int(assign[fi]) % n_in for fi in order]
+
+    @staticmethod
+    def _enforce_pinned_inputs(
+        assign: list[int],
+        n_in: int,
+        pinned: set[int] | frozenset[int],
+    ) -> list[int]:
+        """Force every pinned input onto a detection when possible.
+
+        Missing pinned inputs steal slots that currently hold non-pinned inputs, so a
+        fixed face is guaranteed to appear in the frame whenever there is capacity.
+        """
+        if n_in <= 0 or not assign or not pinned:
+            return list(assign)
+        pinned_norm = {int(p) % n_in for p in pinned if int(p) >= 0}
+        if not pinned_norm:
+            return list(assign)
+
+        out = [int(a) % n_in for a in assign]
+        present = set(out)
+        missing = [p for p in sorted(pinned_norm) if p not in present]
+        for pin in missing:
+            steal_ci = next(
+                (ci for ci, inp in enumerate(out) if inp not in pinned_norm),
+                None,
+            )
+            if steal_ci is None:
+                break
+            out[steal_ci] = pin
+        return out
 
     def apply(
         self,
@@ -186,6 +256,8 @@ class SequentialRotateStabilizer:
         iou_fn: IoUFn,
         *,
         memory_without_tracking: bool = True,
+        assignment_mode: str = "index",
+        pinned_input_indices: set[int] | frozenset[int] | None = None,
     ) -> None:
         n_in = len(checked_inputs_ordered)
         if n_in == 0:
@@ -205,8 +277,23 @@ class SequentialRotateStabilizer:
         if self._stabilize_last_n_inputs >= 0 and n_in != self._stabilize_last_n_inputs:
             self.reset()
 
+        mode = "random" if assignment_mode == "random" else "index"
+        if (
+            self._stabilize_last_assignment_mode
+            and mode != self._stabilize_last_assignment_mode
+            and self._stabilize_last_fn >= 0
+        ):
+            self.reset()
+
         self._stabilize_last_fn = frame_number
         self._stabilize_last_n_inputs = n_in
+        self._stabilize_last_assignment_mode = mode
+
+        pinned = {
+            int(p) % n_in
+            for p in (pinned_input_indices or ())
+            if int(p) >= 0
+        }
 
         self._prune_expired_memory(
             frame_number,
@@ -269,7 +356,11 @@ class SequentialRotateStabilizer:
 
         if no_track_mode:
             base_assign = self._assign_no_track_spatial_slots(
-                det_faces, order, n_in, iou_fn
+                det_faces,
+                order,
+                n_in,
+                iou_fn,
+                assignment_mode=mode,
             )
             spatially_matched = [True] * n_curr
         elif use_tracks or memory_without_tracking:
@@ -283,13 +374,26 @@ class SequentialRotateStabilizer:
                 centroid_max,
                 iou_fn,
                 iou_floor=0.10 if no_track_mode else 0.08,
+                assignment_mode=mode,
+                rng=self._rng,
             )
         else:
             spatial_rank = {
                 ci: rank
                 for rank, ci in enumerate(rr_spatial_sort_indices(curr_boxes))
             }
-            base_assign = [int(spatial_rank[ci]) % n_in for ci in range(n_curr)]
+            used: set[int] = set()
+            base_assign = []
+            for ci in range(n_curr):
+                inp = pick_new_input_index(
+                    n_in,
+                    assignment_mode=mode,
+                    spatial_fallback=int(spatial_rank[ci]),
+                    used=used,
+                    rng=self._rng,
+                )
+                base_assign.append(inp)
+                used.add(int(inp) % n_in)
             spatially_matched = [False] * n_curr
 
         if use_tracks:
@@ -303,16 +407,27 @@ class SequentialRotateStabilizer:
                     final_assign[ci] = mem_inp
                 else:
                     track_inp = int(self._track_to_input[tid]) % n_in
-                    if spatially_matched[ci] and track_inp != mem_inp:
-                        self._track_to_input[tid] = mem_inp
-                        final_assign[ci] = mem_inp
+                    # Fixed inputs keep their track lock; never rematch them away.
+                    if track_inp in pinned:
+                        final_assign[ci] = track_inp
+                    elif spatially_matched[ci] and track_inp != mem_inp:
+                        if mem_inp in pinned:
+                            # Don't steal another track's fixed input via rematch.
+                            final_assign[ci] = track_inp
+                        else:
+                            self._track_to_input[tid] = mem_inp
+                            final_assign[ci] = mem_inp
                     else:
                         final_assign[ci] = track_inp
+            assign = self._enforce_pinned_inputs(final_assign, n_in, pinned)
             for ci, fi in enumerate(order):
-                det_faces[fi]["_rr_input_idx"] = int(final_assign[ci]) % n_in
+                tid = int(det_faces[fi]["track_id"])
+                self._track_to_input[tid] = int(assign[ci]) % n_in
+                det_faces[fi]["_rr_input_idx"] = int(assign[ci]) % n_in
         else:
+            assign = self._enforce_pinned_inputs(base_assign, n_in, pinned)
             for ci, fi in enumerate(order):
-                det_faces[fi]["_rr_input_idx"] = int(base_assign[ci]) % n_in
+                det_faces[fi]["_rr_input_idx"] = int(assign[ci]) % n_in
 
         if no_track_mode:
             for fi in order:
