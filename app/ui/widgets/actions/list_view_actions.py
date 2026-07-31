@@ -42,7 +42,18 @@ _THUMB_ZOOM_MAX = 3.0
 TARGET_MEDIA_SORT_NAME = "name"
 TARGET_MEDIA_SORT_DATE = "date"
 TARGET_MEDIA_SORT_SIZE = "size"
+TARGET_MEDIA_SORT_DIMENSIONS = "dimensions"
+TARGET_MEDIA_SORT_PIXELS = "pixels"
+TARGET_MEDIA_SORT_FRAMES = "frames"
 TARGET_MEDIA_SORT_DEFAULT = TARGET_MEDIA_SORT_NAME
+TARGET_MEDIA_SORT_MODES = (
+    TARGET_MEDIA_SORT_NAME,
+    TARGET_MEDIA_SORT_DATE,
+    TARGET_MEDIA_SORT_SIZE,
+    TARGET_MEDIA_SORT_DIMENSIONS,
+    TARGET_MEDIA_SORT_PIXELS,
+    TARGET_MEDIA_SORT_FRAMES,
+)
 _TARGET_SORT_LOG_PROGRESS_EVERY = 25
 
 
@@ -69,9 +80,16 @@ def get_target_media_sort_mode(main_window: "MainWindow") -> str:
     if combo is None:
         return TARGET_MEDIA_SORT_DEFAULT
     mode = combo.currentData(QtCore.Qt.ItemDataRole.UserRole)
-    if mode in (TARGET_MEDIA_SORT_NAME, TARGET_MEDIA_SORT_DATE, TARGET_MEDIA_SORT_SIZE):
+    if mode in TARGET_MEDIA_SORT_MODES:
         return str(mode)
     return TARGET_MEDIA_SORT_DEFAULT
+
+
+def get_target_media_sort_descending(main_window: "MainWindow") -> bool:
+    button = getattr(main_window, "targetMediaSortDirectionButton", None)
+    if button is None:
+        return False
+    return bool(button.isChecked())
 
 
 def target_media_path_sort_key(media_path: str, mode: str) -> tuple:
@@ -87,6 +105,7 @@ def _target_media_button_sort_key(button, mode: str) -> tuple:
         return (2, 999, str(button.media_path).lower())
 
     path = str(button.media_path)
+    metadata = getattr(button, "_media_metadata", None)
     if mode == TARGET_MEDIA_SORT_DATE:
         if not getattr(button, "_file_stats_loaded", False):
             misc_helpers.refresh_target_media_file_stats(button)
@@ -95,6 +114,15 @@ def _target_media_button_sort_key(button, mode: str) -> tuple:
         if not getattr(button, "_file_stats_loaded", False):
             misc_helpers.refresh_target_media_file_stats(button)
         return (0, int(getattr(button, "_file_size", 0) or 0), path.lower())
+    if mode in (
+        TARGET_MEDIA_SORT_DIMENSIONS,
+        TARGET_MEDIA_SORT_PIXELS,
+        TARGET_MEDIA_SORT_FRAMES,
+    ):
+        if metadata is None and getattr(button, "file_type", None) in ("image", "video"):
+            metadata = misc_helpers.probe_media_metadata(path, button.file_type)
+            button._media_metadata = metadata
+        return misc_helpers.target_media_path_sort_key(path, mode, metadata)
     return (0, os.path.basename(path).lower())
 
 
@@ -110,8 +138,9 @@ def sort_target_media_list(main_window: "MainWindow") -> None:
         return
 
     mode = get_target_media_sort_mode(main_window)
+    descending = get_target_media_sort_descending(main_window)
     started = time.perf_counter()
-    _target_sort_log("start", mode=mode, count=count)
+    _target_sort_log("start", mode=mode, descending=descending, count=count)
 
     if _target_sort_debug_enabled():
         faulthandler.enable()
@@ -162,6 +191,12 @@ def sort_target_media_list(main_window: "MainWindow") -> None:
 
         phase_started = time.perf_counter()
         entries.sort(key=lambda entry: entry[0])
+        if descending:
+            # Keep webcam/screen sinks (group 2) at the bottom.
+            media_entries = [entry for entry in entries if entry[0][0] == 0]
+            other_entries = [entry for entry in entries if entry[0][0] != 0]
+            media_entries.reverse()
+            entries = media_entries + other_entries
         _target_sort_log(
             "sorted",
             entries=len(entries),
@@ -248,6 +283,7 @@ def on_target_media_sort_changed(main_window: "MainWindow", *args) -> None:
         "combo_changed",
         index=combo_index,
         mode=get_target_media_sort_mode(main_window),
+        descending=get_target_media_sort_descending(main_window),
     )
     if getattr(main_window, "_target_media_sort_in_progress", False):
         _target_sort_log("skip_combo_reentrant", index=combo_index)
@@ -261,8 +297,17 @@ def on_target_media_sort_changed(main_window: "MainWindow", *args) -> None:
 
 def initialize_target_media_sort_combo(main_window: "MainWindow") -> None:
     combo = getattr(main_window, "targetMediaSortComboBox", None)
-    if combo is None or combo.count() > 0:
+    if combo is None:
         return
+    # Re-populate when older workspaces only had name/date/size.
+    expected_modes = set(TARGET_MEDIA_SORT_MODES)
+    existing_modes = {
+        combo.itemData(i, QtCore.Qt.ItemDataRole.UserRole)
+        for i in range(combo.count())
+    }
+    if combo.count() > 0 and expected_modes.issubset(existing_modes):
+        return
+    current_mode = get_target_media_sort_mode(main_window)
     combo.blockSignals(True)
     try:
         combo.clear()
@@ -270,6 +315,9 @@ def initialize_target_media_sort_combo(main_window: "MainWindow") -> None:
             ("Name", TARGET_MEDIA_SORT_NAME),
             ("Date", TARGET_MEDIA_SORT_DATE),
             ("Size", TARGET_MEDIA_SORT_SIZE),
+            ("Dimensions", TARGET_MEDIA_SORT_DIMENSIONS),
+            ("Pixels", TARGET_MEDIA_SORT_PIXELS),
+            ("Frames", TARGET_MEDIA_SORT_FRAMES),
         ):
             combo.addItem(label)
             combo.setItemData(
@@ -277,7 +325,15 @@ def initialize_target_media_sort_combo(main_window: "MainWindow") -> None:
                 mode,
                 QtCore.Qt.ItemDataRole.UserRole,
             )
-        combo.setCurrentIndex(0)
+        for index in range(combo.count()):
+            if (
+                combo.itemData(index, QtCore.Qt.ItemDataRole.UserRole)
+                == current_mode
+            ):
+                combo.setCurrentIndex(index)
+                break
+        else:
+            combo.setCurrentIndex(0)
     finally:
         combo.blockSignals(False)
 
@@ -287,6 +343,8 @@ def set_target_media_sort_mode(main_window: "MainWindow", mode: str) -> None:
     if combo is None:
         return
     initialize_target_media_sort_combo(main_window)
+    if mode not in TARGET_MEDIA_SORT_MODES:
+        mode = TARGET_MEDIA_SORT_DEFAULT
     for index in range(combo.count()):
         if (
             combo.itemData(index, QtCore.Qt.ItemDataRole.UserRole)
@@ -298,6 +356,74 @@ def set_target_media_sort_mode(main_window: "MainWindow", mode: str) -> None:
             finally:
                 combo.blockSignals(False)
             return
+
+
+def set_target_media_sort_descending(main_window: "MainWindow", descending: bool) -> None:
+    button = getattr(main_window, "targetMediaSortDirectionButton", None)
+    if button is None:
+        return
+    button.blockSignals(True)
+    try:
+        button.setChecked(bool(descending))
+        button.setText("↓" if descending else "↑")
+        button.setToolTip(
+            "Sort descending" if descending else "Sort ascending"
+        )
+    finally:
+        button.blockSignals(False)
+
+
+def on_target_media_sort_direction_changed(main_window: "MainWindow", *_args) -> None:
+    button = getattr(main_window, "targetMediaSortDirectionButton", None)
+    if button is not None:
+        set_target_media_sort_descending(main_window, button.isChecked())
+    on_target_media_sort_changed(main_window)
+
+
+def initialize_target_media_min_dimension_spinboxes(main_window: "MainWindow") -> None:
+    for name in ("targetMediaMinWidthSpinBox", "targetMediaMinHeightSpinBox"):
+        spin = getattr(main_window, name, None)
+        if spin is None:
+            continue
+        spin.blockSignals(True)
+        try:
+            spin.setRange(0, 8192)
+            spin.setSingleStep(16)
+            if spin.value() < 0:
+                spin.setValue(0)
+            if name.endswith("WidthSpinBox"):
+                spin.setToolTip("Minimum media width (0 = no filter)")
+                spin.setPrefix("W ")
+            else:
+                spin.setToolTip("Minimum media height (0 = no filter)")
+                spin.setPrefix("H ")
+        finally:
+            spin.blockSignals(False)
+
+
+def set_target_media_min_dimensions(
+    main_window: "MainWindow", min_width: int = 0, min_height: int = 0
+) -> None:
+    initialize_target_media_min_dimension_spinboxes(main_window)
+    for name, value in (
+        ("targetMediaMinWidthSpinBox", min_width),
+        ("targetMediaMinHeightSpinBox", min_height),
+    ):
+        spin = getattr(main_window, name, None)
+        if spin is None:
+            continue
+        spin.blockSignals(True)
+        try:
+            spin.setValue(max(0, int(value)))
+        finally:
+            spin.blockSignals(False)
+
+
+def clear_target_videos_search(main_window: "MainWindow", *_args) -> None:
+    search = getattr(main_window, "targetVideosSearchBox", None)
+    if search is None:
+        return
+    search.clear()
 
 
 def thumbnail_size_for_zoom(base_size: tuple[int, int], zoom: float) -> QtCore.QSize:
@@ -443,7 +569,7 @@ def _flush_target_media_thumbnail_batch(main_window: "MainWindow") -> None:
     try:
         batch_size = min(_get_target_media_batch_size(pending_before), pending_before)
         for _ in range(batch_size):
-            media_path, q_image, file_type, media_id = pending_items.popleft()
+            media_path, q_image, file_type, media_id, metadata = pending_items.popleft()
             add_media_thumbnail_button(
                 main_window,
                 widget_components.TargetMediaCardButton,
@@ -453,6 +579,7 @@ def _flush_target_media_thumbnail_batch(main_window: "MainWindow") -> None:
                 media_path=media_path,
                 file_type=file_type,
                 media_id=media_id,
+                media_metadata=metadata,
             )
     finally:
         list_widget.setUpdatesEnabled(True)
@@ -465,14 +592,19 @@ def _flush_target_media_thumbnail_batch(main_window: "MainWindow") -> None:
 
 
 def _queue_target_media_thumbnail(
-    main_window: "MainWindow", media_path, q_image, file_type, media_id
+    main_window: "MainWindow",
+    media_path,
+    q_image,
+    file_type,
+    media_id,
+    media_metadata=None,
 ) -> None:
     pending_items = getattr(main_window, "_pending_target_media_thumbnails", None)
     if pending_items is None:
         pending_items = deque()
         main_window._pending_target_media_thumbnails = pending_items
 
-    pending_items.append((media_path, q_image, file_type, media_id))
+    pending_items.append((media_path, q_image, file_type, media_id, media_metadata))
     timer = _ensure_target_media_batch_timer(main_window)
     if not timer.isActive():
         timer.start(_TARGET_MEDIA_BATCH_INTERVAL_MS)
@@ -549,11 +681,18 @@ def _queue_input_face_thumbnail(
 
 
 # Functions to add Buttons with thumbnail for selecting videos/images and faces
-@QtCore.Slot(str, QtGui.QImage, str, str)
+@QtCore.Slot(str, QtGui.QImage, str, str, object)
 def add_media_thumbnail_to_target_videos_list(
-    main_window: "MainWindow", media_path, q_image, file_type, media_id
+    main_window: "MainWindow",
+    media_path,
+    q_image,
+    file_type,
+    media_id,
+    media_metadata=None,
 ):
-    _queue_target_media_thumbnail(main_window, media_path, q_image, file_type, media_id)
+    _queue_target_media_thumbnail(
+        main_window, media_path, q_image, file_type, media_id, media_metadata
+    )
 
 
 # Functions to add Buttons with thumbnail for selecting videos/images and faces
@@ -834,6 +973,9 @@ def add_media_thumbnail_button(
         buttons_list[button.face_id] = button
     elif buttonClass == widget_components.TargetMediaCardButton:
         buttons_list[button.media_id] = button
+        metadata = kwargs.get("media_metadata")
+        button._media_metadata = metadata
+        misc_helpers.refresh_target_media_file_stats(button)
     elif buttonClass == widget_components.EmbeddingCardButton:
         buttons_list[button.embedding_id] = button
 
@@ -880,6 +1022,8 @@ def initialize_media_list_widgets(main_window: "MainWindow"):
     )
     _set_up_panel_context_menu(main_window, main_window.inputFacesList, "input_faces")
     initialize_target_media_sort_combo(main_window)
+    set_target_media_sort_descending(main_window, False)
+    initialize_target_media_min_dimension_spinboxes(main_window)
 
 
 def initialize_embeddings_list_widget(main_window: "MainWindow"):

@@ -16,6 +16,9 @@ from app.helpers.miscellaneous import (
     is_video_file,
     get_file_type,
     get_scaling_transforms,
+    MediaMetadata,
+    format_target_media_tooltip,
+    probe_media_metadata,
     target_media_path_sort_key,
     image_extensions,
     normalize_issue_scan_ranges,
@@ -438,6 +441,62 @@ def test_target_media_path_sort_key_orders_by_name_date_and_size(tmp_path):
     assert size_keys[0][1] < size_keys[1][1]
 
 
+def test_target_media_path_sort_key_orders_by_metadata_modes():
+    small = MediaMetadata(width=100, height=50, total_frames=10)
+    large = MediaMetadata(width=200, height=100, total_frames=40)
+
+    dim_keys = [
+        target_media_path_sort_key("a.png", "dimensions", small),
+        target_media_path_sort_key("b.png", "dimensions", large),
+    ]
+    assert dim_keys == sorted(dim_keys)
+
+    pixel_keys = [
+        target_media_path_sort_key("a.png", "pixels", small),
+        target_media_path_sort_key("b.png", "pixels", large),
+    ]
+    assert pixel_keys[0][1] < pixel_keys[1][1]
+
+    frame_keys = [
+        target_media_path_sort_key("a.mp4", "frames", small),
+        target_media_path_sort_key("b.mp4", "frames", large),
+    ]
+    assert frame_keys[0][1] < frame_keys[1][1]
+
+
+def test_probe_media_metadata_image_header_only(tmp_path):
+    from PIL import Image
+
+    image_path = tmp_path / "shot.png"
+    Image.new("RGB", (320, 180), color=(12, 34, 56)).save(image_path)
+
+    metadata = probe_media_metadata(str(image_path), "image")
+    assert metadata is not None
+    assert metadata.width == 320
+    assert metadata.height == 180
+    assert metadata.total_frames == 1
+    assert metadata.pixels == 320 * 180
+
+
+def test_format_target_media_tooltip_includes_metadata():
+    tip = format_target_media_tooltip(
+        "C:/clips/demo.mp4",
+        "video",
+        MediaMetadata(
+            width=1920,
+            height=1080,
+            total_frames=240,
+            frame_rate=24.0,
+            bitrate_kbits=5000.0,
+        ),
+        file_size=2048,
+    )
+    assert "demo.mp4" in tip
+    assert "Type: video" in tip
+    assert "1920×1080" in tip
+    assert "Frames: 240" in tip
+
+
 def test_refresh_target_media_file_stats_reads_file_metadata(tmp_path):
     from types import SimpleNamespace
 
@@ -448,6 +507,9 @@ def test_refresh_target_media_file_stats_reads_file_metadata(tmp_path):
         media_path=str(media_file),
         is_webcam=False,
         is_screen_capture=False,
+        file_type="video",
+        _media_metadata=None,
+        setToolTip=lambda *_args, **_kwargs: None,
     )
     refresh_target_media_file_stats(button)
 

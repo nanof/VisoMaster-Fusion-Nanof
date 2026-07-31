@@ -514,6 +514,18 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.targetMediaSortComboBox.currentIndexChanged.connect(
             partial(list_view_actions.on_target_media_sort_changed, self)
         )
+        self.targetMediaSortDirectionButton.toggled.connect(
+            partial(list_view_actions.on_target_media_sort_direction_changed, self)
+        )
+        self.targetVideosSearchResetButton.clicked.connect(
+            partial(list_view_actions.clear_target_videos_search, self)
+        )
+        self.targetMediaMinWidthSpinBox.valueChanged.connect(
+            partial(filter_actions.filter_target_videos, self)
+        )
+        self.targetMediaMinHeightSpinBox.valueChanged.connect(
+            partial(filter_actions.filter_target_videos, self)
+        )
 
         self.inputFacesSearchBox.textChanged.connect(
             partial(filter_actions.filter_input_faces, self)

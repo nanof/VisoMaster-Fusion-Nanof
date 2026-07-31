@@ -23,10 +23,13 @@ if TYPE_CHECKING:
 class TargetMediaLoaderWorker(qtc.QThread):
     # Define signals to emit when loading is done or if there are updates - changed to QImage
     thumbnail_ready = qtc.Signal(
-        str, QImage, str, str
-    )  # Signal with media path and QImage and file_type, media_id
+        str, QImage, str, str, object
+    )  # media path, QImage, file_type, media_id, MediaMetadata|None
     webcam_thumbnail_ready = qtc.Signal(str, QImage, str, str, int, int)
     finished = qtc.Signal()  # Signal to indicate completion
+
+    _FILESYSTEM_SORT_MODES = ("name", "date", "size")
+    _METADATA_SORT_MODES = ("dimensions", "pixels", "frames")
 
     def __init__(
         self,
@@ -46,7 +49,7 @@ class TargetMediaLoaderWorker(qtc.QThread):
         self.media_ids = media_ids or []
         if sort_mode is None:
             self.sort_mode = None
-        elif sort_mode in ("name", "date", "size"):
+        elif sort_mode in self._FILESYSTEM_SORT_MODES + self._METADATA_SORT_MODES:
             self.sort_mode = sort_mode
         elif sort_files_list_by_name:
             self.sort_mode = "name"
@@ -75,6 +78,14 @@ class TargetMediaLoaderWorker(qtc.QThread):
                 if misc_helpers.get_file_type(media_file_path):
                     yield media_file_path
 
+    def _emit_thumbnail(self, media_file_path, q_image, file_type, media_id):
+        metadata = None
+        if file_type in ("image", "video"):
+            metadata = misc_helpers.probe_media_metadata(media_file_path, file_type)
+        self.thumbnail_ready.emit(
+            media_file_path, q_image, file_type, media_id, metadata
+        )
+
     def load_videos_and_images_from_folder(self, folder_name):
         # Initially hide the placeholder text
         self.main_window.placeholder_update_signal.emit(
@@ -92,7 +103,9 @@ class TargetMediaLoaderWorker(qtc.QThread):
             image_files = misc_helpers.get_image_files(folder_name, recursive_toggle)
             media_files = video_files + image_files
 
-        if self.sort_mode:
+        # Pre-sort only for cheap filesystem keys; metadata modes sort on the GUI
+        # after probe results arrive on each card.
+        if self.sort_mode in self._FILESYSTEM_SORT_MODES:
             media_files.sort(
                 key=lambda path: misc_helpers.target_media_path_sort_key(
                     str(path), self.sort_mode
@@ -114,8 +127,7 @@ class TargetMediaLoaderWorker(qtc.QThread):
             media_id = self.media_ids[i] if self.media_ids else str(uuid.uuid1().int)
 
             if q_image:
-                # Emit the signal to update GUI
-                self.thumbnail_ready.emit(media_file_path, q_image, file_type, media_id)
+                self._emit_thumbnail(media_file_path, q_image, file_type, media_id)
             i += 1
         # Show/Hide the placeholder text based on the number of items in ListWidget
         self.main_window.placeholder_update_signal.emit(
@@ -134,7 +146,7 @@ class TargetMediaLoaderWorker(qtc.QThread):
             paired_files_ids.append((path, m_id))
 
         # Keep existing behavior by default; allow callers to preserve original order.
-        if self.sort_mode:
+        if self.sort_mode in self._FILESYSTEM_SORT_MODES:
             paired_files_ids.sort(
                 key=lambda pair: misc_helpers.target_media_path_sort_key(
                     str(pair[0]), self.sort_mode
@@ -154,8 +166,7 @@ class TargetMediaLoaderWorker(qtc.QThread):
                 cache_thumbnail=True,
             )
             if q_image:
-                # Emit the signal to update GUI
-                self.thumbnail_ready.emit(media_file_path, q_image, file_type, media_id)
+                self._emit_thumbnail(media_file_path, q_image, file_type, media_id)
 
         self.main_window.placeholder_update_signal.emit(
             self.main_window.targetVideosList, False
@@ -520,13 +531,27 @@ class FilterWorker(qtc.QThread):
         # Operates only on pre-captured plain Python data — no Qt widget access.
         search_text = self.search_text
         include_file_types = self.include_file_types
+        min_width, min_height = getattr(self, "min_image_size", (0, 0))
 
         visible_indices = []
-        for index, media_path, file_type in self.items_snapshot:
-            if (not search_text or search_text in media_path.lower()) and (
-                file_type in include_file_types
+        for entry in self.items_snapshot:
+            if len(entry) >= 5:
+                index, media_path, file_type, width, height = entry[:5]
+            else:
+                index, media_path, file_type = entry[:3]
+                width, height = 0, 0
+
+            if search_text and search_text not in media_path.lower():
+                continue
+            if file_type not in include_file_types:
+                continue
+            # Webcam/screen have no dims — never hide them by min size.
+            if file_type in ("image", "video") and (
+                (min_width > 0 and int(width) < min_width)
+                or (min_height > 0 and int(height) < min_height)
             ):
-                visible_indices.append(index)
+                continue
+            visible_indices.append(index)
 
         self.filtered_results.emit(visible_indices, len(self.items_snapshot))
 

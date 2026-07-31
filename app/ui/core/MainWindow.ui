@@ -1052,12 +1052,79 @@
            </property>
            <property name="minimumSize">
             <size>
-             <width>72</width>
+             <width>96</width>
              <height>0</height>
             </size>
            </property>
            <property name="toolTip">
-            <string>Sort target media by name, date, or file size</string>
+            <string>Sort target media by name, date, size, dimensions, pixels or frame length</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QToolButton" name="targetMediaSortDirectionButton">
+           <property name="toolTip">
+            <string>Sort ascending</string>
+           </property>
+           <property name="text">
+            <string>↑</string>
+           </property>
+           <property name="checkable">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QToolButton" name="targetVideosSearchResetButton">
+           <property name="toolTip">
+            <string>Clear search</string>
+           </property>
+           <property name="text">
+            <string>×</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QSpinBox" name="targetMediaMinWidthSpinBox">
+           <property name="sizePolicy">
+            <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+             <horstretch>0</horstretch>
+             <verstretch>0</verstretch>
+            </sizepolicy>
+           </property>
+           <property name="minimumSize">
+            <size>
+             <width>70</width>
+             <height>0</height>
+            </size>
+           </property>
+           <property name="toolTip">
+            <string>Minimum media width (0 = no filter)</string>
+           </property>
+           <property name="maximum">
+            <number>8192</number>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QSpinBox" name="targetMediaMinHeightSpinBox">
+           <property name="sizePolicy">
+            <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+             <horstretch>0</horstretch>
+             <verstretch>0</verstretch>
+            </sizepolicy>
+           </property>
+           <property name="minimumSize">
+            <size>
+             <width>70</width>
+             <height>0</height>
+            </size>
+           </property>
+           <property name="toolTip">
+            <string>Minimum media height (0 = no filter)</string>
+           </property>
+           <property name="maximum">
+            <number>8192</number>
            </property>
           </widget>
          </item>

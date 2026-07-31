@@ -933,6 +933,15 @@ def load_saved_workspace(
                     list_view_actions.TARGET_MEDIA_SORT_DEFAULT,
                 ),
             )
+            list_view_actions.set_target_media_sort_descending(
+                main_window,
+                bool(window_state.get("targetMediaSortDescending", False)),
+            )
+            list_view_actions.set_target_media_min_dimensions(
+                main_window,
+                int(window_state.get("targetMediaMinWidth", 0) or 0),
+                int(window_state.get("targetMediaMinHeight", 0) or 0),
+            )
             saved_face_thumbnail_size = window_state.get("face_thumbnail_size")
             if saved_face_thumbnail_size == "small":
                 list_view_actions.apply_face_thumbnail_size(
@@ -1053,6 +1062,19 @@ def save_current_workspace(
             False,
         ),
         "targetMediaSort": list_view_actions.get_target_media_sort_mode(main_window),
+        "targetMediaSortDescending": list_view_actions.get_target_media_sort_descending(
+            main_window
+        ),
+        "targetMediaMinWidth": int(
+            getattr(main_window, "targetMediaMinWidthSpinBox", None).value()
+            if getattr(main_window, "targetMediaMinWidthSpinBox", None) is not None
+            else 0
+        ),
+        "targetMediaMinHeight": int(
+            getattr(main_window, "targetMediaMinHeightSpinBox", None).value()
+            if getattr(main_window, "targetMediaMinHeightSpinBox", None) is not None
+            else 0
+        ),
         "face_thumbnail_size": (
             "small"
             if getattr(

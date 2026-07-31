@@ -121,6 +121,7 @@ def test_sort_target_media_list_preserves_item_widgets():
         button.is_screen_capture = False
         button._file_mtime = float(ord(name[0]))
         button._file_size = len(name)
+        button._media_metadata = None
         list_widget.setItemWidget(item, button)
         buttons[media_id] = button
 
@@ -139,6 +140,7 @@ def test_sort_target_media_list_preserves_item_widgets():
     main_window = SimpleNamespace(
         targetVideosList=list_widget,
         targetMediaSortComboBox=combo,
+        targetMediaSortDirectionButton=None,
     )
 
     list_view_actions.sort_target_media_list(main_window)
@@ -151,6 +153,71 @@ def test_sort_target_media_list_preserves_item_widgets():
     assert all(
         list_widget.itemWidget(list_widget.item(i)) is not None
         for i in range(list_widget.count())
+    )
+
+
+def test_sort_target_media_list_descending_keeps_webcam_at_bottom():
+    from PySide6 import QtCore, QtWidgets
+    from app.helpers.miscellaneous import MediaMetadata
+
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+
+    list_widget = QtWidgets.QListWidget()
+
+    def add_entry(name: str, *, webcam: bool = False, frames: int = 1) -> None:
+        item = QtWidgets.QListWidgetItem(list_widget)
+        button = QtWidgets.QPushButton(name)
+        button.media_path = f"C:/media/{name}.mp4"
+        button.file_type = "webcam" if webcam else "video"
+        button.is_webcam = webcam
+        button.is_screen_capture = False
+        button.webcam_index = 0 if webcam else -1
+        button._file_mtime = 0.0
+        button._file_size = 0
+        button._media_metadata = None if webcam else MediaMetadata(
+            width=100, height=100, total_frames=frames
+        )
+        list_widget.setItemWidget(item, button)
+
+    add_entry("short", frames=10)
+    add_entry("long", frames=100)
+    add_entry("cam", webcam=True)
+
+    combo = QtWidgets.QComboBox()
+    combo.addItem("Frames")
+    combo.setItemData(
+        0,
+        list_view_actions.TARGET_MEDIA_SORT_FRAMES,
+        QtCore.Qt.ItemDataRole.UserRole,
+    )
+    direction = QtWidgets.QToolButton()
+    direction.setCheckable(True)
+    direction.setChecked(True)
+
+    main_window = SimpleNamespace(
+        targetVideosList=list_widget,
+        targetMediaSortComboBox=combo,
+        targetMediaSortDirectionButton=direction,
+    )
+
+    list_view_actions.sort_target_media_list(main_window)
+    labels = [
+        list_widget.itemWidget(list_widget.item(i)).text()
+        for i in range(list_widget.count())
+    ]
+    assert labels == ["long", "short", "cam"]
+
+
+def test_get_target_media_sort_mode_accepts_new_modes():
+    combo = SimpleNamespace(
+        currentData=lambda *_args, **_kwargs: list_view_actions.TARGET_MEDIA_SORT_PIXELS
+    )
+    main_window = SimpleNamespace(targetMediaSortComboBox=combo)
+    assert (
+        list_view_actions.get_target_media_sort_mode(main_window)
+        == list_view_actions.TARGET_MEDIA_SORT_PIXELS
     )
 
 

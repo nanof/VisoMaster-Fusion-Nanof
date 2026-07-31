@@ -51,16 +51,31 @@ def filter_target_videos(main_window: "MainWindow", *args):
     if main_window.filterScreenCaptureCheckBox.isChecked():
         include_file_types.append("screen")
 
+    min_width = 0
+    min_height = 0
+    min_w_spin = getattr(main_window, "targetMediaMinWidthSpinBox", None)
+    min_h_spin = getattr(main_window, "targetMediaMinHeightSpinBox", None)
+    if min_w_spin is not None:
+        min_width = int(min_w_spin.value())
+    if min_h_spin is not None:
+        min_height = int(min_h_spin.value())
+
     items_snapshot = []
     for i in range(main_window.targetVideosList.count()):
         item = main_window.targetVideosList.item(i)
         item_widget = main_window.targetVideosList.itemWidget(item)
         if item_widget is not None:
-            items_snapshot.append((i, item_widget.media_path, item_widget.file_type))
+            metadata = getattr(item_widget, "_media_metadata", None)
+            width = int(getattr(metadata, "width", 0) or 0)
+            height = int(getattr(metadata, "height", 0) or 0)
+            items_snapshot.append(
+                (i, item_widget.media_path, item_widget.file_type, width, height)
+            )
 
     worker = main_window.target_videos_filter_worker
     worker.search_text = search_text
     worker.include_file_types = include_file_types
+    worker.min_image_size = (min_width, min_height)
     worker.items_snapshot = items_snapshot
     worker.start()
 

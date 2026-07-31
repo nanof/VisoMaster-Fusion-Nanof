@@ -201,6 +201,7 @@ class TargetMediaCardButton(CardButton):
         self._file_mtime = None
         self._file_size = None
         self._file_stats_loaded = False
+        self._media_metadata = None
         if not is_webcam and not is_screen_capture:
             misc_helpers.refresh_target_media_file_stats(self)
         self.media_capture: cv2.VideoCapture | bool = False

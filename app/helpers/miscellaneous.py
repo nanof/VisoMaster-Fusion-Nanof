@@ -5,6 +5,7 @@ import cv2
 import time
 from bisect import bisect_left, bisect_right
 from collections import UserDict, OrderedDict
+from dataclasses import dataclass
 import hashlib
 import numpy as np
 from functools import wraps
@@ -688,19 +689,143 @@ def get_file_type(file_name):
     return None
 
 
-def target_media_path_sort_key(media_path: str, mode: str) -> tuple:
-    """Sort key for filesystem media paths (name, date, or size)."""
+@dataclass(frozen=True)
+class MediaMetadata:
+    """Metadata used to sort and filter the target media list.
+
+    Populated by ``probe_media_metadata()`` in the loader thread so the GUI
+    thread never opens a media file just to sort the list.
+    """
+
+    width: int = 0
+    height: int = 0
+    total_frames: int = 0
+    frame_rate: float = 0.0
+    bitrate_kbits: float = 0.0
+
+    @property
+    def pixels(self) -> int:
+        return int(self.width) * int(self.height)
+
+
+def probe_media_metadata(media_file_path, file_type) -> Optional[MediaMetadata]:
+    """Read dimensions/length of a media file without decoding its pixels.
+
+    Images are read header-only via PIL and videos through OpenCV properties.
+    Returns None for webcams/screen and for anything that cannot be probed.
+    """
+    if file_type == "image":
+        try:
+            with Image.open(media_file_path) as img:
+                width, height = img.size
+        except Exception as e:
+            print(f"[WARN] Could not read image metadata for {media_file_path}: {e}")
+            return None
+        return MediaMetadata(width=int(width), height=int(height), total_frames=1)
+
+    if file_type != "video":
+        return None
+
+    cap = None
+    try:
+        cap = cv2.VideoCapture(str(media_file_path))
+        if not cap.isOpened():
+            return None
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        frame_rate = float(cap.get(cv2.CAP_PROP_FPS))
+        bitrate_kbits = float(cap.get(cv2.CAP_PROP_BITRATE))
+    except Exception as e:
+        print(f"[WARN] Could not read video metadata for {media_file_path}: {e}")
+        return None
+    finally:
+        if cap is not None:
+            cap.release()
+
+    if get_video_rotation(str(media_file_path)) in (90, 270):
+        width, height = height, width
+
+    return MediaMetadata(
+        width=max(0, width),
+        height=max(0, height),
+        total_frames=max(0, total_frames),
+        frame_rate=max(0.0, frame_rate),
+        bitrate_kbits=max(0.0, bitrate_kbits),
+    )
+
+
+def target_media_path_sort_key(
+    media_path: str,
+    mode: str,
+    metadata: Optional[MediaMetadata] = None,
+) -> tuple:
+    """Sort key for filesystem media paths (name/date/size/dims/pixels/frames)."""
+    path_lower = media_path.lower()
     if mode == "date":
         try:
-            return (0, os.path.getmtime(media_path), media_path.lower())
+            return (0, os.path.getmtime(media_path), path_lower)
         except OSError:
-            return (0, 0, media_path.lower())
+            return (0, 0.0, path_lower)
     if mode == "size":
         try:
-            return (0, os.path.getsize(media_path), media_path.lower())
+            return (0, os.path.getsize(media_path), path_lower)
         except OSError:
-            return (0, 0, media_path.lower())
+            return (0, 0, path_lower)
+    if mode in ("dimensions", "pixels", "frames"):
+        meta = metadata
+        if meta is None:
+            meta = probe_media_metadata(media_path, get_file_type(media_path))
+        if meta is None:
+            return (1, 0, path_lower)
+        if mode == "dimensions":
+            # Width first, then height, then name — matches PR #267 ordering idea.
+            return (0, int(meta.width), int(meta.height), path_lower)
+        if mode == "pixels":
+            return (0, int(meta.pixels), path_lower)
+        return (0, int(meta.total_frames), path_lower)
     return (0, os.path.basename(media_path).lower())
+
+
+def format_target_media_tooltip(
+    media_path: str,
+    file_type: str | None = None,
+    metadata: Optional[MediaMetadata] = None,
+    *,
+    file_mtime: float | None = None,
+    file_size: int | None = None,
+) -> str:
+    """Build a rich tooltip for a target-media card."""
+    lines = [os.path.basename(media_path) or str(media_path)]
+    if file_type:
+        lines.append(f"Type: {file_type}")
+    if file_mtime:
+        try:
+            lines.append(
+                f"Date: {datetime.fromtimestamp(float(file_mtime)).strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+        except (OSError, OverflowError, ValueError):
+            pass
+    if file_size is not None and int(file_size) > 0:
+        size = float(file_size)
+        units = ("B", "KB", "MB", "GB")
+        unit_idx = 0
+        while size >= 1024.0 and unit_idx < len(units) - 1:
+            size /= 1024.0
+            unit_idx += 1
+        lines.append(f"Size: {size:.1f} {units[unit_idx]}")
+    lines.append(f"Path: {media_path}")
+    if metadata is not None:
+        if metadata.width > 0 and metadata.height > 0:
+            lines.append(f"Dimensions: {metadata.width}×{metadata.height}")
+            lines.append(f"Pixels: {metadata.pixels:,}")
+        if metadata.total_frames > 0:
+            lines.append(f"Frames: {metadata.total_frames}")
+        if metadata.frame_rate > 0:
+            lines.append(f"FPS: {metadata.frame_rate:.2f}")
+        if metadata.bitrate_kbits > 0:
+            lines.append(f"Bitrate: {metadata.bitrate_kbits:.0f} kbps")
+    return "\n".join(lines)
 
 
 def refresh_target_media_file_stats(button) -> None:
@@ -719,6 +844,18 @@ def refresh_target_media_file_stats(button) -> None:
         button._file_mtime = 0.0
         button._file_size = 0
     button._file_stats_loaded = True
+
+    metadata = getattr(button, "_media_metadata", None)
+    if hasattr(button, "setToolTip"):
+        button.setToolTip(
+            format_target_media_tooltip(
+                path,
+                getattr(button, "file_type", None),
+                metadata,
+                file_mtime=getattr(button, "_file_mtime", None),
+                file_size=getattr(button, "_file_size", None),
+            )
+        )
 
 
 def get_scaled_resolution(
