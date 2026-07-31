@@ -18,9 +18,9 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDockWidget,
     QFrame, QGraphicsView, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QListView,
     QListWidget, QListWidgetItem, QMainWindow, QMenu,
-    QMenuBar, QPushButton, QScrollArea, QSizePolicy,
-    QSlider, QSpacerItem, QSpinBox, QTabWidget,
-    QToolButton, QVBoxLayout, QWidget)
+    QMenuBar, QProgressBar, QPushButton, QScrollArea,
+    QSizePolicy, QSlider, QSpacerItem, QSpinBox,
+    QTabWidget, QToolButton, QVBoxLayout, QWidget)
 from app.ui.widgets.vram_progress_bar import VramPeakProgressBar
 from app.ui.core import media_rc
 class Ui_MainWindow(object):
@@ -68,6 +68,14 @@ class Ui_MainWindow(object):
         self.actionLoad_SavedWorkspace.setObjectName(u"actionLoad_SavedWorkspace")
         self.actionSave_CurrentWorkspace = QAction(MainWindow)
         self.actionSave_CurrentWorkspace.setObjectName(u"actionSave_CurrentWorkspace")
+        self.actionReset_to_LastWorkspace = QAction(MainWindow)
+        self.actionReset_to_LastWorkspace.setObjectName(u"actionReset_to_LastWorkspace")
+        self.actionSave_LastWorkspace = QAction(MainWindow)
+        self.actionSave_LastWorkspace.setObjectName(u"actionSave_LastWorkspace")
+        self.actionQuit_WithoutSaving = QAction(MainWindow)
+        self.actionQuit_WithoutSaving.setObjectName(u"actionQuit_WithoutSaving")
+        self.actionQuit = QAction(MainWindow)
+        self.actionQuit.setObjectName(u"actionQuit")
         self.centralwidget = QWidget(MainWindow)
         self.centralwidget.setObjectName(u"centralwidget")
         self.horizontalLayout = QHBoxLayout(self.centralwidget)
@@ -520,6 +528,13 @@ class Ui_MainWindow(object):
         self.filterScreenCaptureCheckBox.setChecked(False)
         self.horizontalLayout_9.addWidget(self.filterScreenCaptureCheckBox)
         self.vboxLayout.addLayout(self.horizontalLayout_9)
+        self.targetVideosListProgressBar = QProgressBar(self.dockWidgetContents)
+        self.targetVideosListProgressBar.setObjectName(u"targetVideosListProgressBar")
+        self.targetVideosListProgressBar.setMaximum(0)
+        self.targetVideosListProgressBar.setValue(0)
+        self.targetVideosListProgressBar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.targetVideosListProgressBar.setTextVisible(True)
+        self.vboxLayout.addWidget(self.targetVideosListProgressBar)
         self.targetVideosList = QListWidget(self.dockWidgetContents)
         self.targetVideosList.setObjectName(u"targetVideosList")
         self.targetVideosList.setAcceptDrops(True)
@@ -771,6 +786,8 @@ class Ui_MainWindow(object):
         self.topMenuBar.addAction(self.menuView.menuAction())
         self.topMenuBar.addAction(self.menuHelp.menuAction())
         self.menuFile.addAction(self.actionLoad_SavedWorkspace)
+        self.menuFile.addAction(self.actionReset_to_LastWorkspace)
+        self.menuFile.addAction(self.actionSave_LastWorkspace)
         self.menuFile.addAction(self.actionSave_CurrentWorkspace)
         self.menuFile.addSeparator()
         self.menuFile.addAction(self.actionOpen_Videos_Folder)
@@ -782,6 +799,9 @@ class Ui_MainWindow(object):
         self.menuFile.addAction(self.actionLoad_Embeddings)
         self.menuFile.addAction(self.actionSave_Embeddings)
         self.menuFile.addAction(self.actionSave_Embeddings_As)
+        self.menuFile.addSeparator()
+        self.menuFile.addAction(self.actionQuit_WithoutSaving)
+        self.menuFile.addAction(self.actionQuit)
         self.menuEdit.addAction(self.actionTest_2)
         self.menuView.addAction(self.actionView_Fullscreen_F11)
         self.menuHelp.addAction(self.actionView_Help_Shortcuts)
@@ -811,6 +831,10 @@ class Ui_MainWindow(object):
         self.actionTest_2.setText(QCoreApplication.translate("MainWindow", u"Test", None))
         self.actionLoad_SavedWorkspace.setText(QCoreApplication.translate("MainWindow", u"Load Saved Workspace", None))
         self.actionSave_CurrentWorkspace.setText(QCoreApplication.translate("MainWindow", u"Save Current Workspace", None))
+        self.actionReset_to_LastWorkspace.setText(QCoreApplication.translate("MainWindow", u"Reset to Last Workspace", None))
+        self.actionSave_LastWorkspace.setText(QCoreApplication.translate("MainWindow", u"Save as Last Workspace", None))
+        self.actionQuit_WithoutSaving.setText(QCoreApplication.translate("MainWindow", u"Quit without Saving", None))
+        self.actionQuit.setText(QCoreApplication.translate("MainWindow", u"Quit", None))
         self.TargetMediaCheckBox.setText(QCoreApplication.translate("MainWindow", u"Target Videos/Images", None))
         self.InputFacesCheckBox.setText(QCoreApplication.translate("MainWindow", u"Input Faces", None))
         self.JobsCheckBox.setText(QCoreApplication.translate("MainWindow", u"Jobs", None))
@@ -938,6 +962,7 @@ class Ui_MainWindow(object):
         self.filterScreenCaptureCheckBox.setToolTip(QCoreApplication.translate("MainWindow", u"Include Screen Capture", None))
 #endif // QT_CONFIG(tooltip)
         self.filterScreenCaptureCheckBox.setText("")
+        self.targetVideosListProgressBar.setFormat(QCoreApplication.translate("MainWindow", u"Loading Target Media %v/%m", None))
         self.input_Faces_DockWidget.setWindowTitle(QCoreApplication.translate("MainWindow", u"Input Faces", None))
         self.groupBox_InputFaces_Select.setTitle(QCoreApplication.translate("MainWindow", u"Input Faces", None))
         self.labelInputFacesPath.setText(QCoreApplication.translate("MainWindow", u"Select Face Images Path", None))

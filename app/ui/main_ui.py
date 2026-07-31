@@ -182,6 +182,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         # This flag is used to make sure new loaded media is properly fit into the graphics frame on the first load
         self.project_root_path = Path(__file__).resolve().parent.parent.parent
+        self.last_workspace_path = self.project_root_path / "last_workspace.json"
+        self.quit_without_saving = False
         self.actual_models_dir_path = self.project_root_path / global_models_dir
         self.loading_new_media = False
         self._graphics_view_keep_transform_on_resize = False
@@ -1193,16 +1195,19 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         list_view_actions.clear_stop_loading_input_media(self)
         list_view_actions.clear_stop_loading_target_media(self)
 
-        save_load_actions.save_current_workspace(
-            self, str(self.project_root_path / "last_workspace.json")
-        )
+        if self.quit_without_saving:
+            print("[INFO] MainWindow: quitting without saving the workspace.")
+        else:
+            save_load_actions.save_current_workspace(
+                self, str(self.last_workspace_path)
+            )
         self.video_processor.join_and_clear_threads()
         # Optionally handle the event if needed
         event.accept()
 
     def load_last_workspace(self):
         # Show the load workspace dialog if the file exists
-        last_workspace_path = self.project_root_path / "last_workspace.json"
+        last_workspace_path = self.last_workspace_path
         if last_workspace_path.is_file():
             auto_load_workspace_toggle = (
                 save_load_actions.get_auto_load_workspace_toggle(

@@ -8082,9 +8082,27 @@ class VideoProcessor(QObject):
                     self.media_path, self.main_window.control["OutputMediaFolder"]
                 )
                 json_file_path += ".json"
-                save_load_actions.save_current_workspace(
-                    self.main_window, json_file_path
-                )
+                try:
+                    save_load_actions.save_current_workspace(
+                        self.main_window, json_file_path
+                    )
+                except Exception as e:
+                    print(f"[WARN] Failed to auto-save workspace after recording: {e}")
+
+            if self.main_window.control.get("AutoSaveLastWorkspaceToggle"):
+                try:
+                    last_path = getattr(
+                        self.main_window,
+                        "last_workspace_path",
+                        self.main_window.project_root_path / "last_workspace.json",
+                    )
+                    save_load_actions.save_current_workspace(
+                        self.main_window, str(last_path)
+                    )
+                except Exception as e:
+                    print(
+                        f"[WARN] Failed to auto-save last_workspace.json after recording: {e}"
+                    )
 
             # 8b. Reopen media capture AFTER FFmpeg audio merge.
             if self.file_type == "video" and self.media_path:

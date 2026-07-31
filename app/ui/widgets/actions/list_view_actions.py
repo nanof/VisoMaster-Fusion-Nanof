@@ -558,6 +558,35 @@ def _ensure_target_media_batch_timer(main_window: "MainWindow") -> QtCore.QTimer
     return timer
 
 
+def _add_target_media_progress_total(main_window: "MainWindow", n: int) -> None:
+    """Grow the loading progress bar's total. GUI thread only."""
+    bar = getattr(main_window, "targetVideosListProgressBar", None)
+    if bar is None or n <= 0:
+        return
+    bar.setMaximum(bar.maximum() + n)
+    bar.setVisible(True)
+
+
+def _advance_target_media_progress(main_window: "MainWindow", n: int) -> None:
+    """Advance the loading progress bar, hiding it once the queue has drained."""
+    bar = getattr(main_window, "targetVideosListProgressBar", None)
+    if bar is None:
+        return
+    bar.setValue(min(bar.value() + n, bar.maximum()))
+    if bar.value() >= bar.maximum():
+        _reset_target_media_progress(main_window)
+
+
+def _reset_target_media_progress(main_window: "MainWindow") -> None:
+    """Hide and zero the loading progress bar (also used when loading is cancelled)."""
+    bar = getattr(main_window, "targetVideosListProgressBar", None)
+    if bar is None:
+        return
+    bar.setVisible(False)
+    bar.setMaximum(0)
+    bar.reset()
+
+
 def _flush_target_media_thumbnail_batch(main_window: "MainWindow") -> None:
     pending_items = getattr(main_window, "_pending_target_media_thumbnails", None)
     if not pending_items:
@@ -565,6 +594,7 @@ def _flush_target_media_thumbnail_batch(main_window: "MainWindow") -> None:
 
     list_widget = main_window.targetVideosList
     pending_before = len(pending_items)
+    batch_size = 0
     list_widget.setUpdatesEnabled(False)
     try:
         batch_size = min(_get_target_media_batch_size(pending_before), pending_before)
@@ -584,6 +614,8 @@ def _flush_target_media_thumbnail_batch(main_window: "MainWindow") -> None:
     finally:
         list_widget.setUpdatesEnabled(True)
         list_widget.viewport().update()
+        if batch_size:
+            _advance_target_media_progress(main_window, batch_size)
 
     if pending_items:
         _ensure_target_media_batch_timer(main_window).start(
@@ -605,6 +637,7 @@ def _queue_target_media_thumbnail(
         main_window._pending_target_media_thumbnails = pending_items
 
     pending_items.append((media_path, q_image, file_type, media_id, media_metadata))
+    _add_target_media_progress_total(main_window, 1)
     timer = _ensure_target_media_batch_timer(main_window)
     if not timer.isActive():
         timer.start(_TARGET_MEDIA_BATCH_INTERVAL_MS)
@@ -1024,6 +1057,7 @@ def initialize_media_list_widgets(main_window: "MainWindow"):
     initialize_target_media_sort_combo(main_window)
     set_target_media_sort_descending(main_window, False)
     initialize_target_media_min_dimension_spinboxes(main_window)
+    _reset_target_media_progress(main_window)
 
 
 def initialize_embeddings_list_widget(main_window: "MainWindow"):
@@ -1090,6 +1124,7 @@ def clear_stop_loading_target_media(main_window: "MainWindow", clear_list: bool 
     if batch_timer is not None:
         batch_timer.stop()
     main_window._pending_target_media_thumbnails = deque()
+    _reset_target_media_progress(main_window)
 
     if main_window.video_loader_worker is not None:
         worker = main_window.video_loader_worker

@@ -2853,6 +2853,10 @@ def histogram_matching(source_image, target_image, diffslider):
     source_image_t = source_image.float().to(device) / 255.0
     target_image_t = target_image.float().to(device) / 255.0
 
+    # Exclude pure-black padding independently so asymmetric pads do not skew CDFs.
+    s_valid = source_image_t.sum(dim=0) > 0.01
+    t_valid = target_image_t.sum(dim=0) > 0.01
+
     matched_target_image_t = target_image_t.clone()
     # Create bin edges for histograms
     bin_edges = torch.linspace(
@@ -2863,9 +2867,9 @@ def histogram_matching(source_image, target_image, diffslider):
         source_channel = source_image_t[channel, :, :]
         target_channel = target_image_t[channel, :, :]
 
-        # Flatten values
-        source_values = source_channel.flatten()
-        target_values = target_channel.flatten()
+        # Flatten values from non-padding pixels only
+        source_values = source_channel[s_valid].flatten()
+        target_values = target_channel[t_valid].flatten()
 
         # Remove NaNs and Infs
         source_values = source_values[~torch.isnan(source_values)]
@@ -2941,6 +2945,9 @@ def histogram_matching(source_image, target_image, diffslider):
         matched_channel = matched_channel_flat.reshape(target_channel.shape)
         matched_channel = torch.clamp(matched_channel, 0.0, 1.0)
 
+        # Preserve target padding pixels unchanged.
+        matched_channel = torch.where(t_valid, matched_channel, target_channel)
+
         # Replace in matched image
         matched_target_image_t[channel, :, :] = matched_channel
 
@@ -2960,15 +2967,24 @@ def histogram_matching_withmask(source_image, target_image, mask, diffslider):
 
     # Convert the mask explicitly to boolean for PyTorch indexing.
     # Float tensors cannot be used to slice/index other tensors.
-    valid_mask = mask.bool()
+    base_mask = mask.bool()
 
     # Remove channel dimension from mask if present so shape becomes (H, W)
-    if valid_mask.dim() == 3 and valid_mask.size(0) == 1:
-        valid_mask = valid_mask.squeeze(0)
+    if base_mask.dim() == 3 and base_mask.size(0) == 1:
+        base_mask = base_mask.squeeze(0)
 
     # Convert images to float tensors in range [0, 1], shape (C, H, W)
     source_image_t = source_image.float().to(device) / 255.0  # (C, H, W)
     target_image_t = target_image.float().to(device) / 255.0  # (C, H, W)
+
+    # Exclude pure-black padding independently on source and target.
+    s_valid = source_image_t.sum(dim=0) > 0.01
+    t_valid = target_image_t.sum(dim=0) > 0.01
+    s_mask_valid = base_mask & s_valid
+    t_mask_valid = base_mask & t_valid
+
+    if not s_mask_valid.any() or not t_mask_valid.any():
+        return target_image.float()
 
     # Apply histogram matching only to the masked areas
     matched_target_image_t = target_image_t.clone()
@@ -2982,9 +2998,9 @@ def histogram_matching_withmask(source_image, target_image, mask, diffslider):
         source_channel = source_image_t[channel, :, :]  # Shape: (H, W)
         target_channel = target_image_t[channel, :, :]
 
-        # Extract masked values
-        masked_source_values = source_channel[valid_mask]
-        masked_target_values = target_channel[valid_mask]
+        # Extract masked values with independent padding filters
+        masked_source_values = source_channel[s_mask_valid]
+        masked_target_values = target_channel[t_mask_valid]
 
         # Remove NaNs and Infs
         masked_source_values = masked_source_values[~torch.isnan(masked_source_values)]
@@ -3069,8 +3085,10 @@ def histogram_matching_withmask(source_image, target_image, mask, diffslider):
         # Reshape back to original image shape
         matched_channel = matched_channel_flat.reshape(target_channel.shape)
 
-        # Apply the mapping only to the valid areas
-        matched_target_image_t[channel, :, :][valid_mask] = matched_channel[valid_mask]
+        # Apply the mapping only to the valid target areas
+        matched_target_image_t[channel, :, :][t_mask_valid] = matched_channel[
+            t_mask_valid
+        ]
 
     # Blend the images according to diffslider
     alpha = diffslider / 100.0
@@ -3207,14 +3225,17 @@ def histogram_matching_DFL_Orig(source_image, target_image, mask, diffslider):
     if mask.dim() == 3 and mask.shape[0] == 1:
         mask = mask.squeeze(0)  # [H, W]
 
-    # Exclude black background pixels from statistical calculations.
+    # Exclude black background pixels from statistical calculations independently.
     s_valid = s_img.sum(dim=0) > 0.01
     t_valid = t_img.sum(dim=0) > 0.01
-    valid_mask = (mask > 0.05) & s_valid & t_valid
+    s_mask = (mask > 0.05) & s_valid
+    t_mask = (mask > 0.05) & t_valid
 
     # If mask is empty after filtering, return original
-    if valid_mask.sum() < 100:
+    if t_mask.sum() < 100:
         return target_image
+    if s_mask.sum() == 0:
+        s_mask = torch.ones_like(s_mask)
 
     # 2. Convert to LAB
     s_lab = rgb_to_lab(s_img, normalize=False)
@@ -3222,8 +3243,8 @@ def histogram_matching_DFL_Orig(source_image, target_image, mask, diffslider):
 
     # 3. Calculate Stats on VALID PIXELS ONLY
     # Shape becomes [3, N_Valid_Pixels]
-    s_masked = s_lab[:, valid_mask]
-    t_masked = t_lab[:, valid_mask]
+    s_masked = s_lab[:, s_mask]
+    t_masked = t_lab[:, t_mask]
 
     # Calculate Mean and Std
     s_mean = s_masked.mean(dim=1).view(3, 1, 1)
@@ -3298,13 +3319,15 @@ def apply_adain_color_transfer(
         if calc_mask_ready.dim() == 2:
             calc_mask_ready = calc_mask_ready.unsqueeze(0)
 
-    # Filter out black padding pixels from the calculation
-    non_black = (src_norm.sum(dim=0, keepdim=True) > 0.01) & (
-        tgt_norm.sum(dim=0, keepdim=True) > 0.01
-    )
-    calc_mask_ready = calc_mask_ready * non_black.float()
+    # Filter out black padding pixels independently for source/target stats.
+    s_non_black = (src_norm.sum(dim=0, keepdim=True) > 0.01).float()
+    t_non_black = (tgt_norm.sum(dim=0, keepdim=True) > 0.01).float()
 
-    calc_mask_sum = torch.sum(calc_mask_ready, dim=(1, 2), keepdim=True) + eps
+    s_calc_mask = calc_mask_ready * s_non_black
+    t_calc_mask = calc_mask_ready * t_non_black
+
+    s_calc_mask_sum = torch.sum(s_calc_mask, dim=(1, 2), keepdim=True) + eps
+    t_calc_mask_sum = torch.sum(t_calc_mask, dim=(1, 2), keepdim=True) + eps
 
     # 2. CONVERT TO LAB SPACE
     src_lab = rgb_to_lab(src_norm, normalize=False)
@@ -3312,19 +3335,19 @@ def apply_adain_color_transfer(
 
     # 3. Compute Means and Variances on LAB channels strictly inside the core mask
     src_mean = (
-        torch.sum(src_lab * calc_mask_ready, dim=(1, 2), keepdim=True) / calc_mask_sum
+        torch.sum(src_lab * s_calc_mask, dim=(1, 2), keepdim=True) / s_calc_mask_sum
     )
     tgt_mean = (
-        torch.sum(tgt_lab * calc_mask_ready, dim=(1, 2), keepdim=True) / calc_mask_sum
+        torch.sum(tgt_lab * t_calc_mask, dim=(1, 2), keepdim=True) / t_calc_mask_sum
     )
 
     src_var = (
-        torch.sum(calc_mask_ready * (src_lab - src_mean) ** 2, dim=(1, 2), keepdim=True)
-        / calc_mask_sum
+        torch.sum(s_calc_mask * (src_lab - src_mean) ** 2, dim=(1, 2), keepdim=True)
+        / s_calc_mask_sum
     )
     tgt_var = (
-        torch.sum(calc_mask_ready * (tgt_lab - tgt_mean) ** 2, dim=(1, 2), keepdim=True)
-        / calc_mask_sum
+        torch.sum(t_calc_mask * (tgt_lab - tgt_mean) ** 2, dim=(1, 2), keepdim=True)
+        / t_calc_mask_sum
     )
 
     src_std = torch.sqrt(src_var + eps)
