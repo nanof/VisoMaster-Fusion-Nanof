@@ -26,6 +26,21 @@ try:
 except ImportError:
     BYTETracker = None  # type: ignore[assignment,misc]
 
+# Canonical 5-point landmark offsets expressed as fractions of a bounding box's
+# width/height. Derived from the ArcFace 112×112 destination template
+# (left eye, right eye, nose, left mouth, right mouth). Used to synthesise
+# landmarks for detectors that output only boxes (e.g. Yolov11/12 VR180).
+_KPS_TEMPLATE_FRACTIONS = np.array(
+    [
+        [0.34192, 0.46158],  # left eye
+        [0.65653, 0.45983],  # right eye
+        [0.50022, 0.64051],  # nose tip
+        [0.37097, 0.82469],  # left mouth corner
+        [0.63152, 0.82325],  # right mouth corner
+    ],
+    dtype=np.float32,
+)
+
 
 def _finalize_out_track_ids(
     out_track_ids: list[int] | None,
@@ -117,6 +132,14 @@ class FaceDetectors:
             "Yolov8": {"model_name": "YoloFace8n", "function": self.detect_yoloface},
             "Yunet": {"model_name": "YunetN", "function": self.detect_yunet},
             "Yunet-2023": {"model_name": "Yunet2023Mar", "function": self.detect_yunet},
+            "Yolov11 VR180": {
+                "model_name": "YoloFace11nVR180",
+                "function": self.detect_yoloface11_vr180,
+            },
+            "Yolov12 VR180": {
+                "model_name": "YoloFace12nVR180",
+                "function": self.detect_yoloface12_vr180,
+            },
         }
 
     def _get_runner_lock(self, runner):
@@ -252,7 +275,13 @@ class FaceDetectors:
         Yolo/Yunet use 640 in code; RetinaFace/SCRFD read declared ONNX input when H==W are ints.
         Returns None when the export is dynamic (UI may offer multiple sizes).
         """
-        if detect_mode in ("Yolov8", "Yunet", "Yunet-2023"):
+        if detect_mode in (
+            "Yolov8",
+            "Yunet",
+            "Yunet-2023",
+            "Yolov11 VR180",
+            "Yolov12 VR180",
+        ):
             return 640
         detector = self.detector_map.get(detect_mode)
         if not detector:
@@ -1679,6 +1708,158 @@ class FaceDetectors:
             )
 
         return self._refine_landmarks(img_landmark, det, kpss, score_values, **kwargs)
+
+    @staticmethod
+    def _synthesize_kps_from_bboxes(bboxes: np.ndarray) -> np.ndarray:
+        """
+        Estimates 5-point facial landmarks from bounding boxes for keypoint-less
+        detectors (e.g. Yolov11/12 VR180).
+
+        The canonical ArcFace keypoint template is placed inside each box, giving
+        a rough frontal-facing landmark set. This keeps the shared detection
+        pipeline working (geometric KPS validation, recognition, optional
+        landmark refinement) even though the detector itself produces no
+        keypoints. When landmark detection is enabled these points are refined by
+        the dedicated landmark model; in VR180 mode the detector's landmarks are
+        ignored entirely (landmarks are re-detected on each perspective crop).
+        """
+        bboxes = np.asarray(bboxes, dtype=np.float32)
+        if bboxes.ndim != 2 or bboxes.shape[0] == 0:
+            return np.empty((0, 5, 2), dtype=np.float32)
+
+        x1 = bboxes[:, 0:1]
+        y1 = bboxes[:, 1:2]
+        w = bboxes[:, 2:3] - bboxes[:, 0:1]
+        h = bboxes[:, 3:4] - bboxes[:, 1:2]
+
+        fx = _KPS_TEMPLATE_FRACTIONS[:, 0][np.newaxis, :]  # (1, 5)
+        fy = _KPS_TEMPLATE_FRACTIONS[:, 1][np.newaxis, :]  # (1, 5)
+
+        kx = x1 + w * fx  # (N, 5)
+        ky = y1 + h * fy  # (N, 5)
+        return np.stack([kx, ky], axis=-1).astype(np.float32)  # (N, 5, 2)
+
+    def _detect_yoloface_vr180(self, model_name: str, **kwargs):
+        """Shared Yolov11/12 VR180 path: boxes only, synthesised 5-point landmarks."""
+        ort_session = kwargs.get("ort_session")
+
+        img, score, rotation_angles = (
+            kwargs.get("img"),
+            kwargs.get("score"),
+            kwargs.get("rotation_angles"),
+        )
+        img_landmark = img if kwargs.get("use_landmark_detection") else None
+
+        input_size = (640, 640)
+        det_img, det_scale, final_input_size = self._prepare_detection_image(
+            img, input_size, "yolo"
+        )
+
+        scores_list, bboxes_list, kpss_list = [], [], []
+        cx, cy = final_input_size[0] / 2, final_input_size[1] / 2
+
+        for angle in rotation_angles:
+            if angle != 0:
+                aimg, M = faceutil.transform(
+                    det_img, (cx, cy), input_size[0], 1.0, angle
+                )
+                IM = faceutil.invertAffineTransform(M)
+            else:
+                IM, aimg = None, det_img
+
+            aimg_prepared = aimg.to(torch.float32) / 255.0
+            aimg_prepared = torch.unsqueeze(aimg_prepared, 0).contiguous()
+
+            io_binding = ort_session.io_binding()
+            aimg_prepared = self.models_processor.bind_ort_io_input(
+                io_binding, model_name, "images", aimg_prepared
+            )
+            self.models_processor.bind_ort_output_dynamic(io_binding, "output0")
+            net_outs = self._run_model_with_lazy_build_check(
+                model_name, ort_session, io_binding
+            )
+
+            # Output [1, 5, N] -> [N, 5] where columns are (cx, cy, w, h, score).
+            outputs = np.squeeze(net_outs).T
+            bbox_raw, score_raw = outputs[:, :4], outputs[:, 4:5]
+            score_raw_flat = score_raw.flatten()
+            keep_indices = np.where(score_raw_flat > score)[0]
+
+            if keep_indices.size > 0:
+                bbox_raw, score_raw = bbox_raw[keep_indices], score_raw[keep_indices]
+                bboxes_raw = np.stack(
+                    (
+                        bbox_raw[:, 0] - bbox_raw[:, 2] / 2,
+                        bbox_raw[:, 1] - bbox_raw[:, 3] / 2,
+                        bbox_raw[:, 0] + bbox_raw[:, 2] / 2,
+                        bbox_raw[:, 1] + bbox_raw[:, 3] / 2,
+                    ),
+                    axis=-1,
+                )
+                if angle != 0 and len(bboxes_raw) > 0:
+                    points1, points2 = (
+                        faceutil.trans_points2d(bboxes_raw[:, :2], IM),
+                        faceutil.trans_points2d(bboxes_raw[:, 2:], IM),
+                    )
+                    _x1, _y1, _x2, _y2 = (
+                        points1[:, 0],
+                        points1[:, 1],
+                        points2[:, 0],
+                        points2[:, 1],
+                    )
+                    if angle in (-270, 90):
+                        points1, points2 = (
+                            np.stack((_x1, _y2), axis=1),
+                            np.stack((_x2, _y1), axis=1),
+                        )
+                    elif angle in (-180, 180):
+                        points1, points2 = (
+                            np.stack((_x2, _y2), axis=1),
+                            np.stack((_x1, _y1), axis=1),
+                        )
+                    elif angle in (-90, 270):
+                        points1, points2 = (
+                            np.stack((_x2, _y1), axis=1),
+                            np.stack((_x1, _y2), axis=1),
+                        )
+                    bboxes_raw = np.hstack((points1, points2))
+
+                kpss_raw = self._synthesize_kps_from_bboxes(bboxes_raw)
+
+                if score_raw.ndim == 1:
+                    score_raw = score_raw[:, np.newaxis]
+
+                if score_raw.size > 0:
+                    kpss_list.append(kpss_raw)
+                    bboxes_list.append(bboxes_raw)
+                    scores_list.append(score_raw)
+
+        det, kpss, score_values = self._filter_detections_gpu(
+            scores_list,
+            bboxes_list,
+            kpss_list,
+            img.shape[1],
+            img.shape[2],
+            det_scale,
+            kwargs.get("max_num"),
+        )
+        if det is None:
+            return (
+                np.empty((0, 4)),
+                np.empty((0, 5, 2)),
+                np.empty((0, 5, 2)),
+                np.empty((0,)),
+            )
+
+        return self._refine_landmarks(img_landmark, det, kpss, score_values, **kwargs)
+
+    def detect_yoloface11_vr180(self, **kwargs):
+        """Runs the Yolov11-face (VR180) detection pipeline (boxes only)."""
+        return self._detect_yoloface_vr180("YoloFace11nVR180", **kwargs)
+
+    def detect_yoloface12_vr180(self, **kwargs):
+        """Runs the Yolov12-face (VR180) detection pipeline (boxes only)."""
+        return self._detect_yoloface_vr180("YoloFace12nVR180", **kwargs)
 
     def detect_yunet(self, **kwargs):
         """Runs the Yunet detection pipeline."""

@@ -436,6 +436,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             partial(video_control_actions.on_slider_released, self)
         )
         video_control_actions.set_up_video_seek_slider(self)
+        video_control_actions.set_up_timeline_zoom(self)
         self._setup_media_arrow_seek_shortcuts()
         self.frameAdvanceButton.clicked.connect(
             partial(video_control_actions.advance_video_slider_by_n_frames, self)

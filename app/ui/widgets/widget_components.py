@@ -302,6 +302,27 @@ class TargetMediaCardButton(CardButton):
         # Reset buttons and slider
         video_control_actions.reset_media_buttons(main_window)
 
+    def _toggle_timeline_visibility(
+        self, main_window: "MainWindow", is_visible: bool
+    ) -> None:
+        """Show/hide timeline-specific controls based on media type."""
+        if (
+            hasattr(main_window, "timelineScrollArea")
+            and main_window.timelineScrollArea
+        ):
+            main_window.timelineScrollArea.setVisible(is_visible)
+        elif hasattr(main_window, "videoSeekSlider") and main_window.videoSeekSlider:
+            main_window.videoSeekSlider.setVisible(is_visible)
+        if hasattr(main_window, "videoSeekLineEdit") and main_window.videoSeekLineEdit:
+            main_window.videoSeekLineEdit.setVisible(is_visible)
+        if hasattr(main_window, "zoomLabel") and main_window.zoomLabel:
+            main_window.zoomLabel.setVisible(is_visible)
+        if (
+            hasattr(main_window, "timelineZoomSlider")
+            and main_window.timelineZoomSlider
+        ):
+            main_window.timelineZoomSlider.setVisible(is_visible)
+
     def load_media(self):
         main_window = self.main_window
         if video_control_actions.block_if_issue_scan_active(
@@ -437,6 +458,11 @@ class TargetMediaCardButton(CardButton):
 
         main_window.videoSeekSlider.blockSignals(False)  # Unblock signals
 
+        # Toggle UI elements visibility based on file type
+        self._toggle_timeline_visibility(
+            main_window, self.file_type in ["video", "webcam", "screen"]
+        )
+
         # Append the selected video button to the list
         main_window.selected_video_button = self
         from app.ui.widgets.actions import list_view_actions
@@ -509,6 +535,10 @@ class TargetMediaCardButton(CardButton):
                 0
             )  # Set the slider to 0 for the new video
             main_window.videoSeekSlider.blockSignals(False)  # Unblock signals
+
+            # Hide timeline UI elements when no media is selected
+            self._toggle_timeline_visibility(main_window, False)
+
             # Append the selected video button to the list
             main_window.selected_video_button = False
             from app.ui.widgets.actions import list_view_actions

@@ -367,6 +367,129 @@ def set_up_video_seek_slider(main_window: "MainWindow"):
     )
 
 
+def set_up_timeline_zoom(main_window: "MainWindow"):
+    """
+    Configures the timeline zoom slider and dynamically adjusts the video seek
+    slider's physical width. Uses exponential mapping for fine-grained control.
+    """
+    from PySide6 import QtCore
+
+    zoom_slider = getattr(main_window, "timelineZoomSlider", None)
+    scroll_area = getattr(main_window, "timelineScrollArea", None)
+    zoom_label = getattr(main_window, "zoomLabel", None)
+
+    if not zoom_slider or not scroll_area:
+        print("[WARN] Timeline zoom widgets not found in UI. Skipping setup.")
+        return
+
+    SLIDER_RESOLUTION = 1000
+    zoom_slider.calculated_max_zoom = 100.0
+
+    def get_target_frames() -> int:
+        target = int(main_window.control.get("VideoSeekMaxFrameSlider", 20))
+        return max(1, target)
+
+    def recalculate_max_zoom(max_frames: int) -> float:
+        target_frames = get_target_frames()
+        if max_frames <= target_frames:
+            return 100.0
+        return (max_frames / target_frames) * 100.0
+
+    def on_video_duration_changed(max_frames: int) -> None:
+        zoom_slider.calculated_max_zoom = recalculate_max_zoom(max_frames)
+
+        zoom_slider.blockSignals(True)
+        zoom_slider.setRange(0, SLIDER_RESOLUTION)
+        zoom_slider.setValue(0)
+        zoom_slider.blockSignals(False)
+
+        if zoom_label:
+            zoom_label.setText("Zoom - x1.0")
+
+        main_window.videoSeekSlider.setMinimumWidth(0)
+
+    def on_zoom_changed(slider_val: int) -> None:
+        video_processor = getattr(main_window, "video_processor", None)
+        if not video_processor or video_processor.max_frame_number <= 0:
+            return
+
+        min_z = 100.0
+        max_z = getattr(zoom_slider, "calculated_max_zoom", 100.0)
+
+        if max_z <= min_z:
+            actual_zoom = min_z
+        else:
+            exponent = slider_val / float(SLIDER_RESOLUTION)
+            actual_zoom = min_z * ((max_z / min_z) ** exponent)
+
+        multiplier = actual_zoom / 100.0
+
+        if zoom_label:
+            zoom_label.setText(f"Zoom - x{multiplier:.1f}")
+
+        current_val = main_window.videoSeekSlider.value()
+        max_val = main_window.videoSeekSlider.maximum()
+        relative_pos = current_val / max(1, max_val)
+
+        viewport_width = scroll_area.viewport().width()
+        if viewport_width < 100:
+            viewport_width = 800
+
+        new_width = int(viewport_width * (actual_zoom / 100.0))
+        main_window.videoSeekSlider.setMinimumWidth(new_width)
+
+        scrollbar = scroll_area.horizontalScrollBar()
+        target_scroll_pos = int((new_width * relative_pos) - (viewport_width / 2))
+        scrollbar.setValue(max(0, target_scroll_pos))
+
+    def on_settings_changed(*args) -> None:
+        settings_slider = getattr(main_window, "parameter_widgets", {}).get(
+            "VideoSeekMaxFrameSlider"
+        )
+        if settings_slider:
+            main_window.control["VideoSeekMaxFrameSlider"] = settings_slider.value()
+        elif args and isinstance(args[0], int):
+            main_window.control["VideoSeekMaxFrameSlider"] = args[0]
+
+        max_frames = main_window.videoSeekSlider.maximum()
+        zoom_slider.calculated_max_zoom = recalculate_max_zoom(max_frames)
+        on_zoom_changed(zoom_slider.value())
+
+    def connect_dynamic_settings():
+        settings_slider = getattr(main_window, "parameter_widgets", {}).get(
+            "VideoSeekMaxFrameSlider"
+        )
+        if settings_slider and hasattr(settings_slider, "valueChanged"):
+            settings_slider.valueChanged.connect(on_settings_changed)
+        else:
+            print(
+                "[WARN] VideoSeekMaxFrameSlider still not found. "
+                "Real-time timeline sync disabled."
+            )
+
+    QtCore.QTimer.singleShot(500, connect_dynamic_settings)
+    main_window.refresh_timeline_zoom = on_settings_changed
+
+    original_set_maximum = main_window.videoSeekSlider.setMaximum
+
+    def custom_set_maximum(max_val: int) -> None:
+        original_set_maximum(max_val)
+        on_video_duration_changed(max_val)
+
+    main_window.videoSeekSlider.setMaximum = custom_set_maximum
+
+    original_set_range = main_window.videoSeekSlider.setRange
+
+    def custom_set_range(min_val: int, max_val: int) -> None:
+        original_set_range(min_val, max_val)
+        on_video_duration_changed(max_val)
+
+    main_window.videoSeekSlider.setRange = custom_set_range
+
+    on_video_duration_changed(main_window.videoSeekSlider.maximum())
+    zoom_slider.valueChanged.connect(on_zoom_changed)
+
+
 def add_video_slider_marker(main_window: "MainWindow"):
     """
     Adds a standard parameter marker at the current slider position.

@@ -810,6 +810,15 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "requiredToggleValue": True,
             "help": "Minimum time between catch-up seeks. Higher reduces seek thrashing; lower reacts faster.",
         },
+        "VideoSeekMaxFrameSlider": {
+            "level": 1,
+            "label": "Max Visible Frames",
+            "min_value": "10",
+            "max_value": "100",
+            "default": "20",
+            "step": 1,
+            "help": "Maximum number of frames visible in the timeline at Max Zoom level.",
+        },
     },
     "Video Recording Settings": {
         "ConfirmBeforeStoppingRecordingToggle": {
@@ -1026,9 +1035,17 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
         "DetectorModelSelection": {
             "level": 1,
             "label": "Face Detect Model",
-            "options": ["RetinaFace", "Yolov8", "SCRFD", "Yunet", "Yunet-2023"],
+            "options": [
+                "RetinaFace",
+                "Yolov8",
+                "SCRFD",
+                "Yunet",
+                "Yunet-2023",
+                "Yolov11 VR180",
+                "Yolov12 VR180",
+            ],
             "default": "RetinaFace",
-            "help": "Select the face detection model. To benchmark alternatives, use the same video and VISIOMASTER_PERF_BUNDLE=1; keep RecognitionModel matched to the swapper (e.g. Inswapper128ArcFace with Inswapper128).",
+            "help": "Select the face detection model. 'Yolov11 VR180' and 'Yolov12 VR180' are trained for VR180 content. To benchmark alternatives, use the same video and VISIOMASTER_PERF_BUNDLE=1; keep RecognitionModel matched to the swapper (e.g. Inswapper128ArcFace with Inswapper128).",
             "exec_function": control_actions.on_detector_model_selection_change,
             "exec_function_args": [],
         },
@@ -1065,7 +1082,7 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
                 "128",
             ],
             "default": "512",
-            "help": "Shown only when the selected detector accepts a variable letterbox (dynamic ONNX). Yolo/Yunet use 640×640 in code; fixed-shape RetinaFace/SCRFD use the model’s compiled side — the control is hidden and the value is set automatically.",
+            "help": "Shown only when the selected detector accepts a variable letterbox (dynamic ONNX). Yolo/Yunet/Yolo VR180 use 640×640 in code; fixed-shape RetinaFace/SCRFD use the model’s compiled side — the control is hidden and the value is set automatically.",
         },
         "MaxFacesToDetectSlider": {
             "level": 1,

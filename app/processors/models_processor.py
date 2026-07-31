@@ -804,57 +804,72 @@ class ModelsProcessor(QtCore.QObject):
 
         When *cache_root* is set (multi-GPU load on a specific CUDA ordinal), only that
         directory is checked — no legacy flat ``tensorrt-engines/`` fallback.
+
+        Accepts both legacy ORT-named engines (``TensorrtExecutionProvider_*.engine``)
+        and explicit-prefixed engines (e.g. ``ModelName_*.engine``), and looks for
+        ctx files under either the UI model name or the ONNX basename.
         """
         try:
             base_onnx_name = os.path.splitext(os.path.basename(onnx_path))[0]
-            ctx_file_name = f"{base_onnx_name}_ctx.onnx"
+            possible_prefixes = list(
+                dict.fromkeys([p for p in (model_name, base_onnx_name) if p])
+            )
+
             if cache_root is not None:
-                cache_dir = cache_root
-                ctx_file_path = os.path.join(cache_dir, ctx_file_name)
-                if not os.path.exists(ctx_file_path):
-                    return False
+                cache_candidates = [cache_root]
             else:
                 # Per-GPU cache root (matches _refresh_trt_options_for_gpu).
                 cache_dir = self._tensorrt_gpu_cache_root()
-                ctx_file_path = os.path.join(cache_dir, ctx_file_name)
+                cache_candidates = [cache_dir]
                 # Legacy layout before per-GPU dirs: ctx under tensorrt-engines/
                 # Only reuse it when Primary GPU is CUDA device 0. Otherwise we would
                 # load GPU-0 TensorRT engines while ``device_id`` targets another GPU,
                 # which keeps VRAM/compute on GPU 0 (common report with TensorRT-Engine).
-                if not os.path.exists(ctx_file_path):
-                    legacy_root = os.path.abspath("tensorrt-engines")
-                    legacy_ctx = os.path.join(legacy_root, ctx_file_name)
-                    primary_phys = self._primary_cuda_device_ordinal()
-                    if primary_phys == 0 and os.path.exists(legacy_ctx):
-                        cache_dir = legacy_root
-                        ctx_file_path = legacy_ctx
-                    else:
-                        return False
+                legacy_root = os.path.abspath("tensorrt-engines")
+                primary_phys = self._primary_cuda_device_ordinal()
+                if (
+                    primary_phys == 0
+                    and os.path.abspath(cache_dir) != legacy_root
+                    and os.path.isdir(legacy_root)
+                ):
+                    cache_candidates.append(legacy_root)
 
-            with open(ctx_file_path, "rb") as f:
-                content = f.read()
+            for cache_dir in cache_candidates:
+                for prefix in possible_prefixes:
+                    ctx_file_name = f"{prefix}_ctx.onnx"
+                    ctx_file_path = os.path.join(cache_dir, ctx_file_name)
+                    if not (
+                        os.path.exists(ctx_file_path) and os.path.isfile(ctx_file_path)
+                    ):
+                        continue
 
-            # Look for the engine name embedded in the context file
-            match = re.search(b"TensorrtExecutionProvider_.*?\\.engine", content)
-            if not match:
-                return False
+                    with open(ctx_file_path, "rb") as f:
+                        content = f.read()
 
-            engine_name = match.group(0).decode("utf-8")
-            # Engines under ctx dir / engines / (relative trt_engine_cache_path).
-            engine_file_path = os.path.join(
-                cache_dir, _TRT_REL_ENGINE_CACHE_DIR, engine_name
-            )
-            if os.path.exists(engine_file_path):
-                return True
-            # Flat next to _ctx.onnx (legacy or brief empty-string experiment).
-            flat = os.path.join(cache_dir, engine_name)
-            if os.path.exists(flat):
-                return True
-            # Older ORT layout: tensorrt-engines/tensorrt-engines/<engine>
-            nested = os.path.join(
-                cache_dir, os.path.basename(cache_dir), engine_name
-            )
-            return bool(os.path.exists(nested))
+                    # Legacy ORT naming or explicit-prefixed engines.
+                    match = re.search(rb"[A-Za-z0-9_.-]+\.engine", content)
+                    if not match:
+                        continue
+
+                    engine_name = match.group(0).decode("utf-8")
+                    # Engines under ctx dir / engines / (relative trt_engine_cache_path).
+                    engine_file_path = os.path.join(
+                        cache_dir, _TRT_REL_ENGINE_CACHE_DIR, engine_name
+                    )
+                    if os.path.exists(engine_file_path):
+                        return True
+                    # Flat next to _ctx.onnx (legacy or brief empty-string experiment).
+                    flat = os.path.join(cache_dir, engine_name)
+                    if os.path.exists(flat):
+                        return True
+                    # Older ORT layout: tensorrt-engines/tensorrt-engines/<engine>
+                    nested = os.path.join(
+                        cache_dir, os.path.basename(cache_dir), engine_name
+                    )
+                    if os.path.exists(nested):
+                        return True
+
+            return False
 
         except Exception as e:
             print(f"[ERROR] Failed TensorRT cache check: {e}")

@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
-
 ################################################################################
 ## Form generated from reading UI file 'MainWindow.ui'
 ##
 ## Created by: Qt User Interface Compiler version 6.8.2
 ##
-## WARNING! All changes made in this file will be lost when recompiling UI file!
+## WARNING
 ################################################################################
-
 from PySide6.QtCore import (QCoreApplication, QDate, QDateTime, QLocale,
     QMetaObject, QObject, QPoint, QRect,
     QSize, QTime, QUrl, Qt)
@@ -17,15 +15,14 @@ from PySide6.QtGui import (QAction, QBrush, QColor, QConicalGradient,
     QPainter, QPalette, QPixmap, QRadialGradient,
     QTransform)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDockWidget,
-    QGraphicsView, QGridLayout, QGroupBox, QHBoxLayout,
-    QLabel, QLineEdit, QListView, QListWidget,
-    QListWidgetItem, QMainWindow, QMenu, QMenuBar,
-    QPushButton, QSizePolicy, QSlider, QSpacerItem,
-    QTabWidget, QVBoxLayout, QWidget)
-
+    QFrame, QGraphicsView, QGridLayout, QGroupBox,
+    QHBoxLayout, QLabel, QLineEdit, QListView,
+    QListWidget, QListWidgetItem, QMainWindow, QMenu,
+    QMenuBar, QPushButton, QScrollArea, QSizePolicy,
+    QSlider, QSpacerItem, QTabWidget, QVBoxLayout,
+    QWidget)
 from app.ui.widgets.vram_progress_bar import VramPeakProgressBar
 from app.ui.core import media_rc
-
 class Ui_MainWindow(object):
     def setupUi(self, MainWindow):
         if not MainWindow.objectName():
@@ -89,86 +86,93 @@ class Ui_MainWindow(object):
         self.TargetMediaCheckBox = QCheckBox(self.mediaLayout)
         self.TargetMediaCheckBox.setObjectName(u"TargetMediaCheckBox")
         self.TargetMediaCheckBox.setChecked(True)
-
         self.panelVisibilityCheckBoxLayout.addWidget(self.TargetMediaCheckBox)
-
         self.InputFacesCheckBox = QCheckBox(self.mediaLayout)
         self.InputFacesCheckBox.setObjectName(u"InputFacesCheckBox")
         self.InputFacesCheckBox.setChecked(True)
-
         self.panelVisibilityCheckBoxLayout.addWidget(self.InputFacesCheckBox)
-
         self.JobsCheckBox = QCheckBox(self.mediaLayout)
         self.JobsCheckBox.setObjectName(u"JobsCheckBox")
         self.JobsCheckBox.setChecked(True)
-
         self.panelVisibilityCheckBoxLayout.addWidget(self.JobsCheckBox)
-
         self.facesPanelCheckBox = QCheckBox(self.mediaLayout)
         self.facesPanelCheckBox.setObjectName(u"facesPanelCheckBox")
         self.facesPanelCheckBox.setChecked(True)
-
         self.panelVisibilityCheckBoxLayout.addWidget(self.facesPanelCheckBox)
-
         self.parametersPanelCheckBox = QCheckBox(self.mediaLayout)
         self.parametersPanelCheckBox.setObjectName(u"parametersPanelCheckBox")
         self.parametersPanelCheckBox.setChecked(True)
-
         self.panelVisibilityCheckBoxLayout.addWidget(self.parametersPanelCheckBox)
-
         self.horizontalSpacer_8 = QSpacerItem(20, 20, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-
         self.panelVisibilityCheckBoxLayout.addItem(self.horizontalSpacer_8)
-
         self.faceCompareCheckBox = QCheckBox(self.mediaLayout)
         self.faceCompareCheckBox.setObjectName(u"faceCompareCheckBox")
-
         self.panelVisibilityCheckBoxLayout.addWidget(self.faceCompareCheckBox)
-
         self.faceMaskCheckBox = QCheckBox(self.mediaLayout)
         self.faceMaskCheckBox.setObjectName(u"faceMaskCheckBox")
-
         self.panelVisibilityCheckBoxLayout.addWidget(self.faceMaskCheckBox)
-
-
         self.verticalLayout.addLayout(self.panelVisibilityCheckBoxLayout)
-
         self.graphicsViewFrame = QGraphicsView(self.mediaLayout)
         self.graphicsViewFrame.setObjectName(u"graphicsViewFrame")
-
         self.verticalLayout.addWidget(self.graphicsViewFrame)
-
         self.verticalLayoutMediaControls = QVBoxLayout()
         self.verticalLayoutMediaControls.setObjectName(u"verticalLayoutMediaControls")
         self.horizontalLayoutMediaSlider = QHBoxLayout()
         self.horizontalLayoutMediaSlider.setObjectName(u"horizontalLayoutMediaSlider")
-        self.videoSeekSlider = QSlider(self.mediaLayout)
+        self.timelineScrollArea = QScrollArea(self.mediaLayout)
+        self.timelineScrollArea.setObjectName(u"timelineScrollArea")
+        sizePolicy1 = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        sizePolicy1.setHorizontalStretch(1)
+        sizePolicy1.setVerticalStretch(0)
+        sizePolicy1.setHeightForWidth(self.timelineScrollArea.sizePolicy().hasHeightForWidth())
+        self.timelineScrollArea.setSizePolicy(sizePolicy1)
+        self.timelineScrollArea.setMinimumSize(QSize(0, 40))
+        self.timelineScrollArea.setMaximumSize(QSize(16777215, 40))
+        self.timelineScrollArea.setWidgetResizable(True)
+        self.timelineScrollArea.setFrameShape(QFrame.Shape.NoFrame)
+        self.timelineScrollArea.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scrollAreaWidgetContents = QWidget()
+        self.scrollAreaWidgetContents.setObjectName(u"scrollAreaWidgetContents")
+        self.verticalLayout_timeline = QVBoxLayout(self.scrollAreaWidgetContents)
+        self.verticalLayout_timeline.setObjectName(u"verticalLayout_timeline")
+        self.verticalLayout_timeline.setContentsMargins(0, 0, 0, 0)
+        self.videoSeekSlider = QSlider(self.scrollAreaWidgetContents)
         self.videoSeekSlider.setObjectName(u"videoSeekSlider")
         self.videoSeekSlider.setOrientation(Qt.Orientation.Horizontal)
-
-        self.horizontalLayoutMediaSlider.addWidget(self.videoSeekSlider)
-
+        self.verticalLayout_timeline.addWidget(self.videoSeekSlider)
+        self.timelineScrollArea.setWidget(self.scrollAreaWidgetContents)
+        self.horizontalLayoutMediaSlider.addWidget(self.timelineScrollArea)
         self.videoSeekLineEdit = QLineEdit(self.mediaLayout)
         self.videoSeekLineEdit.setObjectName(u"videoSeekLineEdit")
-        sizePolicy1 = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        sizePolicy1.setHorizontalStretch(0)
-        sizePolicy1.setVerticalStretch(0)
-        sizePolicy1.setHeightForWidth(self.videoSeekLineEdit.sizePolicy().hasHeightForWidth())
-        self.videoSeekLineEdit.setSizePolicy(sizePolicy1)
+        sizePolicy2 = QSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        sizePolicy2.setHorizontalStretch(0)
+        sizePolicy2.setVerticalStretch(0)
+        sizePolicy2.setHeightForWidth(self.videoSeekLineEdit.sizePolicy().hasHeightForWidth())
+        self.videoSeekLineEdit.setSizePolicy(sizePolicy2)
         self.videoSeekLineEdit.setMaximumSize(QSize(70, 16777215))
         self.videoSeekLineEdit.setClearButtonEnabled(False)
-
         self.horizontalLayoutMediaSlider.addWidget(self.videoSeekLineEdit)
-
-
+        self.zoomLabel = QLabel(self.mediaLayout)
+        self.zoomLabel.setObjectName(u"zoomLabel")
+        sizePolicy3 = QSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        sizePolicy3.setHorizontalStretch(0)
+        sizePolicy3.setVerticalStretch(0)
+        sizePolicy3.setHeightForWidth(self.zoomLabel.sizePolicy().hasHeightForWidth())
+        self.zoomLabel.setSizePolicy(sizePolicy3)
+        self.horizontalLayoutMediaSlider.addWidget(self.zoomLabel)
+        self.timelineZoomSlider = QSlider(self.mediaLayout)
+        self.timelineZoomSlider.setObjectName(u"timelineZoomSlider")
+        sizePolicy2.setHeightForWidth(self.timelineZoomSlider.sizePolicy().hasHeightForWidth())
+        self.timelineZoomSlider.setSizePolicy(sizePolicy2)
+        self.timelineZoomSlider.setMinimumSize(QSize(100, 0))
+        self.timelineZoomSlider.setMaximumSize(QSize(100, 16777215))
+        self.timelineZoomSlider.setOrientation(Qt.Orientation.Horizontal)
+        self.horizontalLayoutMediaSlider.addWidget(self.timelineZoomSlider)
         self.verticalLayoutMediaControls.addLayout(self.horizontalLayoutMediaSlider)
-
         self.horizontalLayoutMediaButtons = QHBoxLayout()
         self.horizontalLayoutMediaButtons.setObjectName(u"horizontalLayoutMediaButtons")
         self.horizontalSpacer_7 = QSpacerItem(40, 20, QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Minimum)
-
         self.horizontalLayoutMediaButtons.addItem(self.horizontalSpacer_7)
-
         self.liveSoundButton = QPushButton(self.mediaLayout)
         self.liveSoundButton.setObjectName(u"liveSoundButton")
         self.liveSoundButton.setMinimumSize(QSize(0, 0))
@@ -178,32 +182,24 @@ class Ui_MainWindow(object):
         self.liveSoundButton.setIconSize(QSize(16, 20))
         self.liveSoundButton.setCheckable(True)
         self.liveSoundButton.setFlat(True)
-
         self.horizontalLayoutMediaButtons.addWidget(self.liveSoundButton)
-
         self.horizontalSpacer = QSpacerItem(40, 20, QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Minimum)
-
         self.horizontalLayoutMediaButtons.addItem(self.horizontalSpacer)
-
         self.frameRewindButton = QPushButton(self.mediaLayout)
         self.frameRewindButton.setObjectName(u"frameRewindButton")
-        sizePolicy2 = QSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
-        sizePolicy2.setHorizontalStretch(0)
-        sizePolicy2.setVerticalStretch(0)
-        sizePolicy2.setHeightForWidth(self.frameRewindButton.sizePolicy().hasHeightForWidth())
-        self.frameRewindButton.setSizePolicy(sizePolicy2)
+        sizePolicy4 = QSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+        sizePolicy4.setHorizontalStretch(0)
+        sizePolicy4.setVerticalStretch(0)
+        sizePolicy4.setHeightForWidth(self.frameRewindButton.sizePolicy().hasHeightForWidth())
+        self.frameRewindButton.setSizePolicy(sizePolicy4)
         self.frameRewindButton.setMaximumSize(QSize(100, 16777215))
         icon2 = QIcon()
         icon2.addFile(u":/media/media/tl_left_hover.png", QSize(), QIcon.Mode.Normal, QIcon.State.Off)
         self.frameRewindButton.setIcon(icon2)
         self.frameRewindButton.setFlat(True)
-
         self.horizontalLayoutMediaButtons.addWidget(self.frameRewindButton)
-
         self.horizontalSpacer_3 = QSpacerItem(40, 20, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
-
         self.horizontalLayoutMediaButtons.addItem(self.horizontalSpacer_3)
-
         self.buttonMediaRecord = QPushButton(self.mediaLayout)
         self.buttonMediaRecord.setObjectName(u"buttonMediaRecord")
         icon3 = QIcon()
@@ -211,124 +207,92 @@ class Ui_MainWindow(object):
         self.buttonMediaRecord.setIcon(icon3)
         self.buttonMediaRecord.setCheckable(True)
         self.buttonMediaRecord.setFlat(True)
-
         self.horizontalLayoutMediaButtons.addWidget(self.buttonMediaRecord)
-
         self.horizontalSpacer_6 = QSpacerItem(30, 20, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
-
         self.horizontalLayoutMediaButtons.addItem(self.horizontalSpacer_6)
-
         self.buttonMediaPlay = QPushButton(self.mediaLayout)
         self.buttonMediaPlay.setObjectName(u"buttonMediaPlay")
-        sizePolicy3 = QSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Minimum)
-        sizePolicy3.setHorizontalStretch(0)
-        sizePolicy3.setVerticalStretch(0)
-        sizePolicy3.setHeightForWidth(self.buttonMediaPlay.sizePolicy().hasHeightForWidth())
-        self.buttonMediaPlay.setSizePolicy(sizePolicy3)
+        sizePolicy5 = QSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Minimum)
+        sizePolicy5.setHorizontalStretch(0)
+        sizePolicy5.setVerticalStretch(0)
+        sizePolicy5.setHeightForWidth(self.buttonMediaPlay.sizePolicy().hasHeightForWidth())
+        self.buttonMediaPlay.setSizePolicy(sizePolicy5)
         self.buttonMediaPlay.setMaximumSize(QSize(100, 16777215))
         icon4 = QIcon()
         icon4.addFile(u":/media/media/play_hover.png", QSize(), QIcon.Mode.Normal, QIcon.State.Off)
         self.buttonMediaPlay.setIcon(icon4)
         self.buttonMediaPlay.setCheckable(True)
         self.buttonMediaPlay.setFlat(True)
-
         self.horizontalLayoutMediaButtons.addWidget(self.buttonMediaPlay)
-
         self.horizontalSpacer_4 = QSpacerItem(40, 20, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
-
         self.horizontalLayoutMediaButtons.addItem(self.horizontalSpacer_4)
-
         self.frameAdvanceButton = QPushButton(self.mediaLayout)
         self.frameAdvanceButton.setObjectName(u"frameAdvanceButton")
-        sizePolicy2.setHeightForWidth(self.frameAdvanceButton.sizePolicy().hasHeightForWidth())
-        self.frameAdvanceButton.setSizePolicy(sizePolicy2)
+        sizePolicy4.setHeightForWidth(self.frameAdvanceButton.sizePolicy().hasHeightForWidth())
+        self.frameAdvanceButton.setSizePolicy(sizePolicy4)
         self.frameAdvanceButton.setMaximumSize(QSize(100, 16777215))
         icon5 = QIcon()
         icon5.addFile(u":/media/media/tl_right_hover.png", QSize(), QIcon.Mode.Normal, QIcon.State.Off)
         self.frameAdvanceButton.setIcon(icon5)
         self.frameAdvanceButton.setFlat(True)
-
         self.horizontalLayoutMediaButtons.addWidget(self.frameAdvanceButton)
-
         self.horizontalSpacer_2 = QSpacerItem(40, 20, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
-
         self.horizontalLayoutMediaButtons.addItem(self.horizontalSpacer_2)
-
         self.addMarkerButton = QPushButton(self.mediaLayout)
         self.addMarkerButton.setObjectName(u"addMarkerButton")
         icon6 = QIcon()
         icon6.addFile(u":/media/media/add_marker_hover.png", QSize(), QIcon.Mode.Normal, QIcon.State.Off)
         self.addMarkerButton.setIcon(icon6)
         self.addMarkerButton.setFlat(True)
-
         self.horizontalLayoutMediaButtons.addWidget(self.addMarkerButton)
-
         self.removeMarkerButton = QPushButton(self.mediaLayout)
         self.removeMarkerButton.setObjectName(u"removeMarkerButton")
         icon7 = QIcon()
         icon7.addFile(u":/media/media/remove_marker_hover.png", QSize(), QIcon.Mode.Normal, QIcon.State.Off)
         self.removeMarkerButton.setIcon(icon7)
         self.removeMarkerButton.setFlat(True)
-
         self.horizontalLayoutMediaButtons.addWidget(self.removeMarkerButton)
-
         self.previousMarkerButton = QPushButton(self.mediaLayout)
         self.previousMarkerButton.setObjectName(u"previousMarkerButton")
         icon8 = QIcon()
         icon8.addFile(u":/media/media/previous_marker_hover.png", QSize(), QIcon.Mode.Normal, QIcon.State.Off)
         self.previousMarkerButton.setIcon(icon8)
         self.previousMarkerButton.setFlat(True)
-
         self.horizontalLayoutMediaButtons.addWidget(self.previousMarkerButton)
-
         self.nextMarkerButton = QPushButton(self.mediaLayout)
         self.nextMarkerButton.setObjectName(u"nextMarkerButton")
         icon9 = QIcon()
         icon9.addFile(u":/media/media/next_marker_hover.png", QSize(), QIcon.Mode.Normal, QIcon.State.Off)
         self.nextMarkerButton.setIcon(icon9)
         self.nextMarkerButton.setFlat(True)
-
         self.horizontalLayoutMediaButtons.addWidget(self.nextMarkerButton)
-
         self.viewFullScreenButton = QPushButton(self.mediaLayout)
         self.viewFullScreenButton.setObjectName(u"viewFullScreenButton")
         icon10 = QIcon()
         icon10.addFile(u":/media/media/fullscreen.png", QSize(), QIcon.Mode.Normal, QIcon.State.Off)
         self.viewFullScreenButton.setIcon(icon10)
         self.viewFullScreenButton.setFlat(True)
-
         self.horizontalLayoutMediaButtons.addWidget(self.viewFullScreenButton)
-
         self.theatreModeButton = QPushButton(self.mediaLayout)
         self.theatreModeButton.setObjectName(u"theatreModeButton")
         icon11 = QIcon()
         icon11.addFile(u":/media/media/theatre_hover.png", QSize(), QIcon.Mode.Normal, QIcon.State.Off)
         self.theatreModeButton.setIcon(icon11)
         self.theatreModeButton.setFlat(True)
-
         self.horizontalLayoutMediaButtons.addWidget(self.theatreModeButton)
-
         self.horizontalSpacer_5 = QSpacerItem(40, 20, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-
         self.horizontalLayoutMediaButtons.addItem(self.horizontalSpacer_5)
-
-
         self.verticalLayoutMediaControls.addLayout(self.horizontalLayoutMediaButtons)
-
-
         self.verticalLayout.addLayout(self.verticalLayoutMediaControls)
-
         self.verticalSpacer = QSpacerItem(20, 5, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred)
-
         self.verticalLayout.addItem(self.verticalSpacer)
-
         self.facesPanelGroupBox = QGroupBox(self.mediaLayout)
         self.facesPanelGroupBox.setObjectName(u"facesPanelGroupBox")
-        sizePolicy4 = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-        sizePolicy4.setHorizontalStretch(0)
-        sizePolicy4.setVerticalStretch(0)
-        sizePolicy4.setHeightForWidth(self.facesPanelGroupBox.sizePolicy().hasHeightForWidth())
-        self.facesPanelGroupBox.setSizePolicy(sizePolicy4)
+        sizePolicy6 = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        sizePolicy6.setHorizontalStretch(0)
+        sizePolicy6.setVerticalStretch(0)
+        sizePolicy6.setHeightForWidth(self.facesPanelGroupBox.sizePolicy().hasHeightForWidth())
+        self.facesPanelGroupBox.setSizePolicy(sizePolicy6)
         self.facesPanelGroupBox.setMinimumSize(QSize(0, 220))
         self.facesPanelGroupBox.setMaximumSize(QSize(16777215, 16777215))
         self.facesPanelGroupBox.setAutoFillBackground(False)
@@ -338,11 +302,11 @@ class Ui_MainWindow(object):
         self.gridLayout_2.setObjectName(u"gridLayout_2")
         self.facesButtonsWidget = QWidget(self.facesPanelGroupBox)
         self.facesButtonsWidget.setObjectName(u"facesButtonsWidget")
-        sizePolicy5 = QSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
-        sizePolicy5.setHorizontalStretch(0)
-        sizePolicy5.setVerticalStretch(0)
-        sizePolicy5.setHeightForWidth(self.facesButtonsWidget.sizePolicy().hasHeightForWidth())
-        self.facesButtonsWidget.setSizePolicy(sizePolicy5)
+        sizePolicy7 = QSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+        sizePolicy7.setHorizontalStretch(0)
+        sizePolicy7.setVerticalStretch(0)
+        sizePolicy7.setHeightForWidth(self.facesButtonsWidget.sizePolicy().hasHeightForWidth())
+        self.facesButtonsWidget.setSizePolicy(sizePolicy7)
         self.verticalLayout_8 = QVBoxLayout(self.facesButtonsWidget)
         self.verticalLayout_8.setSpacing(0)
         self.verticalLayout_8.setObjectName(u"verticalLayout_8")
@@ -358,43 +322,31 @@ class Ui_MainWindow(object):
         self.findTargetFacesButton.setMinimumSize(QSize(100, 0))
         self.findTargetFacesButton.setCheckable(False)
         self.findTargetFacesButton.setFlat(True)
-
         self.controlButtonsLayout.addWidget(self.findTargetFacesButton)
-
         self.clearTargetFacesButton = QPushButton(self.verticalWidget)
         self.clearTargetFacesButton.setObjectName(u"clearTargetFacesButton")
         self.clearTargetFacesButton.setCheckable(False)
         self.clearTargetFacesButton.setFlat(True)
-
         self.controlButtonsLayout.addWidget(self.clearTargetFacesButton)
-
         self.swapfacesButton = QPushButton(self.verticalWidget)
         self.swapfacesButton.setObjectName(u"swapfacesButton")
         self.swapfacesButton.setCheckable(True)
         self.swapfacesButton.setFlat(True)
-
         self.controlButtonsLayout.addWidget(self.swapfacesButton)
-
         self.editFacesButton = QPushButton(self.verticalWidget)
         self.editFacesButton.setObjectName(u"editFacesButton")
         self.editFacesButton.setCheckable(True)
         self.editFacesButton.setFlat(True)
-
         self.controlButtonsLayout.addWidget(self.editFacesButton)
-
-
         self.verticalLayout_8.addWidget(self.verticalWidget)
-
-
         self.gridLayout_2.addWidget(self.facesButtonsWidget, 1, 0, 1, 1)
-
         self.inputEmbeddingsList = QListWidget(self.facesPanelGroupBox)
         self.inputEmbeddingsList.setObjectName(u"inputEmbeddingsList")
-        sizePolicy6 = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        sizePolicy6.setHorizontalStretch(4)
-        sizePolicy6.setVerticalStretch(0)
-        sizePolicy6.setHeightForWidth(self.inputEmbeddingsList.sizePolicy().hasHeightForWidth())
-        self.inputEmbeddingsList.setSizePolicy(sizePolicy6)
+        sizePolicy8 = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        sizePolicy8.setHorizontalStretch(4)
+        sizePolicy8.setVerticalStretch(0)
+        sizePolicy8.setHeightForWidth(self.inputEmbeddingsList.sizePolicy().hasHeightForWidth())
+        self.inputEmbeddingsList.setSizePolicy(sizePolicy8)
         self.inputEmbeddingsList.setMinimumSize(QSize(320, 120))
         self.inputEmbeddingsList.setMaximumSize(QSize(16777215, 120))
         self.inputEmbeddingsList.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -406,102 +358,72 @@ class Ui_MainWindow(object):
         self.inputEmbeddingsList.setViewMode(QListView.ViewMode.IconMode)
         self.inputEmbeddingsList.setUniformItemSizes(True)
         self.inputEmbeddingsList.setProperty(u"wrapping", True)
-
         self.gridLayout_2.addWidget(self.inputEmbeddingsList, 1, 2, 1, 1)
-
         self.horizontalLayout_4 = QHBoxLayout()
         self.horizontalLayout_4.setObjectName(u"horizontalLayout_4")
         self.saveImageButton = QPushButton(self.facesPanelGroupBox)
         self.saveImageButton.setObjectName(u"saveImageButton")
         self.saveImageButton.setFlat(True)
-
         self.horizontalLayout_4.addWidget(self.saveImageButton)
-
-
         self.gridLayout_2.addLayout(self.horizontalLayout_4, 0, 0, 1, 1)
-
         self.batchLayout_1 = QHBoxLayout()
         self.batchLayout_1.setObjectName(u"batchLayout_1")
         self.batchImageButton = QPushButton(self.facesPanelGroupBox)
         self.batchImageButton.setObjectName(u"batchImageButton")
         self.batchImageButton.setFlat(True)
-
         self.batchLayout_1.addWidget(self.batchImageButton)
-
         self.batchallImageButton = QPushButton(self.facesPanelGroupBox)
         self.batchallImageButton.setObjectName(u"batchallImageButton")
         self.batchallImageButton.setFlat(True)
-
         self.batchLayout_1.addWidget(self.batchallImageButton)
-
-
         self.gridLayout_2.addLayout(self.batchLayout_1, 0, 1, 1, 1)
-
         self.horizontalLayout_3 = QHBoxLayout()
         self.horizontalLayout_3.setObjectName(u"horizontalLayout_3")
         self.inputEmbeddingsSearchBox = QLineEdit(self.facesPanelGroupBox)
         self.inputEmbeddingsSearchBox.setObjectName(u"inputEmbeddingsSearchBox")
-
         self.horizontalLayout_3.addWidget(self.inputEmbeddingsSearchBox)
-
         self.openEditorButton = QPushButton(self.facesPanelGroupBox)
         self.openEditorButton.setObjectName(u"openEditorButton")
         self.openEditorButton.setCheckable(False)
         self.openEditorButton.setFlat(True)
-
         self.horizontalLayout_3.addWidget(self.openEditorButton)
-
         self.openEmbeddingButton = QPushButton(self.facesPanelGroupBox)
         self.openEmbeddingButton.setObjectName(u"openEmbeddingButton")
         icon12 = QIcon()
         icon12.addFile(u":/media/media/open_file.png", QSize(), QIcon.Mode.Normal, QIcon.State.Off)
         self.openEmbeddingButton.setIcon(icon12)
         self.openEmbeddingButton.setFlat(True)
-
         self.horizontalLayout_3.addWidget(self.openEmbeddingButton)
-
         self.saveEmbeddingButton = QPushButton(self.facesPanelGroupBox)
         self.saveEmbeddingButton.setObjectName(u"saveEmbeddingButton")
         icon13 = QIcon()
         icon13.addFile(u":/media/media/save_file.png", QSize(), QIcon.Mode.Normal, QIcon.State.Off)
         self.saveEmbeddingButton.setIcon(icon13)
         self.saveEmbeddingButton.setFlat(True)
-
         self.horizontalLayout_3.addWidget(self.saveEmbeddingButton)
-
         self.saveEmbeddingAsButton = QPushButton(self.facesPanelGroupBox)
         self.saveEmbeddingAsButton.setObjectName(u"saveEmbeddingAsButton")
         icon14 = QIcon()
         icon14.addFile(u":/media/media/save_file_as.png", QSize(), QIcon.Mode.Normal, QIcon.State.Off)
         self.saveEmbeddingAsButton.setIcon(icon14)
         self.saveEmbeddingAsButton.setFlat(True)
-
         self.horizontalLayout_3.addWidget(self.saveEmbeddingAsButton)
-
-
         self.gridLayout_2.addLayout(self.horizontalLayout_3, 0, 2, 1, 1)
-
         self.targetFacesList = QListWidget(self.facesPanelGroupBox)
         self.targetFacesList.setObjectName(u"targetFacesList")
         self.targetFacesList.setAutoFillBackground(True)
         self.targetFacesList.setAutoScroll(False)
-
         self.gridLayout_2.addWidget(self.targetFacesList, 1, 1, 1, 1)
-
-
         self.verticalLayout.addWidget(self.facesPanelGroupBox)
-
-
         self.horizontalLayout.addWidget(self.mediaLayout)
-
         MainWindow.setCentralWidget(self.centralwidget)
         self.input_Target_DockWidget = QDockWidget(MainWindow)
         self.input_Target_DockWidget.setObjectName(u"input_Target_DockWidget")
-        sizePolicy7 = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-        sizePolicy7.setHorizontalStretch(4)
-        sizePolicy7.setVerticalStretch(0)
-        sizePolicy7.setHeightForWidth(self.input_Target_DockWidget.sizePolicy().hasHeightForWidth())
-        self.input_Target_DockWidget.setSizePolicy(sizePolicy7)
+        sizePolicy9 = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        sizePolicy9.setHorizontalStretch(4)
+        sizePolicy9.setVerticalStretch(0)
+        sizePolicy9.setHeightForWidth(self.input_Target_DockWidget.sizePolicy().hasHeightForWidth())
+        self.input_Target_DockWidget.setSizePolicy(sizePolicy9)
         self.input_Target_DockWidget.setMinimumSize(QSize(324, 230))
         self.input_Target_DockWidget.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetFloatable|QDockWidget.DockWidgetFeature.DockWidgetMovable)
         self.dockWidgetContents = QWidget()
@@ -519,107 +441,76 @@ class Ui_MainWindow(object):
         self.labelTargetVideosPath = QLabel(self.groupBox_TargetVideos_Select)
         self.labelTargetVideosPath.setObjectName(u"labelTargetVideosPath")
         self.labelTargetVideosPath.setWordWrap(False)
-
         self.horizontalLayout_7.addWidget(self.labelTargetVideosPath)
-
         self.buttonTargetVideosPath = QPushButton(self.groupBox_TargetVideos_Select)
         self.buttonTargetVideosPath.setObjectName(u"buttonTargetVideosPath")
-        sizePolicy8 = QSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        sizePolicy8.setHorizontalStretch(0)
-        sizePolicy8.setVerticalStretch(0)
-        sizePolicy8.setHeightForWidth(self.buttonTargetVideosPath.sizePolicy().hasHeightForWidth())
-        self.buttonTargetVideosPath.setSizePolicy(sizePolicy8)
+        sizePolicy2.setHeightForWidth(self.buttonTargetVideosPath.sizePolicy().hasHeightForWidth())
+        self.buttonTargetVideosPath.setSizePolicy(sizePolicy2)
         self.buttonTargetVideosPath.setIcon(icon12)
         self.buttonTargetVideosPath.setIconSize(QSize(18, 18))
         self.buttonTargetVideosPath.setFlat(True)
-
         self.horizontalLayout_7.addWidget(self.buttonTargetVideosPath)
-
         self.buttonBatchAv1ToH264 = QPushButton(self.groupBox_TargetVideos_Select)
         self.buttonBatchAv1ToH264.setObjectName(u"buttonBatchAv1ToH264")
-        sizePolicy9 = QSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
-        sizePolicy9.setHorizontalStretch(0)
-        sizePolicy9.setVerticalStretch(0)
-        sizePolicy9.setHeightForWidth(self.buttonBatchAv1ToH264.sizePolicy().hasHeightForWidth())
-        self.buttonBatchAv1ToH264.setSizePolicy(sizePolicy9)
+        sizePolicy10 = QSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        sizePolicy10.setHorizontalStretch(0)
+        sizePolicy10.setVerticalStretch(0)
+        sizePolicy10.setHeightForWidth(self.buttonBatchAv1ToH264.sizePolicy().hasHeightForWidth())
+        self.buttonBatchAv1ToH264.setSizePolicy(sizePolicy10)
         self.buttonBatchAv1ToH264.setFlat(True)
-
         self.horizontalLayout_7.addWidget(self.buttonBatchAv1ToH264)
-
-
         self.gridLayout_3.addLayout(self.horizontalLayout_7, 0, 0, 1, 1)
-
-
         self.vboxLayout.addWidget(self.groupBox_TargetVideos_Select)
-
         self.horizontalLayout_9 = QHBoxLayout()
         self.horizontalLayout_9.setObjectName(u"horizontalLayout_9")
         self.targetVideosSearchBox = QLineEdit(self.dockWidgetContents)
         self.targetVideosSearchBox.setObjectName(u"targetVideosSearchBox")
-
         self.horizontalLayout_9.addWidget(self.targetVideosSearchBox)
-
         self.targetMediaSortComboBox = QComboBox(self.dockWidgetContents)
         self.targetMediaSortComboBox.setObjectName(u"targetMediaSortComboBox")
-        sizePolicy8.setHeightForWidth(self.targetMediaSortComboBox.sizePolicy().hasHeightForWidth())
-        self.targetMediaSortComboBox.setSizePolicy(sizePolicy8)
+        sizePolicy2.setHeightForWidth(self.targetMediaSortComboBox.sizePolicy().hasHeightForWidth())
+        self.targetMediaSortComboBox.setSizePolicy(sizePolicy2)
         self.targetMediaSortComboBox.setMinimumSize(QSize(72, 0))
-
         self.horizontalLayout_9.addWidget(self.targetMediaSortComboBox)
-
         self.filterImagesCheckBox = QCheckBox(self.dockWidgetContents)
         self.filterImagesCheckBox.setObjectName(u"filterImagesCheckBox")
         icon15 = QIcon()
         icon15.addFile(u":/media/media/image.png", QSize(), QIcon.Mode.Normal, QIcon.State.Off)
         self.filterImagesCheckBox.setIcon(icon15)
         self.filterImagesCheckBox.setChecked(True)
-
         self.horizontalLayout_9.addWidget(self.filterImagesCheckBox)
-
         self.filterVideosCheckBox = QCheckBox(self.dockWidgetContents)
         self.filterVideosCheckBox.setObjectName(u"filterVideosCheckBox")
         icon16 = QIcon()
         icon16.addFile(u":/media/media/video.png", QSize(), QIcon.Mode.Normal, QIcon.State.Off)
         self.filterVideosCheckBox.setIcon(icon16)
         self.filterVideosCheckBox.setChecked(True)
-
         self.horizontalLayout_9.addWidget(self.filterVideosCheckBox)
-
         self.filterWebcamsCheckBox = QCheckBox(self.dockWidgetContents)
         self.filterWebcamsCheckBox.setObjectName(u"filterWebcamsCheckBox")
         icon17 = QIcon()
         icon17.addFile(u":/media/media/webcam.png", QSize(), QIcon.Mode.Normal, QIcon.State.Off)
         self.filterWebcamsCheckBox.setIcon(icon17)
         self.filterWebcamsCheckBox.setChecked(False)
-
         self.horizontalLayout_9.addWidget(self.filterWebcamsCheckBox)
-
         self.filterScreenCaptureCheckBox = QCheckBox(self.dockWidgetContents)
         self.filterScreenCaptureCheckBox.setObjectName(u"filterScreenCaptureCheckBox")
         self.filterScreenCaptureCheckBox.setIcon(icon16)
         self.filterScreenCaptureCheckBox.setChecked(False)
-
         self.horizontalLayout_9.addWidget(self.filterScreenCaptureCheckBox)
-
-
         self.vboxLayout.addLayout(self.horizontalLayout_9)
-
         self.targetVideosList = QListWidget(self.dockWidgetContents)
         self.targetVideosList.setObjectName(u"targetVideosList")
         self.targetVideosList.setAcceptDrops(True)
         self.targetVideosList.setAutoScroll(False)
-
         self.vboxLayout.addWidget(self.targetVideosList)
-
-
         self.gridLayout_4.addLayout(self.vboxLayout, 0, 0, 1, 1)
-
         self.input_Target_DockWidget.setWidget(self.dockWidgetContents)
         MainWindow.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.input_Target_DockWidget)
         self.input_Faces_DockWidget = QDockWidget(MainWindow)
         self.input_Faces_DockWidget.setObjectName(u"input_Faces_DockWidget")
-        sizePolicy7.setHeightForWidth(self.input_Faces_DockWidget.sizePolicy().hasHeightForWidth())
-        self.input_Faces_DockWidget.setSizePolicy(sizePolicy7)
+        sizePolicy9.setHeightForWidth(self.input_Faces_DockWidget.sizePolicy().hasHeightForWidth())
+        self.input_Faces_DockWidget.setSizePolicy(sizePolicy9)
         self.input_Faces_DockWidget.setMinimumSize(QSize(340, 230))
         self.input_Faces_DockWidget.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetFloatable|QDockWidget.DockWidgetFeature.DockWidgetMovable)
         self.dockWidgetContents_Faces = QWidget()
@@ -640,37 +531,25 @@ class Ui_MainWindow(object):
         self.horizontalLayout_Faces.setObjectName(u"horizontalLayout_Faces")
         self.labelInputFacesPath = QLabel(self.groupBox_InputFaces_Select)
         self.labelInputFacesPath.setObjectName(u"labelInputFacesPath")
-
         self.horizontalLayout_Faces.addWidget(self.labelInputFacesPath)
-
         self.buttonInputFacesPath = QPushButton(self.groupBox_InputFaces_Select)
         self.buttonInputFacesPath.setObjectName(u"buttonInputFacesPath")
-        sizePolicy8.setHeightForWidth(self.buttonInputFacesPath.sizePolicy().hasHeightForWidth())
-        self.buttonInputFacesPath.setSizePolicy(sizePolicy8)
+        sizePolicy2.setHeightForWidth(self.buttonInputFacesPath.sizePolicy().hasHeightForWidth())
+        self.buttonInputFacesPath.setSizePolicy(sizePolicy2)
         self.buttonInputFacesPath.setIcon(icon12)
         self.buttonInputFacesPath.setIconSize(QSize(18, 18))
         self.buttonInputFacesPath.setFlat(True)
-
         self.horizontalLayout_Faces.addWidget(self.buttonInputFacesPath)
-
-
         self.gridLayout_Faces1.addLayout(self.horizontalLayout_Faces, 0, 0, 1, 1)
-
-
         self.vboxLayout_InputFacesLibrary.addWidget(self.groupBox_InputFaces_Select)
-
         self.inputFacesSearchBox = QLineEdit(self.input_faces_library_tab)
         self.inputFacesSearchBox.setObjectName(u"inputFacesSearchBox")
-
         self.vboxLayout_InputFacesLibrary.addWidget(self.inputFacesSearchBox)
-
         self.inputFacesList = QListWidget(self.input_faces_library_tab)
         self.inputFacesList.setObjectName(u"inputFacesList")
         self.inputFacesList.setAcceptDrops(True)
         self.inputFacesList.setAutoScroll(False)
-
         self.vboxLayout_InputFacesLibrary.addWidget(self.inputFacesList)
-
         self.inputFacesTabWidget.addTab(self.input_faces_library_tab, "")
         self.input_faces_favorites_tab = QWidget()
         self.input_faces_favorites_tab.setObjectName(u"input_faces_favorites_tab")
@@ -678,20 +557,14 @@ class Ui_MainWindow(object):
         self.vboxLayout_InputFacesFavorites.setObjectName(u"vboxLayout_InputFacesFavorites")
         self.inputFacesFavoritesSearchBox = QLineEdit(self.input_faces_favorites_tab)
         self.inputFacesFavoritesSearchBox.setObjectName(u"inputFacesFavoritesSearchBox")
-
         self.vboxLayout_InputFacesFavorites.addWidget(self.inputFacesFavoritesSearchBox)
-
         self.inputFacesFavoritesList = QListWidget(self.input_faces_favorites_tab)
         self.inputFacesFavoritesList.setObjectName(u"inputFacesFavoritesList")
         self.inputFacesFavoritesList.setAcceptDrops(False)
         self.inputFacesFavoritesList.setAutoScroll(False)
-
         self.vboxLayout_InputFacesFavorites.addWidget(self.inputFacesFavoritesList)
-
         self.inputFacesTabWidget.addTab(self.input_faces_favorites_tab, "")
-
         self.gridLayout_Faces.addWidget(self.inputFacesTabWidget, 0, 0, 1, 1)
-
         self.input_Faces_DockWidget.setWidget(self.dockWidgetContents_Faces)
         MainWindow.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.input_Faces_DockWidget)
         self.jobManagerDockWidget = QDockWidget(MainWindow)
@@ -706,48 +579,30 @@ class Ui_MainWindow(object):
         self.jobControlLayout.setObjectName(u"jobControlLayout")
         self.addJobButton = QPushButton(self.dockWidgetContents_JobManager)
         self.addJobButton.setObjectName(u"addJobButton")
-
         self.jobControlLayout.addWidget(self.addJobButton)
-
         self.loadJobButton = QPushButton(self.dockWidgetContents_JobManager)
         self.loadJobButton.setObjectName(u"loadJobButton")
-
         self.jobControlLayout.addWidget(self.loadJobButton)
-
         self.deleteJobButton = QPushButton(self.dockWidgetContents_JobManager)
         self.deleteJobButton.setObjectName(u"deleteJobButton")
-
         self.jobControlLayout.addWidget(self.deleteJobButton)
-
-
         self.verticalLayout_JobManager.addLayout(self.jobControlLayout)
-
         self.refreshJobListButton = QPushButton(self.dockWidgetContents_JobManager)
         self.refreshJobListButton.setObjectName(u"refreshJobListButton")
-
         self.verticalLayout_JobManager.addWidget(self.refreshJobListButton)
-
         self.jobQueueList = QListWidget(self.dockWidgetContents_JobManager)
         self.jobQueueList.setObjectName(u"jobQueueList")
         self.jobQueueList.setSortingEnabled(True)
-
         self.verticalLayout_JobManager.addWidget(self.jobQueueList)
-
         self.processControlLayout = QHBoxLayout()
         self.processControlLayout.setObjectName(u"processControlLayout")
         self.buttonProcessAll = QPushButton(self.dockWidgetContents_JobManager)
         self.buttonProcessAll.setObjectName(u"buttonProcessAll")
-
         self.processControlLayout.addWidget(self.buttonProcessAll)
-
         self.buttonProcessSelected = QPushButton(self.dockWidgetContents_JobManager)
         self.buttonProcessSelected.setObjectName(u"buttonProcessSelected")
-
         self.processControlLayout.addWidget(self.buttonProcessSelected)
-
-
         self.verticalLayout_JobManager.addLayout(self.processControlLayout)
-
         self.jobManagerDockWidget.setWidget(self.dockWidgetContents_JobManager)
         MainWindow.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.jobManagerDockWidget)
         self.controlOptionsDockWidget = QDockWidget(MainWindow)
@@ -759,11 +614,11 @@ class Ui_MainWindow(object):
         self.gridLayout_5.setObjectName(u"gridLayout_5")
         self.tabWidget = QTabWidget(self.dockWidgetContents_2)
         self.tabWidget.setObjectName(u"tabWidget")
-        sizePolicy10 = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        sizePolicy10.setHorizontalStretch(1)
-        sizePolicy10.setVerticalStretch(0)
-        sizePolicy10.setHeightForWidth(self.tabWidget.sizePolicy().hasHeightForWidth())
-        self.tabWidget.setSizePolicy(sizePolicy10)
+        sizePolicy11 = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        sizePolicy11.setHorizontalStretch(1)
+        sizePolicy11.setVerticalStretch(0)
+        sizePolicy11.setHeightForWidth(self.tabWidget.sizePolicy().hasHeightForWidth())
+        self.tabWidget.setSizePolicy(sizePolicy11)
         font1 = QFont()
         font1.setFamilies([u"Segoe UI Semibold"])
         font1.setPointSize(10)
@@ -780,9 +635,7 @@ class Ui_MainWindow(object):
         self.verticalLayout_4.setObjectName(u"verticalLayout_4")
         self.swapWidgetsLayout = QVBoxLayout()
         self.swapWidgetsLayout.setObjectName(u"swapWidgetsLayout")
-
         self.verticalLayout_4.addLayout(self.swapWidgetsLayout)
-
         self.tabWidget.addTab(self.face_swap_tab, "")
         self.face_editor_tab = QWidget()
         self.face_editor_tab.setObjectName(u"face_editor_tab")
@@ -790,9 +643,7 @@ class Ui_MainWindow(object):
         self.verticalLayout_3.setObjectName(u"verticalLayout_3")
         self.faceEditorWidgetsLayout = QVBoxLayout()
         self.faceEditorWidgetsLayout.setObjectName(u"faceEditorWidgetsLayout")
-
         self.verticalLayout_3.addLayout(self.faceEditorWidgetsLayout)
-
         self.tabWidget.addTab(self.face_editor_tab, "")
         self.common_tab = QWidget()
         self.common_tab.setObjectName(u"common_tab")
@@ -800,9 +651,7 @@ class Ui_MainWindow(object):
         self.commonWidgetsLayout_1.setObjectName(u"commonWidgetsLayout_1")
         self.commonWidgetsLayout = QVBoxLayout()
         self.commonWidgetsLayout.setObjectName(u"commonWidgetsLayout")
-
         self.commonWidgetsLayout_1.addLayout(self.commonWidgetsLayout)
-
         self.tabWidget.addTab(self.common_tab, "")
         self.denoiser_tab = QWidget()
         self.denoiser_tab.setObjectName(u"denoiser_tab")
@@ -810,9 +659,7 @@ class Ui_MainWindow(object):
         self.denoiserWidgetsLayout_1.setObjectName(u"denoiserWidgetsLayout_1")
         self.denoiserWidgetsLayout = QVBoxLayout()
         self.denoiserWidgetsLayout.setObjectName(u"denoiserWidgetsLayout")
-
         self.denoiserWidgetsLayout_1.addLayout(self.denoiserWidgetsLayout)
-
         self.tabWidget.addTab(self.denoiser_tab, "")
         self.settings_tab = QWidget()
         self.settings_tab.setObjectName(u"settings_tab")
@@ -820,9 +667,7 @@ class Ui_MainWindow(object):
         self.verticalLayout_2.setObjectName(u"verticalLayout_2")
         self.label = QLabel(self.settings_tab)
         self.label.setObjectName(u"label")
-
         self.verticalLayout_2.addWidget(self.label)
-
         self.settingsWidgetsLayout = QVBoxLayout()
         self.settingsWidgetsLayout.setObjectName(u"settingsWidgetsLayout")
         self.outputFolderSelectionLayout = QHBoxLayout()
@@ -830,27 +675,17 @@ class Ui_MainWindow(object):
         self.outputFolderLineEdit = QLineEdit(self.settings_tab)
         self.outputFolderLineEdit.setObjectName(u"outputFolderLineEdit")
         self.outputFolderLineEdit.setReadOnly(True)
-
         self.outputFolderSelectionLayout.addWidget(self.outputFolderLineEdit)
-
         self.outputFolderButton = QPushButton(self.settings_tab)
         self.outputFolderButton.setObjectName(u"outputFolderButton")
         self.outputFolderButton.setFlat(False)
-
         self.outputFolderSelectionLayout.addWidget(self.outputFolderButton)
-
         self.outputOpenButton = QPushButton(self.settings_tab)
         self.outputOpenButton.setObjectName(u"outputOpenButton")
         self.outputOpenButton.setFlat(False)
-
         self.outputFolderSelectionLayout.addWidget(self.outputOpenButton)
-
-
         self.settingsWidgetsLayout.addLayout(self.outputFolderSelectionLayout)
-
-
         self.verticalLayout_2.addLayout(self.settingsWidgetsLayout)
-
         self.tabWidget.addTab(self.settings_tab, "")
         self.preset_tab = QWidget()
         self.preset_tab.setObjectName(u"preset_tab")
@@ -858,9 +693,7 @@ class Ui_MainWindow(object):
         self.presetsWidgetsLayout_1.setObjectName(u"presetsWidgetsLayout_1")
         self.labelp = QLabel(self.preset_tab)
         self.labelp.setObjectName(u"labelp")
-
         self.presetsWidgetsLayout_1.addWidget(self.labelp)
-
         self.presetsWidgetsLayout = QVBoxLayout()
         self.presetsWidgetsLayout.setObjectName(u"presetsWidgetsLayout")
         self.presetsList = QListWidget(self.preset_tab)
@@ -868,58 +701,36 @@ class Ui_MainWindow(object):
         self.presetsList.setSortingEnabled(True)
         self.presetsList.setMinimumSize(QSize(0, 360))
         self.presetsList.setMaximumSize(QSize(16777215, 460))
-
         self.presetsWidgetsLayout.addWidget(self.presetsList)
-
         self.presetsButtonsLayout = QHBoxLayout()
         self.presetsButtonsLayout.setObjectName(u"presetsButtonsLayout")
         self.applyPresetButton = QPushButton(self.preset_tab)
         self.applyPresetButton.setObjectName(u"applyPresetButton")
-
         self.presetsButtonsLayout.addWidget(self.applyPresetButton)
-
         self.savePresetButton = QPushButton(self.preset_tab)
         self.savePresetButton.setObjectName(u"savePresetButton")
-
         self.presetsButtonsLayout.addWidget(self.savePresetButton)
-
         self.controlPresetButton = QPushButton(self.preset_tab)
         self.controlPresetButton.setObjectName(u"controlPresetButton")
         self.controlPresetButton.setCheckable(True)
-
         self.presetsButtonsLayout.addWidget(self.controlPresetButton)
-
-
         self.presetsWidgetsLayout.addLayout(self.presetsButtonsLayout)
-
-
         self.presetsWidgetsLayout_1.addLayout(self.presetsWidgetsLayout)
-
         self.verticalSpacerpresets = QSpacerItem(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
-
         self.presetsWidgetsLayout_1.addItem(self.verticalSpacerpresets)
-
         self.tabWidget.addTab(self.preset_tab, "")
-
         self.gridLayout_5.addWidget(self.tabWidget, 1, 0, 1, 1)
-
         self.horizontalLayout_2 = QHBoxLayout()
         self.horizontalLayout_2.setObjectName(u"horizontalLayout_2")
         self.vramProgressBar = VramPeakProgressBar(self.dockWidgetContents_2)
         self.vramProgressBar.setObjectName(u"vramProgressBar")
         self.vramProgressBar.setValue(24)
-
         self.horizontalLayout_2.addWidget(self.vramProgressBar)
-
         self.clearMemoryButton = QPushButton(self.dockWidgetContents_2)
         self.clearMemoryButton.setObjectName(u"clearMemoryButton")
         self.clearMemoryButton.setFlat(True)
-
         self.horizontalLayout_2.addWidget(self.clearMemoryButton)
-
-
         self.gridLayout_5.addLayout(self.horizontalLayout_2, 0, 0, 1, 1)
-
         self.controlOptionsDockWidget.setWidget(self.dockWidgetContents_2)
         MainWindow.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.controlOptionsDockWidget)
         self.topMenuBar = QMenuBar(MainWindow)
@@ -934,7 +745,6 @@ class Ui_MainWindow(object):
         self.menuHelp = QMenu(self.topMenuBar)
         self.menuHelp.setObjectName(u"menuHelp")
         MainWindow.setMenuBar(self.topMenuBar)
-
         self.topMenuBar.addAction(self.menuFile.menuAction())
         self.topMenuBar.addAction(self.menuEdit.menuAction())
         self.topMenuBar.addAction(self.menuView.menuAction())
@@ -955,17 +765,12 @@ class Ui_MainWindow(object):
         self.menuView.addAction(self.actionView_Fullscreen_F11)
         self.menuHelp.addAction(self.actionView_Help_Shortcuts)
         self.menuHelp.addAction(self.actionView_Help_Presets)
-
         self.retranslateUi(MainWindow)
-
         self.editFacesButton.setDefault(False)
         self.inputFacesTabWidget.setCurrentIndex(0)
         self.tabWidget.setCurrentIndex(0)
-
-
         QMetaObject.connectSlotsByName(MainWindow)
     # setupUi
-
     def retranslateUi(self, MainWindow):
         MainWindow.setWindowTitle(QCoreApplication.translate("MainWindow", u"VisoMaster - Fusion - 1.0.0", None))
         self.actionExit.setText(QCoreApplication.translate("MainWindow", u"Exit", None))
@@ -994,6 +799,10 @@ class Ui_MainWindow(object):
         self.faceMaskCheckBox.setText(QCoreApplication.translate("MainWindow", u"Face Mask", None))
 #if QT_CONFIG(tooltip)
         self.videoSeekLineEdit.setToolTip(QCoreApplication.translate("MainWindow", u"Frame Number", None))
+#endif // QT_CONFIG(tooltip)
+        self.zoomLabel.setText(QCoreApplication.translate("MainWindow", u"Zoom - x1.0", None))
+#if QT_CONFIG(tooltip)
+        self.timelineZoomSlider.setToolTip(QCoreApplication.translate("MainWindow", u"Zoom Timeline", None))
 #endif // QT_CONFIG(tooltip)
 #if QT_CONFIG(tooltip)
         self.liveSoundButton.setToolTip(QCoreApplication.translate("MainWindow", u"[Experimental] Toggle Live Sound while the video is playing", None))
@@ -1132,4 +941,3 @@ class Ui_MainWindow(object):
         self.menuView.setTitle(QCoreApplication.translate("MainWindow", u"View", None))
         self.menuHelp.setTitle(QCoreApplication.translate("MainWindow", u"Help", None))
     # retranslateUi
-

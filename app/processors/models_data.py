@@ -50,6 +50,8 @@ detection_model_mapping = {
     "Yolov8": "YoloFace8n",
     "Yunet": "YunetN",
     "Yunet-2023": "Yunet2023Mar",
+    "Yolov11 VR180": "YoloFace11nVR180",
+    "Yolov12 VR180": "YoloFace12nVR180",
 }
 
 landmark_model_mapping = {
@@ -99,6 +101,8 @@ fp16_safe_models_list = [
     "RetinaFace",
     "SCRFD2.5g",
     "YoloFace8n",
+    "YoloFace11nVR180",
+    "YoloFace12nVR180",
     "YunetN",
     # --- Masking ---
     "FaceParser",
@@ -286,6 +290,24 @@ models_list = [
         "local_path": f"{models_dir}/yunet_n_640_640.onnx",
         "hash": "9e65c0213faef0173a3d2e05156b4bf44a45cde598bdabb69203da4a6b7ad61e",
         "url": f"{assets_repo}/v0.1.0/yunet_n_640_640.onnx",
+    },
+    {
+        # Yolov11-face trained at 960×960 for VR180 face detection. Unlike the
+        # other detectors it outputs no facial keypoints (output0: [1,5,N] =
+        # cx,cy,w,h,score); landmarks are synthesised from the bbox downstream.
+        "model_name": "YoloFace11nVR180",
+        "local_path": f"{models_dir}/yoloface_11n-vr180.onnx",
+        "hash": "7572f27c2930ff83d24f95fb4b6321ea0d7f5883cb40ed647fa80889e8d4e4d8",
+        "url": "https://github.com/Glat0s/yolo-face/releases/download/vr/yoloface_11n-vr180.onnx",
+    },
+    {
+        # Yolov12-face trained at 640×640 for VR180 face detection. Unlike the
+        # other detectors it outputs no facial keypoints (output0: [1,5,N] =
+        # cx,cy,w,h,score); landmarks are synthesised from the bbox downstream.
+        "model_name": "YoloFace12nVR180",
+        "local_path": f"{models_dir}/yoloface_12n-vr180.onnx",
+        "hash": "8d5e9187fe5aa8f95be7a3267802639299fb39df969407d22bc379eed9aaf1e1",
+        "url": "https://github.com/Glat0s/yolo-face/releases/download/vr/yoloface_12n-vr180.onnx",
     },
     {
         "model_name": "FaceLandmark5",
