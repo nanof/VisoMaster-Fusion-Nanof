@@ -155,6 +155,17 @@ def test_sort_target_media_list_preserves_item_widgets():
         for i in range(list_widget.count())
     )
 
+    # Removing a row makes the view queue a deferred delete for its item widget,
+    # so a reorder that survives here can still leave dangling pointers behind.
+    import shiboken6
+
+    QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+    assert all(shiboken6.isValid(button) for button in buttons.values())
+    assert [
+        list_widget.itemWidget(list_widget.item(i)).text()
+        for i in range(list_widget.count())
+    ] == ["alpha", "bravo", "charlie"]
+
 
 def test_sort_target_media_list_descending_keeps_webcam_at_bottom():
     from PySide6 import QtCore, QtWidgets
@@ -269,6 +280,8 @@ def test_clear_all_target_media_confirm_clears_state(monkeypatch):
         targetVideosList=_DummyListWidget(),
         placeholder_update_signal=placeholder_signal,
         video_loader_worker=None,
+        app_display_metadata=SimpleNamespace(window_title="VisoMaster"),
+        setWindowTitle=lambda _title: None,
     )
     button_a = _DummyTargetMediaButton(main_window, "media_1")
     button_b = _DummyTargetMediaButton(main_window, "media_2")

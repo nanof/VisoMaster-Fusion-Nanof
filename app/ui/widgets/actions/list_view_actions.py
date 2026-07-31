@@ -204,14 +204,19 @@ def sort_target_media_list(main_window: "MainWindow") -> None:
         )
 
         sorted_items = [item for _, item, _ in entries]
-        button_by_id = {id(item): button for _, item, button in entries}
 
         main_window._target_media_sort_in_progress = True
         list_widget.setUpdatesEnabled(False)
         try:
             phase_started = time.perf_counter()
             moves = 0
-            reattached = 0
+            failed_moves = 0
+            model = list_widget.model()
+            root = QtCore.QModelIndex()
+            # Reorder through the model. takeItem()/insertItem() removes the row,
+            # which makes the view release (deleteLater) the item widget; re-setting
+            # that widget afterwards leaves the view with a dangling pointer and the
+            # process dies with an access violation on the next event loop pass.
             for target_index, item in enumerate(sorted_items):
                 current_index = list_widget.row(item)
                 if current_index == target_index:
@@ -223,23 +228,14 @@ def sort_target_media_list(main_window: "MainWindow") -> None:
                     )
                     continue
 
-                button = list_widget.itemWidget(item)
-                if button is None:
-                    button = button_by_id.get(id(item))
-
-                taken = list_widget.takeItem(current_index)
-                if taken is None:
+                if not model.moveRow(root, current_index, root, target_index):
+                    failed_moves += 1
                     _target_sort_log(
-                        "warn_take_failed",
+                        "warn_move_failed",
                         target_index=target_index,
                         current_index=current_index,
                     )
                     continue
-
-                list_widget.insertItem(target_index, taken)
-                if list_widget.itemWidget(taken) is None and button is not None:
-                    list_widget.setItemWidget(taken, button)
-                    reattached += 1
                 moves += 1
 
                 if (
@@ -255,7 +251,7 @@ def sort_target_media_list(main_window: "MainWindow") -> None:
             _target_sort_log(
                 "reordered",
                 moves=moves,
-                reattached=reattached,
+                failed_moves=failed_moves,
                 elapsed_ms=int((time.perf_counter() - phase_started) * 1000),
             )
         finally:
