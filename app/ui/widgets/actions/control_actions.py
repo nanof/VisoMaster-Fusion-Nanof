@@ -96,31 +96,54 @@ def handle_face_detector_tracking_reset(main_window: "MainWindow", value):
 def handle_swap_all_match_mode_toggle(
     main_window: "MainWindow", toggle_value: bool, mode: str
 ) -> None:
-    """Keep Swap-all-by-index and Swap-all-by-random mutually exclusive."""
-    if not toggle_value:
-        return
+    """Keep Swap-all-by-index and Swap-all-by-random mutually exclusive.
 
+    Leaving swap-all collapses the multi-checked input pool to the first face so
+    normal matching does not suddenly blend every face that was only in the pool.
+    """
+    from app.helpers.swap_all_match import collapse_checked_inputs_to_first
+    from app.ui.widgets.actions import list_view_actions
+
+    this_key = (
+        "SequentialTargetMatchEnableToggle"
+        if mode == "index"
+        else "RandomTargetMatchEnableToggle"
+    )
     other_key = (
         "RandomTargetMatchEnableToggle"
         if mode == "index"
         else "SequentialTargetMatchEnableToggle"
     )
-    if not main_window.control.get(other_key, False):
-        return
 
-    main_window.control[other_key] = False
-    other_widget = main_window.parameter_widgets.get(other_key)
-    if other_widget is not None:
-        other_widget.blockSignals(True)
-        other_widget.setChecked(False)
-        other_widget.blockSignals(False)
-        common_widget_actions.show_hide_related_widgets(
-            main_window, other_widget, other_key, False
-        )
+    if toggle_value:
+        if main_window.control.get(other_key, False):
+            main_window.control[other_key] = False
+            other_widget = main_window.parameter_widgets.get(other_key)
+            if other_widget is not None:
+                other_widget.blockSignals(True)
+                other_widget.setChecked(False)
+                other_widget.blockSignals(False)
+                common_widget_actions.show_hide_related_widgets(
+                    main_window, other_widget, other_key, False
+                )
 
-    reset = getattr(main_window.video_processor, "reset_sequential_rotate_stabilizer", None)
-    if callable(reset):
-        reset()
+            reset = getattr(
+                main_window.video_processor, "reset_sequential_rotate_stabilizer", None
+            )
+            if callable(reset):
+                reset()
+    else:
+        # update_control() runs this before writing the new value, so control still
+        # holds the previous state. set_control_widgets_values() instead replays every
+        # exec_function against already-applied values, and collapsing there would
+        # silently drop a multi-face selection the user never made in swap-all.
+        was_active = main_window.control.get(this_key, False)
+        if was_active and not main_window.control.get(other_key, False):
+            collapse_checked_inputs_to_first(main_window)
+
+    # Target-face cards advertise a blended source count that does not apply while
+    # swap-all hands one checked input to each detected face.
+    list_view_actions.refresh_target_face_display_labels(main_window)
 
 
 def change_execution_provider(main_window: "MainWindow", new_provider):

@@ -2092,7 +2092,13 @@ def enable_zoom_and_pan(main_window: "MainWindow", view: QtWidgets.QGraphicsView
             self.scale(factor, factor)
 
     def cycle_embedding(direction: int) -> bool:
-        """Select previous (-1) or next (+1) merged embedding for the current target face."""
+        """Select previous (-1) or next (+1) merged embedding for the current target face.
+
+        The cycle includes an empty slot past the last embedding, so the same
+        shortcut also clears the selection. Without it a stray Shift+wheel would
+        blend in an embedding that cannot be undone from the preview, and the
+        Embeddings list is not even visible when its panel is collapsed.
+        """
         target_face_button = getattr(
             main_window, "cur_selected_target_face_button", None
         )
@@ -2112,17 +2118,28 @@ def enable_zoom_and_pan(main_window: "MainWindow", view: QtWidgets.QGraphicsView
             for index, button in enumerate(embedding_buttons)
             if button.isChecked()
         ]
-        if checked_indices:
-            next_index = (checked_indices[0] + direction) % len(embedding_buttons)
-        else:
-            next_index = 0 if direction > 0 else len(embedding_buttons) - 1
+        empty_slot = len(embedding_buttons)
+        current_index = checked_indices[0] if checked_indices else empty_slot
+        next_index = (current_index + direction) % (empty_slot + 1)
 
-        next_button = embedding_buttons[next_index]
+        from app.ui.widgets.actions import preview_notification_actions
+
+        next_button = (
+            embedding_buttons[next_index] if next_index < empty_slot else None
+        )
         for button in embedding_buttons:
             if button is not next_button and button.isChecked():
                 button.click()
+        if next_button is None:
+            preview_notification_actions.show_preview_notification(
+                main_window, "Embedding: none (Shift+wheel)"
+            )
+            return True
         if not next_button.isChecked():
             next_button.click()
+        preview_notification_actions.show_preview_notification(
+            main_window, f"Embedding: {next_button.embedding_name} (Shift+wheel)"
+        )
 
         embeddings_list = getattr(main_window, "inputEmbeddingsList", None)
         embedding_list_item = getattr(next_button, "list_item", None)

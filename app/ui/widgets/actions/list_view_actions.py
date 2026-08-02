@@ -1019,6 +1019,21 @@ def add_media_thumbnail_button(
     list_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
     listWidget.setItemWidget(list_item, button)
 
+    if buttonClass == widget_components.TargetFaceCardButton:
+        refresh_target_face_display_labels(main_window)
+
+
+def refresh_target_face_display_labels(main_window: "MainWindow"):
+    target_faces_list = getattr(main_window, "targetFacesList", None)
+    if target_faces_list is None:
+        return
+
+    for i in range(target_faces_list.count()):
+        list_item = target_faces_list.item(i)
+        target_face_button = target_faces_list.itemWidget(list_item)
+        if isinstance(target_face_button, widget_components.TargetFaceCardButton):
+            target_face_button.refresh_display_label()
+
 
 def initialize_media_list_widgets(main_window: "MainWindow"):
     """One-time configuration for target/input media and face list widgets."""

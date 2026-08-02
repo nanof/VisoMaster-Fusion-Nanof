@@ -158,6 +158,10 @@ fp16_safe_models_list = [
     "GhostFacev1",
     "GhostFacev2",
     "GhostFacev3",
+    # FaceFusion HyperSwap ONNX exports are fp16 (ResearchRAIL).
+    "HyperSwapv1",
+    "HyperSwapv2",
+    "HyperSwapv3",
 ]
 
 # Models whose ONNX graph must be shape-inferred (with a static batch=1) before

@@ -23,6 +23,10 @@ from app.ui.widgets.actions import save_load_actions
 import app.helpers.miscellaneous as misc_helpers
 from app.helpers import qt_lifecycle
 from app.helpers.miscellaneous import get_video_rotation
+from app.helpers.swap_all_match import (
+    swap_all_assignment_mode,
+    swap_all_match_active,
+)
 from app.helpers.screen_capture import (
     create_screen_capture_from_control,
     mss_available,
@@ -844,27 +848,29 @@ class TargetFaceCardButton(CardButton):
             or main_window.control.get("AutoSwapToggle", False)
         ):
             # KeepInputToggle/Batch/AutoSwap are ON
-            # 1. Update assigned faces to correspond on global selection
-            self.assigned_input_faces.clear()
-            self.assigned_merged_embeddings.clear()
+            # Swap-all uses the checked pool only — do not dump it into a blend.
+            if not swap_all_match_active(main_window.control):
+                # 1. Update assigned faces to correspond on global selection
+                self.assigned_input_faces.clear()
+                self.assigned_merged_embeddings.clear()
 
-            qt_lifecycle.prune_dead(main_window.input_faces)
-            for input_face_id, input_face_button in list(
-                main_window.input_faces.items()
-            ):
-                if input_face_button.isChecked():
-                    self.assigned_input_faces[input_face_id] = (
-                        input_face_button.embedding_store
-                    )
+                qt_lifecycle.prune_dead(main_window.input_faces)
+                for input_face_id, input_face_button in list(
+                    main_window.input_faces.items()
+                ):
+                    if input_face_button.isChecked():
+                        self.assigned_input_faces[input_face_id] = (
+                            input_face_button.embedding_store
+                        )
 
-            for embedding_id, embed_button in main_window.merged_embeddings.items():
-                if embed_button.isChecked():
-                    self.assigned_merged_embeddings[embedding_id] = (
-                        embed_button.embedding_store
-                    )
+                for embedding_id, embed_button in main_window.merged_embeddings.items():
+                    if embed_button.isChecked():
+                        self.assigned_merged_embeddings[embedding_id] = (
+                            embed_button.embedding_store
+                        )
 
-            # 2. Recalculate assigned embedding (Inputs might have changed)
-            self.calculate_assigned_input_embedding()
+                # 2. Recalculate assigned embedding (Inputs might have changed)
+                self.calculate_assigned_input_embedding()
 
         else:
             # KeepInputToggle/Batch/AutoSwap are OFF (Default run)
@@ -894,8 +900,55 @@ class TargetFaceCardButton(CardButton):
             self.face_id
         ].copy()
 
+    def drop_assignments_without_cards(self):
+        """Forget sources whose card is gone from the Input Faces / Embeddings panels.
+
+        A destroyed card can no longer be unchecked, so its store would keep
+        feeding the blend from a source the user cannot see any more.
+        """
+        input_faces = getattr(self.main_window, "input_faces", None)
+        if isinstance(input_faces, dict):
+            for input_face_id in list(self.assigned_input_faces):
+                if input_face_id not in input_faces:
+                    self.assigned_input_faces.pop(input_face_id, None)
+
+        merged_embeddings = getattr(self.main_window, "merged_embeddings", None)
+        if isinstance(merged_embeddings, dict):
+            for embedding_id in list(self.assigned_merged_embeddings):
+                if embedding_id not in merged_embeddings:
+                    self.assigned_merged_embeddings.pop(embedding_id, None)
+
+    def clear_assigned_swap_sources(self):
+        main_window = self.main_window
+        if video_control_actions.block_if_issue_scan_active(
+            main_window, "clear swap sources"
+        ):
+            return
+        if not self.assigned_input_faces and not self.assigned_merged_embeddings:
+            return
+
+        input_face_ids = list(self.assigned_input_faces)
+        embedding_ids = list(self.assigned_merged_embeddings)
+        self.assigned_input_faces.clear()
+        self.assigned_merged_embeddings.clear()
+
+        # Cards only mirror the selected target face, so leave the rest untouched.
+        if main_window.cur_selected_target_face_button is self:
+            for input_face_id in input_face_ids:
+                input_face_button = main_window.input_faces.get(input_face_id)
+                if input_face_button is not None:
+                    qt_lifecycle.set_checked(input_face_button, False)
+            for embedding_id in embedding_ids:
+                embed_button = main_window.merged_embeddings.get(embedding_id)
+                if embed_button is not None:
+                    embed_button.setChecked(False)
+
+        self.calculate_assigned_input_embedding()
+        common_widget_actions.refresh_frame(main_window)
+
     def calculate_assigned_input_embedding(self):
         control = self.main_window.control.copy()
+        self.drop_assignments_without_cards()
 
         all_input_embeddings = []
         all_embedding_swap_models = set()
@@ -1055,6 +1108,8 @@ class TargetFaceCardButton(CardButton):
         if video_processor is not None:
             video_processor.clear_restorer_infer_cache()
 
+        self.refresh_display_label_from_any_thread()
+
     def create_context_menu(self):
         # create context menu
         from app.ui.widgets.actions import list_view_actions
@@ -1124,6 +1179,10 @@ class TargetFaceCardButton(CardButton):
                 list_view_actions.apply_face_thumbnail_size, self.main_window, (96, 96)
             )
         )
+        self.clear_swap_sources_action = QtGui.QAction("Clear Swap Sources", self)
+        self.clear_swap_sources_action.triggered.connect(
+            self.clear_assigned_swap_sources
+        )
         self.remove_action = QtGui.QAction("Remove from List", self)
         self.remove_action.triggered.connect(self.remove_target_face_from_list)
         self.popMenu.addAction(self.parameters_copy_action)
@@ -1135,6 +1194,7 @@ class TargetFaceCardButton(CardButton):
         self.popMenu.addAction(self.small_thumbnails_action)
         self.popMenu.addAction(self.large_thumbnails_action)
         self.popMenu.addSeparator()
+        self.popMenu.addAction(self.clear_swap_sources_action)
         self.popMenu.addAction(self.remove_action)
 
     def on_context_menu(self, point):
@@ -1147,6 +1207,13 @@ class TargetFaceCardButton(CardButton):
         self.parameters_paste_action.setEnabled(not scan_active)
         self.load_parameters_action.setEnabled(not scan_active)
         self.load_parameters_and_settings_action.setEnabled(not scan_active)
+        source_count = sum(self.get_assigned_source_counts())
+        self.clear_swap_sources_action.setText(
+            "Clear Swap Sources"
+            if source_count < 2
+            else f"Clear Swap Sources ({source_count})"
+        )
+        self.clear_swap_sources_action.setEnabled(bool(source_count) and not scan_active)
         self.remove_action.setEnabled(not scan_active)
         self.small_thumbnails_action.setChecked(current_face_size == (70, 70))
         self.large_thumbnails_action.setChecked(current_face_size == (96, 96))
@@ -1163,13 +1230,14 @@ class TargetFaceCardButton(CardButton):
             main_window.video_processor.stop_processing()
 
         i = self.get_item_position()
-        main_window.targetFacesList.takeItem(i)
-        main_window.target_faces.pop(self.face_id)
+        if i is not None:
+            main_window.targetFacesList.takeItem(i)
+        main_window.target_faces.pop(self.face_id, None)
         from app.ui.widgets.actions import list_view_actions
 
         list_view_actions.refresh_target_face_display_labels(main_window)
         # Pop parameters using the target's face_id
-        main_window.parameters.pop(self.face_id)
+        main_window.parameters.pop(self.face_id, None)
         if hasattr(main_window, "issue_frames_by_face"):
             main_window.issue_frames_by_face.pop(str(self.face_id), None)
         # Click and Select the first target face if target_faces are not empty
@@ -1182,6 +1250,10 @@ class TargetFaceCardButton(CardButton):
                 main_window, face_id=None
             )
             main_window.selected_target_face_id = None
+            # Input-face clicks assign to cur_selected_target_face_button; leaving the
+            # removed card here would keep routing selections to a card that is no
+            # longer swapped, so the UI checkmarks stop matching what gets rendered.
+            main_window.cur_selected_target_face_button = None
             video_control_actions.refresh_issue_frames_for_selected_face(main_window)
         video_control_actions.update_scan_review_button_states(main_window)
         video_control_actions.remove_face_parameters_and_control_from_markers(
@@ -1203,16 +1275,75 @@ class TargetFaceCardButton(CardButton):
 
         self.deleteLater()
 
+    def get_assigned_source_counts(self) -> tuple[int, int]:
+        return (
+            len(getattr(self, "assigned_input_faces", {}) or {}),
+            len(getattr(self, "assigned_merged_embeddings", {}) or {}),
+        )
+
+    def get_swap_all_mode(self) -> str:
+        """``"index"``, ``"random"`` or ``""`` when swap-all matching is off.
+
+        Swap-all gives each detected face a single checked input card and ignores
+        this card's assignments, so the blended-source counter is meaningless.
+        """
+        control = getattr(self.main_window, "control", None)
+        if not isinstance(control, Mapping) or not swap_all_match_active(control):
+            return ""
+        return swap_all_assignment_mode(control)
+
     def get_display_label(self) -> str:
         item_position = self.get_item_position()
-        if item_position is None:
-            return "Face"
-        return f"Face {item_position + 1}"
+        base_label = "Face" if item_position is None else f"Face {item_position + 1}"
+        if self.get_swap_all_mode():
+            return base_label
+        source_count = sum(self.get_assigned_source_counts())
+        if source_count > 1:
+            return f"{base_label} ×{source_count}"
+        return base_label
+
+    def get_display_tooltip(self) -> str:
+        swap_all_mode = self.get_swap_all_mode()
+        if swap_all_mode:
+            return (
+                f"Swap all by {swap_all_mode}: each detected face takes one checked "
+                "input face, so this card's assignments are not used as source"
+            )
+        input_faces_count, embeddings_count = self.get_assigned_source_counts()
+        sources = []
+        if input_faces_count:
+            sources.append(f"{input_faces_count} input face(s)")
+        if embeddings_count:
+            sources.append(f"{embeddings_count} merged embedding(s)")
+        if not sources:
+            return "No swap source assigned"
+        if sum(self.get_assigned_source_counts()) == 1:
+            return f"Swap source: {sources[0]}"
+        return f"Blended swap source: {' + '.join(sources)}"
 
     def refresh_display_label(self):
         display_label = self.get_display_label()
         self.display_label.setText(display_label)
-        self.face_header_action.setText(display_label)
+        header_action = getattr(self, "face_header_action", None)
+        if header_action is not None:
+            header_action.setText(display_label)
+        set_tooltip = getattr(self, "setToolTip", None)
+        if callable(set_tooltip):
+            set_tooltip(TargetFaceCardButton.get_display_tooltip(self))
+
+    def refresh_display_label_from_any_thread(self):
+        """No-op outside the GUI thread.
+
+        ``calculate_assigned_input_embedding`` also runs on FrameWorker threads
+        (lazy K/V maps), and touching widgets from there is not allowed.
+        """
+        app = QtWidgets.QApplication.instance()
+        if app is not None and QtCore.QThread.currentThread() != app.thread():
+            return
+        try:
+            self.refresh_display_label()
+        except RuntimeError:  # C++ side already destroyed
+            pass
 
     def remove_assigned_input_face(self, input_face_id):
         if self.assigned_input_faces.get(input_face_id):
@@ -1326,6 +1457,9 @@ class InputFaceCardButton(CardButton):
             self._restore_pre_click_checked_state()
             return
 
+        # Swap-all uses the checked pool only; do not blend into assigned_input_faces.
+        swap_all = swap_all_match_active(main_window.control)
+
         if main_window.cur_selected_target_face_button:
             cur_selected_target_face_button = (
                 main_window.cur_selected_target_face_button
@@ -1362,42 +1496,60 @@ class InputFaceCardButton(CardButton):
                             )
 
                     else:
-                        for input_face_id in (
-                            cur_selected_target_face_button.assigned_input_faces.keys()
-                        ):
-                            input_face_button = main_window.input_faces.get(
-                                input_face_id
-                            )
-                            if input_face_button is not None and (
-                                input_face_button != self
+                        if swap_all:
+                            for input_face_button in qt_lifecycle.alive_values(
+                                main_window.input_faces
                             ):
-                                qt_lifecycle.set_checked(input_face_button, False)
+                                if input_face_button != self:
+                                    qt_lifecycle.set_checked(input_face_button, False)
+                        else:
+                            for input_face_id in (
+                                cur_selected_target_face_button.assigned_input_faces.keys()
+                            ):
+                                input_face_button = main_window.input_faces.get(
+                                    input_face_id
+                                )
+                                if input_face_button is not None and (
+                                    input_face_button != self
+                                ):
+                                    qt_lifecycle.set_checked(input_face_button, False)
 
-                    cur_selected_target_face_button.assigned_input_faces = {}
-                    for input_face in selected_input_faces:
-                        cur_selected_target_face_button.assigned_input_faces[
-                            input_face.face_id
-                        ] = input_face.embedding_store
+                    if not swap_all:
+                        cur_selected_target_face_button.assigned_input_faces = {}
+                        for input_face in selected_input_faces:
+                            cur_selected_target_face_button.assigned_input_faces[
+                                input_face.face_id
+                            ] = input_face.embedding_store
 
             elif (
                 not QtWidgets.QApplication.keyboardModifiers()
                 == QtCore.Qt.ControlModifier
             ):
-                for (
-                    input_face_id
-                ) in cur_selected_target_face_button.assigned_input_faces.keys():
-                    input_face_button = main_window.input_faces.get(input_face_id)
-                    if input_face_button is not None and input_face_button != self:
-                        qt_lifecycle.set_checked(input_face_button, False)
-                cur_selected_target_face_button.assigned_input_faces = {}
+                if swap_all:
+                    for input_face_button in qt_lifecycle.alive_values(
+                        main_window.input_faces
+                    ):
+                        if input_face_button != self:
+                            qt_lifecycle.set_checked(input_face_button, False)
+                else:
+                    for (
+                        input_face_id
+                    ) in cur_selected_target_face_button.assigned_input_faces.keys():
+                        input_face_button = main_window.input_faces.get(input_face_id)
+                        if input_face_button is not None and input_face_button != self:
+                            qt_lifecycle.set_checked(input_face_button, False)
+                    cur_selected_target_face_button.assigned_input_faces = {}
 
-            cur_selected_target_face_button.assigned_input_faces[self.face_id] = (
-                self.embedding_store
-            )
+            if not swap_all:
+                cur_selected_target_face_button.assigned_input_faces[self.face_id] = (
+                    self.embedding_store
+                )
 
-            if not self.isChecked():
-                cur_selected_target_face_button.assigned_input_faces.pop(self.face_id)
-            cur_selected_target_face_button.calculate_assigned_input_embedding()
+                if not self.isChecked():
+                    cur_selected_target_face_button.assigned_input_faces.pop(
+                        self.face_id
+                    )
+                cur_selected_target_face_button.calculate_assigned_input_embedding()
         else:
             if (
                 not QtWidgets.QApplication.keyboardModifiers()

@@ -59,3 +59,26 @@ def pinned_indices_from_checked(checked_inputs_ordered: list) -> set[int]:
         for i, btn in enumerate(checked_inputs_ordered)
         if getattr(btn, "random_fixed", False)
     }
+
+
+def collapse_checked_inputs_to_first(main_window: "MainWindow") -> None:
+    """Keep only the first checked input face selected and assigned.
+
+    Used when leaving swap-all modes: the multi-check pool is for per-detection
+    assignment, not for blending into ``assigned_input_faces``.
+    """
+    from app.ui.widgets.actions import common_actions as common_widget_actions
+
+    checked = checked_input_face_buttons(main_window)
+    first = checked[0] if checked else None
+
+    for btn in qt_lifecycle.alive_values(main_window.input_faces):
+        qt_lifecycle.set_checked(btn, btn is first)
+
+    for target_face in list(getattr(main_window, "target_faces", {}).values()):
+        target_face.assigned_input_faces.clear()
+        if first is not None:
+            target_face.assigned_input_faces[first.face_id] = first.embedding_store
+        target_face.calculate_assigned_input_embedding()
+
+    common_widget_actions.refresh_frame(main_window)

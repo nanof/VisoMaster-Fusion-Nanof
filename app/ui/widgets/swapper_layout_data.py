@@ -20,10 +20,13 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
                 "GhostFace-v1",
                 "GhostFace-v2",
                 "GhostFace-v3",
+                "HyperSwap-v1",
+                "HyperSwap-v2",
+                "HyperSwap-v3",
                 "CSCS",
             ],
             "default": "Inswapper128",
-            "help": "Choose which swapper model to use for face swapping.",
+            "help": "Choose which swapper model to use for face swapping. HyperSwap-v1/v2/v3 are FaceFusion Labs 256 px models (1a/1b/1c); v1 is fastest, v3 targets highest quality.",
         },
         "SwapperResSelection": {
             "level": 2,
@@ -126,7 +129,7 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "data_type": "control",
             "exec_function": control_actions.handle_swap_all_match_mode_toggle,
             "exec_function_args": ["random"],
-            "help": "Same pipeline as 'Swap all by index' (no Find Faces, checked Input Faces only, no cosine matching), but each new physical face is assigned a random checked input that is not already used by another face in the frame (no repeats while enough inputs remain; if there are more detections than checked inputs, leftover faces may reuse). Existing faces keep their assignment while tracking/stabilization can match them. Press X to reshuffle all random assignments. Ctrl+Alt+Left-click an Input Face card (or use its context menu) to mark it fixed so X does not reassign it. Mutually exclusive with 'Swap all by index'. Ignored when 'Swap Input Face only once' is enabled.",
+            "help": "Same pipeline as 'Swap all by index' (no Find Faces, checked Input Faces only, no cosine matching), but each new physical face is assigned a random checked input that is not already used by another face in the frame (no repeats while enough inputs remain; if there are more detections than checked inputs, leftover faces may reuse). Existing faces keep their assignment while tracking/stabilization can match them — including across pause/play and capture reopen. Large timeline jumps or backward seeks still clear sticky state. Press X to reshuffle all random assignments. Ctrl+Alt+Left-click an Input Face card (or use its context menu) to mark it fixed so X does not reassign it. Mutually exclusive with 'Swap all by index'. Ignored when 'Swap Input Face only once' is enabled.",
         },
         "SequentialStabilizeWithoutTrackingToggle": {
             "level": 2,
