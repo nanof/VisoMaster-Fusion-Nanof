@@ -367,6 +367,31 @@ def set_up_video_seek_slider(main_window: "MainWindow"):
         paintEvent, main_window.videoSeekSlider
     )
 
+    # on_change_video_seek_slider runs heavy work from valueChanged, which Qt
+    # emits inside QSlider.mousePressEvent *before* it assigns pressedControl.
+    # A release delivered in that window (nested processEvents, modal dialog)
+    # is discarded by Qt, so the press ends with setSliderDown(True) and the
+    # handle stays latched, following the cursor. Poll only while the handle is
+    # down and unlatch it when no mouse button is actually held.
+    latch_watchdog = QtCore.QTimer(main_window.videoSeekSlider)
+    latch_watchdog.setInterval(150)
+
+    def release_latched_handle(self: QtWidgets.QSlider):
+        if not self.isSliderDown():
+            latch_watchdog.stop()
+            return
+        if QtGui.QGuiApplication.mouseButtons() != QtCore.Qt.MouseButton.NoButton:
+            return
+        print("[WARN] Video seek slider stayed latched after release. Unlatching.")
+        self.setSliderDown(False)  # Emits sliderReleased -> on_slider_released
+
+    latch_watchdog.timeout.connect(
+        partial(release_latched_handle, main_window.videoSeekSlider)
+    )
+    main_window.videoSeekSlider.sliderPressed.connect(latch_watchdog.start)
+    main_window.videoSeekSlider.sliderReleased.connect(latch_watchdog.stop)
+    main_window.videoSeekSlider.latch_watchdog = latch_watchdog
+
 
 def set_up_timeline_zoom(main_window: "MainWindow"):
     """
@@ -1686,7 +1711,7 @@ def remove_all_markers(main_window: "MainWindow"):
 
 
 def adjust_sequential_input_rotate_offset(main_window: "MainWindow", delta: int) -> None:
-    """Adjust Face Swap → Input rotate start offset (only when the slider exists and is enabled)."""
+    """Adjust Face Swap ÔåÆ Input rotate start offset (only when the slider exists and is enabled)."""
     key = "SequentialInputRotateOffsetSlider"
     w = main_window.parameter_widgets.get(key)
     if w is None or not w.isEnabled():
@@ -1727,7 +1752,7 @@ def reshuffle_random_target_match(main_window: "MainWindow") -> bool:
 
     if pinned:
         msg = (
-            f"Random assignments reshuffled (X) — kept {len(pinned)} fixed"
+            f"Random assignments reshuffled (X) ÔÇö kept {len(pinned)} fixed"
         )
     else:
         msg = "Random face assignments reshuffled (X)"

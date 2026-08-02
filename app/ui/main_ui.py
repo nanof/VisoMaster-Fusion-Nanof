@@ -929,8 +929,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             self.build_progress_dialog.setWindowTitle(title)
             self.build_progress_dialog.setLabelText(text)
             self.build_progress_dialog.show()
-            # Force the GUI to update immediately
-            QtCore.QCoreApplication.processEvents()
+            # Force the GUI to update immediately. User input stays queued so a
+            # pending mouse release is not stolen from the widget that owns it.
+            QtCore.QCoreApplication.processEvents(
+                QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+            )
 
     @QtCore.Slot()
     def hide_build_dialog(self):

@@ -1117,7 +1117,12 @@ def show_model_loading_dialog(main_window: "MainWindow"):
                 main_window.model_loading_dialog = widget_components.LoadingDialog()
             if not main_window.model_loading_dialog.isVisible():
                 main_window.model_loading_dialog.show()
-                QtWidgets.QApplication.processEvents()
+                # Excluding user input keeps a pending mouse release queued for
+                # its original widget; a plain processEvents() here delivers it
+                # early and leaves the video seek slider latched in drag state.
+                QtWidgets.QApplication.processEvents(
+                    QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+                )
 
         main_window._model_loading_timer.timeout.connect(show_dialog)
     # Start or restart the timer
@@ -1136,4 +1141,6 @@ def hide_model_loading_dialog(main_window: "MainWindow"):
     ):
         if main_window.model_loading_dialog.isVisible():
             main_window.model_loading_dialog.hide()
-            QtWidgets.QApplication.processEvents()
+            QtWidgets.QApplication.processEvents(
+                QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+            )
