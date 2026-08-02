@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Mapping
 
+from app.helpers import qt_lifecycle
+
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
 
@@ -27,17 +29,27 @@ def swap_all_assignment_mode(control: Mapping[str, object]) -> str:
     return "index"
 
 
+def checked_input_face_buttons(main_window: "MainWindow") -> list:
+    """Ordered checked input-face cards.
+
+    Cards destroyed by a list clear can still sit in ``input_faces``; reading
+    them raises from shiboken, which would kill the calling worker thread, so
+    they are treated as unchecked.
+    """
+    return [
+        btn
+        for btn in list(main_window.input_faces.values())
+        if qt_lifecycle.is_checked(btn)
+    ]
+
+
 def pinned_checked_input_indices(main_window: "MainWindow") -> set[int]:
     """Checked input-face indices marked fixed for random reshuffles."""
-    pinned: set[int] = set()
-    idx = 0
-    for _fid, btn in main_window.input_faces.items():
-        if not btn.isChecked():
-            continue
-        if getattr(btn, "random_fixed", False):
-            pinned.add(idx)
-        idx += 1
-    return pinned
+    return {
+        idx
+        for idx, btn in enumerate(checked_input_face_buttons(main_window))
+        if getattr(btn, "random_fixed", False)
+    }
 
 
 def pinned_indices_from_checked(checked_inputs_ordered: list) -> set[int]:

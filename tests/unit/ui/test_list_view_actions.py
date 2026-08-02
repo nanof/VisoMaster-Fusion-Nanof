@@ -70,6 +70,8 @@ class _DummyInputFaceButton:
         for target_face in self.main_window.target_faces.values():
             target_face.assigned_input_faces.pop(self.face_id, None)
             target_face.calculate_assigned_input_embedding()
+        # Mirrors InputFaceCardButton: removal also schedules the card deletion.
+        self.deleteLater()
 
     def deleteLater(self):
         self.deleted += 1

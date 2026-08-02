@@ -42,6 +42,7 @@ from app.helpers.miscellaneous import (
 )
 from app.helpers.cuda_timeline import nvtx_range
 from app.helpers.swap_all_match import (
+    checked_input_face_buttons,
     pinned_indices_from_checked,
     swap_all_assignment_mode,
     swap_all_match_active,
@@ -3458,11 +3459,7 @@ class FrameWorker(threading.Thread):
         # iterates the live dict while the UI thread may be modifying it.
         with self.lock:
             target_faces_snapshot = dict(self.main_window.target_faces)
-            _checked_inputs_ordered = [
-                b
-                for _fid, b in self.main_window.input_faces.items()
-                if b.isChecked()
-            ]
+            _checked_inputs_ordered = checked_input_face_buttons(self.main_window)
 
         _sequential_match_active = swap_all_match_active(control)
         _rr_assignment_mode = (

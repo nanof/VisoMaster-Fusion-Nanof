@@ -47,6 +47,7 @@ import app.helpers.miscellaneous as misc_helpers
 from app.helpers.cuda_timeline import nvtx_range
 from app.helpers.sequential_rotate_stabilizer import SequentialRotateStabilizer
 from app.helpers.swap_all_match import (
+    checked_input_face_buttons,
     pinned_indices_from_checked,
     swap_all_assignment_mode,
     swap_all_match_active,
@@ -1752,11 +1753,7 @@ class VideoProcessor(QObject):
 
     def _feeder_checked_input_faces(self) -> list:
         with self.state_lock:
-            return [
-                b
-                for _fid, b in self.main_window.input_faces.items()
-                if b.isChecked()
-            ]
+            return checked_input_face_buttons(self.main_window)
 
     def compute_feeder_rr_input_indices(
         self,

@@ -1192,8 +1192,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         print("[INFO] MainWindow: closeEvent called.")
 
         self.video_processor.stop_processing()
-        list_view_actions.clear_stop_loading_input_media(self)
-        list_view_actions.clear_stop_loading_target_media(self)
+        # Keep the cards alive: the workspace is serialized from these dicts below.
+        list_view_actions.clear_stop_loading_input_media(self, clear_list=False)
+        list_view_actions.clear_stop_loading_target_media(self, clear_list=False)
 
         if self.quit_without_saving:
             print("[INFO] MainWindow: quitting without saving the workspace.")

@@ -16,6 +16,7 @@ from app.ui.widgets.actions import gpu_settings_actions
 from app.ui.widgets import widget_components
 
 # from app.UI.Widgets.WidgetComponents import *
+from app.helpers import qt_lifecycle
 from app.helpers.typing_helper import LayoutDictTypes
 
 
@@ -1114,7 +1115,7 @@ def set_all_parameters_and_control_widgets_enabled(
         embed_button.setDisabled(disabled)
     for _, target_media_button in main_window.target_videos.items():
         target_media_button.setDisabled(disabled)
-    for _, input_face_button in main_window.input_faces.items():
+    for input_face_button in qt_lifecycle.alive_values(main_window.input_faces):
         input_face_button.setDisabled(disabled)
     for _, target_face_button in main_window.target_faces.items():
         target_face_button.setDisabled(disabled)

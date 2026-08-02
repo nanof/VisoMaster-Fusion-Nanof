@@ -13,6 +13,7 @@ import numpy
 from PIL import Image
 from PySide6 import QtGui, QtWidgets, QtCore
 
+from app.helpers import qt_lifecycle, swap_all_match
 from app.helpers.typing_helper import ControlTypes, FacesParametersTypes, MarkerData
 from app.helpers.miscellaneous import get_video_rotation
 
@@ -1248,7 +1249,8 @@ def _get_ui_object_enabled_state(widget) -> bool:
 
 
 def _set_ui_object_enabled_state(widget, enabled: bool) -> None:
-    if widget is None:
+    # Cards captured when the scan started may have been destroyed meanwhile.
+    if widget is None or not qt_lifecycle.is_alive(widget):
         return
     if hasattr(widget, "setEnabled") and callable(widget.setEnabled):
         widget.setEnabled(bool(enabled))
@@ -2920,9 +2922,7 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
             saved_current_parameters = main_window.current_widget_parameters.copy()
 
     # Get the currently selected source faces and embeddings (for both modes)
-    saved_input_faces = [
-        face for face in main_window.input_faces.values() if face.isChecked()
-    ]
+    saved_input_faces = swap_all_match.checked_input_face_buttons(main_window)
     saved_embeddings = [
         embed for embed in main_window.merged_embeddings.values() if embed.isChecked()
     ]

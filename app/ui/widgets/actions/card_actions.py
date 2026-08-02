@@ -10,7 +10,7 @@ from PySide6 import QtGui
 
 import app.ui.widgets.actions.common_actions as common_widget_actions
 from app.ui.widgets.actions import list_view_actions
-from app.helpers import input_face_favorites_storage
+from app.helpers import input_face_favorites_storage, qt_lifecycle
 import app.helpers.miscellaneous as misc_helpers
 
 if TYPE_CHECKING:
@@ -76,6 +76,27 @@ def clear_target_faces(main_window: "MainWindow", refresh_frame=True):
         common_widget_actions.refresh_frame(main_window=main_window)
 
 
+def destroy_input_face_buttons(main_window: "MainWindow"):
+    """Tear down every input-face card and its list items.
+
+    ``QListWidget.clear()`` destroys the C++ side of the cards it owns, so the
+    dict must be emptied in the same step; otherwise the processing threads and
+    the UI keep reading wrappers whose C++ object is gone.
+    """
+    input_face_buttons = list(main_window.input_faces.values())
+    main_window.input_faces.clear()
+
+    main_window.inputFacesList.clear()
+    main_window.inputFacesFavoritesList.clear()
+
+    for input_face in input_face_buttons:
+        if hasattr(input_face, "embedding_store"):
+            input_face.embedding_store.clear()
+        if hasattr(input_face, "cropped_face"):
+            input_face.cropped_face = None
+        qt_lifecycle.delete_later(input_face)
+
+
 def clear_input_faces(main_window: "MainWindow"):
     from app.ui.widgets.actions import video_control_actions
 
@@ -84,17 +105,7 @@ def clear_input_faces(main_window: "MainWindow"):
     ):
         return
 
-    main_window.inputFacesList.clear()
-    main_window.inputFacesFavoritesList.clear()
-
-    for input_face in list(main_window.input_faces.values()):
-        if hasattr(input_face, "embedding_store"):
-            input_face.embedding_store.clear()
-        if hasattr(input_face, "cropped_face"):
-            input_face.cropped_face = None
-        input_face.deleteLater()
-
-    main_window.input_faces.clear()
+    destroy_input_face_buttons(main_window)
 
     for target_face in main_window.target_faces.values():
         target_face.assigned_input_faces = {}
@@ -149,8 +160,8 @@ def clear_merged_embeddings(main_window: "MainWindow"):
 
 def uncheck_all_input_faces(main_window: "MainWindow"):
     # Uncheck All other input faces
-    for _, input_face_button in main_window.input_faces.items():
-        input_face_button.setChecked(False)
+    for input_face_button in qt_lifecycle.alive_values(main_window.input_faces):
+        qt_lifecycle.set_checked(input_face_button, False)
 
     # Force Garbage Collection for dangling merged tensors
     gc.collect()
@@ -312,10 +323,11 @@ def find_target_faces(main_window: "MainWindow"):
                             new_target_face = main_window.target_faces.get(face_id)
                             if new_target_face:
                                 # Assign checked Input Faces
+                                qt_lifecycle.prune_dead(main_window.input_faces)
                                 for (
                                     input_face_id,
                                     input_face_button,
-                                ) in main_window.input_faces.items():
+                                ) in list(main_window.input_faces.items()):
                                     if input_face_button.isChecked():
                                         new_target_face.assigned_input_faces[
                                             input_face_id

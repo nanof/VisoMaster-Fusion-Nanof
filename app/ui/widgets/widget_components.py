@@ -21,6 +21,7 @@ from app.ui.widgets.actions import graphics_view_actions
 from app.ui.widgets.actions import card_actions
 from app.ui.widgets.actions import save_load_actions
 import app.helpers.miscellaneous as misc_helpers
+from app.helpers import qt_lifecycle
 from app.helpers.miscellaneous import get_video_rotation
 from app.helpers.screen_capture import (
     create_screen_capture_from_control,
@@ -847,7 +848,10 @@ class TargetFaceCardButton(CardButton):
             self.assigned_input_faces.clear()
             self.assigned_merged_embeddings.clear()
 
-            for input_face_id, input_face_button in main_window.input_faces.items():
+            qt_lifecycle.prune_dead(main_window.input_faces)
+            for input_face_id, input_face_button in list(
+                main_window.input_faces.items()
+            ):
                 if input_face_button.isChecked():
                     self.assigned_input_faces[input_face_id] = (
                         input_face_button.embedding_store
@@ -870,8 +874,9 @@ class TargetFaceCardButton(CardButton):
 
             # 2. Check only inputs/embeddings assigned fpr this face
             for input_face_id in self.assigned_input_faces.keys():
-                if main_window.input_faces.get(input_face_id):
-                    main_window.input_faces[input_face_id].setChecked(True)
+                input_face_button = main_window.input_faces.get(input_face_id)
+                if input_face_button is not None:
+                    qt_lifecycle.set_checked(input_face_button, True)
             for embedding_id in self.assigned_merged_embeddings.keys():
                 if main_window.merged_embeddings.get(embedding_id):
                     main_window.merged_embeddings[embedding_id].setChecked(True)
@@ -1360,9 +1365,13 @@ class InputFaceCardButton(CardButton):
                         for input_face_id in (
                             cur_selected_target_face_button.assigned_input_faces.keys()
                         ):
-                            input_face_button = main_window.input_faces[input_face_id]
-                            if input_face_button != self:
-                                input_face_button.setChecked(False)
+                            input_face_button = main_window.input_faces.get(
+                                input_face_id
+                            )
+                            if input_face_button is not None and (
+                                input_face_button != self
+                            ):
+                                qt_lifecycle.set_checked(input_face_button, False)
 
                     cur_selected_target_face_button.assigned_input_faces = {}
                     for input_face in selected_input_faces:
@@ -1377,9 +1386,9 @@ class InputFaceCardButton(CardButton):
                 for (
                     input_face_id
                 ) in cur_selected_target_face_button.assigned_input_faces.keys():
-                    input_face_button = main_window.input_faces[input_face_id]
-                    if input_face_button != self:
-                        input_face_button.setChecked(False)
+                    input_face_button = main_window.input_faces.get(input_face_id)
+                    if input_face_button is not None and input_face_button != self:
+                        qt_lifecycle.set_checked(input_face_button, False)
                 cur_selected_target_face_button.assigned_input_faces = {}
 
             cur_selected_target_face_button.assigned_input_faces[self.face_id] = (
@@ -1395,9 +1404,11 @@ class InputFaceCardButton(CardButton):
                 == QtCore.Qt.ControlModifier
             ):
                 # If there is no target face selected, uncheck all other input faces
-                for _, input_face_button in main_window.input_faces.items():
+                for input_face_button in qt_lifecycle.alive_values(
+                    main_window.input_faces
+                ):
                     if input_face_button != self:
-                        input_face_button.setChecked(False)
+                        qt_lifecycle.set_checked(input_face_button, False)
 
         common_widget_actions.refresh_frame(main_window)
 
@@ -1419,17 +1430,24 @@ class InputFaceCardButton(CardButton):
 
     def _remove_face_from_lists(self):
         main_window = self.main_window
+        # Favorites live in inputFacesFavoritesList, so always take the item from
+        # the list that actually owns this card.
+        list_widget = self.list_widget or main_window.inputFacesList
         i = self.get_item_position()
         if i is not None:
-            main_window.inputFacesList.takeItem(i)
-            main_window.input_faces.pop(self.face_id)
-            for target_face_id in main_window.target_faces:
-                main_window.target_faces[target_face_id].remove_assigned_input_face(
-                    self.face_id
-                )
-            self.deleteLater()
-            return True
-        return False
+            list_widget.takeItem(i)
+        # Drop the wrapper even when the item is gone already, otherwise the dict
+        # keeps a button whose C++ object is deleted and every later isChecked()
+        # raises from the UI and the processing threads.
+        removed = main_window.input_faces.pop(self.face_id, None) is not None
+        if not removed and i is None:
+            return False
+        for target_face_id in main_window.target_faces:
+            main_window.target_faces[target_face_id].remove_assigned_input_face(
+                self.face_id
+            )
+        qt_lifecycle.delete_later(self)
+        return True
 
     def deselect_currently_selected_face(self, main_window):
         self.remove_kv_data_file()
@@ -1450,7 +1468,7 @@ class InputFaceCardButton(CardButton):
             return
         faces_to_remove = [
             face_button
-            for _, face_button in main_window.input_faces.items()
+            for face_button in qt_lifecycle.alive_values(main_window.input_faces)
             if face_button.isChecked()
         ]
 
@@ -1636,7 +1654,7 @@ class InputFaceCardButton(CardButton):
         # Abbiamo bisogno del 'cropped_face' per estrarre le KV map.
         selected_faces = [
             input_face
-            for _, input_face in self.main_window.input_faces.items()
+            for input_face in qt_lifecycle.alive_values(self.main_window.input_faces)
             if input_face.isChecked()
         ]
 

@@ -21,7 +21,7 @@ from app.ui.widgets.actions import card_actions
 from app.ui.widgets.actions import filter_actions
 from app.ui.widgets import widget_components
 import app.helpers.miscellaneous as misc_helpers
-from app.helpers import input_face_favorites_storage
+from app.helpers import input_face_favorites_storage, qt_lifecycle
 from app.ui.widgets import ui_workers
 from app.helpers.screen_capture import SCREEN_CAPTURE_MEDIA_LABEL, mss_available
 
@@ -879,7 +879,7 @@ def add_input_faces_selection_to_favorites(
     main_list = main_window.inputFacesList
     candidates = [
         b
-        for b in main_window.input_faces.values()
+        for b in qt_lifecycle.alive_values(main_window.input_faces)
         if b.isChecked()
         and b.list_widget is main_list
         and not getattr(b, "is_favorite_clip", False)
@@ -1281,8 +1281,7 @@ def clear_stop_loading_input_media(main_window: "MainWindow", clear_list: bool =
             worker.wait()
         main_window.input_faces_loader_worker = None
         if clear_list:
-            main_window.inputFacesList.clear()
-            main_window.inputFacesFavoritesList.clear()
+            card_actions.destroy_input_face_buttons(main_window)
 
 
 def _set_folder_path_display(
@@ -1395,8 +1394,8 @@ def clear_all_input_faces(main_window: "MainWindow") -> bool:
 
     for input_face_button in list(main_window.input_faces.values()):
         input_face_button.remove_kv_data_file()
+        # _remove_face_from_lists() already schedules the card for deletion.
         input_face_button._remove_face_from_lists()
-        input_face_button.deleteLater()
 
     common_widget_actions.refresh_frame(main_window)
     set_input_faces_path_display(main_window, "")
