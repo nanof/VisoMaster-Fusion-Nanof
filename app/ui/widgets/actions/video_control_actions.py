@@ -1711,7 +1711,7 @@ def remove_all_markers(main_window: "MainWindow"):
 
 
 def adjust_sequential_input_rotate_offset(main_window: "MainWindow", delta: int) -> None:
-    """Adjust Face Swap ÔåÆ Input rotate start offset (only when the slider exists and is enabled)."""
+    """Adjust Face Swap → Input rotate start offset (only when the slider exists and is enabled)."""
     key = "SequentialInputRotateOffsetSlider"
     w = main_window.parameter_widgets.get(key)
     if w is None or not w.isEnabled():
@@ -1752,7 +1752,7 @@ def reshuffle_random_target_match(main_window: "MainWindow") -> bool:
 
     if pinned:
         msg = (
-            f"Random assignments reshuffled (X) ÔÇö kept {len(pinned)} fixed"
+            f"Random assignments reshuffled (X) — kept {len(pinned)} fixed"
         )
     else:
         msg = "Random face assignments reshuffled (X)"
@@ -2091,11 +2091,68 @@ def enable_zoom_and_pan(main_window: "MainWindow", view: QtWidgets.QGraphicsView
         if factor > 0:
             self.scale(factor, factor)
 
+    def cycle_embedding(direction: int) -> bool:
+        """Select previous (-1) or next (+1) merged embedding for the current target face."""
+        target_face_button = getattr(
+            main_window, "cur_selected_target_face_button", None
+        )
+        if target_face_button is None:
+            return False
+
+        embedding_buttons = [
+            button
+            for button in getattr(main_window, "merged_embeddings", {}).values()
+            if button is not None and button.isEnabled()
+        ]
+        if not embedding_buttons:
+            return False
+
+        checked_indices = [
+            index
+            for index, button in enumerate(embedding_buttons)
+            if button.isChecked()
+        ]
+        if checked_indices:
+            next_index = (checked_indices[0] + direction) % len(embedding_buttons)
+        else:
+            next_index = 0 if direction > 0 else len(embedding_buttons) - 1
+
+        next_button = embedding_buttons[next_index]
+        for button in embedding_buttons:
+            if button is not next_button and button.isChecked():
+                button.click()
+        if not next_button.isChecked():
+            next_button.click()
+
+        embeddings_list = getattr(main_window, "inputEmbeddingsList", None)
+        embedding_list_item = getattr(next_button, "list_item", None)
+        if embeddings_list is not None and embedding_list_item is not None:
+            QtCore.QTimer.singleShot(
+                0,
+                lambda: embeddings_list.scrollToItem(
+                    embedding_list_item,
+                    QtWidgets.QAbstractItemView.ScrollHint.EnsureVisible,
+                ),
+            )
+        return True
+
     def wheelEvent(self: QtWidgets.QGraphicsView, event: QtGui.QWheelEvent):
-        """Handle mouse wheel event for zooming."""
+        """Wheel zooms; Shift+wheel cycles the selected merged embedding."""
         delta = event.angleDelta().y()
-        if delta != 0:
-            zoom(self, delta // abs(delta))
+        if delta == 0:
+            event.ignore()
+            return
+
+        if event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier:
+            direction = -1 if delta > 0 else 1
+            if cycle_embedding(direction):
+                event.accept()
+            else:
+                event.ignore()
+            return
+
+        zoom(self, delta // abs(delta))
+        event.accept()
 
     def reset_zoom(self: QtWidgets.QGraphicsView):
         """Resets the view transform so the scene content fits the viewport exactly."""

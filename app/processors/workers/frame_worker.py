@@ -6376,13 +6376,30 @@ class FrameWorker(threading.Thread):
         return swap, prev_face
 
     def get_border_mask(self, parameters):
-        """Creates the border fade mask based on sliders (1×128×128 float32 on model device)."""
+        """Creates the border fade mask based on sliders (1×128×128 float32 on model device).
+
+        Each edge has its own blur amount. Older workspaces that only store the
+        legacy ``BorderBlurSlider`` fall back to that single value for all edges.
+        """
         device = self.models_processor.get_effective_torch_device()
-        border_mask = torch.ones((128, 128), dtype=torch.float32, device=device)
-        border_mask = torch.unsqueeze(border_mask, 0)
+        base_mask = torch.ones((1, 128, 128), dtype=torch.float32, device=device)
 
         if not parameters.get("BordermaskEnableToggle", False):
-            return border_mask
+            return base_mask
+
+        legacy_blur = int(parameters.get("BorderBlurSlider", 8))
+
+        def _edge_blur(key: str) -> int:
+            value = parameters.get(key, legacy_blur)
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return legacy_blur
+
+        top_blur = _edge_blur("TopBorderBlurSlider")
+        bottom_blur = _edge_blur("BottomBorderBlurSlider")
+        left_blur = _edge_blur("LeftBorderBlurSlider")
+        right_blur = _edge_blur("RightBorderBlurSlider")
 
         cache_key = (
             str(device),
@@ -6390,7 +6407,10 @@ class FrameWorker(threading.Thread):
             int(parameters["BorderLeftSlider"]),
             int(parameters["BorderRightSlider"]),
             int(parameters["BorderBottomSlider"]),
-            int(parameters["BorderBlurSlider"]),
+            top_blur,
+            bottom_blur,
+            left_blur,
+            right_blur,
         )
         _bmc = self._border_mask_128_cache
         _hit = _bmc.get(cache_key)
@@ -6409,17 +6429,29 @@ class FrameWorker(threading.Thread):
         top = max(0, min(top, 128))
         bottom = max(top, min(bottom, 128))
 
-        border_mask[:, :top, :] = 0
-        border_mask[:, bottom:, :] = 0
-        border_mask[:, :, :left] = 0
-        border_mask[:, :, right:] = 0
+        mask_top = base_mask.clone()
+        mask_top[:, :top, :] = 0
+        mask_bottom = base_mask.clone()
+        mask_bottom[:, bottom:, :] = 0
+        mask_left = base_mask.clone()
+        mask_left[:, :, :left] = 0
+        mask_right = base_mask.clone()
+        mask_right[:, :, right:] = 0
 
-        blur_amount = parameters["BorderBlurSlider"]
-        blur_kernel_size = blur_amount * 2 + 1
-        if blur_kernel_size > 1:
-            sigma_val = max(blur_amount * 0.15 + 0.1, 1e-6)
-            gauss = self._get_cached_gaussian_blur(blur_kernel_size, sigma_val)
-            border_mask = gauss(border_mask)
+        def _apply_blur(mask: torch.Tensor, blur_amount: int) -> torch.Tensor:
+            blur_kernel_size = blur_amount * 2 + 1
+            if blur_kernel_size > 1:
+                sigma_val = max(blur_amount * 0.15 + 0.1, 1e-6)
+                gauss = self._get_cached_gaussian_blur(blur_kernel_size, sigma_val)
+                return gauss(mask)
+            return mask
+
+        border_mask = (
+            _apply_blur(mask_top, top_blur)
+            * _apply_blur(mask_bottom, bottom_blur)
+            * _apply_blur(mask_left, left_blur)
+            * _apply_blur(mask_right, right_blur)
+        )
 
         _bmc[cache_key] = border_mask
         if len(_bmc) > self._BORDER_MASK_128_CACHE_MAX:

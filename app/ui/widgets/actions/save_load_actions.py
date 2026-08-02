@@ -336,6 +336,21 @@ def save_embeddings_to_file(main_window: "MainWindow", save_as=False):
 # This method is used to convert the data type of Parameters Dict
 # Parameters are converted to dict when serializing to JSON
 # Parameters are converted to ParametersDict when reading from JSON
+def _migrate_legacy_border_blur_parameters(parameters: dict) -> None:
+    """Copy legacy BorderBlurSlider into per-edge blur keys when those are absent."""
+    if "BorderBlurSlider" not in parameters:
+        return
+    legacy_blur = parameters["BorderBlurSlider"]
+    for key in (
+        "TopBorderBlurSlider",
+        "BottomBorderBlurSlider",
+        "LeftBorderBlurSlider",
+        "RightBorderBlurSlider",
+    ):
+        if key not in parameters:
+            parameters[key] = legacy_blur
+
+
 def convert_parameters_to_supported_type(
     main_window: "MainWindow",
     parameters: Union[dict, ParametersTypes],
@@ -346,6 +361,7 @@ def convert_parameters_to_supported_type(
             return parameters.data
     elif convert_type is misc_helpers.ParametersDict:
         if isinstance(parameters, dict):
+            _migrate_legacy_border_blur_parameters(parameters)
             return misc_helpers.ParametersDict(
                 parameters,
                 cast(misc_helpers.ParametersDict, main_window.default_parameters).data,
