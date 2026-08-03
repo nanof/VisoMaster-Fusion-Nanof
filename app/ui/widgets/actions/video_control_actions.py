@@ -367,30 +367,67 @@ def set_up_video_seek_slider(main_window: "MainWindow"):
         paintEvent, main_window.videoSeekSlider
     )
 
-    # on_change_video_seek_slider runs heavy work from valueChanged, which Qt
-    # emits inside QSlider.mousePressEvent *before* it assigns pressedControl.
-    # A release delivered in that window (nested processEvents, modal dialog)
-    # is discarded by Qt, so the press ends with setSliderDown(True) and the
-    # handle stays latched, following the cursor. Poll only while the handle is
-    # down and unlatch it when no mouse button is actually held.
-    latch_watchdog = QtCore.QTimer(main_window.videoSeekSlider)
-    latch_watchdog.setInterval(150)
+    # Click-to-seek runs heavy work from valueChanged inside QSlider.mousePressEvent
+    # *before* Qt assigns pressedControl / setSliderDown(True). A MouseButtonRelease
+    # delivered in that window (nested processEvents) is discarded by Qt, then the
+    # press finishes with the handle latched and following the cursor.
+    #
+    # Fix: mark the press before Qt handles it (so valueChanged can skip post-seek
+    # work), and immediately unlatch after mousePressEvent returns if the button
+    # is already up. Keep a short watchdog as a backup.
+    slider = main_window.videoSeekSlider
+    slider._vm_seek_mouse_down = False
+    _qt_mouse_press = QtWidgets.QSlider.mousePressEvent
+    _qt_mouse_release = QtWidgets.QSlider.mouseReleaseEvent
+
+    def _button_physically_up() -> bool:
+        return (
+            QtGui.QGuiApplication.mouseButtons()
+            == QtCore.Qt.MouseButton.NoButton
+        )
+
+    def _unlatch_if_button_up(self: QtWidgets.QSlider, *, warn: bool) -> None:
+        if not self.isSliderDown() or not _button_physically_up():
+            return
+        if warn:
+            print(
+                "[WARN] Video seek slider stayed latched after release. Unlatching."
+            )
+        self.setSliderDown(False)  # Emits sliderReleased -> on_slider_released
+
+    def mousePressEvent(self: QtWidgets.QSlider, event: QtGui.QMouseEvent) -> None:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self._vm_seek_mouse_down = True
+        _qt_mouse_press(self, event)
+        # Release may have been discarded while valueChanged ran; unlatch now.
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            if _button_physically_up():
+                self._vm_seek_mouse_down = False
+            _unlatch_if_button_up(self, warn=True)
+
+    def mouseReleaseEvent(self: QtWidgets.QSlider, event: QtGui.QMouseEvent) -> None:
+        _qt_mouse_release(self, event)
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self._vm_seek_mouse_down = False
+            # If Qt ignored the release (pressedControl still unset), force clear.
+            _unlatch_if_button_up(self, warn=False)
+
+    slider.mousePressEvent = partial(mousePressEvent, slider)
+    slider.mouseReleaseEvent = partial(mouseReleaseEvent, slider)
+
+    latch_watchdog = QtCore.QTimer(slider)
+    latch_watchdog.setInterval(50)
 
     def release_latched_handle(self: QtWidgets.QSlider):
         if not self.isSliderDown():
             latch_watchdog.stop()
             return
-        if QtGui.QGuiApplication.mouseButtons() != QtCore.Qt.MouseButton.NoButton:
-            return
-        print("[WARN] Video seek slider stayed latched after release. Unlatching.")
-        self.setSliderDown(False)  # Emits sliderReleased -> on_slider_released
+        _unlatch_if_button_up(self, warn=True)
 
-    latch_watchdog.timeout.connect(
-        partial(release_latched_handle, main_window.videoSeekSlider)
-    )
-    main_window.videoSeekSlider.sliderPressed.connect(latch_watchdog.start)
-    main_window.videoSeekSlider.sliderReleased.connect(latch_watchdog.stop)
-    main_window.videoSeekSlider.latch_watchdog = latch_watchdog
+    latch_watchdog.timeout.connect(partial(release_latched_handle, slider))
+    slider.sliderPressed.connect(latch_watchdog.start)
+    slider.sliderReleased.connect(latch_watchdog.stop)
+    slider.latch_watchdog = latch_watchdog
 
 
 def set_up_timeline_zoom(main_window: "MainWindow"):
@@ -2634,53 +2671,91 @@ def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
     video_processor.next_frame_to_display = new_position
     update_video_time_line_edit(main_window, new_position)
     update_drop_frame_button_label(main_window)
-    if video_processor.media_capture:
-        misc_helpers.seek_frame(video_processor.media_capture, new_position)
 
-        # Read the raw frame without triggering the full pipeline.
-        ret, frame = misc_helpers.read_frame(
-            video_processor.media_capture, video_processor.media_rotation
-        )
-        if ret:
-            # Cache the raw frame so process_current_frame() can use it as a
-            # fallback when the near-EOF re-read fails (OpenCV reliability issue).
-            video_processor._seek_cached_frame = (new_position, frame)
-
-            # --- HYBRID NAVIGATION PREVIEW ---
-            is_stepping = getattr(main_window, "_is_stepping_media", False)
-            is_compare_active = getattr(main_window, "view_face_compare_enabled", False)
-            is_mask_active = getattr(main_window, "view_face_mask_enabled", False)
-
-            # Suppress raw frame display ONLY if we are stepping via actions/shortcuts
-            # AND a special preview mode (Compare/Mask) is currently active.
-            suppress_flash = is_stepping and (is_compare_active or is_mask_active)
-
-            if not suppress_flash:
-                # Standard scrubbing: push the raw frame to the UI immediately for fast response
-                pixmap = common_widget_actions.get_pixmap_from_frame(main_window, frame)
-                graphics_view_actions.update_graphics_view(
-                    main_window,
-                    pixmap,
-                    new_position,
-                    size_mode="native_pixmap_size",
-                )
-
-        else:
-            # VP-34: Read failed. Trigger a stop/reopen cycle to recover from silent handle failures.
-            print(
-                f"[WARN] on_change_video_seek_slider: Read failed at frame {new_position}. Attempting recovery..."
+    seek_slider = main_window.videoSeekSlider
+    mouse_seeking = bool(getattr(seek_slider, "_vm_seek_mouse_down", False))
+    # valueChanged fires inside QSlider.mousePressEvent before setSliderDown(True).
+    # Defer capture seek/decode so the press can finish and the release is not lost.
+    if mouse_seeking and not seek_slider.isSliderDown():
+        main_window._pending_seek_slider_position = int(new_position)
+        if not getattr(main_window, "_seek_slider_preview_scheduled", False):
+            main_window._seek_slider_preview_scheduled = True
+            QtCore.QTimer.singleShot(
+                0, partial(_flush_deferred_seek_slider_preview, main_window)
             )
-            video_processor._seek_cached_frame = None
-            main_window.last_seek_read_failed = True
-            video_processor.stop_processing()
+        return
+
+    _apply_video_seek_slider_preview(main_window, int(new_position))
 
     # Only update parameters and widgets if the slider is NOT being actively dragged.
     # This ensures playback, clicks, and button presses update the UI,
     # but fast scrubbing does not cause lag or skip marker updates.
-    if not main_window.videoSeekSlider.isSliderDown():
+    # Also treat our pre-press flag: valueChanged fires inside mousePressEvent
+    # before Qt's isSliderDown() becomes True.
+    if not seek_slider.isSliderDown() and not mouse_seeking:
         run_post_seek_actions(main_window, new_position)
     # Do not automatically restart the video, let the user press Play to resume
     # print("on_change_video_seek_slider: Video stopped after slider movement.")
+
+
+def _flush_deferred_seek_slider_preview(main_window: "MainWindow") -> None:
+    """Run the seek preview deferred from mousePress's valueChanged."""
+    if not getattr(main_window, "_seek_slider_preview_scheduled", False):
+        return
+    main_window._seek_slider_preview_scheduled = False
+    main_window._pending_seek_slider_position = None
+    seek_slider = main_window.videoSeekSlider
+    position = int(seek_slider.value())
+    _apply_video_seek_slider_preview(main_window, position)
+    # Marker/AutoSwap for a finished click are handled by on_slider_released.
+
+
+def _apply_video_seek_slider_preview(
+    main_window: "MainWindow", new_position: int
+) -> None:
+    """Seek capture and push a raw-frame preview for the given slider position."""
+    video_processor = main_window.video_processor
+    if not video_processor.media_capture:
+        return
+
+    misc_helpers.seek_frame(video_processor.media_capture, new_position)
+
+    # Read the raw frame without triggering the full pipeline.
+    ret, frame = misc_helpers.read_frame(
+        video_processor.media_capture, video_processor.media_rotation
+    )
+    if ret:
+        # Cache the raw frame so process_current_frame() can use it as a
+        # fallback when the near-EOF re-read fails (OpenCV reliability issue).
+        video_processor._seek_cached_frame = (new_position, frame)
+
+        # --- HYBRID NAVIGATION PREVIEW ---
+        is_stepping = getattr(main_window, "_is_stepping_media", False)
+        is_compare_active = getattr(main_window, "view_face_compare_enabled", False)
+        is_mask_active = getattr(main_window, "view_face_mask_enabled", False)
+
+        # Suppress raw frame display ONLY if we are stepping via actions/shortcuts
+        # AND a special preview mode (Compare/Mask) is currently active.
+        suppress_flash = is_stepping and (is_compare_active or is_mask_active)
+
+        if not suppress_flash:
+            # Standard scrubbing: push the raw frame to the UI immediately for fast response
+            pixmap = common_widget_actions.get_pixmap_from_frame(main_window, frame)
+            graphics_view_actions.update_graphics_view(
+                main_window,
+                pixmap,
+                new_position,
+                size_mode="native_pixmap_size",
+            )
+
+    else:
+        # VP-34: Read failed. Trigger a stop/reopen cycle to recover from silent handle failures.
+        print(
+            f"[WARN] on_change_video_seek_slider: Read failed at frame {new_position}. Attempting recovery..."
+        )
+        video_processor._seek_cached_frame = None
+        main_window.last_seek_read_failed = True
+        video_processor.stop_processing()
 
 
 def _get_marker_data_for_position(
@@ -2853,6 +2928,11 @@ def on_slider_released(main_window: "MainWindow"):
     the full processing pipeline ONLY AFTER the user has finished dragging.
     """
     # print("Called on_slider_released()")
+
+    # Cancel a preview deferred from mousePress; process_current_frame below
+    # owns the final frame display for this interaction.
+    main_window._seek_slider_preview_scheduled = False
+    main_window._pending_seek_slider_position = None
 
     new_position = main_window.videoSeekSlider.value()  # Get the final position
     # print(f"\nSlider released. New position: {new_position}\n")
