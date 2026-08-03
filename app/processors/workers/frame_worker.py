@@ -3296,7 +3296,11 @@ class FrameWorker(threading.Thread):
         edit_button_is_checked_global: bool,
         swapper_model: str,
     ) -> torch.Tensor:
-        """GhostFace / HyperSwap: one ORT batch B×256² when the engine accepts dynamic N."""
+        """GhostFace / HyperSwap: one ORT batch B×256² when the engine accepts dynamic N.
+
+        I/O contract matches ``swap_core`` / ``get_swapped_and_prev_face``: target and
+        output are CHW float in ``[-1, 1]`` (not ``[0, 1]`` like Inswapper128 batch).
+        """
         ordered = sorted(specs, key=lambda x: x["det_index"])
         device = self.models_processor.get_effective_torch_device()
         chw_tiles: list[torch.Tensor] = []
@@ -3392,6 +3396,7 @@ class FrameWorker(threading.Thread):
                     center=(float(dim * 128 / 2), float(dim * 128 / 2)),
                     interpolation=v2.InterpolationMode.BILINEAR,
                 )
+            # Match swap_core: CHW uint8 → HWC [0,1] (sharpness) → CHW [-1,1].
             hwc = w_chw.permute(1, 2, 0).contiguous().float() / 255.0
             if float(params.get("PreSwapSharpnessDecimalSlider", 1.0)) != 1.0:
                 _sh = hwc.permute(2, 0, 1)
@@ -3399,7 +3404,7 @@ class FrameWorker(threading.Thread):
                     _sh, float(params["PreSwapSharpnessDecimalSlider"])
                 )
                 hwc = _sh.permute(1, 2, 0)
-            tchw = hwc.permute(2, 0, 1).unsqueeze(0).contiguous()
+            tchw = (hwc.permute(2, 0, 1) * 2.0 - 1.0).unsqueeze(0).contiguous()
             chw_tiles.append(tchw)
             lt = latent
             lr = lt.unsqueeze(0) if lt.dim() == 1 else lt
@@ -3425,7 +3430,7 @@ class FrameWorker(threading.Thread):
         prefetched_list: list[torch.Tensor] = []
         for bi in range(batch_out.shape[0]):
             prefetched_list.append(
-                (batch_out[bi] * 255.0).clamp(0, 255).to(torch.uint8)
+                (batch_out[bi] * 127.5 + 127.5).clamp(0, 255).to(torch.uint8)
             )
 
         return self._plane_swap_prefetched_apply_swap_core_sequence(
@@ -4980,6 +4985,7 @@ class FrameWorker(threading.Thread):
                         "Similarity transform estimation failed for FFHQ-aligned swapper face"
                     )
         # FW-QUAL-10: use GHOSTFACE_MODELS frozenset instead of chained != comparisons
+        # HyperSwap-v* / Inswapper / SimSwap / … use arcface128 (not Ghost arcfacemap).
         elif swapper_model not in self.GHOSTFACE_MODELS and swapper_model != "CSCS":
             dst = faceutil.get_arcface_template(image_size=512, mode="arcface128")
             dst = np.squeeze(dst)

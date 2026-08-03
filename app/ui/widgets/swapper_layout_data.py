@@ -26,7 +26,13 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
                 "CSCS",
             ],
             "default": "Inswapper128",
-            "help": "Choose which swapper model to use for face swapping. HyperSwap-v1/v2/v3 are FaceFusion Labs 256 px models (1a/1b/1c); v1 is fastest, v3 targets highest quality.",
+            "help": (
+                "Choose which swapper model to use for face swapping. "
+                "HyperSwap-v1/v2/v3 are FaceFusion Labs 256 px models (ONNX 1a/1b/1c): "
+                "v1 is fastest, v2 balanced, v3 targets highest quality. "
+                "HyperSwap uses ArcFace Inswapper128ArcFace automatically (w600k, L2 latent). "
+                "Single-face and multi-face Swap All share the same model and [-1,1] I/O contract."
+            ),
         },
         "SwapperResSelection": {
             "level": 2,

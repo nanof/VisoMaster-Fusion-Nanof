@@ -113,6 +113,16 @@ def test_hyperswap_models_frozenset_contents():
     assert "HyperSwap-v1" in HYPERSWAP_MODELS
 
 
+def test_hyperswap_alignment_disjoint_from_ghostface():
+    """HyperSwap must use arcface128 (Inswapper-style), not Ghost arcfacemap."""
+    from app.processors.workers.frame_worker import FrameWorker
+
+    assert FrameWorker.HYPERSWAP_MODELS.isdisjoint(FrameWorker.GHOSTFACE_MODELS)
+    assert FrameWorker.HYPERSWAP_MODELS == frozenset(
+        {"HyperSwap-v1", "HyperSwap-v2", "HyperSwap-v3"}
+    )
+
+
 def test_hyperswap_exposed_in_swap_model_selection():
     # Avoid importing SWAPPER_LAYOUT_DATA (circular UI imports under pytest).
     from pathlib import Path
@@ -127,6 +137,100 @@ def test_hyperswap_models_are_fp16_safe():
 
     for name in ("HyperSwapv1", "HyperSwapv2", "HyperSwapv3"):
         assert name in fp16_safe_models_list
+
+
+def test_hyperswap_maps_to_inswapper128_arcface():
+    from app.processors.models_data import arcface_mapping_model_dict
+
+    for name in ("HyperSwap-v1", "HyperSwap-v2", "HyperSwap-v3"):
+        assert arcface_mapping_model_dict[name] == "Inswapper128ArcFace"
+
+
+def test_hyperswap_ui_to_model_name():
+    from app.processors.face_swappers import FaceSwappers
+
+    assert FaceSwappers._hyperswap_ui_to_model_name("HyperSwap-v1") == "HyperSwapv1"
+    assert FaceSwappers._hyperswap_ui_to_model_name("HyperSwap-v2") == "HyperSwapv2"
+    assert FaceSwappers._hyperswap_ui_to_model_name("HyperSwap-v3") == "HyperSwapv3"
+    assert FaceSwappers._hyperswap_ui_to_model_name("GhostFace-v1") is None
+
+
+def test_calc_hyperswap_latent_l2_unit_and_shape():
+    from app.processors.face_swappers import FaceSwappers
+
+    fs = FaceSwappers(models_processor=object())  # type: ignore[arg-type]
+    raw = np.random.randn(512).astype(np.float32)
+    lat = fs.calc_hyperswap_latent(raw)
+    assert lat is not None
+    assert lat.shape == (1, 512)
+    assert abs(float(np.linalg.norm(lat)) - 1.0) < 1e-5
+
+
+def test_calc_hyperswap_latent_none_on_empty():
+    from app.processors.face_swappers import FaceSwappers
+
+    fs = FaceSwappers(models_processor=object())  # type: ignore[arg-type]
+    assert fs.calc_hyperswap_latent(None) is None
+    assert fs.calc_hyperswap_latent(np.array([])) is None
+
+
+def test_hyperswap_batch_io_matches_swap_core_minus_one_one_range():
+    """Batch ORT-256 preprocess/decode must match single-face swap_core [-1, 1]."""
+    # HWC float [0,1] as after swap_core's /255 (and after batch sharpness on [0,1]).
+    hwc = torch.rand(256, 256, 3, dtype=torch.float32)
+
+    # Single-face HyperSwap/GhostFace path in get_swapped_and_prev_face:
+    single_in = torch.mul(hwc, 255.0).permute(2, 0, 1)
+    single_in = torch.div(single_in.float(), 127.5)
+    single_in = torch.sub(single_in, 1)
+
+    # Batched path after Paso 1:
+    batch_in = hwc.permute(2, 0, 1) * 2.0 - 1.0
+    assert torch.allclose(batch_in, single_in, atol=1e-5)
+
+    # Synthetic model identity in [-1,1] → decode to uint8 CHW
+    fake_out = batch_in.clone()
+    decoded_batch = (fake_out * 127.5 + 127.5).clamp(0, 255).to(torch.uint8)
+    decoded_single = torch.add(torch.mul(fake_out, 127.5), 127.5).clamp(0, 255).to(
+        torch.uint8
+    )
+    assert torch.equal(decoded_batch, decoded_single)
+    # Round-trip roughly recovers [0,255] from original HWC
+    orig_u8 = (hwc * 255.0).clamp(0, 255).to(torch.uint8).permute(2, 0, 1)
+    assert (decoded_batch.to(torch.int16) - orig_u8.to(torch.int16)).abs().max() <= 1
+
+
+def test_hyperswap_batched_disables_session_after_failure():
+    from app.processors.face_swappers import FaceSwappers
+
+    class _FakeProc:
+        def bind_ort_io_input(self, *a, **k):
+            raise RuntimeError("reject batch")
+
+        def bind_ort_io_output(self, *a, **k):
+            pass
+
+    class _FakeModel:
+        def get_inputs(self):
+            return [type("I", (), {"name": "target"})()]
+
+        def get_outputs(self):
+            return [type("O", (), {"name": "output"})()]
+
+        def io_binding(self):
+            return object()
+
+    fs = FaceSwappers(models_processor=_FakeProc())  # type: ignore[arg-type]
+    fs._load_swapper_model = lambda _n: _FakeModel()  # type: ignore[method-assign]
+    fs._run_model_with_lazy_build_check = lambda *a, **k: None  # type: ignore[method-assign]
+
+    images = torch.zeros(2, 3, 256, 256)
+    emb = torch.zeros(2, 512)
+    out = torch.empty_like(images)
+    assert fs.run_hyperswap_batched(images, emb, out, "HyperSwap-v3") is False
+    assert fs._hyperswap_ort_batch_session_disabled is True
+    # Second call short-circuits without binding
+    assert fs.run_hyperswap_batched(images, emb, out, "HyperSwap-v3") is False
 
 
 # ---------------------------------------------------------------------------

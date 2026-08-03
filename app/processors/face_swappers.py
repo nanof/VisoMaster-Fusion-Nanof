@@ -25,6 +25,8 @@ class FaceSwappers:
         self._inswapper_ort_batch_fail_logged = False
         # After first batched ORT/TRT failure, skip further attempts this session (avoid B=16 errors every frame).
         self._inswapper_ort_batch_session_disabled = False
+        self._hyperswap_ort_batch_fail_logged = False
+        self._hyperswap_ort_batch_session_disabled = False
         self._inswapper_torch = None  # InSwapperTorch instance
         self._inswapper_runner_b1: Optional[object] = None  # CUDA graph runner for B=1
         self._w600k_torch: Optional[object] = None  # IResNet50Torch
@@ -888,6 +890,28 @@ class FaceSwappers:
             )
             return False
 
+    @staticmethod
+    def _hyperswap_ui_to_model_name(swapper_model: str) -> Optional[str]:
+        """Map UI ``HyperSwap-vN`` selection to ORT catalog name ``HyperSwapvN``."""
+        if swapper_model == "HyperSwap-v1":
+            return "HyperSwapv1"
+        if swapper_model == "HyperSwap-v2":
+            return "HyperSwapv2"
+        if swapper_model == "HyperSwap-v3":
+            return "HyperSwapv3"
+        return None
+
+    def _hyperswap_output_name(self, model) -> str:
+        """Introspect first ONNX output name (cached), same pattern as GhostFace."""
+        session_id = id(model)
+        with self._io_cache_lock:
+            if session_id not in self._session_io_name_cache:
+                self._session_io_name_cache[session_id] = {
+                    "input": model.get_inputs()[0].name,
+                    "outputs": [o.name for o in model.get_outputs()],
+                }
+            return self._session_io_name_cache[session_id]["outputs"][0]
+
     def calc_hyperswap_latent(self, source_embedding):
         """FaceFusion HyperSwap: L2-normalized 512-D ArcFace row (1, 512)."""
         if source_embedding is None or len(source_embedding) == 0:
@@ -901,13 +925,8 @@ class FaceSwappers:
     def run_hyperswap(
         self, image, embedding, output, swapper_model="HyperSwap-v3"
     ):
-        if swapper_model == "HyperSwap-v1":
-            model_name = "HyperSwapv1"
-        elif swapper_model == "HyperSwap-v2":
-            model_name = "HyperSwapv2"
-        elif swapper_model == "HyperSwap-v3":
-            model_name = "HyperSwapv3"
-        else:
+        model_name = self._hyperswap_ui_to_model_name(swapper_model)
+        if not model_name:
             print(f"[ERROR] Unknown HyperSwap model: {swapper_model}")
             return
 
@@ -916,6 +935,7 @@ class FaceSwappers:
             print(f"[ERROR] {model_name} model not loaded.")
             return
 
+        output_name = self._hyperswap_output_name(model)
         io_binding = model.io_binding()
         image = self.models_processor.bind_ort_io_input(
             io_binding, model_name, "target", image
@@ -924,7 +944,7 @@ class FaceSwappers:
             io_binding, model_name, "source", embedding
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, model_name, "output", output
+            io_binding, model_name, output_name, output
         )
 
         self._run_model_with_lazy_build_check(model_name, model, io_binding)
@@ -936,13 +956,12 @@ class FaceSwappers:
         output: torch.Tensor,
         swapper_model: str = "HyperSwap-v3",
     ) -> bool:
-        if swapper_model == "HyperSwap-v1":
-            model_name = "HyperSwapv1"
-        elif swapper_model == "HyperSwap-v2":
-            model_name = "HyperSwapv2"
-        elif swapper_model == "HyperSwap-v3":
-            model_name = "HyperSwapv3"
-        else:
+        """Try one ORT run with batch B>=1. Returns False if binding/engine rejects batch."""
+        if self._hyperswap_ort_batch_session_disabled:
+            return False
+
+        model_name = self._hyperswap_ui_to_model_name(swapper_model)
+        if not model_name:
             return False
 
         model = self._load_swapper_model(model_name)
@@ -961,6 +980,7 @@ class FaceSwappers:
         inp = images if images.is_contiguous() else images.contiguous()
         out = output if output.is_contiguous() else output.contiguous()
 
+        output_name = self._hyperswap_output_name(model)
         io_binding = model.io_binding()
         try:
             inp = self.models_processor.bind_ort_io_input(
@@ -970,15 +990,19 @@ class FaceSwappers:
                 io_binding, model_name, "source", emb
             )
             self.models_processor.bind_ort_io_output(
-                io_binding, model_name, "output", out
+                io_binding, model_name, output_name, out
             )
             self._run_model_with_lazy_build_check(model_name, model, io_binding)
             return True
         except Exception as e:
-            print(
-                f"[WARN] HyperSwap batched ORT bind/run failed (B={B}): {e!s:.200}",
-                flush=True,
-            )
+            self._hyperswap_ort_batch_session_disabled = True
+            if not self._hyperswap_ort_batch_fail_logged:
+                self._hyperswap_ort_batch_fail_logged = True
+                print(
+                    f"[WARN] HyperSwap batched ORT bind/run failed (B={B}); "
+                    f"using per-face for this session. First error: {e!s:.200}",
+                    flush=True,
+                )
             return False
 
     def run_blendswap(self, target_rgb_256, source_rgb_112, output):

@@ -142,7 +142,7 @@ Three modes (`MultiGpuModeSelection` in General settings, synced to `ModelsProce
 | `VISIOMASTER_ORT_IOBINDING_POST_SYNC` | IOBinding post-sync behavior |
 | `VISIOMASTER_TRT_NO_DYNAMIC_PROFILES` | Disables all ORT TRT EP ``trt_profile_*`` entries from ``tensorrt_dynamic_shape_profile_opts`` (plain TRT build). |
 | `VISIOMASTER_LP_MOTION_TRT_STATIC_BATCH` | Omit **only** ``LivePortraitMotionExtractor`` dynamic batch profile (batch-1 engine cache). |
-| `VISIOMASTER_TRT_MAX_BATCH_SWAP` / `VISIOMASTER_TRT_OPT_BATCH_SWAP` | Caps for Inswapper128 / GhostFace / HyperSwap batched I/O (default max 16, opt 4). |
+| `VISIOMASTER_TRT_MAX_BATCH_SWAP` / `VISIOMASTER_TRT_OPT_BATCH_SWAP` | Caps for Inswapper128 / GhostFace / HyperSwap batched I/O (default max 16, opt 4). GhostFace/HyperSwap multi-face batch uses `target`/`source` with CHW **[-1, 1]** (same as single-face); Inswapper128 batch stays **[0, 1]**. |
 | `VISIOMASTER_TRT_MAX_BATCH_LP_MOTION` / `VISIOMASTER_TRT_OPT_BATCH_LP_MOTION` | LivePortrait motion ``img`` profile (default max 8, opt 2). |
 | `VISIOMASTER_TRT_MAX_BATCH_LP_STITCH` / `VISIOMASTER_TRT_OPT_BATCH_LP_STITCH` | Stitching / eye / lip ``input`` profile (defaults max 12, opt 4). |
 | `VISIOMASTER_TRT_MAX_BATCH_ARCFACE` / `VISIOMASTER_TRT_OPT_BATCH_ARCFACE` | ``Inswapper128ArcFace`` ``input`` profile (defaults max 16, opt 8). |
