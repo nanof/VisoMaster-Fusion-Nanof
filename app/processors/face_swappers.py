@@ -31,6 +31,9 @@ class FaceSwappers:
         self._inswapper_ort_batch_session_disabled = False
         self._hyperswap_ort_batch_fail_logged = False
         self._hyperswap_ort_batch_session_disabled = False
+        # HyperSwap ONNX exports a second output ("mask") with the region the generator
+        # considers valid. Disabled for the session if the export lacks it or binding fails.
+        self._hyperswap_native_mask_disabled = False
         self._inswapper_torch = None  # InSwapperTorch instance
         self._inswapper_runner_b1: Optional[object] = None  # CUDA graph runner for B=1
         self._w600k_torch: Optional[object] = None  # IResNet50Torch
@@ -1037,6 +1040,88 @@ class FaceSwappers:
         """Introspect first ONNX output name (cached), same pattern as GhostFace."""
         return self._session_io_names(model_name, model)["outputs"][0]
 
+    def hyperswap_native_mask_ready(self) -> bool:
+        """False once the native ``mask`` output proved unusable for this session."""
+        return not self._hyperswap_native_mask_disabled
+
+    def _disable_hyperswap_native_mask(self, reason: str) -> None:
+        if self._hyperswap_native_mask_disabled:
+            return
+        self._hyperswap_native_mask_disabled = True
+        print(
+            f"[WARN] HyperSwap native mask unavailable; falling back to the standard "
+            f"masks for this session. {reason}",
+            flush=True,
+        )
+
+    def _hyperswap_mask_output_name(self, model_name: str, model) -> Optional[str]:
+        """Name of the second ONNX output; ``None`` when the export only has ``output``."""
+        if self._hyperswap_native_mask_disabled:
+            return None
+        outputs = self._session_io_names(model_name, model)["outputs"]
+        if len(outputs) < 2:
+            self._disable_hyperswap_native_mask(
+                f"{model_name} exports a single output."
+            )
+            return None
+        return outputs[1]
+
+    def _run_hyperswap_pass(
+        self,
+        model_name: str,
+        model,
+        target: torch.Tensor,
+        source: torch.Tensor,
+        output: torch.Tensor,
+        mask_output: Optional[torch.Tensor],
+    ) -> bool:
+        """One bind+run. With ``mask_output`` set, returns False instead of raising so the
+        caller can retry without the extra output."""
+        mask_name = None
+        if mask_output is not None:
+            mask_name = self._hyperswap_mask_output_name(model_name, model)
+            if mask_name is None:
+                return False
+
+        try:
+            io_binding = model.io_binding()
+            target = self.models_processor.bind_ort_io_input(
+                io_binding,
+                model_name,
+                "target",
+                target,
+                session=model,
+            )
+            source = self.models_processor.bind_ort_io_input(
+                io_binding,
+                model_name,
+                "source",
+                source,
+                session=model,
+            )
+            self.models_processor.bind_ort_io_output(
+                io_binding,
+                model_name,
+                self._hyperswap_output_name(model_name, model),
+                output,
+                session=model,
+            )
+            if mask_name is not None:
+                self.models_processor.bind_ort_io_output(
+                    io_binding,
+                    model_name,
+                    mask_name,
+                    mask_output,
+                    session=model,
+                )
+            self._run_model_with_lazy_build_check(model_name, model, io_binding)
+            return True
+        except Exception as e:
+            if mask_name is None:
+                raise
+            self._disable_hyperswap_native_mask(f"First error: {e!s:.200}")
+            return False
+
     def calc_hyperswap_latent(self, source_embedding):
         """FaceFusion HyperSwap: L2-normalized 512-D ArcFace row (1, 512)."""
         if source_embedding is None or len(source_embedding) == 0:
@@ -1047,42 +1132,28 @@ class FaceSwappers:
             return v.reshape(1, -1)
         return (v / n).reshape(1, -1)
 
-    def run_hyperswap(self, image, embedding, output, swapper_model="HyperSwap-v3"):
+    def run_hyperswap(
+        self, image, embedding, output, swapper_model="HyperSwap-v3", mask_output=None
+    ) -> bool:
+        """Run one HyperSwap inference. Returns True when ``mask_output`` was filled with
+        the model's native mask."""
         model_name = self._hyperswap_ui_to_model_name(swapper_model)
         if not model_name:
             print(f"[ERROR] Unknown HyperSwap model: {swapper_model}")
-            return
+            return False
 
         model = self._load_swapper_model(model_name)
         if not model:
             print(f"[ERROR] {model_name} model not loaded.")
-            return
+            return False
 
-        output_name = self._hyperswap_output_name(model_name, model)
-        io_binding = model.io_binding()
-        image = self.models_processor.bind_ort_io_input(
-            io_binding,
-            model_name,
-            "target",
-            image,
-            session=model,
-        )
-        embedding = self.models_processor.bind_ort_io_input(
-            io_binding,
-            model_name,
-            "source",
-            embedding,
-            session=model,
-        )
-        self.models_processor.bind_ort_io_output(
-            io_binding,
-            model_name,
-            output_name,
-            output,
-            session=model,
-        )
+        if mask_output is not None and self._run_hyperswap_pass(
+            model_name, model, image, embedding, output, mask_output
+        ):
+            return True
 
-        self._run_model_with_lazy_build_check(model_name, model, io_binding)
+        self._run_hyperswap_pass(model_name, model, image, embedding, output, None)
+        return False
 
     def run_hyperswap_batched(
         self,
@@ -1090,8 +1161,13 @@ class FaceSwappers:
         embedding: torch.Tensor,
         output: torch.Tensor,
         swapper_model: str = "HyperSwap-v3",
+        mask_output: Optional[torch.Tensor] = None,
     ) -> bool:
-        """Try one ORT run with batch B>=1. Returns False if binding/engine rejects batch."""
+        """Try one ORT run with batch B>=1. Returns False if binding/engine rejects batch.
+
+        When ``mask_output`` is given it is filled with the native mask; check
+        ``hyperswap_native_mask_ready()`` afterwards to know whether it is usable.
+        """
         if self._hyperswap_ort_batch_session_disabled:
             return False
 
@@ -1114,32 +1190,18 @@ class FaceSwappers:
 
         inp = images if images.is_contiguous() else images.contiguous()
         out = output if output.is_contiguous() else output.contiguous()
+        msk = None
+        if mask_output is not None:
+            msk = (
+                mask_output if mask_output.is_contiguous() else mask_output.contiguous()
+            )
 
-        output_name = self._hyperswap_output_name(model_name, model)
-        io_binding = model.io_binding()
         try:
-            inp = self.models_processor.bind_ort_io_input(
-                io_binding,
-                model_name,
-                "target",
-                inp,
-                session=model,
-            )
-            emb = self.models_processor.bind_ort_io_input(
-                io_binding,
-                model_name,
-                "source",
-                emb,
-                session=model,
-            )
-            self.models_processor.bind_ort_io_output(
-                io_binding,
-                model_name,
-                output_name,
-                out,
-                session=model,
-            )
-            self._run_model_with_lazy_build_check(model_name, model, io_binding)
+            if msk is not None and self._run_hyperswap_pass(
+                model_name, model, inp, emb, out, msk
+            ):
+                return True
+            self._run_hyperswap_pass(model_name, model, inp, emb, out, None)
             return True
         except Exception as e:
             self._hyperswap_ort_batch_session_disabled = True

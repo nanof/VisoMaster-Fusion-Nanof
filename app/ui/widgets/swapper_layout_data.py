@@ -55,6 +55,41 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "requiredSelectionValue": "Inswapper128",
             "help": "Autoselect Swapper Resolution based on original Face Size (only for Inswapper).",
         },
+        "HyperSwapNativeMaskEnableToggle": {
+            "level": 2,
+            "label": "Native Mask",
+            "default": False,
+            "parentSelection": "SwapModelSelection",
+            "requiredSelectionValue": [
+                "HyperSwap-v1",
+                "HyperSwap-v2",
+                "HyperSwap-v3",
+            ],
+            "help": (
+                "Blend using the mask HyperSwap predicts next to the swapped face, so only "
+                "the region the model considers valid is pasted. It follows the generated "
+                "face (wide-open mouths included) and tends to exclude occluders such as "
+                "glasses, which helps with halos and pasted-on edges. Combined with the "
+                "regular masks, never replacing them."
+            ),
+        },
+        "HyperSwapNativeMaskStrengthSlider": {
+            "level": 3,
+            "label": "Native Mask Strength",
+            "min_value": "0",
+            "max_value": "100",
+            "default": "100",
+            "step": 5,
+            "parentToggle": "HyperSwapNativeMaskEnableToggle",
+            "requiredToggleValue": True,
+            "parentSelection": "SwapModelSelection",
+            "requiredSelectionValue": [
+                "HyperSwap-v1",
+                "HyperSwap-v2",
+                "HyperSwap-v3",
+            ],
+            "help": "100 applies the native mask fully, 0 ignores it. Intermediate values fade it back towards the standard masks, which makes A/B comparison easy.",
+        },
         "InStyleResAEnableToggle": {
             "level": 2,
             "label": "512 Resolution",

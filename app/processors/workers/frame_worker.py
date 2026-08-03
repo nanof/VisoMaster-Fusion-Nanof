@@ -2895,8 +2895,15 @@ class FrameWorker(threading.Thread):
         batch_snap: torch.Tensor,
         source_latent_cache: dict | None,
         edit_button_is_checked_global: bool,
+        native_mask_list: list[torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """PERF-008: optional batched primary restorer before paste (plane multi-face prefetch)."""
+
+        def _native_mask_for(index: int) -> torch.Tensor | None:
+            if native_mask_list is None or index >= len(native_mask_list):
+                return None
+            return native_mask_list[index]
+
         use_gather = (
             len(ordered) >= 2
             and len(prefetched_list) == len(ordered)
@@ -2906,7 +2913,7 @@ class FrameWorker(threading.Thread):
         gather_tails: list | None = [] if use_gather else None
         out_img = img
         if gather_tails is not None:
-            for s, pre in zip(ordered, prefetched_list):
+            for _idx, (s, pre) in enumerate(zip(ordered, prefetched_list)):
                 try:
                     self.swap_core(
                         out_img,
@@ -2920,6 +2927,7 @@ class FrameWorker(threading.Thread):
                         kv_map=s["kv_map"],
                         source_latent_cache=source_latent_cache,
                         prefetched_swap_chw_uint8=pre,
+                        prefetched_native_mask=_native_mask_for(_idx),
                         alignment_img=batch_snap,
                         blendswap_source_rgb112=s.get("blendswap_src112"),
                         uniface_source_rgb256=s.get("uniface_src256"),
@@ -2972,7 +2980,7 @@ class FrameWorker(threading.Thread):
                         )
                 return out_img
 
-        for s, pre in zip(ordered, prefetched_list):
+        for _idx, (s, pre) in enumerate(zip(ordered, prefetched_list)):
             out_img, s["fface"]["original_face"], s["fface"]["swap_mask"] = (
                 self.swap_core(
                     out_img,
@@ -2986,6 +2994,7 @@ class FrameWorker(threading.Thread):
                     kv_map=s["kv_map"],
                     source_latent_cache=source_latent_cache,
                     prefetched_swap_chw_uint8=pre,
+                    prefetched_native_mask=_native_mask_for(_idx),
                     alignment_img=batch_snap,
                     blendswap_source_rgb112=s.get("blendswap_src112"),
                     uniface_source_rgb256=s.get("uniface_src256"),
@@ -3415,15 +3424,30 @@ class FrameWorker(threading.Thread):
         if lat_mat.dim() != 2 or lat_mat.shape[1] != 512:
             return _sequential_from_ordered()
         batch_out = torch.empty_like(batch_in)
+        batch_mask: torch.Tensor | None = None
         ok = False
         if swapper_model in self.GHOSTFACE_MODELS:
             ok = self.models_processor.run_swapper_ghostface_batched(
                 batch_in, lat_mat, batch_out, swapper_model
             )
         elif swapper_model in self.HYPERSWAP_MODELS:
+            if any(
+                self._hyperswap_native_mask_strength(swapper_model, s["parameters"])
+                > 0.0
+                for s in ordered
+            ):
+                batch_mask = torch.empty(
+                    (batch_in.shape[0], 1, batch_in.shape[-2], batch_in.shape[-1]),
+                    dtype=torch.float32,
+                    device=device,
+                ).contiguous()
             ok = self.models_processor.run_hyperswap_batched(
-                batch_in, lat_mat, batch_out, swapper_model
+                batch_in, lat_mat, batch_out, swapper_model, mask_output=batch_mask
             )
+            if batch_mask is not None and not (
+                ok and self.models_processor.hyperswap_native_mask_ready()
+            ):
+                batch_mask = None
         if not ok:
             return _sequential_from_ordered()
 
@@ -3432,6 +3456,9 @@ class FrameWorker(threading.Thread):
             prefetched_list.append(
                 (batch_out[bi] * 127.5 + 127.5).clamp(0, 255).to(torch.uint8)
             )
+        native_mask_list: list[torch.Tensor] | None = None
+        if batch_mask is not None:
+            native_mask_list = [batch_mask[bi] for bi in range(batch_mask.shape[0])]
 
         return self._plane_swap_prefetched_apply_swap_core_sequence(
             img,
@@ -3440,6 +3467,7 @@ class FrameWorker(threading.Thread):
             batch_snap,
             source_latent_cache,
             edit_button_is_checked_global,
+            native_mask_list=native_mask_list,
         )
 
     def _process_frame_standard(
@@ -5672,6 +5700,48 @@ class FrameWorker(threading.Thread):
 
         return torch.clamp(current_face, 0.0, 1.0)
 
+    def _hyperswap_native_mask_strength(self, swapper_model, parameters) -> float:
+        """Blend strength (0..1) for HyperSwap's own mask output; 0 when off/unavailable."""
+        if swapper_model not in self.HYPERSWAP_MODELS:
+            return 0.0
+        if not parameters.get("HyperSwapNativeMaskEnableToggle", False):
+            return 0.0
+        if not self.models_processor.hyperswap_native_mask_ready():
+            return 0.0
+        try:
+            strength = float(parameters.get("HyperSwapNativeMaskStrengthSlider", 100))
+        except (TypeError, ValueError):
+            return 0.0
+        return max(0.0, min(1.0, strength / 100.0))
+
+    def _apply_hyperswap_native_mask(
+        self,
+        swap_mask: torch.Tensor,
+        native_mask: torch.Tensor,
+        strength: float,
+    ) -> torch.Tensor:
+        """Attenuate ``swap_mask`` with the region HyperSwap considers valid.
+
+        The raw output is not guaranteed to peak at exactly 1.0, so it is renormalized;
+        a peak that stays low means a degenerate prediction and is ignored.
+        """
+        mask = native_mask.detach().float()
+        while mask.dim() > 3:
+            mask = mask[0]
+        if mask.dim() == 2:
+            mask = mask.unsqueeze(0)
+        peak = float(mask.amax())
+        if peak < 0.5:
+            return swap_mask
+        mask = (mask / peak).clamp_(0.0, 1.0)
+        if mask.shape[-2:] != swap_mask.shape[-2:]:
+            mask = self._get_cached_resize_bilinear_aa(
+                int(swap_mask.shape[-2]), int(swap_mask.shape[-1])
+            )(mask)
+        if strength < 1.0:
+            mask = 1.0 - strength * (1.0 - mask)
+        return swap_mask * mask.to(swap_mask.dtype)
+
     def get_swapped_and_prev_face(
         self,
         output,
@@ -5683,6 +5753,7 @@ class FrameWorker(threading.Thread):
         swapper_model,
         dfm_model,
         parameters,
+        native_mask_out=None,
     ):
         """
         Runs the swapper model inference and returns the swapped face tensor.
@@ -5701,6 +5772,8 @@ class FrameWorker(threading.Thread):
             swapper_model:      Active swapper name.
             dfm_model:          Loaded ``DFMModel`` instance, or ``None`` for non-DFM swappers.
             parameters:         Per-face parameter dict.
+            native_mask_out:    Optional pre-allocated ``(1, 1, 256, 256)`` tensor filled with
+                                HyperSwap's own mask output when it is available.
 
         Returns:
             Tuple ``(swap_chw_uint8, prev_face_hwc_float)``.
@@ -6058,7 +6131,11 @@ class FrameWorker(threading.Thread):
                 ).contiguous()
 
                 self.models_processor.run_hyperswap(
-                    input_face_disc, latent, swapper_output, swapper_model
+                    input_face_disc,
+                    latent,
+                    swapper_output,
+                    swapper_model,
+                    mask_output=native_mask_out,
                 )
 
                 swapper_output = swapper_output[0]
@@ -7131,6 +7208,7 @@ class FrameWorker(threading.Thread):
         source_latent_cache: dict | None = None,
         alignment_img: torch.Tensor | None = None,
         prefetched_swap_chw_uint8: torch.Tensor | None = None,
+        prefetched_native_mask: torch.Tensor | None = None,
         blendswap_source_rgb112: torch.Tensor | None = None,
         uniface_source_rgb256: torch.Tensor | None = None,
         swapper_autores_track_id: int = -1,
@@ -7159,6 +7237,10 @@ class FrameWorker(threading.Thread):
             alignment_img = alignment_img.to(_swap_dev, non_blocking=False)
         if prefetched_swap_chw_uint8 is not None and prefetched_swap_chw_uint8.device != _swap_dev:
             prefetched_swap_chw_uint8 = prefetched_swap_chw_uint8.to(
+                _swap_dev, non_blocking=False
+            )
+        if prefetched_native_mask is not None and prefetched_native_mask.device != _swap_dev:
+            prefetched_native_mask = prefetched_native_mask.to(
                 _swap_dev, non_blocking=False
             )
         if blendswap_source_rgb112 is not None and blendswap_source_rgb112.device != _swap_dev:
@@ -7265,6 +7347,15 @@ class FrameWorker(threading.Thread):
 
         dfm_model_instance = None
 
+        # HyperSwap predicts its own validity mask; it is folded into swap_mask right
+        # before the paste so nothing downstream can overwrite it.
+        native_mask_strength = self._hyperswap_native_mask_strength(
+            swapper_model, parameters
+        )
+        native_swap_mask: torch.Tensor | None = (
+            prefetched_native_mask if native_mask_strength > 0.0 else None
+        )
+
         # --- SWAPPING INFERENCE ---
         if prefetched_swap_chw_uint8 is not None:
             swap = prefetched_swap_chw_uint8
@@ -7344,6 +7435,13 @@ class FrameWorker(threading.Thread):
                 input_face_affined = input_face_affined.permute(1, 2, 0).contiguous()
                 input_face_affined = torch.div(input_face_affined, 255.0)
 
+                if native_mask_strength > 0.0:
+                    native_swap_mask = torch.empty(
+                        (1, 1, output_size, output_size),
+                        dtype=torch.float32,
+                        device=self.models_processor.get_effective_torch_device(),
+                    ).contiguous()
+
                 swap, prev_face = self.get_swapped_and_prev_face(
                     output,
                     input_face_affined,
@@ -7354,7 +7452,11 @@ class FrameWorker(threading.Thread):
                     swapper_model,
                     dfm_model_instance,
                     parameters,
+                    native_mask_out=native_swap_mask,
                 )
+                # The run falls back to a mask-less bind if the export/engine rejects it.
+                if not self.models_processor.hyperswap_native_mask_ready():
+                    native_swap_mask = None
 
         else:
             swap = original_face_512
@@ -8726,6 +8828,11 @@ class FrameWorker(threading.Thread):
 
             if parameters.get("SwapLightTouchEnableToggle", False):
                 swap = faceutil.swap_light_touch_chw_uint8(swap, parameters)
+
+            if native_swap_mask is not None and native_mask_strength > 0.0:
+                swap_mask = self._apply_hyperswap_native_mask(
+                    swap_mask, native_swap_mask, native_mask_strength
+                )
 
             if is_perspective_crop:
                 if _swap_core_perf is not None:

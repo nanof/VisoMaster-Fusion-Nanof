@@ -2833,8 +2833,15 @@ class ModelsProcessor(QtCore.QObject):
     def calc_hyperswap_latent(self, source_embedding):
         return self.face_swappers.calc_hyperswap_latent(source_embedding)
 
-    def run_hyperswap(self, image, embedding, output, swapper_model="HyperSwap-v3"):
-        self.face_swappers.run_hyperswap(image, embedding, output, swapper_model)
+    def run_hyperswap(
+        self, image, embedding, output, swapper_model="HyperSwap-v3", mask_output=None
+    ) -> bool:
+        return self.face_swappers.run_hyperswap(
+            image, embedding, output, swapper_model, mask_output=mask_output
+        )
+
+    def hyperswap_native_mask_ready(self) -> bool:
+        return self.face_swappers.hyperswap_native_mask_ready()
 
     def run_swapper_ghostface_batched(
         self, images, embedding, output, swapper_model: str = "GhostFace-v2"
@@ -2844,10 +2851,15 @@ class ModelsProcessor(QtCore.QObject):
         )
 
     def run_hyperswap_batched(
-        self, images, embedding, output, swapper_model: str = "HyperSwap-v3"
+        self,
+        images,
+        embedding,
+        output,
+        swapper_model: str = "HyperSwap-v3",
+        mask_output=None,
     ) -> bool:
         return self.face_swappers.run_hyperswap_batched(
-            images, embedding, output, swapper_model
+            images, embedding, output, swapper_model, mask_output=mask_output
         )
 
     def run_blendswap(self, target_rgb_256, source_rgb_112, output):
