@@ -71,6 +71,7 @@ ParametersWidgetTypes = Dict[
 _FACE_STRIP_MAX_HEIGHT = 120
 _FACE_STRIP_LIST_HEIGHT = 80
 _FACE_STRIP_BUTTONS_HEIGHT = 32
+_FACE_STRIP_EMBED_HEIGHT = 60
 _FACES_PANEL_ROW_HEIGHT = 144
 
 
@@ -2036,9 +2037,20 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.targetFacesList.setMinimumHeight(60)
         self.targetFacesList.setMaximumHeight(_FACE_STRIP_LIST_HEIGHT)
 
+        # The Embeddings list belongs to the same panel. Left behind in the hidden
+        # group box, a checked embedding keeps blending into the swap with no way
+        # to see or uncheck it.
+        self._rightFacesFacesHolder.addWidget(self.inputEmbeddingsList)
+        self.inputEmbeddingsList.setMinimumHeight(_FACE_STRIP_EMBED_HEIGHT)
+        self.inputEmbeddingsList.setMaximumHeight(_FACE_STRIP_EMBED_HEIGHT)
+        self._rightFacesStrip.setMaximumHeight(
+            _FACE_STRIP_MAX_HEIGHT + _FACE_STRIP_EMBED_HEIGHT
+        )
+
     def _restore_faces_strip_to_panel(self):
         """Restores widgets to their original left panel seamlessly."""
         self.gridLayout_2.addWidget(self.targetFacesList, 1, 1, 1, 1)
+        self.gridLayout_2.addWidget(self.inputEmbeddingsList, 1, 2, 1, 1)
 
         btns = [
             self.findTargetFacesButton,

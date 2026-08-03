@@ -24,6 +24,7 @@ from app.ui.widgets.actions import control_actions
 from app.ui.widgets.actions import layout_actions
 from app.ui.widgets.actions import save_load_actions
 from app.ui.widgets import ui_workers
+from app.helpers import qt_lifecycle
 from app.helpers.typing_helper import ParametersTypes, MarkerTypes
 import app.helpers.miscellaneous as misc_helpers
 from app.ui.widgets import widget_components
@@ -328,6 +329,15 @@ def _load_job_target_media(main_window: "MainWindow", data: dict):
         main_window.target_videos[selected_media_id].click()
 
 
+def _checked_input_face_ids(input_faces_data: dict) -> set:
+    """Ids of the input faces that were checked when the job was saved."""
+    return {
+        face_id
+        for face_id, face_data in input_faces_data.items()
+        if face_data.get("is_checked")
+    }
+
+
 def _load_job_input_faces(main_window: "MainWindow", data: dict):
     """Loads input face images from the job data."""
     input_faces_data = data.get("input_faces_data", {})
@@ -470,10 +480,18 @@ def _load_job_target_faces_and_params(main_window: "MainWindow", data: dict):
                     "assigned_input_embedding", {}
                 ).items()
             }
+
+            # Assignments were restored without calculate_assigned_input_embedding(),
+            # so the blended-source counter on the card is still stale here.
+            list_view_actions.refresh_target_face_display_labels(main_window)
         else:
             print(
                 f"[WARN] Target face object with id {face_id} not found after creation."
             )
+
+    save_load_actions.restore_input_faces_check_state(
+        main_window, data.get("input_faces_data", {})
+    )
 
 
 def _load_job_controls_and_state(
@@ -700,6 +718,9 @@ def _validate_job_files_exist(data: dict) -> tuple[bool, str | None]:
 
         # Check face files
         all_input_faces_in_job = data.get("input_faces_data", {})
+        # Swap-all jobs assign nothing per target face; their sources are the
+        # checked cards, so those files are required too.
+        required_face_ids.update(_checked_input_face_ids(all_input_faces_in_job))
         for face_id in required_face_ids:
             if face_id not in all_input_faces_in_job:
                 is_job_valid = False
@@ -1122,7 +1143,13 @@ def _serialize_job_data(main_window: "MainWindow") -> dict:
 
     # Serialize Input Faces
     for face_id, input_face in main_window.input_faces.items():
-        input_faces_data[face_id] = {"media_path": input_face.media_path}
+        input_faces_data[face_id] = {
+            "media_path": input_face.media_path,
+            # Swap-all matching consumes the checked cards, not the per-target-face
+            # assignments, so the pool would be lost on reload without this.
+            "is_checked": bool(qt_lifecycle.is_checked(input_face)),
+            "random_fixed": bool(getattr(input_face, "random_fixed", False)),
+        }
 
     # Serialize Target Faces and their parameters
     for face_id, target_face in main_window.target_faces.items():
@@ -2036,6 +2063,7 @@ class JobProcessor(QThread):
             all_input_faces_in_job: Dict[str, Dict[str, str]] = data.get(
                 "input_faces_data", {}
             )
+            required_face_ids.update(_checked_input_face_ids(all_input_faces_in_job))
             for face_id in required_face_ids:
                 if face_id not in seen_face_ids:
                     # We know face_id exists in all_input_faces_in_job from validation

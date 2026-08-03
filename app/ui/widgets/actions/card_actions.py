@@ -11,6 +11,7 @@ from PySide6 import QtGui
 import app.ui.widgets.actions.common_actions as common_widget_actions
 from app.ui.widgets.actions import list_view_actions
 from app.helpers import input_face_favorites_storage, qt_lifecycle
+from app.helpers.swap_all_match import swap_all_match_active
 import app.helpers.miscellaneous as misc_helpers
 
 if TYPE_CHECKING:
@@ -58,6 +59,7 @@ def clear_target_faces(main_window: "MainWindow", refresh_frame=True):
         main_window.videoSeekSlider.update()
 
     main_window.selected_target_face_id = None
+    main_window.cur_selected_target_face_button = None
     # Set Parameter widget values to default
     common_widget_actions.set_widgets_values_using_face_id_parameters(
         main_window=main_window, face_id=None
@@ -317,9 +319,10 @@ def find_target_faces(main_window: "MainWindow"):
                             main_window, face_img, embedding_store, q_image, face_id
                         )
 
-                        if control.get("KeepInputToggle", False) or control.get(
-                            "AutoSwapToggle", False
-                        ):
+                        if (
+                            control.get("KeepInputToggle", False)
+                            or control.get("AutoSwapToggle", False)
+                        ) and not swap_all_match_active(control):
                             new_target_face = main_window.target_faces.get(face_id)
                             if new_target_face:
                                 # Assign checked Input Faces

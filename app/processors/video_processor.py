@@ -1717,16 +1717,25 @@ class VideoProcessor(QObject):
                 if counted_as_fresh_arcface:
                     self._recognition_last_arcface_frame[track_id] = int(frame_num)
 
-    def _clear_sequential_detection_feed_state(self) -> None:
+    def _clear_sequential_detection_feed_state(
+        self, *, reset_rr_assignments: bool = True
+    ) -> None:
         """Drop ByteTrack / EMA state after a timeline jump or new playback anchor.
 
         :meth:`_run_sequential_detection` reuses ``last_detected_faces`` when
         ``frame_number % FaceDetectionIntervalSlider != 0``. Clear on seek
         so keypoints are not inherited from the wrong frame.
+
+        Swap-all-by-random sticky input assignments live in the sequential
+        rotate stabilizer. Seek jumps should clear them (default); pause/play,
+        capture reopen at the same frame, and small audio realigns must keep
+        them so the user does not get a fresh random roll on every resume.
+        Press X still reshuffles via :meth:`reset_sequential_rotate_stabilizer`.
         """
         self.last_detected_faces.clear()
         self._smoothed_kps.clear()
-        self.reset_sequential_rotate_stabilizer()
+        if reset_rr_assignments:
+            self.reset_sequential_rotate_stabilizer()
         self._reset_workers_recast_driver_reference()
 
     def _reset_workers_recast_driver_reference(self) -> None:
@@ -4293,7 +4302,7 @@ class VideoProcessor(QObject):
                 f"frame {self._benchmark_same_frame_anchor_fn} hasta detener reproducción.",
                 flush=True,
             )
-        self._clear_sequential_detection_feed_state()
+        self._clear_sequential_detection_feed_state(reset_rr_assignments=False)
         self._audio_sync_last_seek_monotonic = 0.0
 
         if self.recording:
@@ -5425,7 +5434,11 @@ class VideoProcessor(QObject):
                         # Success! Reset counters and seek back to the target frame.
                         self.current_frame_number = seek_frame
                         self.next_frame_to_display = seek_frame
-                        self._clear_sequential_detection_feed_state()
+                        # Reopen recovers the capture handle; do not reshuffle
+                        # Swap-all-by-random sticky assignments (pause/play).
+                        self._clear_sequential_detection_feed_state(
+                            reset_rr_assignments=False
+                        )
                         misc_helpers.seek_frame(self.media_capture, seek_frame)
                         self.refresh_video_codec_flags()
                         self.reset_av1_scrub_pipeline()
@@ -8961,7 +8974,7 @@ class VideoProcessor(QObject):
                 else:
                     _did_audio_realign = True
         if _did_audio_realign:
-            self._clear_sequential_detection_feed_state()
+            self._clear_sequential_detection_feed_state(reset_rr_assignments=False)
         self._audio_sync_last_seek_monotonic = 0.0
 
         args = [

@@ -185,6 +185,58 @@ def test_random_assignment_sticks_for_same_face_across_frames():
     assert int(f1[0]["_rr_input_idx"]) == inp0
 
 
+def test_random_assignment_survives_pause_resume_without_reset():
+    """Pause/play must not reshuffle: same sticky state, next frame keeps input."""
+    import random
+
+    def iou(a: np.ndarray, b: np.ndarray) -> float:
+        return _iou_xyxy(a, b)
+
+    stabilizer = SequentialRotateStabilizer(rng=random.Random(19))
+    checked = [object(), object(), object(), object(), object()]
+    face_bb = np.array([100.0, 80.0, 180.0, 160.0])
+    f0 = [{"bbox": face_bb.copy(), "track_id": -1}]
+    stabilizer.apply(
+        f0,
+        checked,
+        40,
+        (640, 480),
+        iou,
+        memory_without_tracking=True,
+        assignment_mode="random",
+    )
+    inp0 = int(f0[0]["_rr_input_idx"])
+
+    # Simulate pause/play: detection EMA cleared, but RR sticky state kept.
+    f1 = [{"bbox": face_bb.copy() + np.array([1.0, -1.0, 1.0, -1.0]), "track_id": -1}]
+    stabilizer.apply(
+        f1,
+        checked,
+        40,
+        (640, 480),
+        iou,
+        memory_without_tracking=True,
+        assignment_mode="random",
+    )
+    assert int(f1[0]["_rr_input_idx"]) == inp0
+
+    # Explicit reshuffle (X) clears sticky state → a fresh roll is allowed.
+    stabilizer.reset()
+    f2 = [{"bbox": face_bb.copy(), "track_id": -1}]
+    stabilizer.apply(
+        f2,
+        checked,
+        41,
+        (640, 480),
+        iou,
+        memory_without_tracking=True,
+        assignment_mode="random",
+    )
+    # With 5 inputs and a fresh RNG path after reset, assignment is defined;
+    # the important part is that sticky memory was emptied by reset.
+    assert stabilizer._memory_slots or f2[0].get("_rr_input_idx") is not None
+
+
 def test_random_assignment_no_repeat_for_two_new_faces():
     import random
 

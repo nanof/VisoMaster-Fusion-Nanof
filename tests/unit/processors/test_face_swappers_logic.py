@@ -113,6 +113,22 @@ def test_hyperswap_models_frozenset_contents():
     assert "HyperSwap-v1" in HYPERSWAP_MODELS
 
 
+def test_hyperswap_exposed_in_swap_model_selection():
+    # Avoid importing SWAPPER_LAYOUT_DATA (circular UI imports under pytest).
+    from pathlib import Path
+
+    text = Path("app/ui/widgets/swapper_layout_data.py").read_text(encoding="utf-8")
+    for name in ("HyperSwap-v1", "HyperSwap-v2", "HyperSwap-v3"):
+        assert f'"{name}"' in text
+
+
+def test_hyperswap_models_are_fp16_safe():
+    from app.processors.models_data import fp16_safe_models_list
+
+    for name in ("HyperSwapv1", "HyperSwapv2", "HyperSwapv3"):
+        assert name in fp16_safe_models_list
+
+
 # ---------------------------------------------------------------------------
 # FS-04: GhostFace fallback to input face when model fails
 # ---------------------------------------------------------------------------

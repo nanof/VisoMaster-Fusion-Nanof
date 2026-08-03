@@ -19,6 +19,7 @@ from app.ui.widgets.actions import control_actions
 from app.ui.widgets.actions import layout_actions
 from app.ui.widgets.actions import filter_actions
 from app.ui.widgets import ui_workers
+from app.helpers import qt_lifecycle
 from app.helpers.typing_helper import ParametersTypes, MarkerTypes
 import app.helpers.miscellaneous as misc_helpers
 from app.ui.widgets.settings_layout_data import REMOVED_SETTINGS_CONTROL_KEYS
@@ -460,6 +461,29 @@ def get_auto_load_workspace_toggle(
             return control.get("AutoLoadWorkspaceToggle", False)
 
 
+def restore_input_faces_check_state(main_window: "MainWindow", input_faces_data: dict):
+    """Re-check the input-face cards that were checked when the workspace was saved.
+
+    Swap-all matching reads the checked cards instead of the per-target-face
+    assignments, so that pool only survives a reload through this state. Older
+    workspaces have no flags; there the assignment-driven checks already applied
+    by the caller are the best we have.
+    """
+    if not any("is_checked" in face_data for face_data in input_faces_data.values()):
+        return
+
+    for face_id, input_face_button in main_window.input_faces.items():
+        if not qt_lifecycle.is_alive(input_face_button):
+            continue
+        # Batch runs share one pool across jobs, so cards this payload does not
+        # mention must not stay checked from the previous job.
+        face_data = input_faces_data.get(face_id, {})
+        qt_lifecycle.set_checked(input_face_button, bool(face_data.get("is_checked")))
+        if hasattr(input_face_button, "random_fixed"):
+            input_face_button.random_fixed = bool(face_data.get("random_fixed"))
+            input_face_button._update_random_fixed_visual()
+
+
 def load_saved_workspace(
     main_window: "MainWindow", data_filename: Union[str, bool] = False
 ):
@@ -478,6 +502,7 @@ def load_saved_workspace(
     if data_filename:
         with open(data_filename, "r") as data_file:  # pylint: disable=unspecified-encoding
             data = json.load(data_file)
+        saved_auto_swap = main_window.control.get("AutoSwapToggle", False)
         try:
             list_view_actions.clear_stop_loading_input_media(main_window)
             list_view_actions.clear_stop_loading_target_media(main_window)
@@ -524,6 +549,12 @@ def load_saved_workspace(
                 QtWidgets.QApplication.processEvents()
 
             # Select target media (Secured with .get to prevent KeyError on older workspaces)
+            # Auto Swap would run face detection on the freshly loaded media and create
+            # target-face cards that the saved ones are then appended to, duplicating
+            # every face. The saved workspace is the source of truth here, so keep the
+            # toggle off until its own target faces have been restored.
+            saved_auto_swap = main_window.control.get("AutoSwapToggle", saved_auto_swap)
+            main_window.control["AutoSwapToggle"] = False
             selected_media_id = data.get("selected_media_id", False)
             if selected_media_id and main_window.target_videos.get(selected_media_id):
                 main_window.target_videos[selected_media_id].click()
@@ -612,6 +643,10 @@ def load_saved_workspace(
                             )
 
             # Add target_faces
+            # Anything detected while the media was being loaded is not part of the
+            # workspace and would be appended to, not replaced by, the saved cards.
+            if main_window.target_faces:
+                card_actions.clear_target_faces(main_window, refresh_frame=False)
             for face_id, target_face_data in data.get("target_faces_data", {}).items():
                 cropped_face = np.array(target_face_data["cropped_face"]).astype(
                     "uint8"
@@ -674,6 +709,12 @@ def load_saved_workspace(
                 main_window.target_faces[
                     face_id
                 ].assigned_input_embedding = assigned_input_embedding
+
+            main_window.control["AutoSwapToggle"] = saved_auto_swap
+
+            # Assignments were restored without calculate_assigned_input_embedding(),
+            # so the blended-source counters on the cards are still stale here.
+            list_view_actions.refresh_target_face_display_labels(main_window)
 
             # Add markers
             video_control_actions.remove_all_markers(main_window)
@@ -867,6 +908,10 @@ def load_saved_workspace(
                     main_window, face_id=None
                 )
 
+            restore_input_faces_check_state(
+                main_window, data.get("input_faces_data", {})
+            )
+
             swap_faces_state = data.get("swap_faces_enabled", False)
             main_window.swapfacesButton.setChecked(swap_faces_state)
 
@@ -1000,6 +1045,7 @@ def load_saved_workspace(
                     partial(_clamp_window_frame_to_available_geometry, main_window),
                 )
         except (json.JSONDecodeError, KeyError, TypeError) as e:
+            main_window.control["AutoSwapToggle"] = saved_auto_swap
             QtWidgets.QMessageBox.critical(
                 main_window, "Error", f"Failed to load workspace: {e}"
             )
@@ -1153,6 +1199,10 @@ def save_current_workspace(
         input_faces_data[face_id] = {
             "media_path": input_face.media_path,
             "kv_map": kv_map_path,
+            # Swap-all matching consumes the checked cards, not the per-target-face
+            # assignments, so the pool would be lost on reload without this.
+            "is_checked": bool(qt_lifecycle.is_checked(input_face)),
+            "random_fixed": bool(getattr(input_face, "random_fixed", False)),
         }
 
     # --- Serialize Target Faces & Parameters ---
