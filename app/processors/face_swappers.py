@@ -56,6 +56,7 @@ class FaceSwappers:
         self._crossface_aux_model_names = ("CrossFaceHiFaceS", "CrossFaceSimSwap")
         self.arcface_models = [
             "Inswapper128ArcFace",
+            "HyperSwapArcFace",
             "SimSwapArcFace",
             "GhostArcFace",
             "CSCSArcFace",
@@ -69,8 +70,13 @@ class FaceSwappers:
                 *self._crossface_aux_model_names,
             ):
                 self.models_processor.unload_model(model_name)
+            _unloaded_arc: set[str] = set()
             for model_name in self.arcface_models:
-                self.models_processor.unload_model(model_name)
+                ort_name = self._arcface_ort_session_name(model_name)
+                if ort_name in _unloaded_arc:
+                    continue
+                _unloaded_arc.add(ort_name)
+                self.models_processor.unload_model(ort_name)
 
     def _manage_model(self, new_model_name):
         # FS-RACE-01: protect read-modify-write of current_swapper_model with lock
@@ -129,25 +135,53 @@ class FaceSwappers:
             if is_lazy_build:
                 self.models_processor.hide_build_dialog.emit()
 
+    @staticmethod
+    def _arcface_ort_session_name(arcface_model: str) -> str:
+        """HyperSwapArcFace reuses the w600k Inswapper128ArcFace ONNX session."""
+        if arcface_model == "HyperSwapArcFace":
+            return "Inswapper128ArcFace"
+        return arcface_model
+
+    def _align_hyperswap_ff_arcface_112(
+        self, img: torch.Tensor, face_kps: np.ndarray
+    ) -> torch.Tensor:
+        """HyperSwap source crop: landmark warp to ``arcface_112_v2`` (FaceFusion 3.3).
+
+        FaceFusion computes the HyperSwap identity with ``face_recognizer.calc_embedding``
+        (template ``arcface_112_v2``, w600k), never the pose-aware ``arcfacemap`` fallback.
+        ``faceutil`` mode ``arcface112`` is that same template (``arcface_src`` / 112).
+        The Labs ``arcface_128_to_arcface_112_v2`` convert only applies to training, where
+        inputs are already aligned crops; applying it here double-warps and corrupts identity.
+        """
+        crop, _ = faceutil.warp_face_by_face_landmark_5(
+            img,
+            face_kps,
+            image_size=112,
+            mode="arcface112",
+            interpolation=v2.InterpolationMode.BILINEAR,
+        )
+        return crop
+
     def run_recognize_direct(
         self, img, kps, similarity_type="Auto", arcface_model="Inswapper128ArcFace"
     ):
+        ort_name = self._arcface_ort_session_name(arcface_model)
         # FS-RACE-01: protect read-modify-write of current_arcface_model with lock
         with self.models_processor.model_lock:
-            if (
-                self.current_arcface_model
-                and self.current_arcface_model != arcface_model
-            ):
-                self.models_processor.unload_model(self.current_arcface_model)
-            self.current_arcface_model = arcface_model
+            if self.current_arcface_model:
+                prev_ort = self._arcface_ort_session_name(self.current_arcface_model)
+                if prev_ort != ort_name:
+                    self.models_processor.unload_model(prev_ort)
+            self.current_arcface_model = ort_name
 
-        ort_session = self.models_processor.get_onnx_session(arcface_model)
+        ort_session = self.models_processor.get_onnx_session(ort_name)
         if not ort_session:
-            ort_session = self.models_processor.load_model(arcface_model)
+            ort_session = self.models_processor.load_model(ort_name)
 
         if not ort_session:
             print(
-                f"[WARN] ArcFace model '{arcface_model}' failed to load. Skipping recognition."
+                f"[WARN] ArcFace model '{arcface_model}' (ort={ort_name}) failed to load. "
+                "Skipping recognition."
             )
             return None, None
 
@@ -300,35 +334,43 @@ class FaceSwappers:
         """
         ArcFace embedding with pose-aware alignment (dynamic Optimal vs frontal arcface112).
 
+        ``HyperSwapArcFace`` uses a fixed FaceFusion ``arcface_112_v2`` landmark warp
+        instead of pose-aware Optimal/Opal, matching HyperSwap inference identity.
+
         The ``similarity_type`` argument is kept for API compatibility but alignment follows
-        yaw/pitch so ArcFace avoids brittle manual modes (e.g. Pearl) on challenging poses.
+        yaw/pitch so ArcFace avoids brittle manual modes (e.g. Pearl) on challenging poses
+        (non-HyperSwap paths).
         """
-        ort_session = self.models_processor.get_onnx_session(arcface_model)
+        ort_name = self._arcface_ort_session_name(arcface_model)
+        ort_session = self.models_processor.get_onnx_session(ort_name)
         if not ort_session:
             return None, None
 
-        yaw, pitch = faceutil.calc_face_yaw_pitch(face_kps)
-        if abs(yaw) > 30.0 or abs(pitch) > 30.0:
-            actual_mode = "Optimal"
+        if arcface_model == "HyperSwapArcFace":
+            img = self._align_hyperswap_ff_arcface_112(img, face_kps)
         else:
-            actual_mode = "Opal"
+            yaw, pitch = faceutil.calc_face_yaw_pitch(face_kps)
+            if abs(yaw) > 30.0 or abs(pitch) > 30.0:
+                actual_mode = "Optimal"
+            else:
+                actual_mode = "Opal"
 
-        if actual_mode == "Optimal":
-            img, _ = faceutil.warp_face_by_face_landmark_5(
-                img,
-                face_kps,
-                image_size=112,
-                mode="arcfacemap",
-                interpolation=v2.InterpolationMode.BILINEAR,
-            )
-        else:
-            img, _ = faceutil.warp_face_by_face_landmark_5(
-                img,
-                face_kps,
-                image_size=112,
-                mode="arcface112",
-                interpolation=v2.InterpolationMode.BILINEAR,
-            )
+            if actual_mode == "Optimal":
+                img, _ = faceutil.warp_face_by_face_landmark_5(
+                    img,
+                    face_kps,
+                    image_size=112,
+                    mode="arcfacemap",
+                    interpolation=v2.InterpolationMode.BILINEAR,
+                )
+            else:
+                img, _ = faceutil.warp_face_by_face_landmark_5(
+                    img,
+                    face_kps,
+                    image_size=112,
+                    mode="arcface112",
+                    interpolation=v2.InterpolationMode.BILINEAR,
+                )
 
         # --- NORMALIZATION & PRE-PROCESSING ---
         cropped_image = img.permute(1, 2, 0).clone()  # Store for display/debug (H,W,3)
@@ -339,7 +381,7 @@ class FaceSwappers:
         img = img.clone()
 
         # OPTIMIZED: In-Place math operations (.sub_ and .div_) to save VRAM fragmentation
-        if arcface_model == "Inswapper128ArcFace":
+        if arcface_model in ("Inswapper128ArcFace", "HyperSwapArcFace"):
             # FS-BUG-03: ensure input is in [0, 255] before normalizing
             if img.max() <= 1.0:
                 img = img * 255.0
@@ -374,14 +416,14 @@ class FaceSwappers:
 
         io_binding = ort_session.io_binding()
         img = self.models_processor.bind_ort_io_input(
-            io_binding, arcface_model, input_name, img
+            io_binding, ort_name, input_name, img
         )
 
         for name in output_names:
             self.models_processor.bind_ort_output_dynamic(io_binding, name)
 
         # Run the model with lazy build handling (TensorRT safety)
-        self._run_model_with_lazy_build_check(arcface_model, ort_session, io_binding)
+        self._run_model_with_lazy_build_check(ort_name, ort_session, io_binding)
 
         # Return embedding (flattened) and the cropped image for visualization
         return np.array(io_binding.copy_outputs_to_cpu()).flatten(), cropped_image

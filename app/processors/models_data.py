@@ -35,9 +35,10 @@ arcface_mapping_model_dict = {
     "GhostFace-v1": "GhostArcFace",
     "GhostFace-v2": "GhostArcFace",
     "GhostFace-v3": "GhostArcFace",
-    "HyperSwap-v1": "Inswapper128ArcFace",
-    "HyperSwap-v2": "Inswapper128ArcFace",
-    "HyperSwap-v3": "Inswapper128ArcFace",
+    # Logical key: same w600k ONNX as Inswapper128ArcFace, fixed arcface_112_v2 align.
+    "HyperSwap-v1": "HyperSwapArcFace",
+    "HyperSwap-v2": "HyperSwapArcFace",
+    "HyperSwap-v3": "HyperSwapArcFace",
     "ReHiFace-S": "Inswapper128ArcFace",
     "CSCS": "CSCSArcFace",
     "BlendSwap-256": "Inswapper128ArcFace",

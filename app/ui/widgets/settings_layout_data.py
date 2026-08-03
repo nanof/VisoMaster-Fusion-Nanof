@@ -1030,7 +1030,7 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
                 "CSCSArcFace",
             ],
             "default": "Inswapper128ArcFace",
-            "help": "Choose the ArcFace model to be used for comparing the similarity of faces. During swapping, the app picks the recognition backbone that matches the active swapper (e.g. HyperSwap-v1/v2/v3 and ReHiFace-S use Inswapper128ArcFace, same as Inswapper128 — the Recognition dropdown does not override that for swap inference). ArcFace alignment is pose-aware (automatic) for robust matching.",
+            "help": "Choose the ArcFace model to be used for comparing the similarity of faces. During swapping, the app picks the recognition backbone that matches the active swapper (e.g. HyperSwap-v1/v2/v3 use HyperSwapArcFace = w600k with fixed FaceFusion arcface_112_v2 align; ReHiFace-S uses Inswapper128ArcFace — the Recognition dropdown does not override that for swap inference). ArcFace alignment is pose-aware (automatic) for robust matching except HyperSwapArcFace.",
         },
         "DetectorModelSelection": {
             "level": 1,

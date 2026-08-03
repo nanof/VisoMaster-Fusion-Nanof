@@ -1402,7 +1402,72 @@ class InputFaceCardButton(CardButton):
         self.embedding_store[embedding_swap_model] = embedding
 
     def get_embedding(self, embedding_swap_model: str) -> np.ndarray:
-        return self.embedding_store.get(embedding_swap_model, np.array([]))
+        """Return stored embedding, or lazily compute (e.g. HyperSwapArcFace after import).
+
+        ``embedding_store["kps_5"]`` lives in original-media coordinates, so the lazy
+        path must re-read ``media_path``; pairing those kps with ``cropped_face`` would
+        align against the wrong image and yield a garbage identity.
+        """
+        stored = self.embedding_store.get(embedding_swap_model)
+        if stored is not None and isinstance(stored, np.ndarray) and stored.size > 0:
+            return stored
+
+        if embedding_swap_model == "kps_5":
+            return np.array([])
+
+        kps = self.embedding_store.get("kps_5")
+        kps_valid = isinstance(kps, np.ndarray) and kps.size >= 10
+        media_ok = bool(self.media_path) and os.path.isfile(str(self.media_path))
+
+        try:
+            device = self.main_window.models_processor.device
+            if kps_valid and media_ok:
+                frame_bgr = misc_helpers.read_image_file(self.media_path)
+                if frame_bgr is None or frame_bgr.size == 0:
+                    return np.array([])
+                src_kps = np.asarray(kps, dtype=np.float32)
+                img_rgb = frame_bgr[..., ::-1]
+            elif self.cropped_face is not None and self.cropped_face.size > 0:
+                # No usable kps: approximate them on the stored crop (same heuristic
+                # as TargetFaceCardButton.get_embedding).
+                h, w, _ = self.cropped_face.shape
+                src_kps = np.array(
+                    [
+                        [w * 0.3, h * 0.4],
+                        [w * 0.7, h * 0.4],
+                        [w * 0.5, h * 0.55],
+                        [w * 0.35, h * 0.7],
+                        [w * 0.65, h * 0.7],
+                    ],
+                    dtype=np.float32,
+                )
+                img_rgb = self.cropped_face[..., ::-1]
+            else:
+                return np.array([])
+
+            img_chw = (
+                torch.from_numpy(np.ascontiguousarray(img_rgb))
+                .to(device)
+                .permute(2, 0, 1)
+            )
+            new_embedding, _ = self.main_window.models_processor.run_recognize_direct(
+                img_chw, src_kps, "Auto", embedding_swap_model
+            )
+            if new_embedding is not None and new_embedding.size > 0:
+                self.embedding_store[embedding_swap_model] = new_embedding
+                print(
+                    f"[INFO] InputFaceCardButton {self.face_id}: computed "
+                    f"'{embedding_swap_model}' embedding on demand.",
+                    flush=True,
+                )
+                return new_embedding
+        except Exception as e:
+            print(
+                f"[WARN] InputFaceCardButton {self.face_id}: failed to compute "
+                f"'{embedding_swap_model}': {e}",
+                flush=True,
+            )
+        return np.array([])
 
     def toggle_random_fixed(self, pinned: bool | None = None) -> bool:
         """Mark/unmark this input as fixed for Swap-all-by-random assignment."""

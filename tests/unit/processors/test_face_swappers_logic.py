@@ -143,7 +143,67 @@ def test_hyperswap_maps_to_inswapper128_arcface():
     from app.processors.models_data import arcface_mapping_model_dict
 
     for name in ("HyperSwap-v1", "HyperSwap-v2", "HyperSwap-v3"):
-        assert arcface_mapping_model_dict[name] == "Inswapper128ArcFace"
+        assert arcface_mapping_model_dict[name] == "HyperSwapArcFace"
+
+
+def test_hyperswap_arcface_aliases_w600k_session():
+    from app.processors.face_swappers import FaceSwappers
+
+    assert (
+        FaceSwappers._arcface_ort_session_name("HyperSwapArcFace")
+        == "Inswapper128ArcFace"
+    )
+    assert (
+        FaceSwappers._arcface_ort_session_name("Inswapper128ArcFace")
+        == "Inswapper128ArcFace"
+    )
+
+
+def test_hyperswap_ff_align_uses_arcface_112_v2_single_warp():
+    """HyperSwap identity crop must be one landmark warp to arcface_112_v2 (no convert chain)."""
+    from app.processors.face_swappers import FaceSwappers
+    import app.processors.utils.faceutil as faceutil
+
+    fs = FaceSwappers(models_processor=object())  # type: ignore[arg-type]
+    calls: list[dict] = []
+
+    def _fake_warp(img, kps, image_size=112, mode="arcface112", interpolation=None):
+        calls.append({"image_size": image_size, "mode": mode})
+        return torch.full((3, image_size, image_size), 200, dtype=torch.uint8), None
+
+    orig = faceutil.warp_face_by_face_landmark_5
+    faceutil.warp_face_by_face_landmark_5 = _fake_warp
+    try:
+        kps = np.array(
+            [[40.0, 50.0], [80.0, 50.0], [60.0, 70.0], [45.0, 90.0], [75.0, 90.0]],
+            dtype=np.float32,
+        )
+        out = fs._align_hyperswap_ff_arcface_112(
+            torch.zeros(3, 256, 256, dtype=torch.uint8), kps
+        )
+    finally:
+        faceutil.warp_face_by_face_landmark_5 = orig
+
+    assert calls == [{"image_size": 112, "mode": "arcface112"}]
+    assert out.shape == (3, 112, 112)
+
+
+def test_arcface112_template_matches_facefusion_arcface_112_v2():
+    """faceutil arcface_src / 112 must equal FaceFusion's normalized arcface_112_v2."""
+    from app.processors.utils import faceutil
+
+    template = np.squeeze(faceutil.get_arcface_template(112, "arcface112")) / 112.0
+    facefusion_arcface_112_v2 = np.array(
+        [
+            [0.34191607, 0.46157411],
+            [0.65653393, 0.45983393],
+            [0.50022500, 0.64050536],
+            [0.37097589, 0.82469196],
+            [0.63151696, 0.82325089],
+        ],
+        dtype=np.float32,
+    )
+    assert np.allclose(template, facefusion_arcface_112_v2, atol=1e-5)
 
 
 def test_hyperswap_ui_to_model_name():
