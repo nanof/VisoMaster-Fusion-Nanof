@@ -355,7 +355,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         )
 
         self._model_idle_evict_timer = QtCore.QTimer(self)
-        self._model_idle_evict_timer.setInterval(120_000)
+        self._model_idle_evict_timer.setInterval(5_000)
         self._model_idle_evict_timer.timeout.connect(
             partial(
                 lambda mw: mw.models_processor.evict_idle_onnx_models(),

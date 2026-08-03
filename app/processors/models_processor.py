@@ -489,6 +489,8 @@ class ModelsProcessor(QtCore.QObject):
         self.dfm_inference_lock = threading.Lock()
         self.force_unload_in_progress = False
         self._model_last_used_mono: Dict[str, float] = {}
+        # Catalog name -> monotonic deadline; soft-retired until then (or VRAM flush).
+        self._model_pending_unload_mono: Dict[str, float] = {}
         self.models_trt: Dict[str, Any] = {}
 
         # Initialize Sub-Processors
@@ -907,8 +909,77 @@ class ModelsProcessor(QtCore.QObject):
                 flush=True,
             )
 
+    def _model_unload_grace_seconds(self) -> float:
+        """Seconds to keep a soft-retired ONNX session before unload (0 = immediate)."""
+        try:
+            return float(
+                self.main_window.control.get("ModelUnloadGraceSecondsSlider", 60) or 0
+            )
+        except (TypeError, ValueError):
+            return 60.0
+
+    def _cancel_pending_unload_locked(self, model_name: str) -> None:
+        """Drop pending unload entries for *model_name* and multi-GPU variants (lock held)."""
+        if not model_name:
+            return
+        prefix = f"{model_name}__cuda"
+        for key in list(self._model_pending_unload_mono.keys()):
+            if key == model_name or key.startswith(prefix):
+                self._model_pending_unload_mono.pop(key, None)
+
+    def touch_model_usage(self, model_name: str) -> None:
+        """Mark *model_name* as recently used and cancel any scheduled unload."""
+        if not model_name:
+            return
+        now = time.monotonic()
+        storage_key = self._ort_session_storage_key(model_name)
+        with self.model_lock:
+            self._model_last_used_mono[storage_key] = now
+            if storage_key != model_name:
+                self._model_last_used_mono[model_name] = now
+            self._cancel_pending_unload_locked(model_name)
+            if storage_key != model_name:
+                self._cancel_pending_unload_locked(storage_key)
+
+    def process_pending_model_unloads(self, *, force_all: bool = False) -> None:
+        """Unload soft-retired models whose grace deadline has passed (or all if *force_all*)."""
+        if self.main_window.control.get("KeepModelsAliveToggle", False):
+            if not self.force_unload_in_progress:
+                return
+        now = time.monotonic()
+        with self.model_lock:
+            due = [
+                name
+                for name, deadline in list(self._model_pending_unload_mono.items())
+                if force_all or now >= deadline
+            ]
+            for name in due:
+                self._model_pending_unload_mono.pop(name, None)
+        for name in due:
+            self.unload_model(name, force_immediate=True)
+
+    def flush_pending_model_unloads(self) -> None:
+        """Immediately unload every soft-retired model (e.g. Clear GPU / low VRAM)."""
+        self.process_pending_model_unloads(force_all=True)
+
+    def _vram_headroom_low(self) -> bool:
+        """True when free device memory is scarce enough to reclaim soft-retired sessions."""
+        if self.device == "cpu" or not torch.cuda.is_available():
+            return False
+        try:
+            free_b, total_b = torch.cuda.mem_get_info(
+                self._logical_to_physical_cuda_index(self.clamp_gpu_index(self.gpu_index))
+            )
+            if total_b <= 0:
+                return False
+            # Reclaim when less than ~15% free or under ~1.5 GiB free.
+            return (free_b / total_b) < 0.15 or free_b < int(1.5 * (1024**3))
+        except Exception:
+            return False
+
     def evict_idle_onnx_models(self) -> None:
-        """Unload ONNX sessions idle longer than ModelEvictIdleMinutesSlider (0=off)."""
+        """Process grace-period retires, then idle TTL eviction (ModelEvictIdleMinutesSlider)."""
+        self.process_pending_model_unloads()
         try:
             mins = int(
                 self.main_window.control.get("ModelEvictIdleMinutesSlider", 0) or 0
@@ -931,11 +1002,13 @@ class ModelsProcessor(QtCore.QObject):
                     continue
                 if protect and (name == protect or name.startswith(f"{protect}__cuda")):
                     continue
+                if name in self._model_pending_unload_mono:
+                    continue  # grace path owns this name
                 last = self._model_last_used_mono.get(name, now)
                 if now - last > max_age:
                     to_drop.append(name)
         for name in to_drop:
-            self.unload_model(name)
+            self.unload_model(name, force_immediate=True)
 
     def _providers_for_onnx_model(self, model_name: str):
         """ORT provider list for one ONNX file (CUDA fallback when TRT cannot init)."""
@@ -997,15 +1070,34 @@ class ModelsProcessor(QtCore.QObject):
         Loads an AI model (ONNX) with thread safety.
         Handles checking for existing TensorRT caches and launching the build probe if needed.
         """
+        storage_key_peek = self._ort_session_storage_key(model_name)
+        # Only reclaim soft-retired sessions when VRAM headroom is low (keep grace otherwise).
+        if (
+            model_name != "DMDNetTorch"
+            and not self.models.get(storage_key_peek)
+            and self.models_trt.get(storage_key_peek) is None
+            and self._model_pending_unload_mono
+            and self._vram_headroom_low()
+        ):
+            print(
+                "[INFO] Low VRAM headroom: flushing soft-retired ONNX models before load",
+                flush=True,
+            )
+            self.flush_pending_model_unloads()
+
         with self.model_lock:
             storage_key = self._ort_session_storage_key(model_name)
             if self.models.get(storage_key):
                 self._model_last_used_mono[storage_key] = time.monotonic()
+                self._cancel_pending_unload_locked(model_name)
+                self._cancel_pending_unload_locked(storage_key)
                 return self.models[storage_key]
 
             existing_trt = self.models_trt.get(storage_key)
             if existing_trt is not None:
                 self._model_last_used_mono[storage_key] = time.monotonic()
+                self._cancel_pending_unload_locked(model_name)
+                self._cancel_pending_unload_locked(storage_key)
                 return existing_trt
 
             if model_name == "DMDNetTorch":
@@ -1060,6 +1152,8 @@ class ModelsProcessor(QtCore.QObject):
                             del old_trt
                         self.models_trt[storage_key] = model_instance
                         self._model_last_used_mono[storage_key] = time.monotonic()
+                        self._cancel_pending_unload_locked(model_name)
+                        self._cancel_pending_unload_locked(storage_key)
                         self._real_model_loads += 1
                         if self._vram_trace_enabled:
                             _vram_after = self.device_used_gb()
@@ -1386,6 +1480,8 @@ class ModelsProcessor(QtCore.QObject):
                     del graph
                     gc.collect()
                 self._model_last_used_mono[storage_key] = time.monotonic()
+                self._cancel_pending_unload_locked(model_name)
+                self._cancel_pending_unload_locked(storage_key)
                 self._real_model_loads += 1
                 self.vram_trace(f"LOAD(onnx) {model_name}")
                 self._schedule_ort_warmup_if_enabled(model_name, model_instance)
@@ -1538,9 +1634,13 @@ class ModelsProcessor(QtCore.QObject):
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
-    def unload_model(self, model_name_to_unload):
+    def unload_model(self, model_name_to_unload, force_immediate: bool = False):
         """
         Unloads a single ONNX model from memory.
+
+        By default schedules a grace-period unload (``ModelUnloadGraceSecondsSlider``)
+        so rapid model switches do not thrash VRAM. Pass ``force_immediate=True`` or
+        set ``force_unload_in_progress`` (Clear GPU / provider switch) for a hard unload.
 
         Handles the ``self.models`` (ONNX) dictionary. Respects the KeepModelsAliveToggle
         control unless a force-unload is in progress. Frees the Python object, runs
@@ -1550,8 +1650,29 @@ class ModelsProcessor(QtCore.QObject):
         if not self.force_unload_in_progress:
             if self.main_window.control.get("KeepModelsAliveToggle", False):
                 return  # Skip unloading
+
+        grace = self._model_unload_grace_seconds()
+        immediate = (
+            bool(force_immediate)
+            or self.force_unload_in_progress
+            or grace <= 0.0
+        )
+        if not immediate:
+            if not model_name_to_unload:
+                return
+            due = time.monotonic() + grace
+            with self.model_lock:
+                self._model_pending_unload_mono[model_name_to_unload] = due
+            print(
+                f"[INFO] Scheduled unload of {model_name_to_unload} "
+                f"in {grace:.0f}s (grace period)",
+                flush=True,
+            )
+            return
+
         with self.model_lock:
             unloaded = False
+            self._cancel_pending_unload_locked(model_name_to_unload)
 
             if model_name_to_unload == "DMDNetTorch":
                 self.face_restorers.unload_dmdnet()
@@ -1953,7 +2074,11 @@ class ModelsProcessor(QtCore.QObject):
 
     def get_onnx_session(self, model_name: str):
         """Return the loaded InferenceSession for *model_name* on this thread's GPU (multi-GPU aware)."""
-        return self.models.get(self._ort_session_storage_key(model_name))
+        storage_key = self._ort_session_storage_key(model_name)
+        session = self.models.get(storage_key)
+        if session is not None:
+            self.touch_model_usage(model_name)
+        return session
 
     def is_model_loaded(self, model_name: str) -> bool:
         """True if an ONNX or TensorRT-native session exists for *model_name*."""
@@ -2083,11 +2208,17 @@ class ModelsProcessor(QtCore.QObject):
         """
         # Release existing ORT sessions whenever the provider is changed so that
         # GPU memory from the old provider is freed before new sessions are allocated.
-        self.face_detectors.unload_models()
-        self.face_masks.unload_models()
-        self.face_swappers.unload_models()
-        self.face_landmark_detectors.unload_models()
-        self.face_restorers.unload_models()
+        _prev_force = self.force_unload_in_progress
+        self.force_unload_in_progress = True
+        try:
+            self.face_detectors.unload_models()
+            self.face_masks.unload_models()
+            self.face_swappers.unload_models()
+            self.face_landmark_detectors.unload_models()
+            self.face_restorers.unload_models()
+            self._model_pending_unload_mono.clear()
+        finally:
+            self.force_unload_in_progress = _prev_force
 
         match provider_name:
             case "TensorRT" | "TensorRT-Engine":
@@ -2343,6 +2474,7 @@ class ModelsProcessor(QtCore.QObject):
             if self.clip_session:
                 del self.clip_session
                 self.clip_session = []
+            self._model_pending_unload_mono.clear()
         finally:
             self.force_unload_in_progress = False
 

@@ -469,6 +469,18 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "requiredToggleValue": True,
             "help": "Padding around the union of previous-frame track boxes before clamping to image.",
         },
+        "ModelUnloadGraceSecondsSlider": {
+            "level": 1,
+            "label": "Unload unused models after (seconds, 0=immediate)",
+            "min_value": "0",
+            "max_value": "600",
+            "default": "60",
+            "step": 15,
+            "help": "When a model is no longer selected/needed, keep it in VRAM for this many "
+            "seconds before unloading. Reloading or using it again cancels the timer. "
+            "Pending retires flush early if VRAM headroom is low, or immediately on Clear GPU / "
+            "provider switch. Ignored when Keep models alive is on.",
+        },
         "ModelEvictIdleMinutesSlider": {
             "level": 1,
             "label": "Unload idle ONNX models after (minutes, 0=off)",
@@ -477,7 +489,8 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "default": "0",
             "step": 5,
             "help": "Periodic check: models not used for this many minutes may be unloaded unless "
-            "Keep models alive is on. Does not unload the active swapper mid-playback.",
+            "Keep models alive is on. Does not unload the active swapper mid-playback. "
+            "Runs after the unused-model grace period above.",
         },
         "ModelWarmupOnLoadToggle": {
             "level": 1,
@@ -1457,7 +1470,8 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "level": 1,
             "label": "Keep Loaded Models in Memory",
             "default": False,
-            "help": "Stops the models from automatically unloading when changing settings, only with CLEAR GPU button.",
+            "help": "Stops the models from automatically unloading when changing settings, only with CLEAR GPU button. "
+            "Also disables the unused-model grace timer and idle eviction.",
         },
         "TargetMediaFolderRecursiveToggle": {
             "level": 1,
