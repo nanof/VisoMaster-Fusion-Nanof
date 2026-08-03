@@ -84,6 +84,10 @@ class FaceSwappers:
                     continue
                 _unloaded_arc.add(ort_name)
                 self.models_processor.unload_model(ort_name)
+        # Allow a fresh HyperSwap/TRT session to retry batch + native mask after unload.
+        self._hyperswap_ort_batch_session_disabled = False
+        self._hyperswap_ort_batch_fail_logged = False
+        self._hyperswap_native_mask_disabled = False
 
     def _manage_model(self, new_model_name):
         # FS-RACE-01: protect read-modify-write of current_swapper_model with lock
@@ -93,6 +97,10 @@ class FaceSwappers:
                 and self.current_swapper_model != new_model_name
             ):
                 self.models_processor.unload_model(self.current_swapper_model)
+                if str(self.current_swapper_model).startswith("HyperSwap"):
+                    self._hyperswap_ort_batch_session_disabled = False
+                    self._hyperswap_ort_batch_fail_logged = False
+                    self._hyperswap_native_mask_disabled = False
             # FS-BUG-07: current_swapper_model is committed only after load confirmation (see _load_swapper_model)
 
     def _load_swapper_model(self, model_name):
@@ -1129,7 +1137,7 @@ class FaceSwappers:
         v = np.asarray(source_embedding, dtype=np.float32).reshape(-1)
         n = float(np.linalg.norm(v))
         if n < 1e-8:
-            return v.reshape(1, -1)
+            return None
         return (v / n).reshape(1, -1)
 
     def run_hyperswap(

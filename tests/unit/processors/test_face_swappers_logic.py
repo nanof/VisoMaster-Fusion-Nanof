@@ -7,6 +7,7 @@ All model inference is mocked.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 
@@ -232,6 +233,66 @@ def test_calc_hyperswap_latent_none_on_empty():
     fs = FaceSwappers(models_processor=object())  # type: ignore[arg-type]
     assert fs.calc_hyperswap_latent(None) is None
     assert fs.calc_hyperswap_latent(np.array([])) is None
+
+
+def test_calc_hyperswap_latent_none_on_near_zero_norm():
+    """Degenerate embeddings must not reach ORT as an unnormalized row."""
+    from app.processors.face_swappers import FaceSwappers
+
+    fs = FaceSwappers(models_processor=object())  # type: ignore[arg-type]
+    assert fs.calc_hyperswap_latent(np.zeros(512, dtype=np.float32)) is None
+    assert fs.calc_hyperswap_latent(np.full(512, 1e-12, dtype=np.float32)) is None
+
+
+def test_hyperswap_session_flags_reset_on_unload_and_model_switch():
+    """A one-off TRT failure must not permanently disable HyperSwap batch/mask."""
+    from app.processors.face_swappers import FaceSwappers
+    import threading
+
+    class _Proc:
+        def __init__(self):
+            self.model_lock = threading.Lock()
+            self.unloaded = []
+
+        def unload_model(self, name):
+            self.unloaded.append(name)
+
+    proc = _Proc()
+    fs = FaceSwappers(models_processor=proc)  # type: ignore[arg-type]
+    fs._hyperswap_ort_batch_session_disabled = True
+    fs._hyperswap_ort_batch_fail_logged = True
+    fs._hyperswap_native_mask_disabled = True
+
+    fs.unload_models()
+    assert fs._hyperswap_ort_batch_session_disabled is False
+    assert fs._hyperswap_ort_batch_fail_logged is False
+    assert fs._hyperswap_native_mask_disabled is False
+
+    fs.current_swapper_model = "HyperSwapv1"
+    fs._hyperswap_ort_batch_session_disabled = True
+    fs._hyperswap_native_mask_disabled = True
+    fs._manage_model("HyperSwapv2")
+    assert fs._hyperswap_ort_batch_session_disabled is False
+    assert fs._hyperswap_native_mask_disabled is False
+    assert "HyperSwapv1" in proc.unloaded
+
+
+def test_prefetch_strength_lerp_needs_original_prev_face():
+    """Batched prefetch must lerp against the pre-swap crop, not the swapped result.
+
+    Mirrors ``swap_core`` StrengthEnableToggle handling after plane batch inference.
+    """
+    original_hwc = torch.zeros(8, 8, 3, dtype=torch.float32)
+    swap = torch.full((3, 8, 8), 200.0)
+
+    def _strength_lerp(prev_hwc_01: torch.Tensor, alpha: float) -> torch.Tensor:
+        prev = torch.mul(prev_hwc_01, 255).clamp(0, 255).permute(2, 0, 1)
+        return torch.lerp(prev.float(), swap.float(), alpha)
+
+    alpha = 0.5
+    buggy_prev = torch.div(swap, 255.0).permute(1, 2, 0)
+    assert _strength_lerp(buggy_prev, alpha).mean().item() == pytest.approx(200.0)
+    assert _strength_lerp(original_hwc, alpha).mean().item() == pytest.approx(100.0)
 
 
 def test_hyperswap_batch_io_matches_swap_core_minus_one_one_range():

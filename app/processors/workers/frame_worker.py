@@ -2896,6 +2896,7 @@ class FrameWorker(threading.Thread):
         source_latent_cache: dict | None,
         edit_button_is_checked_global: bool,
         native_mask_list: list[torch.Tensor] | None = None,
+        prefetched_prev_list: list[torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """PERF-008: optional batched primary restorer before paste (plane multi-face prefetch)."""
 
@@ -2903,6 +2904,12 @@ class FrameWorker(threading.Thread):
             if native_mask_list is None or index >= len(native_mask_list):
                 return None
             return native_mask_list[index]
+
+        def _prev_face_for(index: int) -> torch.Tensor | None:
+            """HWC float [0,1] original crop for fractional Strength lerp (matches sequential)."""
+            if prefetched_prev_list is None or index >= len(prefetched_prev_list):
+                return None
+            return prefetched_prev_list[index]
 
         use_gather = (
             len(ordered) >= 2
@@ -2927,6 +2934,7 @@ class FrameWorker(threading.Thread):
                         kv_map=s["kv_map"],
                         source_latent_cache=source_latent_cache,
                         prefetched_swap_chw_uint8=pre,
+                        prefetched_prev_face_hwc=_prev_face_for(_idx),
                         prefetched_native_mask=_native_mask_for(_idx),
                         alignment_img=batch_snap,
                         blendswap_source_rgb112=s.get("blendswap_src112"),
@@ -2994,6 +3002,7 @@ class FrameWorker(threading.Thread):
                     kv_map=s["kv_map"],
                     source_latent_cache=source_latent_cache,
                     prefetched_swap_chw_uint8=pre,
+                    prefetched_prev_face_hwc=_prev_face_for(_idx),
                     prefetched_native_mask=_native_mask_for(_idx),
                     alignment_img=batch_snap,
                     blendswap_source_rgb112=s.get("blendswap_src112"),
@@ -3168,6 +3177,7 @@ class FrameWorker(threading.Thread):
         device = self.models_processor.get_effective_torch_device()
         chw_tiles: list[torch.Tensor] = []
         lat_rows: list[torch.Tensor] = []
+        prev_hwc_list: list[torch.Tensor] = []
 
         def _sequential_from_ordered() -> torch.Tensor:
             out_img = img
@@ -3268,6 +3278,7 @@ class FrameWorker(threading.Thread):
                 hwc = _sh.permute(1, 2, 0)
             tchw = hwc.permute(2, 0, 1).unsqueeze(0).contiguous()
             chw_tiles.append(tchw)
+            prev_hwc_list.append(hwc.detach())
             lt = latent
             if lt.dim() == 1:
                 lr = lt.unsqueeze(0)
@@ -3294,6 +3305,7 @@ class FrameWorker(threading.Thread):
             batch_snap,
             source_latent_cache,
             edit_button_is_checked_global,
+            prefetched_prev_list=prev_hwc_list,
         )
 
     def _run_ort_256_swapper_batched_plane_swap_all(
@@ -3314,6 +3326,7 @@ class FrameWorker(threading.Thread):
         device = self.models_processor.get_effective_torch_device()
         chw_tiles: list[torch.Tensor] = []
         lat_rows: list[torch.Tensor] = []
+        prev_hwc_list: list[torch.Tensor] = []
 
         def _sequential_from_ordered() -> torch.Tensor:
             out_img = img
@@ -3415,6 +3428,7 @@ class FrameWorker(threading.Thread):
                 hwc = _sh.permute(1, 2, 0)
             tchw = (hwc.permute(2, 0, 1) * 2.0 - 1.0).unsqueeze(0).contiguous()
             chw_tiles.append(tchw)
+            prev_hwc_list.append(hwc.detach())
             lt = latent
             lr = lt.unsqueeze(0) if lt.dim() == 1 else lt
             lat_rows.append(lr)
@@ -3468,6 +3482,7 @@ class FrameWorker(threading.Thread):
             source_latent_cache,
             edit_button_is_checked_global,
             native_mask_list=native_mask_list,
+            prefetched_prev_list=prev_hwc_list,
         )
 
     def _process_frame_standard(
@@ -7208,6 +7223,7 @@ class FrameWorker(threading.Thread):
         source_latent_cache: dict | None = None,
         alignment_img: torch.Tensor | None = None,
         prefetched_swap_chw_uint8: torch.Tensor | None = None,
+        prefetched_prev_face_hwc: torch.Tensor | None = None,
         prefetched_native_mask: torch.Tensor | None = None,
         blendswap_source_rgb112: torch.Tensor | None = None,
         uniface_source_rgb256: torch.Tensor | None = None,
@@ -7237,6 +7253,10 @@ class FrameWorker(threading.Thread):
             alignment_img = alignment_img.to(_swap_dev, non_blocking=False)
         if prefetched_swap_chw_uint8 is not None and prefetched_swap_chw_uint8.device != _swap_dev:
             prefetched_swap_chw_uint8 = prefetched_swap_chw_uint8.to(
+                _swap_dev, non_blocking=False
+            )
+        if prefetched_prev_face_hwc is not None and prefetched_prev_face_hwc.device != _swap_dev:
+            prefetched_prev_face_hwc = prefetched_prev_face_hwc.to(
                 _swap_dev, non_blocking=False
             )
         if prefetched_native_mask is not None and prefetched_native_mask.device != _swap_dev:
@@ -7368,7 +7388,11 @@ class FrameWorker(threading.Thread):
                 )
             dim = _ps[1] // 128
             itex = 1
-            prev_face = torch.div(swap.float(), 255.0).permute(1, 2, 0)
+            # Fractional Strength lerp needs the pre-swap crop (same as get_swapped_and_prev_face).
+            if prefetched_prev_face_hwc is not None:
+                prev_face = prefetched_prev_face_hwc
+            else:
+                prev_face = torch.div(swap.float(), 255.0).permute(1, 2, 0)
         elif valid_s_e is not None or (
             swapper_model == "DeepFaceLive (DFM)" and dfm_model_name
         ):
