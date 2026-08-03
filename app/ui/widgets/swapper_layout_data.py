@@ -32,8 +32,11 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
                 "v1 is fastest, v2 balanced, v3 targets highest quality. "
                 "HyperSwap uses ArcFace HyperSwapArcFace automatically (w600k with FaceFusion "
                 "arcface_112_v2 embedder align + L2 latent). "
-                "Single-face and multi-face Swap All share the same model and [-1,1] I/O contract."
+                "Single-face and multi-face Swap All share the same model and [-1,1] I/O contract. "
+                "Changing the swapper clears cached HyperSwapArcFace embeddings so identity is recomputed."
             ),
+            "exec_function": control_actions.on_swap_model_selection_change,
+            "exec_function_args": [],
         },
         "SwapperResSelection": {
             "level": 2,

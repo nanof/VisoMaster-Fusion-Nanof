@@ -299,7 +299,11 @@ class FaceLandmarkDetectors:
         # Bind inputs to the model (dtype matches ONNX-declared I/O).
         for name, tensor in list(input_bindings.items()):
             input_bindings[name] = self.models_processor.bind_ort_io_input(
-                io_binding, model_name, name, tensor
+                io_binding,
+                model_name,
+                name,
+                tensor,
+                session=model,
             )
 
         # Bind outputs. The device will allocate memory for them.

@@ -78,6 +78,28 @@ def on_detector_model_selection_change(main_window: "MainWindow", new_model: str
     detector_internal_size_ui.sync_detector_internal_size_combo(main_window, new_model)
 
 
+def on_swap_model_selection_change(main_window: "MainWindow", new_model: str):
+    """When SwapModelSelection changes, drop stale HyperSwapArcFace caches.
+
+    HyperSwap identity uses a different align than Inswapper128ArcFace on the same
+    w600k ONNX. Cached vectors from a previous session must not stick after the user
+    changes the swapper.
+    """
+    from app.helpers.hyperswap_embedding import (
+        HYPERSWAP_SWAPPER_MODELS,
+        invalidate_hyperswap_arcface_embeddings,
+    )
+
+    cleared = invalidate_hyperswap_arcface_embeddings(main_window)
+    if cleared and new_model in HYPERSWAP_SWAPPER_MODELS:
+        print(
+            f"[INFO] Cleared {cleared} cached HyperSwapArcFace store(s); "
+            "identity will recompute on next swap.",
+            flush=True,
+        )
+    common_widget_actions.refresh_frame(main_window)
+
+
 def handle_face_detector_tracking_reset(main_window: "MainWindow", value):
     """Resets the tracker instance when tracking is toggled or media changes."""
     main_window.models_processor.face_detectors.reset_tracker()

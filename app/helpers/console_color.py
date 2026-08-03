@@ -169,6 +169,24 @@ def install_console_toast_tap(
         setattr(sys, name, _ToastTapStream(stream, on_tagged_line))
 
 
+def install_utf8_console_streams() -> None:
+    """
+    Encode sys.stdout / sys.stderr as UTF-8, replacing what the target cannot map.
+
+    Redirected output (log file, launcher pipe, CI) uses the ANSI code page on Windows,
+    where a single '≤' or '→' in a log line raises UnicodeEncodeError and aborts whatever
+    was printing. Call before install_colored_console_streams() at process startup.
+    """
+    for name in ("stdout", "stderr"):
+        reconfigure = getattr(getattr(sys, name, None), "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
 def install_colored_console_streams() -> None:
     """
     Wrap sys.stdout and sys.stderr when output is a TTY and colors are allowed.

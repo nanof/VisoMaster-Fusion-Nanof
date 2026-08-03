@@ -251,13 +251,42 @@ def test_hyperswap_batch_io_matches_swap_core_minus_one_one_range():
     # Synthetic model identity in [-1,1] → decode to uint8 CHW
     fake_out = batch_in.clone()
     decoded_batch = (fake_out * 127.5 + 127.5).clamp(0, 255).to(torch.uint8)
-    decoded_single = torch.add(torch.mul(fake_out, 127.5), 127.5).clamp(0, 255).to(
-        torch.uint8
+    decoded_single = (
+        torch.add(torch.mul(fake_out, 127.5), 127.5).clamp(0, 255).to(torch.uint8)
     )
     assert torch.equal(decoded_batch, decoded_single)
     # Round-trip roughly recovers [0,255] from original HWC
     orig_u8 = (hwc * 255.0).clamp(0, 255).to(torch.uint8).permute(2, 0, 1)
     assert (decoded_batch.to(torch.int16) - orig_u8.to(torch.int16)).abs().max() <= 1
+
+
+def test_session_io_names_do_not_leak_across_models_on_id_reuse():
+    """A reused id() must not bind HyperSwap's 'source' on an ArcFace session."""
+    from app.processors.face_swappers import FaceSwappers
+
+    def _make_session(input_name: str, output_name: str):
+        class _S:
+            def get_inputs(self):
+                return [type("I", (), {"name": input_name})()]
+
+            def get_outputs(self):
+                return [type("O", (), {"name": output_name})()]
+
+        return _S()
+
+    fs = FaceSwappers(models_processor=object())  # type: ignore[arg-type]
+    arcface = _make_session("data", "683")
+
+    # A HyperSwap session was unloaded and CPython handed its id to `arcface`.
+    fs._hyperswap_output_name("HyperSwap-v3", _make_session("source", "output"))
+    fs._session_io_name_cache[("HyperSwap-v3", id(arcface))] = {
+        "input": "source",
+        "outputs": ["output"],
+    }
+
+    names = fs._session_io_names("Inswapper128ArcFace", arcface)
+    assert names["input"] == "data"
+    assert names["outputs"] == ["683"]
 
 
 def test_hyperswap_batched_disables_session_after_failure():

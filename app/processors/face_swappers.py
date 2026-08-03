@@ -17,7 +17,11 @@ class FaceSwappers:
         self.models_processor = models_processor
         self.current_swapper_model = None
         self.current_arcface_model = None
-        self._session_io_name_cache: dict = {}  # FS-PERF-02: cache input/output names keyed by session id
+        # FS-PERF-02: cache input/output names keyed by (model_name, id(session)).
+        # The model name is part of the key because CPython reuses id() after a session
+        # is unloaded, which otherwise leaks names across models (e.g. HyperSwap "source"
+        # bound on an ArcFace session).
+        self._session_io_name_cache: dict = {}
         self._io_cache_lock = threading.Lock()
         self._inswapper_init_lock = threading.Lock()
         self._w600k_lock = threading.Lock()
@@ -134,6 +138,19 @@ class FaceSwappers:
         finally:
             if is_lazy_build:
                 self.models_processor.hide_build_dialog.emit()
+
+    def _session_io_names(self, model_name: str, ort_session) -> dict:
+        """Cached ``{"input", "outputs"}`` ONNX names for this (model, session) pair."""
+        cache_key = (str(model_name), id(ort_session))
+        with self._io_cache_lock:
+            names = self._session_io_name_cache.get(cache_key)
+            if names is None:
+                names = {
+                    "input": ort_session.get_inputs()[0].name,
+                    "outputs": [o.name for o in ort_session.get_outputs()],
+                }
+                self._session_io_name_cache[cache_key] = names
+            return names
 
     @staticmethod
     def _arcface_ort_session_name(arcface_model: str) -> str:
@@ -277,7 +294,9 @@ class FaceSwappers:
                 if len(img) != len(kps_list):
                     return None
                 crops = [
-                    self._chw112_for_inswapper_arcface(img[i], kps_list[i], similarity_type)
+                    self._chw112_for_inswapper_arcface(
+                        img[i], kps_list[i], similarity_type
+                    )
                     for i in range(len(kps_list))
                 ]
             batch = torch.stack(crops, dim=0).float().clone()
@@ -285,15 +304,9 @@ class FaceSwappers:
                 batch = batch * 255.0
             batch.sub_(127.5).div_(127.5)
 
-            session_id = id(ort_session)
-            with self._io_cache_lock:
-                if session_id not in self._session_io_name_cache:
-                    self._session_io_name_cache[session_id] = {
-                        "input": ort_session.get_inputs()[0].name,
-                        "outputs": [o.name for o in ort_session.get_outputs()],
-                    }
-                input_name = self._session_io_name_cache[session_id]["input"]
-                output_names = self._session_io_name_cache[session_id]["outputs"]
+            _names = self._session_io_names(arcface_model, ort_session)
+            input_name = _names["input"]
+            output_names = _names["outputs"]
 
             io_binding = ort_session.io_binding()
             batch = self.models_processor.bind_ort_io_input(
@@ -301,6 +314,7 @@ class FaceSwappers:
                 arcface_model,
                 input_name,
                 batch,
+                session=ort_session,
             )
             for name in output_names:
                 self.models_processor.bind_ort_output_dynamic(io_binding, name)
@@ -319,7 +333,10 @@ class FaceSwappers:
                 pass
             else:
                 return None
-            return [emb_arr[i].flatten().astype(np.float32, copy=False) for i in range(len(kps_list))]
+            return [
+                emb_arr[i].flatten().astype(np.float32, copy=False)
+                for i in range(len(kps_list))
+            ]
         except Exception as e:
             print(f"[WARN] ArcFace batch inference failed, falling back per-face: {e}")
             return None
@@ -401,22 +418,17 @@ class FaceSwappers:
         # Prepare data (N, C, H, W)
         img = torch.unsqueeze(img, 0).contiguous()
 
-        # FS-PERF-02: cache input/output names by session id to avoid repeated ONNX introspection
-        # Lock prevents 'dictionary changed size during iteration' crashes when multiple
-        # workers encounter a new model ID simultaneously.
-        session_id = id(ort_session)
-        with self._io_cache_lock:
-            if session_id not in self._session_io_name_cache:
-                self._session_io_name_cache[session_id] = {
-                    "input": ort_session.get_inputs()[0].name,
-                    "outputs": [o.name for o in ort_session.get_outputs()],
-                }
-            input_name = self._session_io_name_cache[session_id]["input"]
-            output_names = self._session_io_name_cache[session_id]["outputs"]
+        _names = self._session_io_names(ort_name, ort_session)
+        input_name = _names["input"]
+        output_names = _names["outputs"]
 
         io_binding = ort_session.io_binding()
         img = self.models_processor.bind_ort_io_input(
-            io_binding, ort_name, input_name, img
+            io_binding,
+            ort_name,
+            input_name,
+            img,
+            session=ort_session,
         )
 
         for name in output_names:
@@ -478,7 +490,11 @@ class FaceSwappers:
         io_binding.clear_binding_outputs()
 
         img = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "input", img
+            io_binding,
+            model_name,
+            "input",
+            img,
+            session=model,
         )
         self.models_processor.bind_ort_output_dynamic(io_binding, "output")
 
@@ -518,7 +534,11 @@ class FaceSwappers:
         io_binding.clear_binding_outputs()
 
         img = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "input", img
+            io_binding,
+            model_name,
+            "input",
+            img,
+            session=model,
         )
         self.models_processor.bind_ort_output_dynamic(io_binding, "output")
 
@@ -559,13 +579,25 @@ class FaceSwappers:
 
         # Hardcoded IO names validated by standard CSCS export
         image = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "input_1", image
+            io_binding,
+            model_name,
+            "input_1",
+            image,
+            session=model,
         )
         embedding = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "input_2", embedding
+            io_binding,
+            model_name,
+            "input_2",
+            embedding,
+            session=model,
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, model_name, "output", output
+            io_binding,
+            model_name,
+            "output",
+            output,
+            session=model,
         )
 
         self._run_model_with_lazy_build_check(model_name, model, io_binding)
@@ -631,13 +663,25 @@ class FaceSwappers:
         io_binding.clear_binding_outputs()
 
         image = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "target", image
+            io_binding,
+            model_name,
+            "target",
+            image,
+            session=model,
         )
         embedding = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "source", embedding
+            io_binding,
+            model_name,
+            "source",
+            embedding,
+            session=model,
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, model_name, "output", output
+            io_binding,
+            model_name,
+            "output",
+            output,
+            session=model,
         )
 
         # Run the model with lazy build handling
@@ -708,13 +752,25 @@ class FaceSwappers:
             io_binding.clear_binding_outputs()
 
             inp = self.models_processor.bind_ort_io_input(
-                io_binding, model_name, "target", inp
+                io_binding,
+                model_name,
+                "target",
+                inp,
+                session=model,
             )
             emb_b = self.models_processor.bind_ort_io_input(
-                io_binding, model_name, "source", emb_b
+                io_binding,
+                model_name,
+                "source",
+                emb_b,
+                session=model,
             )
             self.models_processor.bind_ort_io_output(
-                io_binding, model_name, "output", out
+                io_binding,
+                model_name,
+                "output",
+                out,
+                session=model,
             )
             self._run_model_with_lazy_build_check(model_name, model, io_binding)
             return True
@@ -742,11 +798,7 @@ class FaceSwappers:
             # Same lock as B=1 CUDA-graph path: one shared InSwapperTorch instance.
             with self._inswapper_b1_lock:
                 inp = images if images.is_contiguous() else images.contiguous()
-                emb = (
-                    embedding
-                    if embedding.is_contiguous()
-                    else embedding.contiguous()
-                )
+                emb = embedding if embedding.is_contiguous() else embedding.contiguous()
                 B = inp.shape[0]
                 if emb.shape[0] not in (1, B):
                     raise ValueError(
@@ -782,13 +834,25 @@ class FaceSwappers:
 
         io_binding = model.io_binding()
         image = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "target", image
+            io_binding,
+            model_name,
+            "target",
+            image,
+            session=model,
         )
         embedding = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "source", embedding
+            io_binding,
+            model_name,
+            "source",
+            embedding,
+            session=model,
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, model_name, "output", output
+            io_binding,
+            model_name,
+            "output",
+            output,
+            session=model,
         )
 
         # Run the model with lazy build handling
@@ -809,13 +873,25 @@ class FaceSwappers:
 
         io_binding = model.io_binding()
         image = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "input", image
+            io_binding,
+            model_name,
+            "input",
+            image,
+            session=model,
         )
         embedding = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "onnx::Gemm_1", embedding
+            io_binding,
+            model_name,
+            "onnx::Gemm_1",
+            embedding,
+            session=model,
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, model_name, "output", output
+            io_binding,
+            model_name,
+            "output",
+            output,
+            session=model,
         )
 
         # Run the model with lazy build handling
@@ -842,24 +918,31 @@ class FaceSwappers:
             return
 
         # FS-ROBUST-02: introspect output name dynamically instead of hardcoding node IDs
-        session_id = id(ghostfaceswap_model)
-        with self._io_cache_lock:
-            if session_id not in self._session_io_name_cache:
-                self._session_io_name_cache[session_id] = {
-                    "input": ghostfaceswap_model.get_inputs()[0].name,
-                    "outputs": [o.name for o in ghostfaceswap_model.get_outputs()],
-                }
-            output_name = self._session_io_name_cache[session_id]["outputs"][0]
+        output_name = self._session_io_names(model_name, ghostfaceswap_model)[
+            "outputs"
+        ][0]
 
         io_binding = ghostfaceswap_model.io_binding()
         image = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "target", image
+            io_binding,
+            model_name,
+            "target",
+            image,
+            session=ghostfaceswap_model,
         )
         embedding = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "source", embedding
+            io_binding,
+            model_name,
+            "source",
+            embedding,
+            session=ghostfaceswap_model,
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, model_name, output_name, output
+            io_binding,
+            model_name,
+            output_name,
+            output,
+            session=ghostfaceswap_model,
         )
 
         # Run the model with lazy build handling
@@ -901,25 +984,32 @@ class FaceSwappers:
         inp = images if images.is_contiguous() else images.contiguous()
         out = output if output.is_contiguous() else output.contiguous()
 
-        session_id = id(ghostfaceswap_model)
-        with self._io_cache_lock:
-            if session_id not in self._session_io_name_cache:
-                self._session_io_name_cache[session_id] = {
-                    "input": ghostfaceswap_model.get_inputs()[0].name,
-                    "outputs": [o.name for o in ghostfaceswap_model.get_outputs()],
-                }
-            output_name = self._session_io_name_cache[session_id]["outputs"][0]
+        output_name = self._session_io_names(model_name, ghostfaceswap_model)[
+            "outputs"
+        ][0]
 
         io_binding = ghostfaceswap_model.io_binding()
         try:
             inp = self.models_processor.bind_ort_io_input(
-                io_binding, model_name, "target", inp
+                io_binding,
+                model_name,
+                "target",
+                inp,
+                session=ghostfaceswap_model,
             )
             emb = self.models_processor.bind_ort_io_input(
-                io_binding, model_name, "source", emb
+                io_binding,
+                model_name,
+                "source",
+                emb,
+                session=ghostfaceswap_model,
             )
             self.models_processor.bind_ort_io_output(
-                io_binding, model_name, output_name, out
+                io_binding,
+                model_name,
+                output_name,
+                out,
+                session=ghostfaceswap_model,
             )
             self._run_model_with_lazy_build_check(
                 model_name, ghostfaceswap_model, io_binding
@@ -943,16 +1033,9 @@ class FaceSwappers:
             return "HyperSwapv3"
         return None
 
-    def _hyperswap_output_name(self, model) -> str:
+    def _hyperswap_output_name(self, model_name: str, model) -> str:
         """Introspect first ONNX output name (cached), same pattern as GhostFace."""
-        session_id = id(model)
-        with self._io_cache_lock:
-            if session_id not in self._session_io_name_cache:
-                self._session_io_name_cache[session_id] = {
-                    "input": model.get_inputs()[0].name,
-                    "outputs": [o.name for o in model.get_outputs()],
-                }
-            return self._session_io_name_cache[session_id]["outputs"][0]
+        return self._session_io_names(model_name, model)["outputs"][0]
 
     def calc_hyperswap_latent(self, source_embedding):
         """FaceFusion HyperSwap: L2-normalized 512-D ArcFace row (1, 512)."""
@@ -964,9 +1047,7 @@ class FaceSwappers:
             return v.reshape(1, -1)
         return (v / n).reshape(1, -1)
 
-    def run_hyperswap(
-        self, image, embedding, output, swapper_model="HyperSwap-v3"
-    ):
+    def run_hyperswap(self, image, embedding, output, swapper_model="HyperSwap-v3"):
         model_name = self._hyperswap_ui_to_model_name(swapper_model)
         if not model_name:
             print(f"[ERROR] Unknown HyperSwap model: {swapper_model}")
@@ -977,16 +1058,28 @@ class FaceSwappers:
             print(f"[ERROR] {model_name} model not loaded.")
             return
 
-        output_name = self._hyperswap_output_name(model)
+        output_name = self._hyperswap_output_name(model_name, model)
         io_binding = model.io_binding()
         image = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "target", image
+            io_binding,
+            model_name,
+            "target",
+            image,
+            session=model,
         )
         embedding = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "source", embedding
+            io_binding,
+            model_name,
+            "source",
+            embedding,
+            session=model,
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, model_name, output_name, output
+            io_binding,
+            model_name,
+            output_name,
+            output,
+            session=model,
         )
 
         self._run_model_with_lazy_build_check(model_name, model, io_binding)
@@ -1022,17 +1115,29 @@ class FaceSwappers:
         inp = images if images.is_contiguous() else images.contiguous()
         out = output if output.is_contiguous() else output.contiguous()
 
-        output_name = self._hyperswap_output_name(model)
+        output_name = self._hyperswap_output_name(model_name, model)
         io_binding = model.io_binding()
         try:
             inp = self.models_processor.bind_ort_io_input(
-                io_binding, model_name, "target", inp
+                io_binding,
+                model_name,
+                "target",
+                inp,
+                session=model,
             )
             emb = self.models_processor.bind_ort_io_input(
-                io_binding, model_name, "source", emb
+                io_binding,
+                model_name,
+                "source",
+                emb,
+                session=model,
             )
             self.models_processor.bind_ort_io_output(
-                io_binding, model_name, output_name, out
+                io_binding,
+                model_name,
+                output_name,
+                out,
+                session=model,
             )
             self._run_model_with_lazy_build_check(model_name, model, io_binding)
             return True
@@ -1066,13 +1171,25 @@ class FaceSwappers:
         io_binding.clear_binding_inputs()
         io_binding.clear_binding_outputs()
         target_rgb_256 = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "target", target_rgb_256
+            io_binding,
+            model_name,
+            "target",
+            target_rgb_256,
+            session=model,
         )
         source_rgb_112 = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "source", source_rgb_112
+            io_binding,
+            model_name,
+            "source",
+            source_rgb_112,
+            session=model,
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, model_name, "output", output
+            io_binding,
+            model_name,
+            "output",
+            output,
+            session=model,
         )
         self._run_model_with_lazy_build_check(model_name, model, io_binding)
 
@@ -1095,13 +1212,25 @@ class FaceSwappers:
         io_binding.clear_binding_inputs()
         io_binding.clear_binding_outputs()
         target_norm_256 = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "target", target_norm_256
+            io_binding,
+            model_name,
+            "target",
+            target_norm_256,
+            session=model,
         )
         source_rgb_256 = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "source", source_rgb_256
+            io_binding,
+            model_name,
+            "source",
+            source_rgb_256,
+            session=model,
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, model_name, "output", output
+            io_binding,
+            model_name,
+            "output",
+            output,
+            session=model,
         )
         self._run_model_with_lazy_build_check(model_name, model, io_binding)
 
@@ -1121,7 +1250,9 @@ class FaceSwappers:
             "CrossFaceHiFaceS", "input", is_output=False
         )
         emb = (
-            torch.from_numpy(np.asarray(source_embedding, dtype=np.float32).reshape(1, -1))
+            torch.from_numpy(
+                np.asarray(source_embedding, dtype=np.float32).reshape(1, -1)
+            )
             .to(dtype=td_in, device=dev)
             .contiguous()
         )
@@ -1131,10 +1262,18 @@ class FaceSwappers:
         out_t = torch.empty((1, 512), dtype=td_out, device=dev).contiguous()
         io_binding = cross.io_binding()
         emb = self.models_processor.bind_ort_io_input(
-            io_binding, "CrossFaceHiFaceS", "input", emb
+            io_binding,
+            "CrossFaceHiFaceS",
+            "input",
+            emb,
+            session=cross,
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, "CrossFaceHiFaceS", "output", out_t
+            io_binding,
+            "CrossFaceHiFaceS",
+            "output",
+            out_t,
+            session=cross,
         )
         self._run_model_with_lazy_build_check("CrossFaceHiFaceS", cross, io_binding)
 
@@ -1160,7 +1299,9 @@ class FaceSwappers:
             "CrossFaceSimSwap", "input", is_output=False
         )
         emb = (
-            torch.from_numpy(np.asarray(source_embedding, dtype=np.float32).reshape(1, -1))
+            torch.from_numpy(
+                np.asarray(source_embedding, dtype=np.float32).reshape(1, -1)
+            )
             .to(dtype=td_in, device=dev)
             .contiguous()
         )
@@ -1170,10 +1311,18 @@ class FaceSwappers:
         out_t = torch.empty((1, 512), dtype=td_out, device=dev).contiguous()
         io_binding = cross.io_binding()
         emb = self.models_processor.bind_ort_io_input(
-            io_binding, "CrossFaceSimSwap", "input", emb
+            io_binding,
+            "CrossFaceSimSwap",
+            "input",
+            emb,
+            session=cross,
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, "CrossFaceSimSwap", "output", out_t
+            io_binding,
+            "CrossFaceSimSwap",
+            "output",
+            out_t,
+            session=cross,
         )
         self._run_model_with_lazy_build_check("CrossFaceSimSwap", cross, io_binding)
 
@@ -1193,13 +1342,25 @@ class FaceSwappers:
 
         io_binding = model.io_binding()
         image = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "target", image
+            io_binding,
+            model_name,
+            "target",
+            image,
+            session=model,
         )
         embedding = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "source", embedding
+            io_binding,
+            model_name,
+            "source",
+            embedding,
+            session=model,
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, model_name, "output", output
+            io_binding,
+            model_name,
+            "output",
+            output,
+            session=model,
         )
 
         self._run_model_with_lazy_build_check(model_name, model, io_binding)

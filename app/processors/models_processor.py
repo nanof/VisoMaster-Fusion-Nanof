@@ -19,11 +19,15 @@ from torchvision.transforms import v2
 
 from app.processors.utils import faceutil
 from app.processors.ort_io_dtype_utils import (
+    SessionIoDtypeCache,
     _numpy_scalar_type_to_torch_dtype,
     _ort_warmup_numpy_dtype_for_input,
     normalize_ort_bind_device_type,
+    resolve_session_io_dtype_maps,
 )
-from app.processors.trt_dynamic_batch_profiles import merge_tensorrt_dynamic_shape_profiles
+from app.processors.trt_dynamic_batch_profiles import (
+    merge_tensorrt_dynamic_shape_profiles,
+)
 
 # --- Optional Imports & Fallbacks ---
 
@@ -465,10 +469,9 @@ class ModelsProcessor(QtCore.QObject):
         # Initialize models and models_path dictionaries
         self.models: Dict[str, onnxruntime.InferenceSession] = {}
         # ONNX session I/O element types (name -> numpy scalar type) for IOBinding.
-        # Invalidated in unload_model. Used for FP16 graphs without changing float32 defaults.
-        self._ort_session_io_dtype_cache: Dict[
-            str, Tuple[Dict[str, type], Dict[str, type]]
-        ] = {}
+        # Used for FP16 graphs without changing float32 defaults. Invalidated by session
+        # identity, not by unload_model (see get_ort_session_io_numpy_dtype_maps).
+        self._ort_session_io_dtype_cache: SessionIoDtypeCache = {}
         self.models_path = {}
         self.models_data = {}
 
@@ -876,9 +879,7 @@ class ModelsProcessor(QtCore.QObject):
             return False
 
     def _schedule_ort_warmup_if_enabled(self, model_name: str, session) -> None:
-        if not bool(
-            self.main_window.control.get("ModelWarmupOnLoadToggle", False)
-        ):
+        if not bool(self.main_window.control.get("ModelWarmupOnLoadToggle", False)):
             return
         if session is None:
             return
@@ -1113,7 +1114,9 @@ class ModelsProcessor(QtCore.QObject):
                     cache_is_valid = self._check_tensorrt_cache(
                         model_name, onnx_path, cache_root=trt_cache_dir
                     )
-                    if os.environ.get("VISIOMASTER_LOG_TRT_CACHE", "").strip().lower() in (
+                    if os.environ.get(
+                        "VISIOMASTER_LOG_TRT_CACHE", ""
+                    ).strip().lower() in (
                         "1",
                         "true",
                         "yes",
@@ -1284,8 +1287,11 @@ class ModelsProcessor(QtCore.QObject):
                     e_fallback = e_ort_first
                     # Stale engines (e.g. copied from another GPU folder, incomplete write, TRT upgrade)
                     # deserialize badly — delete the cited file and retry TensorRT EP once before CUDA EP.
-                    if is_tensorrt_load and _ort_error_indicates_trt_engine_deserialize_failure(
-                        e_ort_first
+                    if (
+                        is_tensorrt_load
+                        and _ort_error_indicates_trt_engine_deserialize_failure(
+                            e_ort_first
+                        )
                     ):
                         bad_engine = _extract_tensorrt_engine_path_from_ort_error(
                             e_ort_first
@@ -1565,7 +1571,9 @@ class ModelsProcessor(QtCore.QObject):
                     if model_instance is not None:
                         print(f"[INFO] Unloading ONNX model: {k}")
                         self._model_last_used_mono.pop(k, None)
-                        self._ort_session_io_dtype_cache.pop(model_name_to_unload, None)
+                        # The I/O dtype map is left in place on purpose: callers that
+                        # still hold this session need it to finish binding. It is
+                        # invalidated by session identity, not by unload.
                         self.models[k] = None
                         del model_instance
                         unloaded = True
@@ -1603,46 +1611,51 @@ class ModelsProcessor(QtCore.QObject):
                     )
 
     def get_ort_session_io_numpy_dtype_maps(
-        self, model_name: str
+        self, model_name: str, session: Any = None
     ) -> Tuple[Dict[str, type], Dict[str, type]]:
         """Return ``(input_name -> np scalar type, output_name -> np scalar type)`` from the ONNX graph.
 
-        Types follow ORT ``NodeArg.type`` strings (e.g. ``tensor(float16)``). Cached until
-        ``unload_model`` removes the session.
+        Types follow ORT ``NodeArg.type`` strings (e.g. ``tensor(float16)``). Prefer passing
+        the InferenceSession the caller already holds so binding survives ``unload_model``
+        races (see ``resolve_session_io_dtype_maps``).
         """
         with self.model_lock:
-            cached = self._ort_session_io_dtype_cache.get(model_name)
-            if cached is not None:
-                return cached
-            session = self.models.get(self._ort_session_storage_key(model_name))
-            if session is None:
-                raise RuntimeError(f"No ONNX session loaded for {model_name!r}")
-            ins = {
-                i.name: _ort_warmup_numpy_dtype_for_input(i)
-                for i in session.get_inputs()
-            }
-            outs = {
-                o.name: _ort_warmup_numpy_dtype_for_input(o)
-                for o in session.get_outputs()
-            }
-            cached = (ins, outs)
-            self._ort_session_io_dtype_cache[model_name] = cached
-            return cached
+            return resolve_session_io_dtype_maps(
+                self._ort_session_io_dtype_cache,
+                model_name,
+                session
+                if session is not None
+                else self.models.get(self._ort_session_storage_key(model_name)),
+            )
 
     def get_ort_io_numpy_dtype(
-        self, model_name: str, tensor_name: str, *, is_output: bool
+        self,
+        model_name: str,
+        tensor_name: str,
+        *,
+        is_output: bool,
+        session: Any = None,
     ) -> type:
         """Declared numpy scalar type for one ONNX input or output (defaults to float32)."""
-        ins, outs = self.get_ort_session_io_numpy_dtype_maps(model_name)
+        ins, outs = self.get_ort_session_io_numpy_dtype_maps(
+            model_name, session=session
+        )
         table = outs if is_output else ins
         return table.get(tensor_name, np.float32)
 
     def get_ort_io_torch_dtype(
-        self, model_name: str, tensor_name: str, *, is_output: bool
+        self,
+        model_name: str,
+        tensor_name: str,
+        *,
+        is_output: bool,
+        session: Any = None,
     ) -> torch.dtype:
         """``torch.dtype`` matching the ONNX-declared type for I/O binding / buffers."""
         return _numpy_scalar_type_to_torch_dtype(
-            self.get_ort_io_numpy_dtype(model_name, tensor_name, is_output=is_output)
+            self.get_ort_io_numpy_dtype(
+                model_name, tensor_name, is_output=is_output, session=session
+            )
         )
 
     def bind_ort_io_input(
@@ -1654,12 +1667,17 @@ class ModelsProcessor(QtCore.QObject):
         *,
         device_type: Optional[str] = None,
         device_id: Optional[int] = None,
+        session: Any = None,
     ) -> torch.Tensor:
         """Cast ``tensor`` to ONNX-declared input dtype; ``bind_input`` with matching ``element_type``."""
         t = tensor.to(
-            dtype=self.get_ort_io_torch_dtype(model_name, input_name, is_output=False)
+            dtype=self.get_ort_io_torch_dtype(
+                model_name, input_name, is_output=False, session=session
+            )
         ).contiguous()
-        exp_np = self.get_ort_io_numpy_dtype(model_name, input_name, is_output=False)
+        exp_np = self.get_ort_io_numpy_dtype(
+            model_name, input_name, is_output=False, session=session
+        )
         dev_t = normalize_ort_bind_device_type(
             device_type if device_type is not None else self.get_ort_bind_device_type()
         )
@@ -1687,16 +1705,21 @@ class ModelsProcessor(QtCore.QObject):
         *,
         device_type: Optional[str] = None,
         device_id: Optional[int] = None,
+        session: Any = None,
     ) -> None:
         """Bind a preallocated device tensor as an ONNX output; dtype must match the graph."""
-        exp_td = self.get_ort_io_torch_dtype(model_name, output_name, is_output=True)
+        exp_td = self.get_ort_io_torch_dtype(
+            model_name, output_name, is_output=True, session=session
+        )
         if tensor.dtype != exp_td:
             raise TypeError(
                 f"{model_name}: output buffer {output_name!r} has dtype {tensor.dtype} but "
                 f"ONNX declares {exp_td}; allocate torch.empty(..., dtype={exp_td})."
             )
         t = tensor.contiguous()
-        exp_np = self.get_ort_io_numpy_dtype(model_name, output_name, is_output=True)
+        exp_np = self.get_ort_io_numpy_dtype(
+            model_name, output_name, is_output=True, session=session
+        )
         dev_t = normalize_ort_bind_device_type(
             device_type if device_type is not None else self.get_ort_bind_device_type()
         )
@@ -1741,15 +1764,17 @@ class ModelsProcessor(QtCore.QObject):
         if session is None:
             raise RuntimeError(f"Model {model_name} not loaded")
         io_binding = session.io_binding()
-        self.get_ort_session_io_numpy_dtype_maps(model_name)
+        self.get_ort_session_io_numpy_dtype_maps(model_name, session=session)
 
         for name, tensor in list(inputs.items()):
             inputs[name] = self.bind_ort_io_input(
-                io_binding, model_name, name, tensor
+                io_binding, model_name, name, tensor, session=session
             )
 
         for name, tensor in output_spec.items():
-            self.bind_ort_io_output(io_binding, model_name, name, tensor)
+            self.bind_ort_io_output(
+                io_binding, model_name, name, tensor, session=session
+            )
 
         is_lazy_build = self.check_and_clear_pending_build(model_name)
         if is_lazy_build:
@@ -1861,11 +1886,7 @@ class ModelsProcessor(QtCore.QObject):
     def _tensorrt_cache_root_for_physical(self, phys_ord: int) -> str:
         """``tensorrt-engines/gpu{N}`` for a concrete CUDA device ordinal (multi-GPU ORT)."""
         try:
-            n = (
-                int(torch.cuda.device_count())
-                if torch.cuda.is_available()
-                else 0
-            )
+            n = int(torch.cuda.device_count()) if torch.cuda.is_available() else 0
         except Exception:
             n = 0
         if n > 0:
@@ -1879,11 +1900,7 @@ class ModelsProcessor(QtCore.QObject):
         logical_pri = self.clamp_gpu_index(self.gpu_index)
         phys = self._logical_to_physical_cuda_index(logical_pri)
         try:
-            n = (
-                int(torch.cuda.device_count())
-                if torch.cuda.is_available()
-                else 0
-            )
+            n = int(torch.cuda.device_count()) if torch.cuda.is_available() else 0
         except Exception:
             n = 0
         gpu_idx = phys if n > 0 else logical_pri
@@ -2041,7 +2058,9 @@ class ModelsProcessor(QtCore.QObject):
             return [("CPUExecutionProvider")]
         raise ValueError(f"Unknown provider: {provider_name}")
 
-    def set_gpu_index(self, gpu_index: int, *, reconfigure_providers: bool = True) -> int:
+    def set_gpu_index(
+        self, gpu_index: int, *, reconfigure_providers: bool = True
+    ) -> int:
         resolved = self.clamp_gpu_index(gpu_index)
         self.gpu_index = resolved
         self._refresh_trt_options_for_gpu()
@@ -2242,7 +2261,11 @@ class ModelsProcessor(QtCore.QObject):
         routing. On Windows, ``nvidia-smi -i=N`` often uses a different GPU order than CUDA.
         """
         idx = int(cuda_index)
-        if not torch.cuda.is_available() or idx < 0 or idx >= int(torch.cuda.device_count()):
+        if (
+            not torch.cuda.is_available()
+            or idx < 0
+            or idx >= int(torch.cuda.device_count())
+        ):
             return 0, 0
         try:
             free_b, total_b = torch.cuda.mem_get_info(idx)
@@ -2253,9 +2276,7 @@ class ModelsProcessor(QtCore.QObject):
             try:
                 props = torch.cuda.get_device_properties(idx)
                 total_mb = max(1, int(props.total_memory) // (1024 * 1024))
-                used_mb = max(
-                    0, int(torch.cuda.memory_reserved(idx)) // (1024 * 1024)
-                )
+                used_mb = max(0, int(torch.cuda.memory_reserved(idx)) // (1024 * 1024))
                 return used_mb, total_mb
             except Exception:
                 return 0, 0
@@ -2282,9 +2303,7 @@ class ModelsProcessor(QtCore.QObject):
         rows = self.get_all_gpus_memory_mb()
         if not rows:
             return 0, 0
-        idx = self._logical_to_physical_cuda_index(
-            self.clamp_gpu_index(self.gpu_index)
-        )
+        idx = self._logical_to_physical_cuda_index(self.clamp_gpu_index(self.gpu_index))
         if idx < len(rows):
             return rows[idx][0], rows[idx][1]
         return rows[0][0], rows[0][1]
@@ -2814,9 +2833,7 @@ class ModelsProcessor(QtCore.QObject):
     def calc_hyperswap_latent(self, source_embedding):
         return self.face_swappers.calc_hyperswap_latent(source_embedding)
 
-    def run_hyperswap(
-        self, image, embedding, output, swapper_model="HyperSwap-v3"
-    ):
+    def run_hyperswap(self, image, embedding, output, swapper_model="HyperSwap-v3"):
         self.face_swappers.run_hyperswap(image, embedding, output, swapper_model)
 
     def run_swapper_ghostface_batched(
@@ -3326,8 +3343,8 @@ class ModelsProcessor(QtCore.QObject):
                     )
                     _ddim_sigmas = torch.from_numpy(_sig_np).float().to(self.device)
                     _ddim_alphas = torch.from_numpy(_alp_np).float().to(self.device)
-                    _ddim_alphas_prev = torch.from_numpy(_alp_prev_np).float().to(
-                        self.device
+                    _ddim_alphas_prev = (
+                        torch.from_numpy(_alp_prev_np).float().to(self.device)
                     )
                     _ddim_sqrt_1m = torch.sqrt(torch.clamp(1.0 - _ddim_alphas, min=0.0))
                     if len(self._ddim_schedule_cache) >= self._DDIM_CACHE_MAX:
@@ -3378,10 +3395,9 @@ class ModelsProcessor(QtCore.QObject):
                     latent_shape, dtype=torch.float32, device=self.device
                 )
                 unet_input_uncond = torch.empty_like(unet_input_cond)
-                false_tensor_for_unet = (
-                    torch.tensor([False], dtype=torch.bool, device=self.device)
-                    .contiguous()
-                )
+                false_tensor_for_unet = torch.tensor(
+                    [False], dtype=torch.bool, device=self.device
+                ).contiguous()
             else:
                 e_t_uncond = None
                 unet_input_uncond = None

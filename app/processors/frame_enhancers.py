@@ -177,9 +177,15 @@ class FrameEnhancers:
             n_img1 = in_meta[1].name
             n_ts = in_meta[2].name
             n_out = out_meta[0].name
-            td_ts = self.models_processor.get_ort_io_torch_dtype(mk, n_ts, is_output=False)
-            td_out = self.models_processor.get_ort_io_torch_dtype(mk, n_out, is_output=True)
-            out_t = torch.empty((1, 3, ph, pw), dtype=td_out, device=device_torch).contiguous()
+            td_ts = self.models_processor.get_ort_io_torch_dtype(
+                mk, n_ts, is_output=False, session=ort_session
+            )
+            td_out = self.models_processor.get_ort_io_torch_dtype(
+                mk, n_out, is_output=True, session=ort_session
+            )
+            out_t = torch.empty(
+                (1, 3, ph, pw), dtype=td_out, device=device_torch
+            ).contiguous()
             ts = torch.tensor([timestep], dtype=td_ts, device=device_torch).contiguous()
 
             if self.models_processor.uses_cuda_ep_for_thread():
@@ -188,16 +194,40 @@ class FrameEnhancers:
                 dt = self.models_processor.get_ort_bind_device_type()
                 cuda_id = self.models_processor.get_ort_bind_input_cuda_device_id()
                 t0 = self.models_processor.bind_ort_io_input(
-                    io_binding, mk, n_img0, t0, device_type=dt, device_id=cuda_id
+                    io_binding,
+                    mk,
+                    n_img0,
+                    t0,
+                    device_type=dt,
+                    device_id=cuda_id,
+                    session=ort_session,
                 )
                 t1 = self.models_processor.bind_ort_io_input(
-                    io_binding, mk, n_img1, t1, device_type=dt, device_id=cuda_id
+                    io_binding,
+                    mk,
+                    n_img1,
+                    t1,
+                    device_type=dt,
+                    device_id=cuda_id,
+                    session=ort_session,
                 )
                 ts = self.models_processor.bind_ort_io_input(
-                    io_binding, mk, n_ts, ts, device_type=dt, device_id=cuda_id
+                    io_binding,
+                    mk,
+                    n_ts,
+                    ts,
+                    device_type=dt,
+                    device_id=cuda_id,
+                    session=ort_session,
                 )
                 self.models_processor.bind_ort_io_output(
-                    io_binding, mk, n_out, out_t, device_type=dt, device_id=cuda_id
+                    io_binding,
+                    mk,
+                    n_out,
+                    out_t,
+                    device_type=dt,
+                    device_id=cuda_id,
+                    session=ort_session,
                 )
                 self._run_model_with_lazy_build_check(mk, ort_session, io_binding)
                 torch.cuda.current_stream().synchronize()
@@ -214,7 +244,9 @@ class FrameEnhancers:
                         return tc.to(bind_dev, non_blocking=False).contiguous()
                     return tc
 
-                out_b = torch.empty((1, 3, ph, pw), dtype=td_out, device=bind_dev).contiguous()
+                out_b = torch.empty(
+                    (1, 3, ph, pw), dtype=td_out, device=bind_dev
+                ).contiguous()
                 self.models_processor.run_onnx_io_binding(
                     mk,
                     {n_img0: _to_bind(t0), n_img1: _to_bind(t1), n_ts: _to_bind(ts)},
@@ -227,7 +259,9 @@ class FrameEnhancers:
             out_crop = out_t[:, :, :h0, :w0]
             return self._rgb01_nchw_to_bgr_hwc_uint8(out_crop)
         except Exception as e:
-            print(f"[WARN] RIFE preview interpolation failed, using blend fallback: {e}")
+            print(
+                f"[WARN] RIFE preview interpolation failed, using blend fallback: {e}"
+            )
             return (
                 img0_bgr.astype(np.float32) * (1.0 - timestep)
                 + img1_bgr.astype(np.float32) * timestep
@@ -433,10 +467,18 @@ class FrameEnhancers:
         output_name = ort_session.get_outputs()[0].name
 
         image = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, input_name, image
+            io_binding,
+            model_name,
+            input_name,
+            image,
+            session=ort_session,
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, model_name, output_name, output
+            io_binding,
+            model_name,
+            output_name,
+            output,
+            session=ort_session,
         )
 
         # Nota: no sincronizar aquí por tesela — run_with_iobinding ya bloquea al completar
@@ -638,11 +680,7 @@ class FrameEnhancers:
             ):
                 # SPAN es más ligero que RRDB: teselas mayores = menos pasadas ORT y mejor FPS.
                 # 1024→4096 de salida ~201 MiB float32; suele caber; si hay OOM, bajar a 768.
-                tile_size = (
-                    1024
-                    if enhancer_type in ("SPAN-4x", "SPAN-F-4x")
-                    else 512
-                )
+                tile_size = 1024 if enhancer_type in ("SPAN-4x", "SPAN-F-4x") else 512
 
                 if (
                     enhancer_type == "RealEsrgan-x2-Plus"
@@ -804,7 +842,9 @@ class FrameEnhancers:
                     case "DDColor":
                         self.run_ddcolor(tensor_gray_rgb, output_ab)  # Safe wrapper
 
-                output_ab = output_ab.squeeze(0).float()  # (2, render_factor, render_factor)
+                output_ab = output_ab.squeeze(
+                    0
+                ).float()  # (2, render_factor, render_factor)
 
                 t_resize_o = self._get_cached_resize_enhance(
                     img.size(1),

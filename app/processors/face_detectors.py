@@ -188,7 +188,8 @@ class FaceDetectors:
 
         # Use float for det_scale calculation initially for precision
         det_scale = torch.tensor(
-            new_height / float(img_height), device=self.models_processor.get_effective_torch_device()
+            new_height / float(img_height),
+            device=self.models_processor.get_effective_torch_device(),
         )
 
         resize = self._get_cached_resize_det_prep(new_height, new_width)
@@ -475,7 +476,8 @@ class FaceDetectors:
                 )
             else:
                 bindex = torch.arange(
-                    det_boxes.shape[0], device=self.models_processor.get_effective_torch_device()
+                    det_boxes.shape[0],
+                    device=self.models_processor.get_effective_torch_device(),
                 )[:max_num]
                 det_boxes = det_boxes[bindex]
                 det_kpss = det_kpss[bindex]
@@ -747,7 +749,9 @@ class FaceDetectors:
 
             self.models_processor.run_session_with_iobinding(ort_session, io_binding)
 
-            if os.environ.get("VISIOMASTER_ORT_IOBINDING_POST_SYNC", "").strip().lower() in (
+            if os.environ.get(
+                "VISIOMASTER_ORT_IOBINDING_POST_SYNC", ""
+            ).strip().lower() in (
                 "1",
                 "true",
                 "yes",
@@ -1225,7 +1229,11 @@ class FaceDetectors:
 
             io_binding = ort_session.io_binding()
             aimg = self.models_processor.bind_ort_io_input(
-                io_binding, model_name, "input.1", aimg
+                io_binding,
+                model_name,
+                "input.1",
+                aimg,
+                session=ort_session,
             )
             for i in [
                 "448",
@@ -1410,7 +1418,11 @@ class FaceDetectors:
             io_binding = ort_session.io_binding()
 
             aimg = self.models_processor.bind_ort_io_input(
-                io_binding, model_name, input_name, aimg
+                io_binding,
+                model_name,
+                input_name,
+                aimg,
+                session=ort_session,
             )
             for name in output_names:
                 self.models_processor.bind_ort_output_dynamic(io_binding, name)
@@ -1588,7 +1600,11 @@ class FaceDetectors:
 
             io_binding = ort_session.io_binding()
             aimg_prepared = self.models_processor.bind_ort_io_input(
-                io_binding, model_name, "images", aimg_prepared
+                io_binding,
+                model_name,
+                "images",
+                aimg_prepared,
+                session=ort_session,
             )
             self.models_processor.bind_ort_output_dynamic(io_binding, "output0")
             # Run the model with lazy build handling
@@ -1772,7 +1788,11 @@ class FaceDetectors:
 
             io_binding = ort_session.io_binding()
             aimg_prepared = self.models_processor.bind_ort_io_input(
-                io_binding, model_name, "images", aimg_prepared
+                io_binding,
+                model_name,
+                "images",
+                aimg_prepared,
+                session=ort_session,
             )
             self.models_processor.bind_ort_output_dynamic(io_binding, "output0")
             net_outs = self._run_model_with_lazy_build_check(
@@ -1903,7 +1923,11 @@ class FaceDetectors:
             io_binding = ort_session.io_binding()
 
             aimg_prepared = self.models_processor.bind_ort_io_input(
-                io_binding, model_name, input_name, aimg_prepared
+                io_binding,
+                model_name,
+                input_name,
+                aimg_prepared,
+                session=ort_session,
             )
             for name in output_names:
                 self.models_processor.bind_ort_output_dynamic(io_binding, name)
