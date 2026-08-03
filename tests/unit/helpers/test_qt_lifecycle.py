@@ -62,3 +62,58 @@ def test_checked_input_face_buttons_skips_destroyed_cards():
     )
 
     assert swap_all_match.checked_input_face_buttons(main_window) == [alive]
+
+
+def test_checked_input_face_buttons_follows_list_widget_order():
+    from PySide6 import QtWidgets
+
+    _ = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    faces_list = QtWidgets.QListWidget()
+    fav_list = QtWidgets.QListWidget()
+
+    def _add(list_widget, name, checked):
+        btn = QtWidgets.QPushButton(name)
+        btn.setCheckable(True)
+        btn.setChecked(checked)
+        btn.list_widget = list_widget
+        item = QtWidgets.QListWidgetItem(list_widget)
+        list_widget.setItemWidget(item, btn)
+        return btn
+
+    # Dict insertion order deliberately differs from visual order.
+    fav_b = _add(fav_list, "fav_b", True)
+    face_a = _add(faces_list, "face_a", True)
+    fav_a = _add(fav_list, "fav_a", True)
+    # Visual fav order is fav_b then fav_a (add order). Faces list: face_a.
+    main_window = SimpleNamespace(
+        input_faces={"x": fav_b, "y": face_a, "z": fav_a},
+        inputFacesList=faces_list,
+        inputFacesFavoritesList=fav_list,
+    )
+    ordered = swap_all_match.checked_input_face_buttons(main_window)
+    assert [b.text() for b in ordered] == ["face_a", "fav_b", "fav_a"]
+
+
+def test_clear_checked_inputs_outside_list():
+    from PySide6 import QtWidgets
+
+    _ = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    faces_list = QtWidgets.QListWidget()
+    fav_list = QtWidgets.QListWidget()
+
+    def _add(list_widget, checked=True):
+        btn = QtWidgets.QPushButton()
+        btn.setCheckable(True)
+        btn.setChecked(checked)
+        btn.list_widget = list_widget
+        item = QtWidgets.QListWidgetItem(list_widget)
+        list_widget.setItemWidget(item, btn)
+        return btn
+
+    face = _add(faces_list)
+    fav = _add(fav_list)
+    main_window = SimpleNamespace(input_faces={"f": face, "v": fav})
+    swap_all_match.clear_checked_inputs_outside_list(main_window, fav_list, keep=fav)
+    assert face.isChecked() is False
+    assert fav.isChecked() is True

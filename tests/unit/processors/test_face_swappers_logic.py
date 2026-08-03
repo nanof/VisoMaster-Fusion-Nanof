@@ -133,6 +133,17 @@ def test_hyperswap_exposed_in_swap_model_selection():
         assert f'"{name}"' in text
 
 
+def test_simswap_crossface_exposed_in_swap_model_selection():
+    from pathlib import Path
+
+    text = Path("app/ui/widgets/swapper_layout_data.py").read_text(encoding="utf-8")
+    assert '"SimSwap512-CrossFace"' in text
+    from app.processors.models_data import arcface_mapping_model_dict
+
+    assert arcface_mapping_model_dict["SimSwap512-CrossFace"] == "Inswapper128ArcFace"
+    assert arcface_mapping_model_dict["SimSwap512"] == "SimSwapArcFace"
+
+
 def test_hyperswap_models_are_fp16_safe():
     from app.processors.models_data import fp16_safe_models_list
 

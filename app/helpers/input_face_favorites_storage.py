@@ -18,6 +18,29 @@ if TYPE_CHECKING:
 _MANIFEST = "favorites_manifest.json"
 _VERSION = 1
 
+# Legacy manifests stored a display label ("Favorite (Input Faces · C:/…/face.jpg)") in
+# media_path, which broke the on-demand ArcFace recompute in
+# InputFaceCardButton.get_embedding: without a readable source file it falls back to
+# approximate keypoints on the 112 px thumbnail and yields a different identity.
+_LABEL_SEPARATOR = "\u00b7"
+
+
+def resolve_source_media_path(media_path: str) -> str | None:
+    """Readable source file behind a favorite's ``media_path``, or ``None``.
+
+    Accepts both a plain path and the legacy ``Favorite (… · <path>)`` label.
+    """
+    if not media_path:
+        return None
+    raw = str(media_path)
+    if Path(raw).is_file():
+        return raw
+    if _LABEL_SEPARATOR in raw:
+        candidate = raw.split(_LABEL_SEPARATOR, 1)[1].strip().rstrip(")").strip()
+        if candidate and Path(candidate).is_file():
+            return candidate
+    return None
+
 
 def favorites_dir(main_window: "MainWindow") -> Path:
     p = main_window.project_root_path / "input_face_favorites"
@@ -135,6 +158,13 @@ def load_persisted_favorites(main_window: "MainWindow") -> None:
         return
 
     manifest = _prune_manifest_missing_dirs(d, _read_manifest(d))
+    # Migrate legacy label entries to the real source path so ArcFace models that were
+    # not stored at import time can still be recomputed from the original media.
+    for entry in manifest.get("items", []):
+        stored = str(entry.get("media_path", ""))
+        resolved = resolve_source_media_path(stored)
+        if resolved and resolved != stored:
+            entry["media_path"] = resolved
     try:
         _write_manifest(d, manifest)
     except OSError:

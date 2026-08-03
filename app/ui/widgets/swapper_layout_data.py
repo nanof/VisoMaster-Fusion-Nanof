@@ -17,6 +17,7 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
                 "InStyleSwapper256 Version C",
                 "DeepFaceLive (DFM)",
                 "SimSwap512",
+                "SimSwap512-CrossFace",
                 "GhostFace-v1",
                 "GhostFace-v2",
                 "GhostFace-v3",
@@ -28,6 +29,9 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "default": "Inswapper128",
             "help": (
                 "Choose which swapper model to use for face swapping. "
+                "SimSwap512-CrossFace runs the same SimSwap512 network but maps "
+                "Inswapper128ArcFace (w600k) embeddings through CrossFaceSimSwap "
+                "(FaceFusion-style), instead of SimSwapArcFace. "
                 "HyperSwap-v1/v2/v3 are FaceFusion Labs 256 px models (ONNX 1a/1b/1c): "
                 "v1 is fastest, v2 balanced, v3 targets highest quality. "
                 "HyperSwap uses ArcFace HyperSwapArcFace automatically (w600k with FaceFusion "

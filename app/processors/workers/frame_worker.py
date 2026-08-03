@@ -2601,7 +2601,14 @@ class FrameWorker(threading.Thread):
     def _restorer_infer_cache_key(
         parameters: dict, control: dict, effective_restorer_type: str
     ) -> tuple:
-        """Primary-restorer inputs that affect NN output — excludes blend / auto-blend UI."""
+        """Primary-restorer inputs that affect NN output — excludes blend / auto-blend UI.
+
+        SwapModelSelection / SwapperResSelection are included because different
+        swappers (and resolutions) use different alignment templates; reusing a
+        restored crop from another swapper pastes it with the new tform and the
+        face looks shifted in paused single-frame preview (play mode never hits
+        this cache).
+        """
         return (
             str(effective_restorer_type),
             str(parameters.get("FaceRestorerDetTypeSelection", "")),
@@ -2612,6 +2619,40 @@ class FrameWorker(threading.Thread):
             float(parameters.get("FaceRestorerUltraLightScaleGeDecimalSlider", 2.0)),
             bool(parameters.get("FaceRestorerUltraLightPreferFp16Toggle", True)),
             float(control.get("DetectorScoreSlider", 0.5)),
+            str(parameters.get("SwapModelSelection", "")),
+            str(parameters.get("SwapperResSelection", "")),
+        )
+
+    @staticmethod
+    def _restorer_infer_swap_fingerprint(swap: torch.Tensor) -> tuple:
+        """Cheap content id for the pre-restorer swap crop (blend-slider fast path).
+
+        Only blend / auto-blend UI should keep the cached NN output; any change to
+        the swapped face (model, expression, masks feeding the crop, etc.) must miss.
+        """
+        t = swap.detach()
+        if t.dim() != 3:
+            return ("invalid", int(t.numel()))
+        # Mean/std on GPU is fine; corner+center samples catch most geometry shifts.
+        tf = t.float()
+        c, h, w = int(tf.shape[0]), int(tf.shape[1]), int(tf.shape[2])
+        cy, cx = h // 2, w // 2
+        samples = (
+            float(tf[0, 0, 0]),
+            float(tf[0, 0, w - 1]),
+            float(tf[0, h - 1, 0]),
+            float(tf[0, h - 1, w - 1]),
+            float(tf[0, cy, cx]),
+            float(tf[min(1, c - 1), cy, cx]),
+            float(tf[min(2, c - 1), cy, cx]),
+        )
+        return (
+            c,
+            h,
+            w,
+            float(tf.mean()),
+            float(tf.std(unbiased=False)),
+            samples,
         )
 
     def _try_reuse_cached_primary_restorer_output(
@@ -2619,6 +2660,7 @@ class FrameWorker(threading.Thread):
         *,
         infer_key: tuple,
         face_bucket_id: int | None,
+        swap_fingerprint: tuple,
     ) -> torch.Tensor | None:
         if not self.is_single_frame:
             return None
@@ -2630,6 +2672,7 @@ class FrameWorker(threading.Thread):
             cache.get("frame_number") != self.frame_number
             or cache.get("face_bucket_id") != bucket
             or cache.get("infer_key") != infer_key
+            or cache.get("swap_fingerprint") != swap_fingerprint
         ):
             return None
         cached = cache.get("swap_restorecalc")
@@ -2644,6 +2687,7 @@ class FrameWorker(threading.Thread):
         *,
         infer_key: tuple,
         face_bucket_id: int | None,
+        swap_fingerprint: tuple,
     ) -> None:
         if not self.is_single_frame:
             return
@@ -2653,6 +2697,7 @@ class FrameWorker(threading.Thread):
             "frame_number": self.frame_number,
             "face_bucket_id": bucket,
             "infer_key": infer_key,
+            "swap_fingerprint": swap_fingerprint,
             # CPU staging: blend-only reuse without pinning another 512² GPU tensor.
             "swap_restorecalc": swap_restorecalc.detach().cpu().contiguous().clone(),
         }
@@ -9089,9 +9134,11 @@ class FrameWorker(threading.Thread):
                 )
                 raise _GatherPrePrimaryRestorer()
             infer_key = self._restorer_infer_cache_key(parameters, control, _rt1)
+            swap_fp = self._restorer_infer_swap_fingerprint(swap)
             cached_restorecalc = self._try_reuse_cached_primary_restorer_output(
                 infer_key=infer_key,
                 face_bucket_id=face_restorer_param_bucket_id,
+                swap_fingerprint=swap_fp,
             )
             if cached_restorecalc is not None:
                 swap_restorecalc = cached_restorecalc
@@ -9110,6 +9157,7 @@ class FrameWorker(threading.Thread):
                     swap_restorecalc,
                     infer_key=infer_key,
                     face_bucket_id=face_restorer_param_bucket_id,
+                    swap_fingerprint=swap_fp,
                 )
         elif _swap_restore_needs_clone:
             swap_restorecalc = swap.clone()

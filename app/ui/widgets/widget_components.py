@@ -22,10 +22,12 @@ from app.ui.widgets.actions import card_actions
 from app.ui.widgets.actions import save_load_actions
 import app.helpers.miscellaneous as misc_helpers
 from app.helpers import qt_lifecycle
+from app.helpers.input_face_favorites_storage import resolve_source_media_path
 from app.helpers.miscellaneous import get_video_rotation
 from app.helpers.swap_all_match import (
     swap_all_assignment_mode,
     swap_all_match_active,
+    clear_checked_inputs_outside_list,
 )
 from app.helpers.screen_capture import (
     create_screen_capture_from_control,
@@ -969,24 +971,31 @@ class TargetFaceCardButton(CardButton):
         if len(all_input_embeddings) > 0:
             self.assigned_input_embedding = {}
             for model in all_embedding_swap_models:
+                # "kps_5" shares the store with the ArcFace vectors but holds pixel
+                # coordinates, so it must never go through the embedding merge.
+                if model == "kps_5":
+                    continue
+
                 # Gather all embeddings for the current swap model
                 embeddings_to_merge = [
-                    store[model] for store in all_input_embeddings if model in store
+                    store[model]
+                    for store in all_input_embeddings
+                    if isinstance(store.get(model), np.ndarray)
+                    and np.asarray(store[model]).ndim == 1
                 ]
+                if not embeddings_to_merge:
+                    continue
 
-                # 1. Apply Mean or Median
-                if control["EmbMergeMethodSelection"] == "Mean":
-                    merged_emb = np.mean(embeddings_to_merge, axis=0)
-                elif control["EmbMergeMethodSelection"] == "Median":
+                if control["EmbMergeMethodSelection"] == "Median":
                     merged_emb = np.median(embeddings_to_merge, axis=0)
                 else:
-                    merged_emb = np.mean(embeddings_to_merge, axis=0)  # Fallback
+                    merged_emb = np.mean(embeddings_to_merge, axis=0)
 
-                # 2. Apply L2 Normalization
-                norm = np.linalg.norm(merged_emb)
-                if norm > 0:
-                    merged_emb = merged_emb / norm
-
+                # The raw ArcFace magnitude is part of the identity signal for swappers
+                # whose calc_swapper_latent_* does not renormalize (GhostFace uses the
+                # vector as-is, CSCS sums two unit vectors). Forcing unit norm here
+                # collapsed GhostFace identity transfer and disagreed with
+                # FrameWorker._resolve_swap_source_embedding, which averages raw vectors.
                 self.assigned_input_embedding[model] = merged_emb
 
         else:
@@ -1387,6 +1396,8 @@ class InputFaceCardButton(CardButton):
         self.is_favorite_clip = bool(kwargs.get("is_favorite_clip", False))
         self.random_fixed = False
         self._base_tooltip = str(media_path)
+        if self.is_favorite_clip:
+            self._base_tooltip = f"Favorite \u00b7 {self._base_tooltip}"
 
         self.setCheckable(True)
         self.setToolTip(self._base_tooltip)
@@ -1417,12 +1428,13 @@ class InputFaceCardButton(CardButton):
 
         kps = self.embedding_store.get("kps_5")
         kps_valid = isinstance(kps, np.ndarray) and kps.size >= 10
-        media_ok = bool(self.media_path) and os.path.isfile(str(self.media_path))
+        # Favorites saved by older builds keep a display label here instead of a path.
+        source_path = resolve_source_media_path(str(self.media_path or ""))
 
         try:
             device = self.main_window.models_processor.device
-            if kps_valid and media_ok:
-                frame_bgr = misc_helpers.read_image_file(self.media_path)
+            if kps_valid and source_path:
+                frame_bgr = misc_helpers.read_image_file(source_path)
                 if frame_bgr is None or frame_bgr.size == 0:
                     return np.array([])
                 src_kps = np.asarray(kps, dtype=np.float32)
@@ -1524,6 +1536,13 @@ class InputFaceCardButton(CardButton):
 
         # Swap-all uses the checked pool only; do not blend into assigned_input_faces.
         swap_all = swap_all_match_active(main_window.control)
+        # Favorites and Faces share input_faces; keep the swap-all pool on one list
+        # so Ctrl/Shift selection in Favorites is not polluted by Faces checks (and
+        # vice versa). Index mode also needs a single visual order.
+        if swap_all:
+            clear_checked_inputs_outside_list(
+                main_window, self.list_widget, keep=self
+            )
 
         if main_window.cur_selected_target_face_button:
             cur_selected_target_face_button = (
@@ -1712,6 +1731,9 @@ class InputFaceCardButton(CardButton):
             main_window, "delete input faces"
         ):
             return
+        if self.is_favorite_clip:
+            self.remove_input_face_from_list()
+            return
         self.remove_kv_data_file()
         self._remove_face_from_lists()
 
@@ -1831,6 +1853,9 @@ class InputFaceCardButton(CardButton):
         )
         self.create_embed_action.setEnabled(not scan_active)
         self.remove_action.setEnabled(not scan_active)
+        # A favorite points at the original media, which it only reads to recompute
+        # embeddings; discarding the favorite must never trash that file.
+        self.delete_action.setVisible(not self.is_favorite_clip)
         self.delete_action.setEnabled(not scan_active)
         self.random_fixed_action.setText(
             "Unpin fixed for random (Ctrl+Alt+Left-click)"
@@ -2119,18 +2144,13 @@ class CreateEmbeddingDialog(QtWidgets.QDialog):
         # Calculate the merged embedding for each arcface model
         final_embedding_store = {}
         for swap_model, embeddings in merged_embedding_store.items():
-            if self.merge_type == "Mean":
-                merged_emb = np.mean(embeddings, axis=0)
-            elif self.merge_type == "Median":
+            if self.merge_type == "Median":
                 merged_emb = np.median(embeddings, axis=0)
             else:
-                merged_emb = np.mean(embeddings, axis=0)  # Fallback
+                merged_emb = np.mean(embeddings, axis=0)
 
-            # Apply L2 Normalization ONLY to standard latent embeddings
-            norm = np.linalg.norm(merged_emb)
-            if norm > 0:
-                merged_emb = merged_emb / norm
-
+            # Keep the raw ArcFace magnitude: GhostFace and CSCS consume the vector
+            # without renormalizing it (see calc_swapper_latent_ghost / _cscs).
             final_embedding_store[swap_model] = merged_emb
 
         # Process kps_5 spatial averaging (Always use Mean, never L2 Normalize)

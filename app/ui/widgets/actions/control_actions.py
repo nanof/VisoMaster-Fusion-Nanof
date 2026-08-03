@@ -84,11 +84,19 @@ def on_swap_model_selection_change(main_window: "MainWindow", new_model: str):
     HyperSwap identity uses a different align than Inswapper128ArcFace on the same
     w600k ONNX. Cached vectors from a previous session must not stick after the user
     changes the swapper.
+
+    Also drop the paused-preview primary-restorer cache: it used to key only on
+    restorer params, so a swapper change could paste an old restored crop with the
+    new alignment tform (face looks shifted until play).
     """
     from app.helpers.hyperswap_embedding import (
         HYPERSWAP_SWAPPER_MODELS,
         invalidate_hyperswap_arcface_embeddings,
     )
+
+    video_processor = getattr(main_window, "video_processor", None)
+    if video_processor is not None:
+        video_processor.clear_restorer_infer_cache()
 
     cleared = invalidate_hyperswap_arcface_embeddings(main_window)
     if cleared and new_model in HYPERSWAP_SWAPPER_MODELS:
@@ -721,6 +729,10 @@ def handle_restorer_state_change(
             if active_model_attr:
                 setattr(face_restorers_manager, active_model_attr, None)
 
+    video_processor = getattr(main_window, "video_processor", None)
+    if video_processor is not None:
+        video_processor.clear_restorer_infer_cache()
+
     if new_value and model_type:
         apply_restorer_required_global_settings(main_window, str(model_type))
 
@@ -797,7 +809,14 @@ def handle_model_selection_change(
     elif active_model_attr:
         setattr(face_restorers_manager, active_model_attr, None)
 
+    video_processor = getattr(main_window, "video_processor", None)
+    if video_processor is not None:
+        video_processor.clear_restorer_infer_cache()
+
     apply_restorer_required_global_settings(main_window, str(new_model_type))
+    # update_parameter refreshes before this loader runs; re-preview once the
+    # restorer session is ready so paused frames are not left on a stale crop.
+    common_widget_actions.refresh_frame(main_window)
 
 
 def handle_landmark_state_change(
