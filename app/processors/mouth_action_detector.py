@@ -12,6 +12,7 @@ is safe to call from multiple FrameWorker threads.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import threading
@@ -33,6 +34,48 @@ _TRIGGER_LABEL_INDEX: int = 1
 
 # Detection input size expected by the model (width, height)
 _DETECTION_INPUT_SIZE: tuple[int, int] = (320, 320)
+
+
+@contextlib.contextmanager
+def _tensorflow_import_guard():
+    """Temporarily silence Shiboken's ``feature_imported`` during TF import.
+
+    PySide6 inspects every newly imported module. During ``import tensorflow``,
+    ``six.moves`` trips that hook and raises
+    ``AttributeError: '_SixMetaPathImporter' object has no attribute '_path'``
+    (often via torch.package's patched ``inspect.getfile``). Disabling the hook
+    only for the import keeps Auto Mouth usable without affecting the rest of Qt.
+    """
+    patches: list[tuple[Any, str, Any]] = []
+    try:
+        import shibokensupport.feature as _shibo_feat
+        import shibokensupport.signature.loader as _shibo_loader
+
+        for mod in (_shibo_feat, _shibo_loader):
+            if hasattr(mod, "feature_imported"):
+                patches.append((mod, "feature_imported", mod.feature_imported))
+                setattr(mod, "feature_imported", lambda *a, **k: None)
+    except Exception:  # noqa: BLE001
+        patches = []
+
+    # Also undo torch.package's inspect.getfile patch while TF/six load.
+    import inspect as _inspect
+
+    _getfile_prev = _inspect.getfile
+    try:
+        import torch.package.package_importer as _pi
+
+        if getattr(_pi, "_orig_getfile", None) is not None:
+            _inspect.getfile = _pi._orig_getfile
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        yield
+    finally:
+        _inspect.getfile = _getfile_prev
+        for mod, name, original in patches:
+            setattr(mod, name, original)
 
 
 class MouthActionDetector:
@@ -66,12 +109,22 @@ class MouthActionDetector:
     # ------------------------------------------------------------------
     @classmethod
     def get(cls) -> "MouthActionDetector":
-        """Return the shared singleton, creating and loading it on first call."""
+        """Return the shared singleton, creating and loading it on first call.
+
+        A failed load still installs the singleton so every frame does not
+        retry a broken TensorFlow import.
+        """
         if cls._instance is None:
             with cls._class_lock:
                 if cls._instance is None:
                     inst = cls()
-                    inst._lazy_load()
+                    try:
+                        inst._lazy_load()
+                    except Exception as exc:  # noqa: BLE001
+                        inst._load_error = (
+                            f"Mouth action detector failed to initialise: {exc}"
+                        )
+                        logger.warning(inst._load_error)
                     cls._instance = inst
         return cls._instance
 
@@ -84,11 +137,18 @@ class MouthActionDetector:
         os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 
         try:
-            import tensorflow as tf
+            with _tensorflow_import_guard():
+                import tensorflow as tf
         except ImportError:
             self._load_error = (
                 "tensorflow is not installed — mouth action detection disabled. "
                 "Run: pip install tensorflow"
+            )
+            logger.warning(self._load_error)
+            return
+        except Exception as exc:  # noqa: BLE001
+            self._load_error = (
+                f"tensorflow import failed — mouth action detection disabled: {exc}"
             )
             logger.warning(self._load_error)
             return
