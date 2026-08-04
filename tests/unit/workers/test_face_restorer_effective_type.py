@@ -67,6 +67,8 @@ def test_restorer_infer_cache_key_ignores_blend_slider():
         "FaceRestorerUltraLightOnSmallFaceToggle": False,
         "FaceRestorerUltraLightScaleGeDecimalSlider": 2.0,
         "FaceRestorerUltraLightPreferFp16Toggle": True,
+        "SwapModelSelection": "Inswapper128",
+        "SwapperResSelection": "128",
     }
     control = {"DetectorScoreSlider": 0.5}
     key_a = FrameWorker._restorer_infer_cache_key(
@@ -77,3 +79,35 @@ def test_restorer_infer_cache_key_ignores_blend_slider():
     )
     assert key_a == key_b
     assert "GPEN-512" in key_a
+
+
+def test_restorer_infer_cache_key_changes_with_swapper():
+    base_params = {
+        "FaceRestorerDetTypeSelection": "Original",
+        "FaceFidelityWeightDecimalSlider": 0.9,
+        "FaceRestorerUltraLightOnnxToggle": False,
+        "FaceRestorerUltraLightOnLiveToggle": True,
+        "FaceRestorerUltraLightOnSmallFaceToggle": False,
+        "FaceRestorerUltraLightScaleGeDecimalSlider": 2.0,
+        "FaceRestorerUltraLightPreferFp16Toggle": True,
+        "SwapperResSelection": "128",
+    }
+    control = {"DetectorScoreSlider": 0.5}
+    key_a = FrameWorker._restorer_infer_cache_key(
+        {**base_params, "SwapModelSelection": "Inswapper128"}, control, "GPEN-512"
+    )
+    key_b = FrameWorker._restorer_infer_cache_key(
+        {**base_params, "SwapModelSelection": "GhostFace-v2"}, control, "GPEN-512"
+    )
+    assert key_a != key_b
+
+
+def test_restorer_infer_swap_fingerprint_changes_with_content():
+    import torch
+
+    a = torch.zeros(3, 8, 8)
+    b = a.clone()
+    b[0, 4, 4] = 255
+    assert FrameWorker._restorer_infer_swap_fingerprint(
+        a
+    ) != FrameWorker._restorer_infer_swap_fingerprint(b)

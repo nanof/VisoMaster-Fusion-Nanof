@@ -914,8 +914,10 @@ def add_input_faces_selection_to_favorites(
         mp = btn.media_path
         if not isinstance(mp, str):
             mp = str(mp)
-        label = f"Favorite (Input Faces · {mp})"
-        _copy_payload_to_favorites_list(main_window, cropped, embedding_store, label)
+        # Store the real source path: InputFaceCardButton.get_embedding re-reads it to
+        # compute ArcFace models that were not stored at import time (GhostArcFace,
+        # SimSwapArcFace, …). The "Favorite" wording is added to the tooltip instead.
+        _copy_payload_to_favorites_list(main_window, cropped, embedding_store, mp)
         added += 1
 
     if added == 0:

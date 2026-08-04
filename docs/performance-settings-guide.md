@@ -140,6 +140,8 @@ Useful environment variables for measurement: `VISIOMASTER_PERF_BUNDLE=1`, and a
 
 **TensorRT (ORT EP) — perfiles de batch dinámico:** al cargar modelos con el proveedor TensorRT, Fusion puede fusionar `trt_profile_min_shapes` / `opt` / `max` para rutas que usan **batch variable** (LivePortrait motion/stitch/eye/lip, Inswapper128 batched, GhostFace/HyperSwap batched, ArcFace batched). Si la compilación TRT falla (nombre de input distinto en tu ONNX), usa `VISIOMASTER_TRT_NO_DYNAMIC_PROFILES=1` o ajusta los `VISIOMASTER_TRT_MAX_BATCH_*`. Detalle en `docs/agent-architecture.md` (tabla de variables).
 
+**GhostFace / HyperSwap — Swap All (batch ORT 256):** el path multi-cara usa el mismo contrato I/O que la inferencia cara a cara: tensores `target`/`output` en **[-1, 1]** (no `[0, 1]` como Inswapper128 batched). Tras un fallo de batch HyperSwap, Fusion desactiva nuevos intentos batched en esa sesión y cae a secuencial.
+
 ---
 
 ## 8. Backlog de optimización (código / pipeline)

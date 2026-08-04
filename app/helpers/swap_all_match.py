@@ -32,15 +32,68 @@ def swap_all_assignment_mode(control: Mapping[str, object]) -> str:
 def checked_input_face_buttons(main_window: "MainWindow") -> list:
     """Ordered checked input-face cards.
 
+    Order follows the Faces list, then the Favorites list (each in widget order).
+    Dict insertion order is not reliable once favorites share ``input_faces`` with
+    the main list — swap-all by index would otherwise assign the wrong inputs.
+
     Cards destroyed by a list clear can still sit in ``input_faces``; reading
     them raises from shiboken, which would kill the calling worker thread, so
     they are treated as unchecked.
     """
-    return [
-        btn
-        for btn in list(main_window.input_faces.values())
-        if qt_lifecycle.is_checked(btn)
-    ]
+    seen: set[int] = set()
+    ordered: list = []
+
+    def _append_from_list(list_widget) -> None:
+        if list_widget is None:
+            return
+        try:
+            count = int(list_widget.count())
+        except RuntimeError:
+            return
+        for i in range(count):
+            try:
+                item = list_widget.item(i)
+                if item is None:
+                    continue
+                btn = list_widget.itemWidget(item)
+            except RuntimeError:
+                continue
+            if btn is None or id(btn) in seen:
+                continue
+            if qt_lifecycle.is_checked(btn):
+                seen.add(id(btn))
+                ordered.append(btn)
+
+    _append_from_list(getattr(main_window, "inputFacesList", None))
+    _append_from_list(getattr(main_window, "inputFacesFavoritesList", None))
+
+    # Fallback for tests / callers without list widgets wired up.
+    if not ordered and not hasattr(main_window, "inputFacesList"):
+        for btn in list(getattr(main_window, "input_faces", {}).values()):
+            if id(btn) in seen:
+                continue
+            if qt_lifecycle.is_checked(btn):
+                seen.add(id(btn))
+                ordered.append(btn)
+
+    return ordered
+
+
+def clear_checked_inputs_outside_list(
+    main_window: "MainWindow",
+    list_widget,
+    *,
+    keep: object | None = None,
+) -> None:
+    """Uncheck input cards that are not on ``list_widget`` (swap-all pool isolation)."""
+    if list_widget is None:
+        return
+    for btn in qt_lifecycle.alive_values(getattr(main_window, "input_faces", {})):
+        if btn is keep:
+            continue
+        if getattr(btn, "list_widget", None) is list_widget:
+            continue
+        qt_lifecycle.set_checked(btn, False)
 
 
 def pinned_checked_input_indices(main_window: "MainWindow") -> set[int]:

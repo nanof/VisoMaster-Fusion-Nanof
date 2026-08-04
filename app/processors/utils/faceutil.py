@@ -89,34 +89,12 @@ src5 = np.array(
     dtype=np.float32,
 )
 
-# ^^^ Pitch Up (Tête en arrière)
-# Les yeux descendent légèrement, le nez remonte (plus proche des yeux), la bouche remonte
-src6 = np.array(
-    [
-        [39.730, 55.000],  # LE (Shifted Down)
-        [72.270, 55.000],  # RE (Shifted Down)
-        [56.000, 64.000],  # Nose (Shifted Up/Closer to eyes)
-        [42.463, 78.000],  # LM (Shifted Up)
-        [69.537, 78.000],  # RM (Shifted Up)
-    ],
-    dtype=np.float32,
-)
-
-# vvv Pitch Down (Tête en avant)
-# Les yeux remontent, le nez descend (s'éloigne des yeux), la bouche descend
-src7 = np.array(
-    [
-        [39.730, 45.000],  # LE (Shifted Up)
-        [72.270, 45.000],  # RE (Shifted Up)
-        [56.000, 75.000],  # Nose (Shifted Down/Further from eyes)
-        [42.463, 95.000],  # LM (Shifted Down)
-        [69.537, 95.000],  # RM (Shifted Down)
-    ],
-    dtype=np.float32,
-)
-
-# Ajout des nouveaux gabarits src6 et src7 à la liste
-src = np.array([src1, src2, src3, src4, src5, src6, src7])
+# src1..src5 are the canonical ArcFace yaw templates (left profile → right
+# profile). Hand-made pitch variants used to be appended here, but they changed the
+# crop scale by ~18% when they won the search, which made the GhostFace target crop
+# jump between frames on nodding heads. Only add templates that come from the
+# ArcFace/InsightFace reference set.
+src = np.array([src1, src2, src3, src4, src5])
 src_map = {112: src, 224: src * 2}
 
 arcface_src = np.array(

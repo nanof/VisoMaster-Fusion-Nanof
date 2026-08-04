@@ -2,8 +2,16 @@
 
 from __future__ import annotations
 
+import weakref
+from typing import Any, Dict, Optional, Tuple
+
 import numpy as np
 import torch
+
+SessionIoDtypeCache = Dict[
+    str,
+    Tuple[Dict[str, type], Dict[str, type], Optional["weakref.ReferenceType"]],
+]
 
 
 def _ort_warmup_numpy_dtype_for_input(inp) -> type:
@@ -31,6 +39,45 @@ def session_declared_numpy_dtype_for_name(
         if arg.name == tensor_name:
             return _ort_warmup_numpy_dtype_for_input(arg)
     return np.float32
+
+
+def resolve_session_io_dtype_maps(
+    cache: SessionIoDtypeCache, model_name: str, session: Any
+) -> Tuple[Dict[str, type], Dict[str, type]]:
+    """``(input name -> np type, output name -> np type)`` for *session*, cached by identity.
+
+    Callers that already hold an InferenceSession (typical after ``get_onnx_session`` /
+    ``load_model``) should pass that object. Looking the session up again by name races
+    with ``unload_model`` clearing the registry mid-frame.
+
+    If *session* is ``None`` (registry cleared) but a prior call cached maps whose weakref
+    is still alive — another worker still holding that session — reuse those maps. That
+    covers helpers that allocate output buffers via ``get_ort_io_torch_dtype`` before they
+    re-fetch the session. Cache entries are only reused for the same session object, so a
+    reload with a different export (FP16 vs FP32) re-introspects.
+    """
+    if session is None:
+        entry = cache.get(model_name)
+        if entry is not None:
+            ins, outs, session_ref = entry
+            if session_ref is not None and session_ref() is not None:
+                return ins, outs
+            cache.pop(model_name, None)
+        raise RuntimeError(f"No ONNX session loaded for {model_name!r}")
+    entry = cache.get(model_name)
+    if entry is not None:
+        ins, outs, session_ref = entry
+        cached_session = session_ref() if session_ref is not None else None
+        if cached_session is session:
+            return ins, outs
+    ins = {i.name: _ort_warmup_numpy_dtype_for_input(i) for i in session.get_inputs()}
+    outs = {o.name: _ort_warmup_numpy_dtype_for_input(o) for o in session.get_outputs()}
+    try:
+        session_ref = weakref.ref(session)
+    except TypeError:
+        session_ref = None
+    cache[model_name] = (ins, outs, session_ref)
+    return ins, outs
 
 
 def normalize_ort_bind_device_type(device_type: str) -> str:

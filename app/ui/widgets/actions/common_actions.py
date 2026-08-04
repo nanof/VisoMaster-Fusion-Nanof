@@ -471,6 +471,18 @@ def set_parameter_row_visibility(current_widget, visible: bool):
         current_widget.line_edit.setVisible(visible)
 
 
+def selection_value_matches(layout_info: dict, current_text: str) -> bool:
+    """Compare a widget's ``requiredSelectionValue`` against the parent selection text.
+
+    Accepts either a single string or a list/tuple of accepted values, so one row can
+    be shared by several options of the same selection box.
+    """
+    required = layout_info.get("requiredSelectionValue")
+    if isinstance(required, (list, tuple, set, frozenset)):
+        return current_text in required
+    return required == current_text
+
+
 # Function to Hide Elements conditionally from values in LayoutData (Currently supports using Selection box and Toggle button to hide other widgets)
 def show_hide_related_widgets(
     main_window: "MainWindow",
@@ -494,9 +506,8 @@ def show_hide_related_widgets(
                     and current_widget
                 ):
                     # 1. Check Selection Condition
-                    selection_condition_met = (
-                        layout_info.get("requiredSelectionValue")
-                        == parent_widget.currentText()
+                    selection_condition_met = selection_value_matches(
+                        layout_info, parent_widget.currentText()
                     )
 
                     # 2. Check Toggle Condition (Cross-Check)
@@ -551,8 +562,8 @@ def show_hide_related_widgets(
                     parentSelection = layout_info.get("parentSelection", "")
                     if parentSelection:
                         sel_widget = main_window.parameter_widgets.get(parentSelection)
-                        if sel_widget and sel_widget.currentText() != layout_info.get(
-                            "requiredSelectionValue"
+                        if sel_widget and not selection_value_matches(
+                            layout_info, sel_widget.currentText()
                         ):
                             selection_condition_met = False
 

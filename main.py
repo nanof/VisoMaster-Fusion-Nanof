@@ -3,11 +3,15 @@ from PySide6 import QtWidgets
 import sys
 
 import qdarktheme
-from app.helpers.console_color import install_colored_console_streams
+from app.helpers.console_color import (
+    install_colored_console_streams,
+    install_utf8_console_streams,
+)
 from app.ui.core.proxy_style import ProxyStyle
 from app.ui.widgets.tooltip_utils import install_tooltip_vertical_wrap
 
 if __name__ == "__main__":
+    install_utf8_console_streams()
     install_colored_console_streams()
     app = QtWidgets.QApplication(sys.argv)
     app.setStyle(ProxyStyle())

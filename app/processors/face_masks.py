@@ -324,7 +324,10 @@ class FaceMasks:
         in0 = ort_session.get_inputs()[0].name
         out_name = "output"
         td_out = self.models_processor.get_ort_io_torch_dtype(
-            model_name, out_name, is_output=True
+            model_name,
+            out_name,
+            is_output=True,
+            session=ort_session,
         )
         out = torch.empty(
             (1, 19, 512, 512),
@@ -332,10 +335,14 @@ class FaceMasks:
             device=self.models_processor.get_effective_torch_device(),
         )
         io = ort_session.io_binding()
-        x = self.models_processor.bind_ort_io_input(io, model_name, in0, x)
+        x = self.models_processor.bind_ort_io_input(
+            io, model_name, in0, x, session=ort_session
+        )
         for ometa in ort_session.get_outputs():
             if ometa.name == out_name:
-                self.models_processor.bind_ort_io_output(io, model_name, out_name, out)
+                self.models_processor.bind_ort_io_output(
+                    io, model_name, out_name, out, session=ort_session
+                )
             else:
                 self.models_processor.bind_ort_output_dynamic(io, ometa.name)
 
@@ -364,15 +371,18 @@ class FaceMasks:
         labels_512 = out.argmax(dim=1).squeeze(0).to(torch.long)
         return labels_512
 
-    def run_rvm_portrait_alpha(self, face_chw_float_rgb_0_255: torch.Tensor) -> torch.Tensor:
+    def run_rvm_portrait_alpha(
+        self, face_chw_float_rgb_0_255: torch.Tensor
+    ) -> torch.Tensor:
         """
         RVM ONNX (mobilenetv3): devuelve alfa [1, H, W] float32 en el dispositivo activo.
         Estado recurrente en cero (calidad de vídeo completo requeriría estado entre frames).
         """
         model_name = "RvmPortraitMatting"
         dev = self.models_processor.get_effective_torch_device()
-        H, W = int(face_chw_float_rgb_0_255.shape[1]), int(
-            face_chw_float_rgb_0_255.shape[2]
+        H, W = (
+            int(face_chw_float_rgb_0_255.shape[1]),
+            int(face_chw_float_rgb_0_255.shape[2]),
         )
         src = (face_chw_float_rgb_0_255.float() / 255.0).clamp(0.0, 1.0)
         src = src.unsqueeze(0).contiguous()
@@ -385,25 +395,46 @@ class FaceMasks:
 
         ins = {i.name: i for i in ort_session.get_inputs()}
         td_src = self.models_processor.get_ort_io_torch_dtype(
-            model_name, ins["src"].name, is_output=False
+            model_name,
+            ins["src"].name,
+            is_output=False,
+            session=ort_session,
         )
         td_r1 = self.models_processor.get_ort_io_torch_dtype(
-            model_name, ins["r1i"].name, is_output=False
+            model_name,
+            ins["r1i"].name,
+            is_output=False,
+            session=ort_session,
         )
         td_r2 = self.models_processor.get_ort_io_torch_dtype(
-            model_name, ins["r2i"].name, is_output=False
+            model_name,
+            ins["r2i"].name,
+            is_output=False,
+            session=ort_session,
         )
         td_r3 = self.models_processor.get_ort_io_torch_dtype(
-            model_name, ins["r3i"].name, is_output=False
+            model_name,
+            ins["r3i"].name,
+            is_output=False,
+            session=ort_session,
         )
         td_r4 = self.models_processor.get_ort_io_torch_dtype(
-            model_name, ins["r4i"].name, is_output=False
+            model_name,
+            ins["r4i"].name,
+            is_output=False,
+            session=ort_session,
         )
         td_dr = self.models_processor.get_ort_io_torch_dtype(
-            model_name, ins["downsample_ratio"].name, is_output=False
+            model_name,
+            ins["downsample_ratio"].name,
+            is_output=False,
+            session=ort_session,
         )
         td_pha = self.models_processor.get_ort_io_torch_dtype(
-            model_name, "pha", is_output=True
+            model_name,
+            "pha",
+            is_output=True,
+            session=ort_session,
         )
 
         src = src.to(dtype=td_src).contiguous()
@@ -426,19 +457,49 @@ class FaceMasks:
                 dt = self.models_processor.get_ort_bind_device_type()
                 cuda_id = self.models_processor.get_ort_bind_input_cuda_device_id()
                 src = self.models_processor.bind_ort_io_input(
-                    io, model_name, ins["src"].name, src, device_type=dt, device_id=cuda_id
+                    io,
+                    model_name,
+                    ins["src"].name,
+                    src,
+                    device_type=dt,
+                    device_id=cuda_id,
+                    session=ort_session,
                 )
                 r1 = self.models_processor.bind_ort_io_input(
-                    io, model_name, ins["r1i"].name, r1, device_type=dt, device_id=cuda_id
+                    io,
+                    model_name,
+                    ins["r1i"].name,
+                    r1,
+                    device_type=dt,
+                    device_id=cuda_id,
+                    session=ort_session,
                 )
                 r2 = self.models_processor.bind_ort_io_input(
-                    io, model_name, ins["r2i"].name, r2, device_type=dt, device_id=cuda_id
+                    io,
+                    model_name,
+                    ins["r2i"].name,
+                    r2,
+                    device_type=dt,
+                    device_id=cuda_id,
+                    session=ort_session,
                 )
                 r3 = self.models_processor.bind_ort_io_input(
-                    io, model_name, ins["r3i"].name, r3, device_type=dt, device_id=cuda_id
+                    io,
+                    model_name,
+                    ins["r3i"].name,
+                    r3,
+                    device_type=dt,
+                    device_id=cuda_id,
+                    session=ort_session,
                 )
                 r4 = self.models_processor.bind_ort_io_input(
-                    io, model_name, ins["r4i"].name, r4, device_type=dt, device_id=cuda_id
+                    io,
+                    model_name,
+                    ins["r4i"].name,
+                    r4,
+                    device_type=dt,
+                    device_id=cuda_id,
+                    session=ort_session,
                 )
                 dr = self.models_processor.bind_ort_io_input(
                     io,
@@ -447,13 +508,20 @@ class FaceMasks:
                     dr,
                     device_type=dt,
                     device_id=cuda_id,
+                    session=ort_session,
                 )
                 outs_meta = ort_session.get_outputs()
                 for o in outs_meta:
                     if o.name != "pha":
                         self.models_processor.bind_ort_output_dynamic(io, o.name)
                 self.models_processor.bind_ort_io_output(
-                    io, model_name, "pha", pha, device_type=dt, device_id=cuda_id
+                    io,
+                    model_name,
+                    "pha",
+                    pha,
+                    device_type=dt,
+                    device_id=cuda_id,
+                    session=ort_session,
                 )
                 torch.cuda.current_stream().synchronize()
                 self.models_processor.run_session_with_iobinding(ort_session, io)
@@ -474,19 +542,49 @@ class FaceMasks:
 
                 io = ort_session.io_binding()
                 self.models_processor.bind_ort_io_input(
-                    io, model_name, ins["src"].name, _to_bind_dev(src), device_type=dt, device_id=cid
+                    io,
+                    model_name,
+                    ins["src"].name,
+                    _to_bind_dev(src),
+                    device_type=dt,
+                    device_id=cid,
+                    session=ort_session,
                 )
                 self.models_processor.bind_ort_io_input(
-                    io, model_name, ins["r1i"].name, _to_bind_dev(r1), device_type=dt, device_id=cid
+                    io,
+                    model_name,
+                    ins["r1i"].name,
+                    _to_bind_dev(r1),
+                    device_type=dt,
+                    device_id=cid,
+                    session=ort_session,
                 )
                 self.models_processor.bind_ort_io_input(
-                    io, model_name, ins["r2i"].name, _to_bind_dev(r2), device_type=dt, device_id=cid
+                    io,
+                    model_name,
+                    ins["r2i"].name,
+                    _to_bind_dev(r2),
+                    device_type=dt,
+                    device_id=cid,
+                    session=ort_session,
                 )
                 self.models_processor.bind_ort_io_input(
-                    io, model_name, ins["r3i"].name, _to_bind_dev(r3), device_type=dt, device_id=cid
+                    io,
+                    model_name,
+                    ins["r3i"].name,
+                    _to_bind_dev(r3),
+                    device_type=dt,
+                    device_id=cid,
+                    session=ort_session,
                 )
                 self.models_processor.bind_ort_io_input(
-                    io, model_name, ins["r4i"].name, _to_bind_dev(r4), device_type=dt, device_id=cid
+                    io,
+                    model_name,
+                    ins["r4i"].name,
+                    _to_bind_dev(r4),
+                    device_type=dt,
+                    device_id=cid,
+                    session=ort_session,
                 )
                 self.models_processor.bind_ort_io_input(
                     io,
@@ -495,14 +593,23 @@ class FaceMasks:
                     _to_bind_dev(dr),
                     device_type=dt,
                     device_id=cid,
+                    session=ort_session,
                 )
-                pha_buf = torch.empty((1, 1, H, W), dtype=td_pha, device=bind_dev).contiguous()
+                pha_buf = torch.empty(
+                    (1, 1, H, W), dtype=td_pha, device=bind_dev
+                ).contiguous()
                 outs_meta = ort_session.get_outputs()
                 for o in outs_meta:
                     if o.name != "pha":
                         self.models_processor.bind_ort_output_dynamic(io, o.name)
                 self.models_processor.bind_ort_io_output(
-                    io, model_name, "pha", pha_buf, device_type=dt, device_id=cid
+                    io,
+                    model_name,
+                    "pha",
+                    pha_buf,
+                    device_type=dt,
+                    device_id=cid,
+                    session=ort_session,
                 )
                 if self.models_processor.uses_cuda_ep_for_thread():
                     torch.cuda.current_stream().synchronize()
@@ -521,8 +628,9 @@ class FaceMasks:
         """u2netp (rembg): máscara saliente 1xHxW, entrada 320."""
         model_name = "U2NetpSalientSeg"
         dev = self.models_processor.get_effective_torch_device()
-        H, W = int(face_chw_float_rgb_0_255.shape[1]), int(
-            face_chw_float_rgb_0_255.shape[2]
+        H, W = (
+            int(face_chw_float_rgb_0_255.shape[1]),
+            int(face_chw_float_rgb_0_255.shape[2]),
         )
         x = (face_chw_float_rgb_0_255.float() / 255.0).clamp(0.0, 1.0)
         x = v2.functional.resize(x.unsqueeze(0), [320, 320], antialias=True)
@@ -539,10 +647,16 @@ class FaceMasks:
         out_names = [o.name for o in ort_session.get_outputs()]
         last_name = out_names[-1]
         td_in = self.models_processor.get_ort_io_torch_dtype(
-            model_name, in_name, is_output=False
+            model_name,
+            in_name,
+            is_output=False,
+            session=ort_session,
         )
         td_last = self.models_processor.get_ort_io_torch_dtype(
-            model_name, last_name, is_output=True
+            model_name,
+            last_name,
+            is_output=True,
+            session=ort_session,
         )
         x = x.to(dtype=td_in).contiguous()
 
@@ -551,7 +665,13 @@ class FaceMasks:
             dt = self.models_processor.get_ort_bind_device_type()
             cuda_id = self.models_processor.get_ort_bind_input_cuda_device_id()
             x = self.models_processor.bind_ort_io_input(
-                io, model_name, in_name, x, device_type=dt, device_id=cuda_id
+                io,
+                model_name,
+                in_name,
+                x,
+                device_type=dt,
+                device_id=cuda_id,
+                session=ort_session,
             )
             out_t = torch.empty(
                 (1, 1, 320, 320), dtype=td_last, device=dev
@@ -559,7 +679,13 @@ class FaceMasks:
             for name in out_names:
                 if name == last_name:
                     self.models_processor.bind_ort_io_output(
-                        io, model_name, name, out_t, device_type=dt, device_id=cuda_id
+                        io,
+                        model_name,
+                        name,
+                        out_t,
+                        device_type=dt,
+                        device_id=cuda_id,
+                        session=ort_session,
                     )
                 else:
                     self.models_processor.bind_ort_output_dynamic(io, name)
@@ -588,13 +714,27 @@ class FaceMasks:
                 xb = xb.to(bind_dev, non_blocking=False).contiguous()
             io = ort_session.io_binding()
             self.models_processor.bind_ort_io_input(
-                io, model_name, in_name, xb, device_type=dt, device_id=cid
+                io,
+                model_name,
+                in_name,
+                xb,
+                device_type=dt,
+                device_id=cid,
+                session=ort_session,
             )
-            out_t = torch.empty((1, 1, 320, 320), dtype=td_last, device=bind_dev).contiguous()
+            out_t = torch.empty(
+                (1, 1, 320, 320), dtype=td_last, device=bind_dev
+            ).contiguous()
             for name in out_names:
                 if name == last_name:
                     self.models_processor.bind_ort_io_output(
-                        io, model_name, name, out_t, device_type=dt, device_id=cid
+                        io,
+                        model_name,
+                        name,
+                        out_t,
+                        device_type=dt,
+                        device_id=cid,
+                        session=ort_session,
                     )
                 else:
                     self.models_processor.bind_ort_output_dynamic(io, name)
@@ -1272,8 +1412,21 @@ class FaceMasks:
         img = torch.div(img, 255)
         img = torch.unsqueeze(img, 0).contiguous()
 
+        model_name = "Occluder"
+        ort_session = self.models_processor.get_onnx_session(model_name)
+        if not ort_session:
+            ort_session = self.models_processor.load_model(model_name)
+            if ort_session:
+                self.active_models.add(model_name)
+        if not ort_session:
+            return torch.ones(
+                (1, 256, 256),
+                dtype=torch.float32,
+                device=self.models_processor.get_effective_torch_device(),
+            )
+
         td_occ = self.models_processor.get_ort_io_torch_dtype(
-            "Occluder", "output", is_output=True
+            model_name, "output", is_output=True, session=ort_session
         )
         outpred = torch.ones(
             (1, 1, 256, 256),
@@ -1371,10 +1524,18 @@ class FaceMasks:
 
         io_binding = ort_session.io_binding()
         image = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "img", image
+            io_binding,
+            model_name,
+            "img",
+            image,
+            session=ort_session,
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, model_name, "output", output
+            io_binding,
+            model_name,
+            "output",
+            output,
+            session=ort_session,
         )
 
         is_lazy_build = self.models_processor.check_and_clear_pending_build(model_name)
@@ -1431,11 +1592,19 @@ class FaceMasks:
                 ):
                     io = session.io_binding()
                     self.models_processor.bind_ort_io_input(
-                        io, model_key, input_name, img
+                        io,
+                        model_key,
+                        input_name,
+                        img,
+                        session=session,
                     )
                     prim = output_names[0]
                     self.models_processor.bind_ort_io_output(
-                        io, model_key, prim, out
+                        io,
+                        model_key,
+                        prim,
+                        out,
+                        session=session,
                     )
                     for name in output_names[1:]:
                         self.models_processor.bind_ort_output_dynamic(io, name)
@@ -1483,10 +1652,18 @@ class FaceMasks:
         img = img.type(torch.float32)
         img = torch.div(img, 255)
         img = torch.unsqueeze(img, 0).contiguous()
-        if self.models_processor.get_onnx_session("XSeg") is None:
-            self.models_processor.load_model("XSeg")
+        ort_session = self.models_processor.get_onnx_session("XSeg")
+        if ort_session is None:
+            ort_session = self.models_processor.load_model("XSeg")
+        if ort_session is None:
+            empty = torch.zeros(
+                (1, 256, 256),
+                dtype=torch.float32,
+                device=self.models_processor.get_effective_torch_device(),
+            )
+            return empty, empty, empty, empty
         td_xseg = self.models_processor.get_ort_io_torch_dtype(
-            "XSeg", "out_mask:0", is_output=True
+            "XSeg", "out_mask:0", is_output=True, session=ort_session
         )
         dev = self.models_processor.get_effective_torch_device()
         outbuf = torch.ones((1, 1, 256, 256), dtype=td_xseg, device=dev).contiguous()
@@ -1506,9 +1683,7 @@ class FaceMasks:
             outpred2 = outpred.clone()
 
         needs_smart_expand_1 = (amount < 0) and exclude_obstacles
-        needs_smart_expand_2 = (
-            amount2 != amount and amount2 < 0
-        ) and exclude_obstacles
+        needs_smart_expand_2 = (amount2 != amount and amount2 < 0) and exclude_obstacles
 
         true_obstacles = None
         if needs_smart_expand_1 or needs_smart_expand_2:
@@ -1699,10 +1874,18 @@ class FaceMasks:
 
         io_binding = ort_session.io_binding()
         image = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "in_face:0", image
+            io_binding,
+            model_name,
+            "in_face:0",
+            image,
+            session=ort_session,
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, model_name, "out_mask:0", output
+            io_binding,
+            model_name,
+            "out_mask:0",
+            output,
+            session=ort_session,
         )
 
         is_lazy_build = self.models_processor.check_and_clear_pending_build(model_name)
@@ -1742,10 +1925,18 @@ class FaceMasks:
         output_name = sess.get_outputs()[0].name
 
         image_tensor = self.models_processor.bind_ort_io_input(
-            io_binding, model_key, input_name, image_tensor
+            io_binding,
+            model_key,
+            input_name,
+            image_tensor,
+            session=sess,
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, model_key, output_name, output_tensor
+            io_binding,
+            model_key,
+            output_name,
+            output_tensor,
+            session=sess,
         )
 
         is_lazy_build = self.models_processor.check_and_clear_pending_build(model_key)
@@ -2103,7 +2294,7 @@ class FaceMasks:
             )
         out0 = sess.get_outputs()[0].name
         td_feat = self.models_processor.get_ort_io_torch_dtype(
-            model_key, out0, is_output=True
+            model_key, out0, is_output=True, session=sess
         )
         shape = feature_shapes[feature_layer]
         outpred = torch.empty(shape, dtype=td_feat, device=swapped.device)
@@ -2111,7 +2302,9 @@ class FaceMasks:
         swapped_feat = self.run_onnx(swapped, outpred, model_key)
         original_feat = self.run_onnx(original, outpred2, model_key)
 
-        diff_map = torch.abs(swapped_feat.float() - original_feat.float()).mean(dim=1)[0]
+        diff_map = torch.abs(swapped_feat.float() - original_feat.float()).mean(dim=1)[
+            0
+        ]
         diff_map = diff_map * swap_mask.squeeze(0)
 
         # OPTIMIZED: Deterministic strided slicing instead of random sampling.

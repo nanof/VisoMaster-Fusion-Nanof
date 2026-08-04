@@ -19,11 +19,15 @@ from torchvision.transforms import v2
 
 from app.processors.utils import faceutil
 from app.processors.ort_io_dtype_utils import (
+    SessionIoDtypeCache,
     _numpy_scalar_type_to_torch_dtype,
     _ort_warmup_numpy_dtype_for_input,
     normalize_ort_bind_device_type,
+    resolve_session_io_dtype_maps,
 )
-from app.processors.trt_dynamic_batch_profiles import merge_tensorrt_dynamic_shape_profiles
+from app.processors.trt_dynamic_batch_profiles import (
+    merge_tensorrt_dynamic_shape_profiles,
+)
 
 # --- Optional Imports & Fallbacks ---
 
@@ -465,10 +469,9 @@ class ModelsProcessor(QtCore.QObject):
         # Initialize models and models_path dictionaries
         self.models: Dict[str, onnxruntime.InferenceSession] = {}
         # ONNX session I/O element types (name -> numpy scalar type) for IOBinding.
-        # Invalidated in unload_model. Used for FP16 graphs without changing float32 defaults.
-        self._ort_session_io_dtype_cache: Dict[
-            str, Tuple[Dict[str, type], Dict[str, type]]
-        ] = {}
+        # Used for FP16 graphs without changing float32 defaults. Invalidated by session
+        # identity, not by unload_model (see get_ort_session_io_numpy_dtype_maps).
+        self._ort_session_io_dtype_cache: SessionIoDtypeCache = {}
         self.models_path = {}
         self.models_data = {}
 
@@ -486,6 +489,8 @@ class ModelsProcessor(QtCore.QObject):
         self.dfm_inference_lock = threading.Lock()
         self.force_unload_in_progress = False
         self._model_last_used_mono: Dict[str, float] = {}
+        # Catalog name -> monotonic deadline; soft-retired until then (or VRAM flush).
+        self._model_pending_unload_mono: Dict[str, float] = {}
         self.models_trt: Dict[str, Any] = {}
 
         # Initialize Sub-Processors
@@ -876,9 +881,7 @@ class ModelsProcessor(QtCore.QObject):
             return False
 
     def _schedule_ort_warmup_if_enabled(self, model_name: str, session) -> None:
-        if not bool(
-            self.main_window.control.get("ModelWarmupOnLoadToggle", False)
-        ):
+        if not bool(self.main_window.control.get("ModelWarmupOnLoadToggle", False)):
             return
         if session is None:
             return
@@ -906,8 +909,77 @@ class ModelsProcessor(QtCore.QObject):
                 flush=True,
             )
 
+    def _model_unload_grace_seconds(self) -> float:
+        """Seconds to keep a soft-retired ONNX session before unload (0 = immediate)."""
+        try:
+            return float(
+                self.main_window.control.get("ModelUnloadGraceSecondsSlider", 60) or 0
+            )
+        except (TypeError, ValueError):
+            return 60.0
+
+    def _cancel_pending_unload_locked(self, model_name: str) -> None:
+        """Drop pending unload entries for *model_name* and multi-GPU variants (lock held)."""
+        if not model_name:
+            return
+        prefix = f"{model_name}__cuda"
+        for key in list(self._model_pending_unload_mono.keys()):
+            if key == model_name or key.startswith(prefix):
+                self._model_pending_unload_mono.pop(key, None)
+
+    def touch_model_usage(self, model_name: str) -> None:
+        """Mark *model_name* as recently used and cancel any scheduled unload."""
+        if not model_name:
+            return
+        now = time.monotonic()
+        storage_key = self._ort_session_storage_key(model_name)
+        with self.model_lock:
+            self._model_last_used_mono[storage_key] = now
+            if storage_key != model_name:
+                self._model_last_used_mono[model_name] = now
+            self._cancel_pending_unload_locked(model_name)
+            if storage_key != model_name:
+                self._cancel_pending_unload_locked(storage_key)
+
+    def process_pending_model_unloads(self, *, force_all: bool = False) -> None:
+        """Unload soft-retired models whose grace deadline has passed (or all if *force_all*)."""
+        if self.main_window.control.get("KeepModelsAliveToggle", False):
+            if not self.force_unload_in_progress:
+                return
+        now = time.monotonic()
+        with self.model_lock:
+            due = [
+                name
+                for name, deadline in list(self._model_pending_unload_mono.items())
+                if force_all or now >= deadline
+            ]
+            for name in due:
+                self._model_pending_unload_mono.pop(name, None)
+        for name in due:
+            self.unload_model(name, force_immediate=True)
+
+    def flush_pending_model_unloads(self) -> None:
+        """Immediately unload every soft-retired model (e.g. Clear GPU / low VRAM)."""
+        self.process_pending_model_unloads(force_all=True)
+
+    def _vram_headroom_low(self) -> bool:
+        """True when free device memory is scarce enough to reclaim soft-retired sessions."""
+        if self.device == "cpu" or not torch.cuda.is_available():
+            return False
+        try:
+            free_b, total_b = torch.cuda.mem_get_info(
+                self._logical_to_physical_cuda_index(self.clamp_gpu_index(self.gpu_index))
+            )
+            if total_b <= 0:
+                return False
+            # Reclaim when less than ~15% free or under ~1.5 GiB free.
+            return (free_b / total_b) < 0.15 or free_b < int(1.5 * (1024**3))
+        except Exception:
+            return False
+
     def evict_idle_onnx_models(self) -> None:
-        """Unload ONNX sessions idle longer than ModelEvictIdleMinutesSlider (0=off)."""
+        """Process grace-period retires, then idle TTL eviction (ModelEvictIdleMinutesSlider)."""
+        self.process_pending_model_unloads()
         try:
             mins = int(
                 self.main_window.control.get("ModelEvictIdleMinutesSlider", 0) or 0
@@ -930,11 +1002,13 @@ class ModelsProcessor(QtCore.QObject):
                     continue
                 if protect and (name == protect or name.startswith(f"{protect}__cuda")):
                     continue
+                if name in self._model_pending_unload_mono:
+                    continue  # grace path owns this name
                 last = self._model_last_used_mono.get(name, now)
                 if now - last > max_age:
                     to_drop.append(name)
         for name in to_drop:
-            self.unload_model(name)
+            self.unload_model(name, force_immediate=True)
 
     def _providers_for_onnx_model(self, model_name: str):
         """ORT provider list for one ONNX file (CUDA fallback when TRT cannot init)."""
@@ -996,15 +1070,34 @@ class ModelsProcessor(QtCore.QObject):
         Loads an AI model (ONNX) with thread safety.
         Handles checking for existing TensorRT caches and launching the build probe if needed.
         """
+        storage_key_peek = self._ort_session_storage_key(model_name)
+        # Only reclaim soft-retired sessions when VRAM headroom is low (keep grace otherwise).
+        if (
+            model_name != "DMDNetTorch"
+            and not self.models.get(storage_key_peek)
+            and self.models_trt.get(storage_key_peek) is None
+            and self._model_pending_unload_mono
+            and self._vram_headroom_low()
+        ):
+            print(
+                "[INFO] Low VRAM headroom: flushing soft-retired ONNX models before load",
+                flush=True,
+            )
+            self.flush_pending_model_unloads()
+
         with self.model_lock:
             storage_key = self._ort_session_storage_key(model_name)
             if self.models.get(storage_key):
                 self._model_last_used_mono[storage_key] = time.monotonic()
+                self._cancel_pending_unload_locked(model_name)
+                self._cancel_pending_unload_locked(storage_key)
                 return self.models[storage_key]
 
             existing_trt = self.models_trt.get(storage_key)
             if existing_trt is not None:
                 self._model_last_used_mono[storage_key] = time.monotonic()
+                self._cancel_pending_unload_locked(model_name)
+                self._cancel_pending_unload_locked(storage_key)
                 return existing_trt
 
             if model_name == "DMDNetTorch":
@@ -1059,6 +1152,8 @@ class ModelsProcessor(QtCore.QObject):
                             del old_trt
                         self.models_trt[storage_key] = model_instance
                         self._model_last_used_mono[storage_key] = time.monotonic()
+                        self._cancel_pending_unload_locked(model_name)
+                        self._cancel_pending_unload_locked(storage_key)
                         self._real_model_loads += 1
                         if self._vram_trace_enabled:
                             _vram_after = self.device_used_gb()
@@ -1113,7 +1208,9 @@ class ModelsProcessor(QtCore.QObject):
                     cache_is_valid = self._check_tensorrt_cache(
                         model_name, onnx_path, cache_root=trt_cache_dir
                     )
-                    if os.environ.get("VISIOMASTER_LOG_TRT_CACHE", "").strip().lower() in (
+                    if os.environ.get(
+                        "VISIOMASTER_LOG_TRT_CACHE", ""
+                    ).strip().lower() in (
                         "1",
                         "true",
                         "yes",
@@ -1284,8 +1381,11 @@ class ModelsProcessor(QtCore.QObject):
                     e_fallback = e_ort_first
                     # Stale engines (e.g. copied from another GPU folder, incomplete write, TRT upgrade)
                     # deserialize badly — delete the cited file and retry TensorRT EP once before CUDA EP.
-                    if is_tensorrt_load and _ort_error_indicates_trt_engine_deserialize_failure(
-                        e_ort_first
+                    if (
+                        is_tensorrt_load
+                        and _ort_error_indicates_trt_engine_deserialize_failure(
+                            e_ort_first
+                        )
                     ):
                         bad_engine = _extract_tensorrt_engine_path_from_ort_error(
                             e_ort_first
@@ -1380,6 +1480,8 @@ class ModelsProcessor(QtCore.QObject):
                     del graph
                     gc.collect()
                 self._model_last_used_mono[storage_key] = time.monotonic()
+                self._cancel_pending_unload_locked(model_name)
+                self._cancel_pending_unload_locked(storage_key)
                 self._real_model_loads += 1
                 self.vram_trace(f"LOAD(onnx) {model_name}")
                 self._schedule_ort_warmup_if_enabled(model_name, model_instance)
@@ -1532,9 +1634,13 @@ class ModelsProcessor(QtCore.QObject):
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
-    def unload_model(self, model_name_to_unload):
+    def unload_model(self, model_name_to_unload, force_immediate: bool = False):
         """
         Unloads a single ONNX model from memory.
+
+        By default schedules a grace-period unload (``ModelUnloadGraceSecondsSlider``)
+        so rapid model switches do not thrash VRAM. Pass ``force_immediate=True`` or
+        set ``force_unload_in_progress`` (Clear GPU / provider switch) for a hard unload.
 
         Handles the ``self.models`` (ONNX) dictionary. Respects the KeepModelsAliveToggle
         control unless a force-unload is in progress. Frees the Python object, runs
@@ -1544,8 +1650,29 @@ class ModelsProcessor(QtCore.QObject):
         if not self.force_unload_in_progress:
             if self.main_window.control.get("KeepModelsAliveToggle", False):
                 return  # Skip unloading
+
+        grace = self._model_unload_grace_seconds()
+        immediate = (
+            bool(force_immediate)
+            or self.force_unload_in_progress
+            or grace <= 0.0
+        )
+        if not immediate:
+            if not model_name_to_unload:
+                return
+            due = time.monotonic() + grace
+            with self.model_lock:
+                self._model_pending_unload_mono[model_name_to_unload] = due
+            print(
+                f"[INFO] Scheduled unload of {model_name_to_unload} "
+                f"in {grace:.0f}s (grace period)",
+                flush=True,
+            )
+            return
+
         with self.model_lock:
             unloaded = False
+            self._cancel_pending_unload_locked(model_name_to_unload)
 
             if model_name_to_unload == "DMDNetTorch":
                 self.face_restorers.unload_dmdnet()
@@ -1565,7 +1692,9 @@ class ModelsProcessor(QtCore.QObject):
                     if model_instance is not None:
                         print(f"[INFO] Unloading ONNX model: {k}")
                         self._model_last_used_mono.pop(k, None)
-                        self._ort_session_io_dtype_cache.pop(model_name_to_unload, None)
+                        # The I/O dtype map is left in place on purpose: callers that
+                        # still hold this session need it to finish binding. It is
+                        # invalidated by session identity, not by unload.
                         self.models[k] = None
                         del model_instance
                         unloaded = True
@@ -1603,46 +1732,51 @@ class ModelsProcessor(QtCore.QObject):
                     )
 
     def get_ort_session_io_numpy_dtype_maps(
-        self, model_name: str
+        self, model_name: str, session: Any = None
     ) -> Tuple[Dict[str, type], Dict[str, type]]:
         """Return ``(input_name -> np scalar type, output_name -> np scalar type)`` from the ONNX graph.
 
-        Types follow ORT ``NodeArg.type`` strings (e.g. ``tensor(float16)``). Cached until
-        ``unload_model`` removes the session.
+        Types follow ORT ``NodeArg.type`` strings (e.g. ``tensor(float16)``). Prefer passing
+        the InferenceSession the caller already holds so binding survives ``unload_model``
+        races (see ``resolve_session_io_dtype_maps``).
         """
         with self.model_lock:
-            cached = self._ort_session_io_dtype_cache.get(model_name)
-            if cached is not None:
-                return cached
-            session = self.models.get(self._ort_session_storage_key(model_name))
-            if session is None:
-                raise RuntimeError(f"No ONNX session loaded for {model_name!r}")
-            ins = {
-                i.name: _ort_warmup_numpy_dtype_for_input(i)
-                for i in session.get_inputs()
-            }
-            outs = {
-                o.name: _ort_warmup_numpy_dtype_for_input(o)
-                for o in session.get_outputs()
-            }
-            cached = (ins, outs)
-            self._ort_session_io_dtype_cache[model_name] = cached
-            return cached
+            return resolve_session_io_dtype_maps(
+                self._ort_session_io_dtype_cache,
+                model_name,
+                session
+                if session is not None
+                else self.models.get(self._ort_session_storage_key(model_name)),
+            )
 
     def get_ort_io_numpy_dtype(
-        self, model_name: str, tensor_name: str, *, is_output: bool
+        self,
+        model_name: str,
+        tensor_name: str,
+        *,
+        is_output: bool,
+        session: Any = None,
     ) -> type:
         """Declared numpy scalar type for one ONNX input or output (defaults to float32)."""
-        ins, outs = self.get_ort_session_io_numpy_dtype_maps(model_name)
+        ins, outs = self.get_ort_session_io_numpy_dtype_maps(
+            model_name, session=session
+        )
         table = outs if is_output else ins
         return table.get(tensor_name, np.float32)
 
     def get_ort_io_torch_dtype(
-        self, model_name: str, tensor_name: str, *, is_output: bool
+        self,
+        model_name: str,
+        tensor_name: str,
+        *,
+        is_output: bool,
+        session: Any = None,
     ) -> torch.dtype:
         """``torch.dtype`` matching the ONNX-declared type for I/O binding / buffers."""
         return _numpy_scalar_type_to_torch_dtype(
-            self.get_ort_io_numpy_dtype(model_name, tensor_name, is_output=is_output)
+            self.get_ort_io_numpy_dtype(
+                model_name, tensor_name, is_output=is_output, session=session
+            )
         )
 
     def bind_ort_io_input(
@@ -1654,12 +1788,17 @@ class ModelsProcessor(QtCore.QObject):
         *,
         device_type: Optional[str] = None,
         device_id: Optional[int] = None,
+        session: Any = None,
     ) -> torch.Tensor:
         """Cast ``tensor`` to ONNX-declared input dtype; ``bind_input`` with matching ``element_type``."""
         t = tensor.to(
-            dtype=self.get_ort_io_torch_dtype(model_name, input_name, is_output=False)
+            dtype=self.get_ort_io_torch_dtype(
+                model_name, input_name, is_output=False, session=session
+            )
         ).contiguous()
-        exp_np = self.get_ort_io_numpy_dtype(model_name, input_name, is_output=False)
+        exp_np = self.get_ort_io_numpy_dtype(
+            model_name, input_name, is_output=False, session=session
+        )
         dev_t = normalize_ort_bind_device_type(
             device_type if device_type is not None else self.get_ort_bind_device_type()
         )
@@ -1687,16 +1826,21 @@ class ModelsProcessor(QtCore.QObject):
         *,
         device_type: Optional[str] = None,
         device_id: Optional[int] = None,
+        session: Any = None,
     ) -> None:
         """Bind a preallocated device tensor as an ONNX output; dtype must match the graph."""
-        exp_td = self.get_ort_io_torch_dtype(model_name, output_name, is_output=True)
+        exp_td = self.get_ort_io_torch_dtype(
+            model_name, output_name, is_output=True, session=session
+        )
         if tensor.dtype != exp_td:
             raise TypeError(
                 f"{model_name}: output buffer {output_name!r} has dtype {tensor.dtype} but "
                 f"ONNX declares {exp_td}; allocate torch.empty(..., dtype={exp_td})."
             )
         t = tensor.contiguous()
-        exp_np = self.get_ort_io_numpy_dtype(model_name, output_name, is_output=True)
+        exp_np = self.get_ort_io_numpy_dtype(
+            model_name, output_name, is_output=True, session=session
+        )
         dev_t = normalize_ort_bind_device_type(
             device_type if device_type is not None else self.get_ort_bind_device_type()
         )
@@ -1741,15 +1885,17 @@ class ModelsProcessor(QtCore.QObject):
         if session is None:
             raise RuntimeError(f"Model {model_name} not loaded")
         io_binding = session.io_binding()
-        self.get_ort_session_io_numpy_dtype_maps(model_name)
+        self.get_ort_session_io_numpy_dtype_maps(model_name, session=session)
 
         for name, tensor in list(inputs.items()):
             inputs[name] = self.bind_ort_io_input(
-                io_binding, model_name, name, tensor
+                io_binding, model_name, name, tensor, session=session
             )
 
         for name, tensor in output_spec.items():
-            self.bind_ort_io_output(io_binding, model_name, name, tensor)
+            self.bind_ort_io_output(
+                io_binding, model_name, name, tensor, session=session
+            )
 
         is_lazy_build = self.check_and_clear_pending_build(model_name)
         if is_lazy_build:
@@ -1861,11 +2007,7 @@ class ModelsProcessor(QtCore.QObject):
     def _tensorrt_cache_root_for_physical(self, phys_ord: int) -> str:
         """``tensorrt-engines/gpu{N}`` for a concrete CUDA device ordinal (multi-GPU ORT)."""
         try:
-            n = (
-                int(torch.cuda.device_count())
-                if torch.cuda.is_available()
-                else 0
-            )
+            n = int(torch.cuda.device_count()) if torch.cuda.is_available() else 0
         except Exception:
             n = 0
         if n > 0:
@@ -1879,11 +2021,7 @@ class ModelsProcessor(QtCore.QObject):
         logical_pri = self.clamp_gpu_index(self.gpu_index)
         phys = self._logical_to_physical_cuda_index(logical_pri)
         try:
-            n = (
-                int(torch.cuda.device_count())
-                if torch.cuda.is_available()
-                else 0
-            )
+            n = int(torch.cuda.device_count()) if torch.cuda.is_available() else 0
         except Exception:
             n = 0
         gpu_idx = phys if n > 0 else logical_pri
@@ -1936,7 +2074,11 @@ class ModelsProcessor(QtCore.QObject):
 
     def get_onnx_session(self, model_name: str):
         """Return the loaded InferenceSession for *model_name* on this thread's GPU (multi-GPU aware)."""
-        return self.models.get(self._ort_session_storage_key(model_name))
+        storage_key = self._ort_session_storage_key(model_name)
+        session = self.models.get(storage_key)
+        if session is not None:
+            self.touch_model_usage(model_name)
+        return session
 
     def is_model_loaded(self, model_name: str) -> bool:
         """True if an ONNX or TensorRT-native session exists for *model_name*."""
@@ -2041,7 +2183,9 @@ class ModelsProcessor(QtCore.QObject):
             return [("CPUExecutionProvider")]
         raise ValueError(f"Unknown provider: {provider_name}")
 
-    def set_gpu_index(self, gpu_index: int, *, reconfigure_providers: bool = True) -> int:
+    def set_gpu_index(
+        self, gpu_index: int, *, reconfigure_providers: bool = True
+    ) -> int:
         resolved = self.clamp_gpu_index(gpu_index)
         self.gpu_index = resolved
         self._refresh_trt_options_for_gpu()
@@ -2064,11 +2208,17 @@ class ModelsProcessor(QtCore.QObject):
         """
         # Release existing ORT sessions whenever the provider is changed so that
         # GPU memory from the old provider is freed before new sessions are allocated.
-        self.face_detectors.unload_models()
-        self.face_masks.unload_models()
-        self.face_swappers.unload_models()
-        self.face_landmark_detectors.unload_models()
-        self.face_restorers.unload_models()
+        _prev_force = self.force_unload_in_progress
+        self.force_unload_in_progress = True
+        try:
+            self.face_detectors.unload_models()
+            self.face_masks.unload_models()
+            self.face_swappers.unload_models()
+            self.face_landmark_detectors.unload_models()
+            self.face_restorers.unload_models()
+            self._model_pending_unload_mono.clear()
+        finally:
+            self.force_unload_in_progress = _prev_force
 
         match provider_name:
             case "TensorRT" | "TensorRT-Engine":
@@ -2242,7 +2392,11 @@ class ModelsProcessor(QtCore.QObject):
         routing. On Windows, ``nvidia-smi -i=N`` often uses a different GPU order than CUDA.
         """
         idx = int(cuda_index)
-        if not torch.cuda.is_available() or idx < 0 or idx >= int(torch.cuda.device_count()):
+        if (
+            not torch.cuda.is_available()
+            or idx < 0
+            or idx >= int(torch.cuda.device_count())
+        ):
             return 0, 0
         try:
             free_b, total_b = torch.cuda.mem_get_info(idx)
@@ -2253,9 +2407,7 @@ class ModelsProcessor(QtCore.QObject):
             try:
                 props = torch.cuda.get_device_properties(idx)
                 total_mb = max(1, int(props.total_memory) // (1024 * 1024))
-                used_mb = max(
-                    0, int(torch.cuda.memory_reserved(idx)) // (1024 * 1024)
-                )
+                used_mb = max(0, int(torch.cuda.memory_reserved(idx)) // (1024 * 1024))
                 return used_mb, total_mb
             except Exception:
                 return 0, 0
@@ -2282,9 +2434,7 @@ class ModelsProcessor(QtCore.QObject):
         rows = self.get_all_gpus_memory_mb()
         if not rows:
             return 0, 0
-        idx = self._logical_to_physical_cuda_index(
-            self.clamp_gpu_index(self.gpu_index)
-        )
+        idx = self._logical_to_physical_cuda_index(self.clamp_gpu_index(self.gpu_index))
         if idx < len(rows):
             return rows[idx][0], rows[idx][1]
         return rows[0][0], rows[0][1]
@@ -2324,6 +2474,7 @@ class ModelsProcessor(QtCore.QObject):
             if self.clip_session:
                 del self.clip_session
                 self.clip_session = []
+            self._model_pending_unload_mono.clear()
         finally:
             self.force_unload_in_progress = False
 
@@ -2815,9 +2966,14 @@ class ModelsProcessor(QtCore.QObject):
         return self.face_swappers.calc_hyperswap_latent(source_embedding)
 
     def run_hyperswap(
-        self, image, embedding, output, swapper_model="HyperSwap-v3"
-    ):
-        self.face_swappers.run_hyperswap(image, embedding, output, swapper_model)
+        self, image, embedding, output, swapper_model="HyperSwap-v3", mask_output=None
+    ) -> bool:
+        return self.face_swappers.run_hyperswap(
+            image, embedding, output, swapper_model, mask_output=mask_output
+        )
+
+    def hyperswap_native_mask_ready(self) -> bool:
+        return self.face_swappers.hyperswap_native_mask_ready()
 
     def run_swapper_ghostface_batched(
         self, images, embedding, output, swapper_model: str = "GhostFace-v2"
@@ -2827,10 +2983,15 @@ class ModelsProcessor(QtCore.QObject):
         )
 
     def run_hyperswap_batched(
-        self, images, embedding, output, swapper_model: str = "HyperSwap-v3"
+        self,
+        images,
+        embedding,
+        output,
+        swapper_model: str = "HyperSwap-v3",
+        mask_output=None,
     ) -> bool:
         return self.face_swappers.run_hyperswap_batched(
-            images, embedding, output, swapper_model
+            images, embedding, output, swapper_model, mask_output=mask_output
         )
 
     def run_blendswap(self, target_rgb_256, source_rgb_112, output):
@@ -3326,8 +3487,8 @@ class ModelsProcessor(QtCore.QObject):
                     )
                     _ddim_sigmas = torch.from_numpy(_sig_np).float().to(self.device)
                     _ddim_alphas = torch.from_numpy(_alp_np).float().to(self.device)
-                    _ddim_alphas_prev = torch.from_numpy(_alp_prev_np).float().to(
-                        self.device
+                    _ddim_alphas_prev = (
+                        torch.from_numpy(_alp_prev_np).float().to(self.device)
                     )
                     _ddim_sqrt_1m = torch.sqrt(torch.clamp(1.0 - _ddim_alphas, min=0.0))
                     if len(self._ddim_schedule_cache) >= self._DDIM_CACHE_MAX:
@@ -3378,10 +3539,9 @@ class ModelsProcessor(QtCore.QObject):
                     latent_shape, dtype=torch.float32, device=self.device
                 )
                 unet_input_uncond = torch.empty_like(unet_input_cond)
-                false_tensor_for_unet = (
-                    torch.tensor([False], dtype=torch.bool, device=self.device)
-                    .contiguous()
-                )
+                false_tensor_for_unet = torch.tensor(
+                    [False], dtype=torch.bool, device=self.device
+                ).contiguous()
             else:
                 e_t_uncond = None
                 unet_input_uncond = None

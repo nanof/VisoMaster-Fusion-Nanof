@@ -17,6 +17,7 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
                 "InStyleSwapper256 Version C",
                 "DeepFaceLive (DFM)",
                 "SimSwap512",
+                "SimSwap512-CrossFace",
                 "GhostFace-v1",
                 "GhostFace-v2",
                 "GhostFace-v3",
@@ -26,7 +27,20 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
                 "CSCS",
             ],
             "default": "Inswapper128",
-            "help": "Choose which swapper model to use for face swapping. HyperSwap-v1/v2/v3 are FaceFusion Labs 256 px models (1a/1b/1c); v1 is fastest, v3 targets highest quality.",
+            "help": (
+                "Choose which swapper model to use for face swapping. "
+                "SimSwap512-CrossFace runs the same SimSwap512 network but maps "
+                "Inswapper128ArcFace (w600k) embeddings through CrossFaceSimSwap "
+                "(FaceFusion-style), instead of SimSwapArcFace. "
+                "HyperSwap-v1/v2/v3 are FaceFusion Labs 256 px models (ONNX 1a/1b/1c): "
+                "v1 is fastest, v2 balanced, v3 targets highest quality. "
+                "HyperSwap uses ArcFace HyperSwapArcFace automatically (w600k with FaceFusion "
+                "arcface_112_v2 embedder align + L2 latent). "
+                "Single-face and multi-face Swap All share the same model and [-1,1] I/O contract. "
+                "Changing the swapper clears cached HyperSwapArcFace embeddings so identity is recomputed."
+            ),
+            "exec_function": control_actions.on_swap_model_selection_change,
+            "exec_function_args": [],
         },
         "SwapperResSelection": {
             "level": 2,
@@ -44,6 +58,41 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "parentSelection": "SwapModelSelection",
             "requiredSelectionValue": "Inswapper128",
             "help": "Autoselect Swapper Resolution based on original Face Size (only for Inswapper).",
+        },
+        "HyperSwapNativeMaskEnableToggle": {
+            "level": 2,
+            "label": "Native Mask",
+            "default": False,
+            "parentSelection": "SwapModelSelection",
+            "requiredSelectionValue": [
+                "HyperSwap-v1",
+                "HyperSwap-v2",
+                "HyperSwap-v3",
+            ],
+            "help": (
+                "Blend using the mask HyperSwap predicts next to the swapped face, so only "
+                "the region the model considers valid is pasted. It follows the generated "
+                "face (wide-open mouths included) and tends to exclude occluders such as "
+                "glasses, which helps with halos and pasted-on edges. Combined with the "
+                "regular masks, never replacing them."
+            ),
+        },
+        "HyperSwapNativeMaskStrengthSlider": {
+            "level": 3,
+            "label": "Native Mask Strength",
+            "min_value": "0",
+            "max_value": "100",
+            "default": "100",
+            "step": 5,
+            "parentToggle": "HyperSwapNativeMaskEnableToggle",
+            "requiredToggleValue": True,
+            "parentSelection": "SwapModelSelection",
+            "requiredSelectionValue": [
+                "HyperSwap-v1",
+                "HyperSwap-v2",
+                "HyperSwap-v3",
+            ],
+            "help": "100 applies the native mask fully, 0 ignores it. Intermediate values fade it back towards the standard masks, which makes A/B comparison easy.",
         },
         "InStyleResAEnableToggle": {
             "level": 2,

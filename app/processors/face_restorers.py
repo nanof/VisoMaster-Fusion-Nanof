@@ -110,9 +110,7 @@ class FaceRestorers:
                 return None
             try:
                 net = DMDNet().to("cuda")
-                state = torch.load(
-                    str(pth), map_location="cuda", weights_only=False
-                )
+                state = torch.load(str(pth), map_location="cuda", weights_only=False)
                 net.load_state_dict(state, strict=True)
                 net.eval()
                 self._dmdnet_model = net
@@ -149,8 +147,10 @@ class FaceRestorers:
         dev = next(model.parameters()).device
         dtype = torch.float32
         lq = temp_nchw.to(device=dev, dtype=dtype).contiguous()
-        loc_t = get_component_location_tensor(lm68_xy, dev).unsqueeze(0).to(
-            device=dev, dtype=dtype
+        loc_t = (
+            get_component_location_tensor(lm68_xy, dev)
+            .unsqueeze(0)
+            .to(device=dev, dtype=dtype)
         )
 
         amp_ctx = (
@@ -168,8 +168,10 @@ class FaceRestorers:
                 if sp.shape[2] != 512 or sp.shape[3] != 512:
                     sp = v2.functional.resize(sp, [512, 512], antialias=True)
                 lm_sp = np.asarray(sp_lm68_xy, dtype=np.float32).reshape(68, 2)
-                loc_sp = get_component_location_tensor(lm_sp, dev).unsqueeze(0).to(
-                    device=dev, dtype=dtype
+                loc_sp = (
+                    get_component_location_tensor(lm_sp, dev)
+                    .unsqueeze(0)
+                    .to(device=dev, dtype=dtype)
                 )
                 with torch.no_grad(), amp_ctx:
                     with self._dmdnet_lock:
@@ -413,7 +415,9 @@ class FaceRestorers:
                         print(
                             f"[GPENTorch] CUDA graph build failed for GPEN-{label}, using direct inference: {e}"
                         )
-                        self._gpen_runner[cache_key] = model  # fallback: direct model call
+                        self._gpen_runner[cache_key] = (
+                            model  # fallback: direct model call
+                        )
         finally:
             self.models_processor.hide_build_dialog.emit()
         return self._gpen_runner.get(cache_key)
@@ -779,7 +783,9 @@ class FaceRestorers:
 
             self.models_processor.run_session_with_iobinding(ort_session, io_binding)
 
-            if os.environ.get("VISIOMASTER_ORT_IOBINDING_POST_SYNC", "").strip().lower() in (
+            if os.environ.get(
+                "VISIOMASTER_ORT_IOBINDING_POST_SYNC", ""
+            ).strip().lower() in (
                 "1",
                 "true",
                 "yes",
@@ -815,7 +821,10 @@ class FaceRestorers:
         if not model_name_to_load:
             return swapped_face_upscaled
 
-        if restorer_type in ("DMDNet", "DMDNet FP16") and self.models_processor.device != "cuda":
+        if (
+            restorer_type in ("DMDNet", "DMDNet FP16")
+            and self.models_processor.device != "cuda"
+        ):
             return swapped_face_upscaled
 
         # If using a separate detection mode
@@ -1015,7 +1024,10 @@ class FaceRestorers:
                 dtype=torch.float32,
                 device=dev,
             ).contiguous()
-            if dmd_landmarks_68_crop is None or np.asarray(dmd_landmarks_68_crop).size < 136:
+            if (
+                dmd_landmarks_68_crop is None
+                or np.asarray(dmd_landmarks_68_crop).size < 136
+            ):
                 if "DMDNetLm" not in self._warned_models:
                     print(
                         "[WARN] DMDNet: need target landmarks (106-point mode recommended). "
@@ -1027,9 +1039,7 @@ class FaceRestorers:
             if restorer_det_type in ("Blend", "Reference"):
                 lm68 = np.array(tform(lm68), dtype=np.float32)
             _dmd_amp = restorer_type == "DMDNet FP16"
-            if not self.run_dmdnet(
-                temp, lm68, outpred, use_half_autocast=_dmd_amp
-            ):
+            if not self.run_dmdnet(temp, lm68, outpred, use_half_autocast=_dmd_amp):
                 return swapped_face_upscaled
 
         if outpred is None:
@@ -1113,10 +1123,18 @@ class FaceRestorers:
 
         io_binding = ort_session.io_binding()
         image_input_tensor = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, input_name, image_input_tensor
+            io_binding,
+            model_name,
+            input_name,
+            image_input_tensor,
+            session=ort_session,
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, model_name, output_name, output_latent_tensor
+            io_binding,
+            model_name,
+            output_name,
+            output_latent_tensor,
+            session=ort_session,
         )
 
         # Run the model with lazy build handling
@@ -1155,10 +1173,18 @@ class FaceRestorers:
 
         io_binding = ort_session.io_binding()
         latent_input_tensor = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, input_name, latent_input_tensor
+            io_binding,
+            model_name,
+            input_name,
+            latent_input_tensor,
+            session=ort_session,
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, model_name, output_name, output_image_tensor
+            io_binding,
+            model_name,
+            output_name,
+            output_image_tensor,
+            session=ort_session,
         )
 
         # Run the model with lazy build handling
@@ -1201,6 +1227,7 @@ class FaceRestorers:
             x_noisy_plus_lq_latent,
             device_type=bind_device_type,
             device_id=bind_device_id,
+            session=ort_session,
         )
         timesteps_tensor = self.models_processor.bind_ort_io_input(
             io_binding,
@@ -1209,6 +1236,7 @@ class FaceRestorers:
             timesteps_tensor,
             device_type=bind_device_type,
             device_id=bind_device_id,
+            session=ort_session,
         )
         is_ref_flag_tensor = self.models_processor.bind_ort_io_input(
             io_binding,
@@ -1217,6 +1245,7 @@ class FaceRestorers:
             is_ref_flag_tensor,
             device_type=bind_device_type,
             device_id=bind_device_id,
+            session=ort_session,
         )
         use_reference_exclusive_path_globally_tensor = (
             self.models_processor.bind_ort_io_input(
@@ -1226,6 +1255,7 @@ class FaceRestorers:
                 use_reference_exclusive_path_globally_tensor,
                 device_type=bind_device_type,
                 device_id=bind_device_id,
+                session=ort_session,
             )
         )
 
@@ -1253,7 +1283,10 @@ class FaceRestorers:
                     and k_name_onnx in onnx_kv_input_names_to_shape
                 ):
                     td_k = self.models_processor.get_ort_io_torch_dtype(
-                        model_name, k_name_onnx, is_output=False
+                        model_name,
+                        k_name_onnx,
+                        is_output=False,
+                        session=ort_session,
                     )
                     actual_kv_tensors_for_binding[k_name_onnx] = (
                         k_tensor_original.unsqueeze(0)
@@ -1269,7 +1302,10 @@ class FaceRestorers:
                     and v_name_onnx in onnx_kv_input_names_to_shape
                 ):
                     td_v = self.models_processor.get_ort_io_torch_dtype(
-                        model_name, v_name_onnx, is_output=False
+                        model_name,
+                        v_name_onnx,
+                        is_output=False,
+                        session=ort_session,
                     )
                     actual_kv_tensors_for_binding[v_name_onnx] = (
                         v_tensor_original.unsqueeze(0)
@@ -1290,7 +1326,10 @@ class FaceRestorers:
 
             if tensor_to_bind is None:
                 td_z = self.models_processor.get_ort_io_torch_dtype(
-                    model_name, onnx_kv_name, is_output=False
+                    model_name,
+                    onnx_kv_name,
+                    is_output=False,
+                    session=ort_session,
                 )
                 tensor_to_bind = torch.zeros(
                     expected_shape,
@@ -1308,6 +1347,7 @@ class FaceRestorers:
                 tensor_to_bind,
                 device_type=bind_device_type,
                 device_id=bind_device_id,
+                session=ort_session,
             )
 
         self.models_processor.bind_ort_io_output(
@@ -1317,6 +1357,7 @@ class FaceRestorers:
             output_unet_tensor,
             device_type=bind_device_type,
             device_id=bind_device_id,
+            session=ort_session,
         )
 
         # Run the model with lazy build handling
@@ -1415,10 +1456,18 @@ class FaceRestorers:
 
         io_binding = ort_session.io_binding()
         image = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "input", image
+            io_binding,
+            model_name,
+            "input",
+            image,
+            session=ort_session,
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, model_name, "output", output
+            io_binding,
+            model_name,
+            "output",
+            output,
+            session=ort_session,
         )
 
         # Run the model with lazy build handling
@@ -1437,10 +1486,18 @@ class FaceRestorers:
 
         io_binding = ort_session.io_binding()
         image = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "input", image
+            io_binding,
+            model_name,
+            "input",
+            image,
+            session=ort_session,
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, model_name, "output", output
+            io_binding,
+            model_name,
+            "output",
+            output,
+            session=ort_session,
         )
 
         # Run the model with lazy build handling
@@ -1464,7 +1521,10 @@ class FaceRestorers:
 
         io_binding = ort_session.io_binding()
         td_out = self.models_processor.get_ort_io_torch_dtype(
-            model_name, "output", is_output=True
+            model_name,
+            "output",
+            is_output=True,
+            session=ort_session,
         )
         out_bind = (
             output
@@ -1474,10 +1534,18 @@ class FaceRestorers:
             ).contiguous()
         )
         image = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "input", image
+            io_binding,
+            model_name,
+            "input",
+            image,
+            session=ort_session,
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, model_name, "output", out_bind
+            io_binding,
+            model_name,
+            "output",
+            out_bind,
+            session=ort_session,
         )
 
         # Run the model with lazy build handling
@@ -1498,10 +1566,18 @@ class FaceRestorers:
 
         io_binding = ort_session.io_binding()
         image = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "input", image
+            io_binding,
+            model_name,
+            "input",
+            image,
+            session=ort_session,
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, model_name, "output", output
+            io_binding,
+            model_name,
+            "output",
+            output,
+            session=ort_session,
         )
 
         # Run the model with lazy build handling
@@ -1520,10 +1596,18 @@ class FaceRestorers:
 
         io_binding = ort_session.io_binding()
         image = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "input", image
+            io_binding,
+            model_name,
+            "input",
+            image,
+            session=ort_session,
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, model_name, "output", output
+            io_binding,
+            model_name,
+            "output",
+            output,
+            session=ort_session,
         )
 
         # Run the model with lazy build handling
@@ -1542,10 +1626,18 @@ class FaceRestorers:
 
         io_binding = ort_session.io_binding()
         image = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "input", image
+            io_binding,
+            model_name,
+            "input",
+            image,
+            session=ort_session,
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, model_name, "output", output
+            io_binding,
+            model_name,
+            "output",
+            output,
+            session=ort_session,
         )
 
         # Run the model with lazy build handling
@@ -1587,12 +1679,20 @@ class FaceRestorers:
 
         io_binding = ort_session.io_binding()
         image = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "x", image
+            io_binding,
+            model_name,
+            "x",
+            image,
+            session=ort_session,
         )
         w = np.array([fidelity_weight_value], dtype=np.double)
         io_binding.bind_cpu_input("w", w)
         self.models_processor.bind_ort_io_output(
-            io_binding, model_name, "y", output
+            io_binding,
+            model_name,
+            "y",
+            output,
+            session=ort_session,
         )
 
         # Run the model with lazy build handling
@@ -1615,16 +1715,28 @@ class FaceRestorers:
 
         io_binding = ort_session.io_binding()
         image = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "x_lq", image
+            io_binding,
+            model_name,
+            "x_lq",
+            image,
+            session=ort_session,
         )
         fidelity_ratio = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "fidelity_ratio", fidelity_ratio
+            io_binding,
+            model_name,
+            "fidelity_ratio",
+            fidelity_ratio,
+            session=ort_session,
         )
         self.models_processor.bind_ort_output_dynamic(io_binding, "enc_feat")
         self.models_processor.bind_ort_output_dynamic(io_binding, "quant_logit")
         self.models_processor.bind_ort_output_dynamic(io_binding, "texture_dec")
         self.models_processor.bind_ort_io_output(
-            io_binding, model_name, "main_dec", output
+            io_binding,
+            model_name,
+            "main_dec",
+            output,
+            session=ort_session,
         )
 
         # Run the model with lazy build handling
@@ -1637,10 +1749,16 @@ class FaceRestorers:
         if not ort_session:
             return
         td_in = self.models_processor.get_ort_io_torch_dtype(
-            model_name, "input", is_output=False
+            model_name,
+            "input",
+            is_output=False,
+            session=ort_session,
         )
         td_out = self.models_processor.get_ort_io_torch_dtype(
-            model_name, "output", is_output=True
+            model_name,
+            "output",
+            is_output=True,
+            session=ort_session,
         )
         x_in = image_fp32_nchw.to(dtype=td_in).contiguous()
         out16 = torch.empty(
@@ -1650,10 +1768,18 @@ class FaceRestorers:
         ).contiguous()
         io_binding = ort_session.io_binding()
         x_in = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "input", x_in
+            io_binding,
+            model_name,
+            "input",
+            x_in,
+            session=ort_session,
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, model_name, "output", out16
+            io_binding,
+            model_name,
+            "output",
+            out16,
+            session=ort_session,
         )
         self._run_model_with_lazy_build_check(model_name, ort_session, io_binding)
         output_fp32_nchw.copy_(out16.float())
@@ -1666,10 +1792,18 @@ class FaceRestorers:
 
         io_binding = ort_session.io_binding()
         image = self.models_processor.bind_ort_io_input(
-            io_binding, model_name, "input", image
+            io_binding,
+            model_name,
+            "input",
+            image,
+            session=ort_session,
         )
         self.models_processor.bind_ort_io_output(
-            io_binding, model_name, "2359", output
+            io_binding,
+            model_name,
+            "2359",
+            output,
+            session=ort_session,
         )
         self.models_processor.bind_ort_output_dynamic(io_binding, "1228")
         self.models_processor.bind_ort_output_dynamic(io_binding, "1238")
