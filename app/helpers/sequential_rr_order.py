@@ -40,6 +40,66 @@ def pick_new_input_index(
     return int(spatial_fallback) % n_in
 
 
+def rr_dedupe_assignments(
+    assign: list[int],
+    n_in: int,
+    *,
+    assignment_mode: str = "index",
+    keep_priority: list[int] | None = None,
+    pinned: set[int] | frozenset[int] | None = None,
+    rng: random.Random | None = None,
+) -> list[int]:
+    """Remove repeated inputs while unused inputs remain.
+
+    Temporal matching (memory slots, ByteTrack locks, ghost slots) can hand the
+    same input to two faces: two remembered slots may carry the same index, and
+    sticky locks are resolved per face without a frame-wide view. Repeats are
+    only acceptable once every input is taken (more detections than inputs).
+
+    ``keep_priority`` ranks who keeps a contested input (lower wins); faces
+    matched temporally should rank above newly assigned ones so the reshuffle
+    moves the new face and the stable one is left untouched. Inputs in
+    ``pinned`` always win the contest.
+    """
+    n = len(assign)
+    if n_in <= 0:
+        return [0] * n
+    out = [int(a) % n_in for a in assign]
+    if n <= 1 or n_in == 1:
+        return out
+
+    pinned_norm = {int(p) % n_in for p in (pinned or ()) if int(p) >= 0}
+    prio = (
+        [int(p) for p in keep_priority]
+        if keep_priority is not None and len(keep_priority) == n
+        else [0] * n
+    )
+    order = sorted(
+        range(n),
+        key=lambda i: (0 if out[i] in pinned_norm else 1, prio[i], i),
+    )
+
+    used: set[int] = set()
+    conflicts: list[int] = []
+    for i in order:
+        if out[i] in used:
+            conflicts.append(i)
+        else:
+            used.add(out[i])
+    if not conflicts:
+        return out
+
+    picker = rng if rng is not None else random
+    for i in sorted(conflicts):
+        free = [j for j in range(n_in) if j not in used]
+        if not free:
+            break
+        pick = int(picker.choice(free)) if assignment_mode == "random" else int(free[0])
+        out[i] = pick
+        used.add(pick)
+    return out
+
+
 def rr_spatial_order_key(
     bbox: np.ndarray,
     list_index: int,

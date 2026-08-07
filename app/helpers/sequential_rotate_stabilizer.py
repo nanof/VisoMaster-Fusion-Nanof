@@ -10,6 +10,7 @@ import numpy as np
 
 from app.helpers.sequential_rr_order import (
     pick_new_input_index,
+    rr_dedupe_assignments,
     rr_greedy_assign_from_memory,
     rr_spatial_order_key,
     rr_spatial_sort_indices,
@@ -163,9 +164,14 @@ class SequentialRotateStabilizer:
         iou_fn: IoUFn,
         *,
         assignment_mode: str = "index",
-    ) -> list[int]:
-        """Slot-based matching: one persistent slot per physical face (no ByteTrack)."""
+    ) -> tuple[list[int], list[int]]:
+        """Slot-based matching: one persistent slot per physical face (no ByteTrack).
+
+        Returns the assignment plus a per-detection match tier (0 persistent slot,
+        1 previous frame, 2 freshly picked) used to break repeat conflicts.
+        """
         assign: dict[int, int] = {}
+        tier: dict[int, int] = {}
         matched_slots: set[int] = set()
 
         scored: list[tuple[float, int, int]] = []
@@ -182,6 +188,7 @@ class SequentialRotateStabilizer:
                 continue
             sinp = int(self._spatial_slots[sid][1]) % n_in
             assign[fi] = sinp
+            tier[fi] = 0
             matched_slots.add(sid)
 
         for fi in order:
@@ -197,6 +204,7 @@ class SequentialRotateStabilizer:
                     best_inp = int(pinp) % n_in
             if best_inp is not None:
                 assign[fi] = best_inp
+                tier[fi] = 1
 
         rank_boxes = [np.asarray(det_faces[fi]["bbox"], dtype=np.float64) for fi in order]
         spatial_rank = {
@@ -213,9 +221,13 @@ class SequentialRotateStabilizer:
                 used=used_inp,
                 rng=self._rng,
             )
+            tier[fi] = 2
             used_inp.add(int(assign[fi]) % n_in)
 
-        return [int(assign[fi]) % n_in for fi in order]
+        return (
+            [int(assign[fi]) % n_in for fi in order],
+            [int(tier.get(fi, 2)) for fi in order],
+        )
 
     @staticmethod
     def _enforce_pinned_inputs(
@@ -355,14 +367,14 @@ class SequentialRotateStabilizer:
         )
 
         if no_track_mode:
-            base_assign = self._assign_no_track_spatial_slots(
+            base_assign, match_tier = self._assign_no_track_spatial_slots(
                 det_faces,
                 order,
                 n_in,
                 iou_fn,
                 assignment_mode=mode,
             )
-            spatially_matched = [True] * n_curr
+            spatially_matched = [t <= 1 for t in match_tier]
         elif use_tracks or memory_without_tracking:
             mem_for_assign = self._build_memory_for_assign(
                 frame_number, no_track_mode=no_track_mode
@@ -377,6 +389,7 @@ class SequentialRotateStabilizer:
                 assignment_mode=mode,
                 rng=self._rng,
             )
+            match_tier = [0 if m else 2 for m in spatially_matched]
         else:
             spatial_rank = {
                 ci: rank
@@ -395,9 +408,11 @@ class SequentialRotateStabilizer:
                 base_assign.append(inp)
                 used.add(int(inp) % n_in)
             spatially_matched = [False] * n_curr
+            match_tier = [2] * n_curr
 
         if use_tracks:
             final_assign = list(base_assign)
+            keep_priority = list(match_tier)
             for ci, fi in enumerate(order):
                 tid = int(det_faces[fi]["track_id"])
                 self._track_last_seen[tid] = frame_number
@@ -405,7 +420,9 @@ class SequentialRotateStabilizer:
                 if tid not in self._track_to_input:
                     self._track_to_input[tid] = mem_inp
                     final_assign[ci] = mem_inp
+                    keep_priority[ci] = 2
                 else:
+                    keep_priority[ci] = 0
                     track_inp = int(self._track_to_input[tid]) % n_in
                     # Fixed inputs keep their track lock; never rematch them away.
                     if track_inp in pinned:
@@ -419,28 +436,50 @@ class SequentialRotateStabilizer:
                             final_assign[ci] = mem_inp
                     else:
                         final_assign[ci] = track_inp
+            final_assign = rr_dedupe_assignments(
+                final_assign,
+                n_in,
+                assignment_mode=mode,
+                keep_priority=keep_priority,
+                pinned=pinned,
+                rng=self._rng,
+            )
             assign = self._enforce_pinned_inputs(final_assign, n_in, pinned)
             for ci, fi in enumerate(order):
                 tid = int(det_faces[fi]["track_id"])
                 self._track_to_input[tid] = int(assign[ci]) % n_in
                 det_faces[fi]["_rr_input_idx"] = int(assign[ci]) % n_in
         else:
+            base_assign = rr_dedupe_assignments(
+                base_assign,
+                n_in,
+                assignment_mode=mode,
+                keep_priority=match_tier,
+                pinned=pinned,
+                rng=self._rng,
+            )
             assign = self._enforce_pinned_inputs(base_assign, n_in, pinned)
             for ci, fi in enumerate(order):
                 det_faces[fi]["_rr_input_idx"] = int(assign[ci]) % n_in
 
         if no_track_mode:
+            # One slot per physical face: without claiming, two detections can
+            # overwrite the same slot and leave a stale one carrying its input.
+            claimed_slots: set[int] = set()
             for fi in order:
                 bb = np.asarray(det_faces[fi]["bbox"], dtype=np.float32).copy()
                 inp = int(det_faces[fi]["_rr_input_idx"]) % n_in
                 best_sid: int | None = None
                 best_iou = self._NO_TRACK_IOU_FLOOR
                 for sid, (sbb, _sinp, _ls) in self._spatial_slots.items():
+                    if sid in claimed_slots:
+                        continue
                     iou_v = float(iou_fn(bb, sbb))
                     if iou_v > best_iou:
                         best_iou = iou_v
                         best_sid = sid
                 if best_sid is not None:
+                    claimed_slots.add(best_sid)
                     self._spatial_slots[best_sid] = (bb, inp, frame_number)
                 else:
                     sid = self._next_spatial_slot_id

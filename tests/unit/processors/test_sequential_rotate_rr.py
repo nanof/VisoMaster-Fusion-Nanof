@@ -264,6 +264,134 @@ def test_random_assignment_no_repeat_for_two_new_faces():
     assert {a, b}.issubset({0, 1, 2})
 
 
+def test_dedupe_assignments_removes_repeats_while_inputs_free():
+    from app.helpers.sequential_rr_order import rr_dedupe_assignments
+
+    out = rr_dedupe_assignments([1, 1, 1], n_in=4, assignment_mode="index")
+    assert len(set(out)) == 3
+    assert 1 in out
+
+
+def test_dedupe_assignments_keeps_matched_face_and_moves_new_one():
+    from app.helpers.sequential_rr_order import rr_dedupe_assignments
+
+    # Face 1 is temporally matched (priority 0); face 0 is a fresh pick.
+    out = rr_dedupe_assignments(
+        [2, 2],
+        n_in=3,
+        assignment_mode="index",
+        keep_priority=[2, 0],
+    )
+    assert out[1] == 2
+    assert out[0] != 2
+
+
+def test_dedupe_assignments_keeps_pinned_input():
+    from app.helpers.sequential_rr_order import rr_dedupe_assignments
+
+    out = rr_dedupe_assignments(
+        [3, 3],
+        n_in=4,
+        assignment_mode="index",
+        keep_priority=[0, 2],
+        pinned={3},
+    )
+    # Pinned wins the contest even against the better-ranked face.
+    assert 3 in out
+    assert len(set(out)) == 2
+
+
+def test_dedupe_assignments_allows_repeats_when_inputs_exhausted():
+    from app.helpers.sequential_rr_order import rr_dedupe_assignments
+
+    out = rr_dedupe_assignments([0, 1, 0, 1], n_in=2, assignment_mode="random")
+    assert sorted(out) == [0, 0, 1, 1]
+
+
+def test_random_no_repeat_when_spatial_slots_share_input():
+    """Two remembered slots carrying the same input must not swap the same face."""
+    import random
+
+    stabilizer = SequentialRotateStabilizer(rng=random.Random(3))
+    checked = [object(), object(), object()]
+    box_a = np.array([40.0, 40.0, 120.0, 120.0], dtype=np.float32)
+    box_b = np.array([300.0, 40.0, 380.0, 120.0], dtype=np.float32)
+    stabilizer._spatial_slots = {
+        0: (box_a.copy(), 1, 0),
+        1: (box_b.copy(), 1, 0),
+    }
+    faces = [
+        {"bbox": box_a.astype(np.float64), "track_id": -1},
+        {"bbox": box_b.astype(np.float64), "track_id": -1},
+    ]
+    stabilizer.apply(
+        faces,
+        checked,
+        1,
+        (640, 480),
+        _iou_xyxy,
+        memory_without_tracking=True,
+        assignment_mode="random",
+    )
+    assert int(faces[0]["_rr_input_idx"]) != int(faces[1]["_rr_input_idx"])
+
+
+def test_random_no_repeat_when_two_tracks_share_locked_input():
+    import random
+
+    stabilizer = SequentialRotateStabilizer(rng=random.Random(5))
+    checked = [object(), object(), object()]
+    stabilizer._track_to_input = {7: 1, 8: 1}
+    stabilizer._track_last_seen = {7: 0, 8: 0}
+    faces = [
+        {"bbox": np.array([40.0, 40.0, 120.0, 120.0]), "track_id": 7},
+        {"bbox": np.array([300.0, 40.0, 380.0, 120.0]), "track_id": 8},
+    ]
+    stabilizer.apply(
+        faces,
+        checked,
+        1,
+        (640, 480),
+        _iou_xyxy,
+        memory_without_tracking=False,
+        assignment_mode="random",
+    )
+    inputs = [int(f["_rr_input_idx"]) for f in faces]
+    assert len(set(inputs)) == 2
+    assert stabilizer._track_to_input[7] != stabilizer._track_to_input[8]
+
+
+def test_random_no_repeat_with_ghost_memory_slot():
+    """A disappeared face's ghost slot must not clone an input onto a new face."""
+    import random
+
+    stabilizer = SequentialRotateStabilizer(rng=random.Random(13))
+    checked = [object(), object(), object()]
+    present = np.array([40.0, 40.0, 120.0, 120.0], dtype=np.float32)
+    ghost = np.array([300.0, 40.0, 380.0, 120.0], dtype=np.float32)
+    stabilizer._track_to_input = {7: 0}
+    stabilizer._track_last_seen = {7: 0}
+    stabilizer._memory_slots = [(ghost.copy(), 0, 0)]
+    stabilizer._prev_frame_slots = [(present.copy(), 0)]
+    faces = [
+        {"bbox": present.astype(np.float64), "track_id": 7},
+        {"bbox": ghost.astype(np.float64), "track_id": 9},
+    ]
+    stabilizer.apply(
+        faces,
+        checked,
+        1,
+        (640, 480),
+        _iou_xyxy,
+        memory_without_tracking=False,
+        assignment_mode="random",
+    )
+    inputs = [int(f["_rr_input_idx"]) for f in faces]
+    assert len(set(inputs)) == 2
+    # The established track keeps its input; the newcomer is the one moved.
+    assert inputs[0] == 0
+
+
 def test_swap_all_match_helpers():
     from app.helpers.swap_all_match import (
         swap_all_assignment_mode,
