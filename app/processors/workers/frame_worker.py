@@ -6738,7 +6738,8 @@ class FrameWorker(threading.Thread):
         """
         Smart Profile Masking:
         Instead of a blind gradient, this uses the projected eye positions to ensure
-        we NEVER mask the eyes.
+        we NEVER mask the eyes. The vertical (pitch) fade is anchored to the projected
+        mouth corners so the chin border softens without touching the lips.
         """
         mask = torch.ones((1, height, width), dtype=torch.float32, device=device)
 
@@ -6752,13 +6753,17 @@ class FrameWorker(threading.Thread):
             kps_proj = tform(kps_5)
             le_x = kps_proj[0][0]
             re_x = kps_proj[1][0]
+            mouth_y = (kps_proj[3][1] + kps_proj[4][1]) / 2.0
         else:
             le_x = width * 0.35
             re_x = width * 0.65
+            mouth_y = height * 0.75
 
         le_x_norm = np.clip(le_x / width, 0.0, 1.0)
         re_x_norm = np.clip(re_x / width, 0.0, 1.0)
+        mouth_y_norm = np.clip(mouth_y / height, 0.0, 1.0)
         eye_safety_margin = 0.05
+        mouth_safety_margin = 0.08
 
         abs_yaw = abs(yaw_deg)
         if abs_yaw > start_angle:
@@ -6788,6 +6793,20 @@ class FrameWorker(threading.Thread):
                     )
                     grad_yaw = 1.0 - (1.0 - mask_r) * strength_yaw
                     mask = mask * grad_yaw
+
+        abs_pitch = abs(pitch_deg)
+        if abs_pitch > start_angle:
+            angle_excess = max(0, abs_pitch - start_angle)
+            strength_pitch = min(angle_excess / 45.0, 1.0) * max_strength
+            fade_start = min(1.0, float(mouth_y_norm) + mouth_safety_margin)
+            if fade_start < 0.95:
+                linspace_y = torch.linspace(0, 1, height, device=device).view(
+                    1, height, 1
+                )
+                grad_pitch = torch.clamp(
+                    (linspace_y - fade_start) / (1.0 - fade_start), 0, 1
+                )
+                mask = mask * (1.0 - grad_pitch * strength_pitch)
 
         return mask
 

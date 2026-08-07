@@ -471,7 +471,7 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "level": 1,
             "label": "Profile Angle Mask",
             "default": False,
-            "help": "Automatically fades the far side of the face when the head is turned (profile view) to hide distortions.",
+            "help": "Automatically fades the far side of the face when the head is turned (profile view) and the area below the mouth when the head is tilted up or down, to hide distortions and the chin border.",
         },
         "ProfileAngleMaskThresholdSlider": {
             "level": 2,
@@ -482,7 +482,7 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "step": 1,
             "parentToggle": "ProfileAngleMaskEnableToggle",
             "requiredToggleValue": True,
-            "help": "Starting angle (degrees) to apply the mask. Lower values apply it sooner.",
+            "help": "Starting angle (degrees) to apply the mask, for both turn (yaw) and tilt (pitch). Lower values apply it sooner.",
         },
         "ProfileAngleMaskStrengthSlider": {
             "level": 2,
