@@ -162,6 +162,33 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "step": 1,
             "help": "Set the similarity threshold to control how similar the detected face should be to the reference (target) face.",
         },
+        "GenderAppearanceFilterSelection": {
+            "level": 1,
+            "label": "Gender filter (detected face appearance)",
+            "options": [
+                "All",
+                "Female appearance only",
+                "Male appearance only",
+            ],
+            "default": "All",
+            "data_type": "control",
+            "help": "Discard detected faces whose apparent gender does not match before swap. Uses InsightFace GenderAge on the detector bbox (not identity matching). 'All' disables the filter. Low-confidence classifications are left through so uncertain faces are not dropped.",
+        },
+        "GenderAppearanceMinConfidenceSlider": {
+            "level": 2,
+            "label": "Min confidence to apply gender filter (%)",
+            "min_value": "50",
+            "max_value": "99",
+            "default": "60",
+            "step": 1,
+            "data_type": "control",
+            "parentSelection": "GenderAppearanceFilterSelection",
+            "requiredSelectionValue": [
+                "Female appearance only",
+                "Male appearance only",
+            ],
+            "help": "Only enforce the gender filter when GenderAge confidence is at least this value. Below the threshold the face is still swapped (fail-open).",
+        },
         "SequentialTargetMatchEnableToggle": {
             "level": 1,
             "label": "Swap all by index",

@@ -132,6 +132,8 @@ _FEEDER_PLAYBACK_LIVE_CONTROL_KEYS = frozenset(
         "RandomTargetMatchEnableToggle",
         "SequentialStabilizeWithoutTrackingToggle",
         "SequentialInputRotateOffsetSlider",
+        "GenderAppearanceFilterSelection",
+        "GenderAppearanceMinConfidenceSlider",
     }
 )
 
@@ -1426,6 +1428,10 @@ class VideoProcessor(QObject):
             self._recognition_track_last_matched_frame.clear()
         self._scene_cut_hist_prev = None
         self._force_arcface_refresh_until_frame = -1
+        try:
+            self.main_window.models_processor.clear_gender_track_cache()
+        except Exception:
+            pass
 
     def note_track_matched_for_recognition(self, track_id: int, frame_num: int) -> None:
         """Record that this ByteTrack id had a positive target match (swap/edit path)."""

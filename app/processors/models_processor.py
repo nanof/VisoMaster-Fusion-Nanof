@@ -57,6 +57,7 @@ except ModuleNotFoundError:
 from app.processors.face_detectors import FaceDetectors
 from app.processors.face_landmark_detectors import FaceLandmarkDetectors
 from app.processors.face_masks import FaceMasks
+from app.processors.face_attributes import FaceAttributes
 from app.processors.face_restorers import FaceRestorers
 from app.processors.face_swappers import FaceSwappers
 from app.processors.frame_enhancers import FrameEnhancers
@@ -198,8 +199,24 @@ ONNX_MODELS_SKIP_TENSORRT_EP = frozenset(
         "PerformRecastMotionExtractor",
         "PerformRecastWarpingModule",
         "PerformRecastSpadeGenerator",
+        # Tiny attribute net; TRT first-build cost dwarfs inference savings.
+        "GenderAge",
     }
 )
+
+# Models that must run on the CPU EP even under a GPU provider.
+#
+# GenderAge (InsightFace buffalo genderage.onnx) is a 96x96 MobileNet whose
+# depthwise convolutions make the CUDA EP log "OP Conv(...) running in Fallback
+# mode. May be extremely slow." for *every* Conv, on *every* inference. Measured
+# on an RTX 5070 Ti: ~233 ms per call on the CUDA EP versus ~0.6 ms on the CPU EP
+# for the same batch of 3 faces (~400x). Neither cudnn_conv_use_max_workspace nor
+# a fixed batch shape avoids the fallback, so the CPU EP is simply the fast path
+# for this graph.
+ONNX_MODELS_FORCE_CPU_EP = frozenset({"GenderAge"})
+
+# Keep the tiny CPU-EP nets from grabbing every core away from the video pipeline.
+CPU_EP_MODEL_INTRA_OP_THREADS = 2
 
 
 def _env_truthy(name: str) -> bool:
@@ -497,6 +514,7 @@ class ModelsProcessor(QtCore.QObject):
         self.face_detectors = FaceDetectors(self)
         self.face_landmark_detectors = FaceLandmarkDetectors(self)
         self.face_masks = FaceMasks(self)
+        self.face_attributes = FaceAttributes(self)
         self.face_restorers = FaceRestorers(self)
         self.face_swappers = FaceSwappers(self)
         self.frame_enhancers = FrameEnhancers(self)
@@ -1012,6 +1030,8 @@ class ModelsProcessor(QtCore.QObject):
 
     def _providers_for_onnx_model(self, model_name: str):
         """ORT provider list for one ONNX file (CUDA fallback when TRT cannot init)."""
+        if model_name in ONNX_MODELS_FORCE_CPU_EP:
+            return [("CPUExecutionProvider")]
         if model_name not in ONNX_MODELS_SKIP_TENSORRT_EP:
             return self.providers
         uses_trt = any(
@@ -1125,7 +1145,18 @@ class ModelsProcessor(QtCore.QObject):
             providers_for_model = _patch_providers_cuda_device_id(
                 providers_for_model, session_phys
             )
-            if (
+            if model_name in ONNX_MODELS_FORCE_CPU_EP:
+                if session_options is None:
+                    session_options = onnxruntime.SessionOptions()
+                    session_options.intra_op_num_threads = (
+                        CPU_EP_MODEL_INTRA_OP_THREADS
+                    )
+                print(
+                    f"[INFO] {model_name}: using CPU EP "
+                    "(CUDA EP runs every Conv in cuDNN fallback mode, ~400x slower).",
+                    flush=True,
+                )
+            elif (
                 model_name in ONNX_MODELS_SKIP_TENSORRT_EP
                 and providers_for_model is not self.providers
             ):
@@ -2213,6 +2244,7 @@ class ModelsProcessor(QtCore.QObject):
         try:
             self.face_detectors.unload_models()
             self.face_masks.unload_models()
+            self.face_attributes.unload_models()
             self.face_swappers.unload_models()
             self.face_landmark_detectors.unload_models()
             self.face_restorers.unload_models()
@@ -2458,6 +2490,7 @@ class ModelsProcessor(QtCore.QObject):
             self.face_detectors.unload_models()
             self.face_landmark_detectors.unload_models()
             self.face_masks.unload_models()
+            self.face_attributes.unload_models()
             self.face_restorers.unload_models()
             self.face_swappers.unload_models()
             self.frame_enhancers.unload_models()
@@ -3017,6 +3050,25 @@ class ModelsProcessor(QtCore.QObject):
 
     def run_occluder(self, image, output):
         self.face_masks.run_occluder(image, output)
+
+    def classify_face_gender(
+        self,
+        img_chw,
+        bbox=None,
+        kps_5=None,
+        track_id: int = -1,
+    ):
+        """InsightFace GenderAge → ``(gender|None, confidence)`` with ``gender`` in female/male."""
+        return self.face_attributes.classify_face_gender(
+            img_chw, bbox=bbox, kps_5=kps_5, track_id=track_id
+        )
+
+    def classify_faces_gender(self, img_chw, faces):
+        """Batched GenderAge → list of ``(gender|None, confidence)`` aligned with ``faces``."""
+        return self.face_attributes.classify_faces_gender(img_chw, faces)
+
+    def clear_gender_track_cache(self) -> None:
+        self.face_attributes.clear_track_cache()
 
     def run_dfl_xseg(self, image, output):
         self.face_masks.run_dfl_xseg(image, output)

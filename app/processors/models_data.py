@@ -108,6 +108,8 @@ fp16_safe_models_list = [
     # --- Masking ---
     "FaceParser",
     "Occluder",
+    # --- Attributes ---
+    "GenderAge",
     # --- Upscaling ---
     "RealEsrganx2Plus",
     "RealEsrganx4Plus",
@@ -556,6 +558,13 @@ models_list = [
         "local_path": f"{models_dir}/occluder.onnx",
         "hash": "79f5c2edf10b83458693d122dd51488b210fb80c059c5d56347a047710d44a78",
         "url": f"{assets_repo}/v0.1.0/occluder.onnx",
+    },
+    {
+        # InsightFace buffalo_l genderage.onnx (96x96, mean=0/std=1, out=[F,M,age/100]).
+        "model_name": "GenderAge",
+        "local_path": f"{models_dir}/genderage.onnx",
+        "hash": "5aa5e4b1e9e7857c5a22b84962c91b206d6dac21348b83f890d39e8ef71cfa16",
+        "url": "https://huggingface.co/public-data/insightface/resolve/main/models/buffalo_l/genderage.onnx",
     },
     {
         "model_name": "XSeg",

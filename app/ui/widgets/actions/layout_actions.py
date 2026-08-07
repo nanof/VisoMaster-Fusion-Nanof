@@ -295,7 +295,9 @@ def add_widgets_to_tab_layout(
                     default = default(main_window.dfm_model_manager)
 
                 init_selection = default
-                if bind_control and data_type == "control":
+                if widget_data_type == "control" and (
+                    bind_control or widget_data.get("data_type") == "control"
+                ):
                     init_selection = main_window.control.get(storage_key, default)
 
                 widget = widget_components.SelectionBox(
@@ -318,7 +320,7 @@ def add_widgets_to_tab_layout(
                     category_layout, label, widget, widget.reset_default_button
                 )
 
-                if data_type == "parameter":
+                if widget_data_type == "parameter":
                     common_widget_actions.create_default_parameter(
                         main_window, widget_name, default
                     )
@@ -338,7 +340,8 @@ def add_widgets_to_tab_layout(
                         actual_value = selected_value
                     bc_sel = cast(Union[str, None], widget_data.get("bind_control"))
                     control_key_sel = bc_sel or selection_widget_name
-                    if data_type == "parameter":
+                    _dt_sel = cast(str, widget_data.get("data_type", data_type))
+                    if _dt_sel == "parameter":
                         common_widget_actions.update_parameter(
                             main_window,
                             selection_widget_name,
@@ -349,7 +352,7 @@ def add_widgets_to_tab_layout(
                                 list, widget_data.get("exec_function_args", [])
                             ),
                         )
-                    elif data_type == "control":
+                    elif _dt_sel == "control":
                         common_widget_actions.update_control(
                             main_window,
                             control_key_sel,

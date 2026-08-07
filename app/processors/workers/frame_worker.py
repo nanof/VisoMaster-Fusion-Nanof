@@ -40,6 +40,10 @@ from app.helpers.miscellaneous import (
     get_grid_for_pasting,
     read_image_file,
 )
+from app.processors.face_attributes import (
+    gender_filter_mode,
+    skip_swap_for_gender_appearance_filter,
+)
 from app.helpers.cuda_timeline import nvtx_range
 from app.helpers.swap_all_match import (
     checked_input_face_buttons,
@@ -95,6 +99,48 @@ def _env_flag(name: str) -> bool:
             in ("1", "true", "yes", "on")
         )
     return False
+
+
+# Gender-filter telemetry lives at module scope on purpose: a FrameWorker is built
+# per frame, so per-instance counters would reset before they could aggregate (and
+# the "only log on change" guard would never dedupe anything).
+_GENDER_LOG_LOCK = threading.Lock()
+_GENDER_TIMING_REPORT_EVERY = 60
+_gender_timing_acc: list[float] = [0.0, 0.0, 0.0]  # total ms, faces, frames
+_gender_filter_last_report: tuple[str, int, int] | None = None
+
+
+def _accumulate_gender_timing(dt_ms: float, face_count: int) -> None:
+    """Aggregate GenderAge stage cost across frames; print every N frames."""
+    with _GENDER_LOG_LOCK:
+        _gender_timing_acc[0] += dt_ms
+        _gender_timing_acc[1] += face_count
+        _gender_timing_acc[2] += 1
+        if _gender_timing_acc[2] < _GENDER_TIMING_REPORT_EVERY:
+            return
+        total_ms, faces, frames = _gender_timing_acc
+        _gender_timing_acc[0] = _gender_timing_acc[1] = _gender_timing_acc[2] = 0.0
+    print(
+        f"[GENDER-TIMING] {total_ms / frames:.2f} ms/frame, "
+        f"{int(faces)} faces over {int(frames)} frames "
+        f"({total_ms / max(faces, 1.0):.2f} ms/face)",
+        flush=True,
+    )
+
+
+def _report_gender_filter_outcome(mode: str, skipped: int, total: int) -> None:
+    """Log the filter outcome only when it changes, so playback is not spammed."""
+    global _gender_filter_last_report
+    report = (mode, skipped, total)
+    with _GENDER_LOG_LOCK:
+        if _gender_filter_last_report == report:
+            return
+        _gender_filter_last_report = report
+    print(
+        f"[INFO] Gender filter '{mode}': skipping {skipped} of "
+        f"{total} detected face(s).",
+        flush=True,
+    )
 
 
 class _GatherPrePrimaryRestorer(BaseException):
@@ -887,6 +933,61 @@ class FrameWorker(threading.Thread):
                     ).get("SwapModelSelection", "Inswapper128")
             return self.models_processor.get_arcface_model(_swap_name_for_arc)
         return str(control["RecognitionModelSelection"])
+
+    def _annotate_detected_gender_appearance(
+        self,
+        img_chw: torch.Tensor,
+        faces: list[dict[str, Any]],
+        control: dict,
+        *,
+        swap_or_edit_active: bool = True,
+    ) -> None:
+        """Run GenderAge on each detected face when the appearance filter is active.
+
+        Skips entirely when neither swap nor edit is active (nothing would be
+        filtered anyway) so plain detection/preview never pays for the model.
+        """
+        mode = gender_filter_mode(control)
+        if mode == "All" or not faces or not swap_or_edit_active:
+            return
+        todo = [f for f in faces if "detected_gender" not in f]
+        if todo:
+            # The GenderAge session runs on the CPU EP, and moving the crops to host
+            # memory already waits for the GPU, so wall clock alone is accurate here.
+            _timing = _env_flag("VISIOMASTER_GENDER_TIMING")
+            _t0 = time.perf_counter() if _timing else None
+
+            # One batched inference per frame instead of one session run per face.
+            for fface, (gender, conf) in zip(
+                todo, self.models_processor.classify_faces_gender(img_chw, todo)
+            ):
+                fface["detected_gender"] = gender
+                fface["detected_gender_confidence"] = float(conf)
+
+            if _t0 is not None:
+                _accumulate_gender_timing(
+                    (time.perf_counter() - _t0) * 1000.0, len(todo)
+                )
+
+        # Report only when the outcome changes, so video playback is not spammed.
+        skipped = sum(
+            1
+            for f in faces
+            if skip_swap_for_gender_appearance_filter(
+                control,
+                f.get("detected_gender"),
+                float(f.get("detected_gender_confidence", 0.0) or 0.0),
+            )
+        )
+        _report_gender_filter_outcome(mode, skipped, len(faces))
+
+    @staticmethod
+    def _skip_face_for_gender_filter(fface: dict[str, Any], control: dict) -> bool:
+        return skip_swap_for_gender_appearance_filter(
+            control,
+            fface.get("detected_gender"),
+            float(fface.get("detected_gender_confidence", 0.0) or 0.0),
+        )
 
     def _find_best_target_match(
         self,
@@ -2332,6 +2433,22 @@ class FrameWorker(threading.Thread):
             )
 
             if best_target_button_vr:
+                _vr_gender_probe = {
+                    "bbox": None,
+                    "kps_5": kps_on_crop,
+                    "track_id": -1,
+                }
+                if gender_filter_mode(control) != "All":
+                    self._annotate_detected_gender_appearance(
+                        face_crop_tensor, [_vr_gender_probe], control
+                    )
+                    if self._skip_face_for_gender_filter(_vr_gender_probe, control):
+                        if compare_mode_vr_early:
+                            unmatched_compare_crops.append(face_crop_tensor)
+                        else:
+                            del face_crop_tensor
+                        continue
+
                 denoiser_on = (
                     control.get("DenoiserUNetEnableBeforeRestorersToggle", False)
                     or control.get("DenoiserAfterFirstRestorerToggle", False)
@@ -4125,6 +4242,15 @@ class FrameWorker(threading.Thread):
         if perf_stages is not None:
             perf_stages.mark("std_recognize")
 
+        self._annotate_detected_gender_appearance(
+            img,
+            det_faces_data_for_display,
+            control,
+            swap_or_edit_active=(
+                swap_button_is_checked_global or edit_button_is_checked_global
+            ),
+        )
+
         if _sequential_match_active and _checked_inputs_ordered:
             _need_rr_apply = self.precomputed_rr_input_indices is None
             if not _need_rr_apply:
@@ -4174,6 +4300,8 @@ class FrameWorker(threading.Thread):
                     best_fface, best_score = None, -1.0
 
                     for fface in det_faces_data_for_display:
+                        if self._skip_face_for_gender_filter(fface, control):
+                            continue
                         # FW-BUG-09: pass snapshot; cache result on fface for downstream reuse
                         tgt, tgt_params, score = self._find_best_target_match(
                             fface["embedding"], control, target_faces_snapshot
@@ -4351,6 +4479,9 @@ class FrameWorker(threading.Thread):
                 for det_index, fface in enumerate(det_faces_data_for_display):
                     if stop_event.is_set():
                         break
+
+                    if self._skip_face_for_gender_filter(fface, control):
+                        continue
 
                     if _sequential_match_active:
                         if _plane_batch_specs:
