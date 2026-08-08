@@ -134,6 +134,114 @@ def rr_spatial_sort_indices(boxes: list[np.ndarray]) -> list[int]:
     return sorted(range(n), key=_key)
 
 
+def rr_bbox_area(bbox: np.ndarray) -> float:
+    bb = np.asarray(bbox, dtype=np.float64)
+    width = max(0.0, float(bb[2] - bb[0]))
+    height = max(0.0, float(bb[3] - bb[1]))
+    return width * height
+
+
+def rr_area_sort_indices(boxes: list[np.ndarray]) -> list[int]:
+    """Largest bbox first, preserving list order for equal areas."""
+
+    def _key(ci: int) -> tuple[float, int]:
+        return (-rr_bbox_area(boxes[ci]), ci)
+
+    return sorted(range(len(boxes)), key=_key)
+
+
+def rr_prioritize_largest_faces(
+    assign: list[int],
+    boxes: list[np.ndarray],
+    n_in: int,
+    *,
+    area_margin: float = 0.25,
+) -> list[int]:
+    """Hand the distinct inputs to the biggest faces when detections outnumber inputs.
+
+    Some input must be reused with fewer checked inputs than faces, and temporal
+    locks decide the reuse by arrival order: a face that shows up late keeps a
+    duplicate even when it dominates the frame. The biggest faces take the distinct
+    inputs, and the reuse falls on the smaller ones, keeping the dominant face's
+    input off every other face while another input can absorb the duplicate.
+
+    ``area_margin`` is hysteresis: faces of similar size must not trade inputs
+    frame after frame on detector area jitter.
+    """
+    n = len(assign)
+    if n_in <= 0:
+        return [0] * n
+    out = [int(a) % n_in for a in assign]
+    if n <= n_in or n_in == 1:
+        return out
+
+    areas = [rr_bbox_area(b) for b in boxes]
+    ranked = rr_area_sort_indices(boxes)
+    holder: dict[int, int] = {}
+    smallest_holder = ranked[0]
+
+    for position, ci in enumerate(ranked):
+        if out[ci] not in holder:
+            holder[out[ci]] = ci
+            smallest_holder = ci
+            continue
+        if len(holder) < n_in:
+            free = {j for j in range(n_in) if j not in holder}
+            donor = min(
+                (
+                    cj
+                    for cj in ranked[position + 1 :]
+                    if out[cj] in free
+                    and areas[ci] > areas[cj] * (1.0 + area_margin)
+                ),
+                key=lambda cj: areas[cj],
+                default=None,
+            )
+            if donor is not None:
+                out[ci], out[donor] = out[donor], out[ci]
+                holder[out[ci]] = ci
+                smallest_holder = ci
+                continue
+            unheld = sorted(free.difference(out))
+            if unheld:
+                out[ci] = unheld[0]
+                holder[out[ci]] = ci
+                smallest_holder = ci
+                continue
+        # Nothing left to claim: reuse the input of the smallest face served so far.
+        out[ci] = out[smallest_holder]
+
+    return _spare_largest_face_input(out, areas, ranked, n_in, area_margin)
+
+
+def _spare_largest_face_input(
+    out: list[int],
+    areas: list[float],
+    ranked: list[int],
+    n_in: int,
+    area_margin: float,
+) -> list[int]:
+    """Move duplicates off the biggest face's input onto the least reused one."""
+    top = ranked[0]
+    counts: dict[int, int] = {j: 0 for j in range(n_in)}
+    for inp in out:
+        counts[inp] += 1
+
+    for ci in ranked[1:]:
+        if out[ci] != out[top] or ci == top:
+            continue
+        if areas[top] <= areas[ci] * (1.0 + area_margin):
+            continue
+        target = min(
+            (j for j in range(n_in) if j != out[top]),
+            key=lambda j: (counts[j], j),
+        )
+        counts[out[ci]] -= 1
+        out[ci] = target
+        counts[target] += 1
+    return out
+
+
 def rr_centroid_distance(box_a: np.ndarray, box_b: np.ndarray) -> float:
     ba = np.asarray(box_a, dtype=np.float64)
     bb = np.asarray(box_b, dtype=np.float64)

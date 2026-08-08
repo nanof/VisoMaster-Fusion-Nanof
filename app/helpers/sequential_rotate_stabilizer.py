@@ -10,8 +10,10 @@ import numpy as np
 
 from app.helpers.sequential_rr_order import (
     pick_new_input_index,
+    rr_area_sort_indices,
     rr_dedupe_assignments,
     rr_greedy_assign_from_memory,
+    rr_prioritize_largest_faces,
     rr_spatial_order_key,
     rr_spatial_sort_indices,
 )
@@ -339,7 +341,12 @@ class SequentialRotateStabilizer:
             and len(set(ordered_tids)) == len(ordered_tids)
         )
 
-        if use_tracks:
+        # More faces than inputs: whoever picks first keeps a distinct input, so the
+        # biggest faces go first instead of the leftmost ones.
+        area_priority = len(det_faces) > n_in
+        if area_priority:
+            order = rr_area_sort_indices(raw_boxes)
+        elif use_tracks:
 
             def _sort_key(fi: int) -> tuple[float, float, int]:
                 return rr_spatial_order_key(
@@ -445,6 +452,8 @@ class SequentialRotateStabilizer:
                 rng=self._rng,
             )
             assign = self._enforce_pinned_inputs(final_assign, n_in, pinned)
+            if area_priority:
+                assign = rr_prioritize_largest_faces(assign, curr_boxes, n_in)
             for ci, fi in enumerate(order):
                 tid = int(det_faces[fi]["track_id"])
                 self._track_to_input[tid] = int(assign[ci]) % n_in
@@ -459,6 +468,8 @@ class SequentialRotateStabilizer:
                 rng=self._rng,
             )
             assign = self._enforce_pinned_inputs(base_assign, n_in, pinned)
+            if area_priority:
+                assign = rr_prioritize_largest_faces(assign, curr_boxes, n_in)
             for ci, fi in enumerate(order):
                 det_faces[fi]["_rr_input_idx"] = int(assign[ci]) % n_in
 

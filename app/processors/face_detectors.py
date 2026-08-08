@@ -444,31 +444,17 @@ class FaceDetectors:
             det_scores[sorted_indices],
         )
 
-        # If more faces are detected than max_num, select the best ones.
+        # If more faces are detected than max_num, keep the biggest ones.
         if max_num > 0 and det_boxes.shape[0] > max_num:
             if det_boxes.shape[0] > 1:
-                # Score faces based on a combination of their size and proximity to the image center.
-                # This filtering happens on *unscaled* coordinates (relative to the padded detection image).
+                # Ranking used to subtract the squared distance to the frame centre,
+                # which is measured in px² and therefore dwarfs the area term: a small
+                # centred face outranked a large one near the edges. Detections are
+                # already sorted by confidence, so a stable sort breaks area ties by score.
                 area = (det_boxes[:, 2] - det_boxes[:, 0]) * (
                     det_boxes[:, 3] - det_boxes[:, 1]
                 )
-                # The old logic (img_height / det_scale) was mathematically incorrect and
-                # produced extreme values for non-standard aspect ratios (like VR videos).
-                # The correct logic is to find the center of the *active image area*
-                # on the padded canvas.
-                # new_height_on_canvas = img_height * det_scale
-                # new_width_on_canvas = img_width * det_scale
-                det_img_center_y = (img_height * det_scale) / 2.0
-                det_img_center_x = (img_width * det_scale) / 2.0
-
-                center_x = (det_boxes[:, 0] + det_boxes[:, 2]) / 2 - det_img_center_x
-                center_y = (det_boxes[:, 1] + det_boxes[:, 3]) / 2 - det_img_center_y
-
-                offset_dist_squared = center_x**2 + center_y**2
-                # This score favors large faces (area) that are close to the center
-                # (low offset_dist_squared).
-                values = area - offset_dist_squared * 2.0
-                bindex = torch.argsort(values, descending=True)[:max_num]
+                bindex = torch.argsort(area, descending=True, stable=True)[:max_num]
                 det_boxes, det_kpss, det_scores = (
                     det_boxes[bindex],
                     det_kpss[bindex],

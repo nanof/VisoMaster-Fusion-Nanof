@@ -6,7 +6,10 @@ No ML models are loaded; all inference paths are mocked.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
+import pytest
 import torch
 
 
@@ -55,6 +58,60 @@ def test_nms_keeps_all_non_overlapping_boxes():
     areas = ((boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])).clamp(min=0.0)
     keep = nms(boxes, areas, iou_threshold=0.5)
     assert len(keep) == 3
+
+
+# ---------------------------------------------------------------------------
+# Max faces cap keeps the biggest faces, whatever their position in the frame
+# ---------------------------------------------------------------------------
+
+
+def _filter_detections(boxes, scores, max_num):
+    from app.processors.face_detectors import FaceDetectors
+
+    detectors = FaceDetectors.__new__(FaceDetectors)
+    detectors.models_processor = SimpleNamespace(
+        get_effective_torch_device=lambda: torch.device("cpu")
+    )
+    boxes_np = np.asarray(boxes, dtype=np.float32)
+    kpss = np.zeros((boxes_np.shape[0], 5, 2), dtype=np.float32)
+    det, _kpss, score_values = detectors._filter_detections_gpu(
+        [np.asarray(scores, dtype=np.float32).reshape(-1, 1)],
+        [boxes_np],
+        [kpss],
+        1080,
+        1920,
+        torch.tensor(1.0),
+        max_num,
+        skip_nms=True,
+    )
+    return det, score_values
+
+
+def test_max_faces_cap_keeps_big_face_away_from_center():
+    big_off_center = [10.0, 300.0, 310.0, 600.0]
+    small_centered = [900.0, 500.0, 980.0, 580.0]
+    smaller_centered = [1000.0, 500.0, 1070.0, 570.0]
+
+    det, _ = _filter_detections(
+        [big_off_center, small_centered, smaller_centered],
+        [0.90, 0.95, 0.94],
+        max_num=2,
+    )
+
+    kept = [row[:4].tolist() for row in det]
+    assert big_off_center in kept
+    assert smaller_centered not in kept
+
+
+def test_max_faces_cap_breaks_area_ties_by_score():
+    left = [0.0, 0.0, 100.0, 100.0]
+    right = [800.0, 0.0, 900.0, 100.0]
+
+    det, scores = _filter_detections([left, right], [0.5, 0.9], max_num=1)
+
+    assert det.shape[0] == 1
+    assert det[0][:4].tolist() == right
+    assert float(scores[0]) == pytest.approx(0.9)
 
 
 # ---------------------------------------------------------------------------

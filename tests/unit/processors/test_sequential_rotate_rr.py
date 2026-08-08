@@ -4,7 +4,9 @@ import numpy as np
 
 from app.helpers.sequential_rotate_stabilizer import SequentialRotateStabilizer
 from app.helpers.sequential_rr_order import (
+    rr_area_sort_indices,
     rr_greedy_assign_from_memory,
+    rr_prioritize_largest_faces,
     rr_spatial_order_key,
     rr_spatial_sort_indices,
 )
@@ -56,6 +58,98 @@ def test_rr_spatial_sort_indices_ignores_detector_list_order():
     right = np.array([200.0, 0.0, 250.0, 100.0])
     boxes = [right, left]
     assert rr_spatial_sort_indices(boxes) == [1, 0]
+
+
+def test_rr_area_sort_indices_largest_first_with_stable_ties():
+    small = np.array([0.0, 0.0, 20.0, 20.0])
+    large = np.array([100.0, 0.0, 140.0, 50.0])
+    same_area = np.array([200.0, 0.0, 250.0, 40.0])
+
+    assert rr_area_sort_indices([small, large, same_area]) == [1, 2, 0]
+
+
+def _box(x: float, side: float) -> np.ndarray:
+    return np.array([x, 0.0, x + side, side], dtype=np.float64)
+
+
+def test_prioritize_largest_gives_the_big_face_an_exclusive_input():
+    # Big face shares input 0 with a small one while input 1 sits on another small face.
+    boxes = [_box(0.0, 40.0), _box(200.0, 200.0), _box(500.0, 40.0)]
+    out = rr_prioritize_largest_faces([0, 0, 1], boxes, n_in=2)
+    assert out[1] == 0
+    assert out.count(0) == 1
+
+
+def test_prioritize_largest_exchanges_input_with_a_smaller_face():
+    boxes = [_box(0.0, 40.0), _box(200.0, 200.0), _box(500.0, 120.0)]
+    # Medium face duplicates the big one; the tiny face is holding input 1.
+    assert rr_prioritize_largest_faces([1, 0, 0], boxes, n_in=2) == [1, 0, 1]
+
+
+def test_prioritize_largest_keeps_the_two_biggest_faces_untouched():
+    boxes = [_box(0.0, 200.0), _box(300.0, 180.0), _box(600.0, 40.0)]
+    out = rr_prioritize_largest_faces([0, 1, 0], boxes, n_in=2)
+    assert out[:2] == [0, 1]
+    # The extra face reuses the smaller served input instead of the big face's.
+    assert out[2] == 1
+
+
+def test_prioritize_largest_ignores_similar_sizes():
+    # Faces within the hysteresis margin must not trade inputs on area jitter.
+    boxes = [_box(0.0, 100.0), _box(200.0, 98.0), _box(400.0, 96.0)]
+    assign = [0, 0, 1]
+    assert rr_prioritize_largest_faces(assign, boxes, n_in=2) == assign
+
+
+def test_prioritize_largest_noop_when_inputs_cover_all_faces():
+    boxes = [_box(0.0, 40.0), _box(200.0, 200.0)]
+    assign = [0, 1]
+    assert rr_prioritize_largest_faces(assign, boxes, n_in=3) == assign
+
+
+def test_stabilizer_gives_inputs_to_biggest_faces_when_outnumbered():
+    stabilizer = SequentialRotateStabilizer()
+    checked = [object(), object()]
+    faces = [
+        {"bbox": _box(0.0, 40.0), "track_id": -1},
+        {"bbox": _box(200.0, 200.0), "track_id": -1},
+        {"bbox": _box(600.0, 160.0), "track_id": -1},
+    ]
+    stabilizer.apply(
+        faces, checked, 0, (1280, 720), _iou_xyxy, memory_without_tracking=True
+    )
+    big_inputs = {int(faces[1]["_rr_input_idx"]), int(faces[2]["_rr_input_idx"])}
+    assert big_inputs == {0, 1}
+
+
+def test_stabilizer_reassigns_input_when_a_bigger_face_appears():
+    """Late arrival: a dominant face must take a distinct input from a small one."""
+    stabilizer = SequentialRotateStabilizer()
+    checked = [object(), object()]
+    small_a = {"bbox": _box(0.0, 40.0), "track_id": 1}
+    small_b = {"bbox": _box(120.0, 44.0), "track_id": 2}
+    stabilizer.apply(
+        [small_a, small_b],
+        checked,
+        0,
+        (1280, 720),
+        _iou_xyxy,
+        memory_without_tracking=False,
+    )
+    assert {int(small_a["_rr_input_idx"]), int(small_b["_rr_input_idx"])} == {0, 1}
+
+    frame1 = [
+        {"bbox": _box(0.0, 40.0), "track_id": 1},
+        {"bbox": _box(120.0, 44.0), "track_id": 2},
+        {"bbox": _box(400.0, 240.0), "track_id": 3},
+    ]
+    stabilizer.apply(
+        frame1, checked, 1, (1280, 720), _iou_xyxy, memory_without_tracking=False
+    )
+    inputs = [int(f["_rr_input_idx"]) for f in frame1]
+    # The big newcomer owns a distinct input; the duplicate lands on a small face.
+    assert set(inputs) == {0, 1}
+    assert inputs.count(inputs[2]) == 1
 
 
 def test_rr_greedy_assign_keeps_input_when_bbox_jitters():

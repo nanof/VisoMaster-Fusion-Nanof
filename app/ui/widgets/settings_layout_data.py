@@ -1104,7 +1104,7 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "max_value": "50",
             "default": "20",
             "step": 1,
-            "help": "Set the maximum number of faces to detect in a frame",
+            "help": "Set the maximum number of faces to detect in a frame. When the frame holds more faces than this, the biggest ones are kept and the smaller ones are dropped, wherever they are in the frame.",
         },
         "PerformanceFastDetectEnableToggle": {
             "level": 1,
