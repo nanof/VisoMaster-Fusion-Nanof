@@ -22,7 +22,10 @@ from app.ui.widgets.actions import card_actions
 from app.ui.widgets.actions import save_load_actions
 import app.helpers.miscellaneous as misc_helpers
 from app.helpers import qt_lifecycle
-from app.helpers.input_face_favorites_storage import resolve_source_media_path
+from app.helpers.input_face_favorites_storage import (
+    delete_favorite,
+    resolve_source_media_path,
+)
 from app.helpers.miscellaneous import get_video_rotation
 from app.helpers.swap_all_match import (
     swap_all_assignment_mode,
@@ -1712,14 +1715,26 @@ class InputFaceCardButton(CardButton):
             faces_to_remove = [self]
 
         was_removed = False
+        favorite_removed = False
 
         for face_to_remove in faces_to_remove:
             face_to_remove.remove_kv_data_file()
+            is_favorite = face_to_remove.is_favorite_clip
+            favorite_id = face_to_remove.face_id
             if face_to_remove._remove_face_from_lists():
                 was_removed = True
+                if is_favorite:
+                    # Favorites are persisted under the project root, so the stored
+                    # copy has to go as well or the card reappears on the next start.
+                    delete_favorite(main_window, favorite_id)
+                    favorite_removed = True
 
         if was_removed:
             common_widget_actions.refresh_frame(main_window)
+            if favorite_removed:
+                main_window.placeholder_update_signal.emit(
+                    main_window.inputFacesFavoritesList, False
+                )
             if not main_window.input_faces:
                 main_window.placeholder_update_signal.emit(
                     main_window.inputFacesList, False
@@ -1847,6 +1862,8 @@ class InputFaceCardButton(CardButton):
 
     def on_context_menu(self, point):
         # show context menu
+        from app.ui.widgets.actions import list_view_actions
+
         scan_active = video_control_actions.is_issue_scan_active(self.main_window)
         current_face_size = getattr(
             self.main_window, "face_thumbnail_button_size", None
@@ -1866,7 +1883,8 @@ class InputFaceCardButton(CardButton):
         self.small_thumbnails_action.setChecked(current_face_size == (70, 70))
         self.large_thumbnails_action.setChecked(current_face_size == (96, 96))
         self.clear_all_faces_action.setEnabled(
-            bool(self.main_window.input_faces) and not scan_active
+            bool(list_view_actions.clearable_input_faces(self.main_window))
+            and not scan_active
         )
         on_main_input_list = self.list_widget is self.main_window.inputFacesList
         self.add_to_favorites_action.setVisible(

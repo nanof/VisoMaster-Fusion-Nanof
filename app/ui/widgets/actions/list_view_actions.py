@@ -1389,27 +1389,41 @@ def clear_all_target_media(main_window: "MainWindow") -> bool:
     return True
 
 
+def clearable_input_faces(main_window: "MainWindow") -> list:
+    """Input-face cards that "Clear All Faces" may drop.
+
+    Favorites are persisted on disk and live in their own list, so clearing the
+    Faces panel must leave them alone.
+    """
+    return [
+        button
+        for button in main_window.input_faces.values()
+        if not getattr(button, "is_favorite_clip", False)
+    ]
+
+
 def clear_all_input_faces(main_window: "MainWindow") -> bool:
     from app.ui.widgets.actions import video_control_actions
 
     if video_control_actions.block_if_issue_scan_active(main_window, "clear all faces"):
         return False
 
-    if not main_window.input_faces:
+    faces_to_clear = clearable_input_faces(main_window)
+    if not faces_to_clear:
         return False
 
     confirmed = _confirm_panel_clear(
         main_window,
         "Clear All Faces",
         "This will remove all input faces and reset the Input Faces panel.\n\n"
-        "Files on disk will not be deleted.",
+        "Favorites and files on disk will not be deleted.",
     )
     if not confirmed:
         return False
 
     clear_stop_loading_input_media(main_window, clear_list=False)
 
-    for input_face_button in list(main_window.input_faces.values()):
+    for input_face_button in faces_to_clear:
         input_face_button.remove_kv_data_file()
         # _remove_face_from_lists() already schedules the card for deletion.
         input_face_button._remove_face_from_lists()
@@ -1461,7 +1475,9 @@ def _build_panel_context_menu(
         clear_action.triggered.connect(partial(clear_all_target_media, main_window))
     elif panel_type == "input_faces":
         clear_action = QtGui.QAction("Clear All Faces", menu)
-        clear_action.setEnabled(bool(main_window.input_faces) and not scan_active)
+        clear_action.setEnabled(
+            bool(clearable_input_faces(main_window)) and not scan_active
+        )
         clear_action.triggered.connect(partial(clear_all_input_faces, main_window))
     else:
         clear_action = QtGui.QAction("Clear All Embeddings", menu)
