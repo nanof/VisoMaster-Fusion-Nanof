@@ -72,7 +72,12 @@ class MuseTalkVAE:
         self.scaling_factor = self.vae.config.scaling_factor
         self.transform = transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
         self._resized_img = int(resized_img)
+        self._channels_last = False
         self._rebuild_mask()
+
+    def set_channels_last(self, enabled: bool = True) -> None:
+        """Match engine preference after converting ``self.vae`` to NHWC."""
+        self._channels_last = bool(enabled) and self.device.type == "cuda"
 
     def _rebuild_mask(self) -> None:
         """Keep the top half of the crop, zero the half the model must repaint.
@@ -106,7 +111,10 @@ class MuseTalkVAE:
         x = torch.from_numpy(x).to(self.vae.device)
         if half_mask:
             x = x * (self._mask_tensor > 0.5)
-        return self.transform(x)
+        x = self.transform(x)
+        if self._channels_last:
+            x = x.to(memory_format=torch.channels_last)
+        return x
 
     def get_latents_for_unet_batch(self, imgs_bgr: list[np.ndarray]) -> Any:
         """Masked+reference latents for N crops, using one VAE encode pass."""
@@ -133,6 +141,8 @@ class MuseTalkVAE:
         if half_mask:
             x = x * (self._mask_tensor > 0.5)
         x = self.transform(x).unsqueeze(0)
+        if self._channels_last:
+            x = x.to(memory_format=torch.channels_last)
         return x
 
     def encode_latents(self, image: Any) -> Any:

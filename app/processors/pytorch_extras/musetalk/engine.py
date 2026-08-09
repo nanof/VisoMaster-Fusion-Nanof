@@ -62,9 +62,28 @@ def _env_truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    """Read a 0/1 env flag; missing/empty keeps ``default``."""
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+def musetalk_compile_enabled() -> bool:
+    """True when VISOFUSION_MUSETALK_COMPILE asks for torch.compile (default on)."""
+    return _env_flag("VISOFUSION_MUSETALK_COMPILE", True)
+
+
 def musetalk_debug_enabled() -> bool:
     """True when VISOFUSION_MUSETALK_DEBUG asks for lip-sync tracing."""
     return _env_truthy("VISOFUSION_MUSETALK_DEBUG")
+
+
+# Whisper-tiny encoder: embed + 4 layers → 5; window = 2*(2+2+1) = 10 → 50 tokens.
+_MUSETALK_AUDIO_TOKENS = 50
+_MUSETALK_AUDIO_DIM = 384
+_MUSETALK_LATENT_HW = 32
 
 
 class _EffectProbe:
@@ -251,6 +270,8 @@ class MuseTalkEngine:
         # thread must not touch the GPU while another model is capturing.
         self.gpu_capture_lock: Any = None
         self._warn_once: set[str] = set()
+        self._compiled = False
+        self._channels_last = False
 
     @property
     def is_loaded(self) -> bool:
@@ -333,13 +354,19 @@ class MuseTalkEngine:
                 self._pe.to(self._device)
 
                 self._audio_proc = MuseTalkAudioProcessor(whisper_dir())
+                # Whisper only runs during prepare_audio; keep it on CPU so
+                # realtime lip-sync VRAM is UNet+VAE only.
                 self._whisper = WhisperModel.from_pretrained(str(whisper_dir()))
                 self._dtype = self._unet.model.dtype
                 self._whisper = self._whisper.to(
-                    device=self._device, dtype=self._dtype
+                    device="cpu", dtype=torch.float32
                 ).eval()
                 self._whisper.requires_grad_(False)
                 self._timesteps = torch.tensor([0], device=self._device)
+                if self._device.type == "cuda":
+                    self._prefer_channels_last()
+                    if musetalk_compile_enabled():
+                        self._try_torch_compile()
                 self._probe = self._build_probe()
                 self._start_batcher()
                 self._loaded = True
@@ -348,7 +375,8 @@ class MuseTalkEngine:
                 print(
                     f"[INFO] MuseTalk loaded on {self._device} "
                     f"in {(time.perf_counter() - t0) * 1000:.0f} ms "
-                    f"(max batch {self._max_batch})"
+                    f"(max batch {self._max_batch}, whisper=cpu"
+                    f"{', compile=on' if self._compiled else ''})"
                 )
                 return True
             except Exception as e:
@@ -374,6 +402,109 @@ class MuseTalkEngine:
         )
         return _EffectProbe(dump_dir, max(0, frames))
 
+    def _prefer_channels_last(self) -> None:
+        """Use NHWC on CUDA for UNet/VAE convolutions when supported."""
+        import torch
+
+        try:
+            if self._unet is not None:
+                self._unet.model = self._unet.model.to(
+                    memory_format=torch.channels_last
+                )
+            if self._vae is not None:
+                self._vae.vae = self._vae.vae.to(memory_format=torch.channels_last)
+                if hasattr(self._vae, "set_channels_last"):
+                    self._vae.set_channels_last(True)
+            self._channels_last = True
+        except Exception as e:
+            self._channels_last = False
+            print(f"[WARN] MuseTalk channels_last skipped: {e}")
+
+    def _try_torch_compile(self) -> None:
+        """Compile UNet (and VAE if stable). Failures stay on eager path."""
+        import torch
+
+        if self._unet is None or self._device is None or self._device.type != "cuda":
+            return
+        try:
+            from custom_kernels.compile_utils import (
+                _skip_torch_compile_cuda_inductor_reason,
+                setup_compile_env,
+            )
+        except Exception as e:
+            print(f"[WARN] MuseTalk torch.compile unavailable: {e}")
+            return
+
+        n = max(1, int(self._max_batch))
+        dtype = self._dtype
+        device = self._device
+        sample = torch.zeros(
+            (n, 8, _MUSETALK_LATENT_HW, _MUSETALK_LATENT_HW),
+            device=device,
+            dtype=dtype,
+        )
+        if self._channels_last:
+            sample = sample.to(memory_format=torch.channels_last)
+        skip = _skip_torch_compile_cuda_inductor_reason(sample)
+        if skip is not None:
+            print(f"[INFO] MuseTalk torch.compile skipped ({skip})")
+            return
+
+        setup_compile_env(compile_mode="default")
+        # Specialize on batch 1 and max_batch (dynamic=True thrashes sympy on this
+        # UNet and has hung/crashed the process on Windows + triton-windows).
+        audio_full = torch.zeros(
+            (n, _MUSETALK_AUDIO_TOKENS, _MUSETALK_AUDIO_DIM),
+            device=device,
+            dtype=dtype,
+        )
+        timesteps = self._timesteps
+
+        try:
+            compiled_unet = torch.compile(
+                self._unet.model, mode="default", fullgraph=False, dynamic=False
+            )
+            with torch.inference_mode():
+                for size in sorted({1, n}):
+                    s = sample[:size]
+                    a = audio_full[:size]
+                    if self._channels_last:
+                        s = s.to(memory_format=torch.channels_last)
+                    for _ in range(2):
+                        compiled_unet(s, timesteps, encoder_hidden_states=a)
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            self._unet.model = compiled_unet
+            self._compiled = True
+            print("[INFO] MuseTalk UNet torch.compile ready", flush=True)
+        except Exception as e:
+            print(f"[WARN] MuseTalk UNet torch.compile failed: {e}", flush=True)
+            return
+
+        if self._vae is None:
+            return
+        try:
+            compiled_vae = torch.compile(
+                self._vae.vae, mode="default", fullgraph=False, dynamic=False
+            )
+            img_full = torch.zeros((n, 3, 256, 256), device=device, dtype=dtype)
+            with torch.inference_mode():
+                for size in sorted({1, n}):
+                    img = img_full[:size]
+                    if self._channels_last:
+                        img = img.to(memory_format=torch.channels_last)
+                    for _ in range(2):
+                        lat = compiled_vae.encode(img).latent_dist.sample()
+                        _ = compiled_vae.decode(lat).sample
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            self._vae.vae = compiled_vae
+            print("[INFO] MuseTalk VAE torch.compile ready", flush=True)
+        except Exception as e:
+            print(
+                f"[WARN] MuseTalk VAE torch.compile failed (UNet still compiled): {e}",
+                flush=True,
+            )
     def _start_batcher(self) -> None:
         self._batch_stop.clear()
         self._batch_queue = queue.Queue()
@@ -450,11 +581,15 @@ class MuseTalkEngine:
         # Uncontended except while another model builds its CUDA graph, which is a
         # one-off per model, so this costs a lock acquire per batch.
         gate = self.gpu_capture_lock or contextlib.nullcontext()
-        with gate, torch.no_grad():
+        with gate, torch.inference_mode():
             # The VAE mask stays the exact lower half. bbox_shift belongs to the
             # crop geometry (see framing.py); moving this line instead detaches it
             # from the blend boundary and shows up as a seam across the nose.
             latents = vae.get_latents_for_unet_batch([r.crop for r in batch])
+            if getattr(self, "_channels_last", False) and getattr(
+                latents, "is_cuda", False
+            ):
+                latents = latents.to(memory_format=torch.channels_last)
             audio = torch.cat(
                 [chunks[r.audio_index : r.audio_index + 1] for r in batch], dim=0
             )
@@ -483,6 +618,8 @@ class MuseTalkEngine:
             self._timesteps = None
             self._probe = None
             self._loaded = False
+            self._compiled = False
+            self._channels_last = False
             try:
                 import torch
 
@@ -540,6 +677,8 @@ class MuseTalkEngine:
         wav_path = path
         tmp_wav: Path | None = None
         try:
+            import torch
+
             if is_video_container or path.suffix.lower() in {
                 ".mp4",
                 ".mkv",
@@ -554,18 +693,19 @@ class MuseTalkEngine:
                 wav_path = tmp_wav
 
             feats, librosa_len = self._audio_proc.get_audio_feature(
-                wav_path, weight_dtype=self._dtype
+                wav_path, weight_dtype=torch.float32
             )
             if feats is None or librosa_len <= 0:
                 self._last_error = "Failed to extract audio features"
                 print(f"[WARN] MuseTalk: {self._last_error}")
                 return False
 
+            whisper_device = next(self._whisper.parameters()).device
             with self._lock:
                 chunks = self._audio_proc.get_whisper_chunk(
                     feats,
-                    self._device,
-                    self._dtype,
+                    whisper_device,
+                    torch.float32,
                     self._whisper,
                     librosa_len,
                     fps=float(fps),

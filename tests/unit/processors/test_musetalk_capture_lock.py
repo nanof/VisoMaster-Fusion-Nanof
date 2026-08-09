@@ -77,6 +77,7 @@ def _engine(lock: _RecordingLock | None) -> tuple[MuseTalkEngine, _FakeVae]:
     eng._device = torch.device("cpu")
     eng._timesteps = torch.zeros(1)
     eng._bbox_shift = 0
+    eng._channels_last = False
     eng.gpu_capture_lock = lock
     return eng, vae
 
