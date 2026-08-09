@@ -13,8 +13,8 @@ from app.processors.pytorch_extras import is_pytorch_extras_enabled
 def run_instantid_placeholder(*_args, **_kwargs) -> None:
     if not is_pytorch_extras_enabled():
         print(
-            "[INFO] InstantID: defina VISOFUSION_PYTORCH_EXTRAS=1 e instale "
-            "requirements-pytorch-extra.txt para habilitar este pipeline."
+            "[INFO] InstantID: stub gated by VISOFUSION_PYTORCH_EXTRAS=1 "
+            "(deps already in requirements_cu13.txt via launcher)."
         )
         return
     print(

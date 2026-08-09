@@ -19,6 +19,11 @@ for _sub in (
     "pytorch_weights",
     "liveportrait_onnx",
     "performrecast_onnx",
+    "musetalk",
+    "musetalk/musetalkV15",
+    "musetalk/sd-vae",
+    "musetalk/whisper",
+    "musetalk/cache",
 ):
     os.makedirs(models_dir / _sub, exist_ok=True)
 
@@ -739,5 +744,60 @@ pytorch_assets_list: list = [
         "local_path": str(models_dir / "pytorch_weights" / "DMDNet.pth"),
         "hash": "",
         "url": "https://github.com/csxmli2016/DMDNet/releases/download/v1/DMDNet.pth",
+    },
+]
+
+# MuseTalk 1.5 (+ VAE + Whisper), ~4 GB. Downloaded by default; opt out with
+# ``download_models.py --skip-musetalk`` or VISOFUSION_SKIP_MUSETALK=1.
+# Small configs come first so a bad URL fails before the 3.4 GB UNet.
+_hf_mt = "https://huggingface.co/TMElyralab/MuseTalk/resolve/main"
+_hf_vae = "https://huggingface.co/stabilityai/sd-vae-ft-mse/resolve/main"
+_hf_wh = "https://huggingface.co/openai/whisper-tiny/resolve/main"
+musetalk_assets_list: list = [
+    {
+        "model_name": "MuseTalkV15-Config",
+        "local_path": str(models_dir / "musetalk" / "musetalkV15" / "musetalk.json"),
+        "hash": "",
+        "url": f"{_hf_mt}/musetalkV15/musetalk.json",
+    },
+    {
+        "model_name": "MuseTalk-SDVAE-Config",
+        "local_path": str(models_dir / "musetalk" / "sd-vae" / "config.json"),
+        "hash": "",
+        "url": f"{_hf_vae}/config.json",
+    },
+    {
+        "model_name": "MuseTalk-Whisper-Config",
+        "local_path": str(models_dir / "musetalk" / "whisper" / "config.json"),
+        "hash": "",
+        "url": f"{_hf_wh}/config.json",
+    },
+    {
+        "model_name": "MuseTalk-Whisper-Preprocessor",
+        "local_path": str(
+            models_dir / "musetalk" / "whisper" / "preprocessor_config.json"
+        ),
+        "hash": "",
+        "url": f"{_hf_wh}/preprocessor_config.json",
+    },
+    {
+        "model_name": "MuseTalk-Whisper-Weights",
+        "local_path": str(models_dir / "musetalk" / "whisper" / "pytorch_model.bin"),
+        "hash": "",
+        "url": f"{_hf_wh}/pytorch_model.bin",
+    },
+    {
+        "model_name": "MuseTalk-SDVAE-Weights",
+        "local_path": str(
+            models_dir / "musetalk" / "sd-vae" / "diffusion_pytorch_model.bin"
+        ),
+        "hash": "",
+        "url": f"{_hf_vae}/diffusion_pytorch_model.bin",
+    },
+    {
+        "model_name": "MuseTalkV15-UNet",
+        "local_path": str(models_dir / "musetalk" / "musetalkV15" / "unet.pth"),
+        "hash": "",
+        "url": f"{_hf_mt}/musetalkV15/unet.pth",
     },
 ]

@@ -1246,4 +1246,401 @@ COMMON_LAYOUT_DATA: Any = {
             ),
         },
     },
+    "MuseTalk Lip-Sync": {
+        "MuseTalkEnableToggle": {
+            "level": 1,
+            "label": "Enable MuseTalk Lip-Sync",
+            "default": False,
+            "data_type": "control",
+            "help": (
+                "Optional realtime lip-sync after swap (MuseTalk 1.5). "
+                "Dependencies and weights are installed by the launcher "
+                "(Check / Update Dependencies + Check / Update Models). "
+                "Uses the video audio track or an external WAV/MP3. Safe to leave off — "
+                "does not affect the ONNX swap path when disabled."
+            ),
+            "exec_function": control_actions.handle_musetalk_toggle_change,
+            "exec_function_args": ["MuseTalkEnableToggle"],
+        },
+        "MuseTalkBypassToggle": {
+            "level": 2,
+            "label": "Bypass lip-sync (A/B comparison)",
+            "default": False,
+            "data_type": "control",
+            "parentToggle": "MuseTalkEnableToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "Temporarily show the swapped frame without applying MuseTalk. "
+                "The MuseTalk model and prepared audio stay loaded, so switching "
+                "this off restores lip-sync immediately without a reload. Useful "
+                "for comparing the same paused frame before and after lip-sync."
+            ),
+        },
+        "MuseTalkPipelineOrderSelection": {
+            "level": 2,
+            "label": "When to lip-sync",
+            "options": [
+                "Before the swap",
+                "After the swap",
+                "Before + light after (hybrid)",
+            ],
+            "default": "Before the swap",
+            "data_type": "control",
+            "parentToggle": "MuseTalkEnableToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "Before the swap: MuseTalk only drives the mouth pose and the swapper "
+                "then paints the source identity over it, so the lips keep the face's "
+                "own shape and colour and the restorer and enhancers also work on the "
+                "generated mouth. This is the only way to avoid MuseTalk's generic "
+                "mouth, because it cannot preserve identity by itself: its input has "
+                "the lower face masked out. After the swap: lip-sync has the last "
+                "word, which syncs harder but normalises the mouth toward the model's "
+                "own prior. Hybrid: does 'before' for identity, then a light second "
+                "pass on the mouth only to bring back the sharpness the swap flattens "
+                "— costs a second inference per frame. VR180 always uses 'After'."
+            ),
+        },
+        "MuseTalkHybridAfterStrengthSlider": {
+            "level": 3,
+            "label": "Hybrid re-sync amount",
+            "min_value": "0",
+            "max_value": "100",
+            "default": "40",
+            "step": 5,
+            "data_type": "control",
+            "parentToggle": "MuseTalkEnableToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "In the hybrid order, how strongly the second pass re-applies the "
+                "generated mouth over the swapped one. Because the pre-swap pass "
+                "already set the mouth pose, both are aligned, so this only sharpens "
+                "the same shape rather than ghosting a second mouth. Higher recovers "
+                "more of the lip-sync crispness the swap flattened but drifts back "
+                "toward MuseTalk's colour; lower keeps more of the swap's identity. "
+                "Only applies with 'Before + light after (hybrid)' selected."
+            ),
+        },
+        "MuseTalkAudioSourceSelection": {
+            "level": 2,
+            "label": "Audio source",
+            "options": ["Video track", "External file"],
+            "default": "Video track",
+            "data_type": "control",
+            "parentToggle": "MuseTalkEnableToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "Video track: extract audio from the loaded media. "
+                "External file: use MuseTalk Audio Path below (dubbing)."
+            ),
+            "exec_function": control_actions.handle_musetalk_audio_change,
+            "exec_function_args": ["MuseTalkAudioSourceSelection"],
+        },
+        "MuseTalkAudioPathText": {
+            "level": 2,
+            "label": "External audio path",
+            "default": "",
+            "width": 220,
+            "data_type": "control",
+            "parentToggle": "MuseTalkEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Path to WAV/MP3/M4A when Audio source is External file. Press Enter to apply.",
+            "exec_function": control_actions.handle_musetalk_audio_change,
+            "exec_function_args": ["MuseTalkAudioPathText"],
+        },
+        "MuseTalkExtraMarginSlider": {
+            "level": 2,
+            "label": "Crop extra margin",
+            "min_value": "0",
+            "max_value": "40",
+            "default": "10",
+            "step": 1,
+            "data_type": "control",
+            "parentToggle": "MuseTalkEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Extra pixels added below the face bbox (MuseTalk v1.5 default 10).",
+        },
+        "MuseTalkFaceIndexSlider": {
+            "level": 2,
+            "label": "Face index",
+            "min_value": "0",
+            "max_value": "7",
+            "default": "0",
+            "step": 1,
+            "data_type": "control",
+            "parentToggle": "MuseTalkEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Which detected face to lip-sync when several are present.",
+        },
+        "MuseTalkBlendStrengthSlider": {
+            "level": 2,
+            "label": "Lip-sync strength",
+            "min_value": "0",
+            "max_value": "100",
+            "default": "100",
+            "step": 5,
+            "data_type": "control",
+            "parentToggle": "MuseTalkEnableToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "How much of the generated mouth replaces the original, as an alpha "
+                "blend. Any value below 100 mixes the original mouth back in, and "
+                "because the two mouths are in different poses that shows both at once "
+                "as a ghosted 'double mouth'. Ignored while 'Repaint only the mouth' "
+                "is on, which is the better way to keep identity; 0 still means "
+                "untouched. 100 = full lip-sync, 0 = untouched."
+            ),
+        },
+        "MuseTalkBboxShiftSlider": {
+            "level": 2,
+            "label": "Mouth openness bias",
+            "min_value": "-15",
+            "max_value": "15",
+            "default": "0",
+            "step": 1,
+            "data_type": "control",
+            "parentToggle": "MuseTalkEnableToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "MuseTalk's own 'bbox_shift': moves the nose-bridge point the crop is "
+                "built around, in pixels of the frame. Positive (toward the mouth) "
+                "lets the audio open the mouth more but looks more generic; negative "
+                "(upward) keeps more of the real face and its identity at the cost of "
+                "some lip motion. 0 is MuseTalk's default, and small nudges are enough "
+                "— upstream's usable range is about ±9. Needs 'Frame the crop from "
+                "landmarks' on, since it acts on the landmark window."
+            ),
+        },
+        "MuseTalkRestoreMouthToggle": {
+            "level": 2,
+            "label": "Sharpen the mouth (restorer)",
+            "default": False,
+            "data_type": "control",
+            "parentToggle": "MuseTalkEnableToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "MuseTalk generates the mouth at only 256px, so it comes out soft and "
+                "plastic. This runs the same face restorer the swap uses (GFPGAN / "
+                "CodeFormer) over just the generated mouth to add back teeth and lip "
+                "texture — the official project's recommended fix for the resolution "
+                "cap. It hallucinates plausible detail rather than the true identity, "
+                "but it kills the generic look. Costs extra time per frame."
+            ),
+        },
+        "MuseTalkRestoreMouthModelSelection": {
+            "level": 3,
+            "label": "Mouth restorer",
+            "options": [
+                "GFPGAN-v1.4",
+                "CodeFormer",
+                "GPEN-256",
+                "GPEN-512",
+                "RestoreFormer++",
+            ],
+            "default": "GFPGAN-v1.4",
+            "data_type": "control",
+            "parentToggle": "MuseTalkRestoreMouthToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "Which restorer to run on the mouth. GFPGAN is a good default; "
+                "CodeFormer trades fidelity for smoothness."
+            ),
+        },
+        "MuseTalkRestoreMouthStrengthSlider": {
+            "level": 3,
+            "label": "Mouth sharpening",
+            "min_value": "0",
+            "max_value": "100",
+            "default": "60",
+            "step": 5,
+            "data_type": "control",
+            "parentToggle": "MuseTalkRestoreMouthToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "How much of the restored mouth is blended over the generated one. "
+                "Lower it if the added detail looks over-sharpened or noisy."
+            ),
+        },
+        "MuseTalkLandmarkCropToggle": {
+            "level": 2,
+            "label": "Frame the crop from landmarks",
+            "default": True,
+            "data_type": "control",
+            "parentToggle": "MuseTalkEnableToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "Build the working crop the way MuseTalk's own code does: jaw to jaw "
+                "horizontally, ending at the chin, centred on the nose bridge. The "
+                "detector box is a different shape, so the model sees the face at a "
+                "scale it was not trained on and returns a smaller, more generic "
+                "mouth. Turn this off to fall back to the detector box."
+            ),
+        },
+        "MuseTalkFaceParsingToggle": {
+            "level": 2,
+            "label": "Segment the face to blend",
+            "default": True,
+            "data_type": "control",
+            "parentToggle": "MuseTalkEnableToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "Blend using a face-parsing mask, which is what MuseTalk's own "
+                "implementation does. The repaint then follows the jaw, chin and lips "
+                "instead of an ellipse, which is what caused a visible edge across "
+                "the mouth. Turn this off only to compare: the fallback shape is "
+                "cheaper but noticeably worse."
+            ),
+        },
+        "MuseTalkMouthOnlyToggle": {
+            "level": 2,
+            "label": "Repaint only the mouth",
+            "default": True,
+            "data_type": "control",
+            "parentToggle": "MuseTalkFaceParsingToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "Paste the generated mouth only where the mouth is, over the union of "
+                "the original and the generated mouth, and always fully opaque. This "
+                "is what removes the ghosted 'double mouth and double chin': the jaw "
+                "and chin of the swapped face are never touched, so there is nothing "
+                "left to show through, and the identity that used to be lost by "
+                "repainting the whole lower face is kept. With this on, 'Lip-sync "
+                "strength', 'Repaint upper limit' and 'Cheek protection' no longer "
+                "apply — only the padding below. Needs face segmentation on."
+            ),
+        },
+        "MuseTalkMouthPaddingSlider": {
+            "level": 3,
+            "label": "Mouth region padding",
+            "min_value": "0",
+            "max_value": "24",
+            "default": "6",
+            "step": 1,
+            "data_type": "control",
+            "parentToggle": "MuseTalkMouthOnlyToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "How many pixels of skin around the mouth are included in the repaint. "
+                "The border is feathered over roughly this distance, so a little "
+                "padding hides the seam. Raise it if you can see the edge of the "
+                "repaint; lower it to keep more of the original skin, at the cost of a "
+                "tighter, more visible border."
+            ),
+        },
+        "MuseTalkRepaintTopSlider": {
+            "level": 2,
+            "label": "Repaint upper limit",
+            "min_value": "35",
+            "max_value": "65",
+            "default": "50",
+            "step": 1,
+            "data_type": "control",
+            "parentToggle": "MuseTalkFaceParsingToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "Where the repaint stops, as a percentage down the working crop. The "
+                "default 50 lands on the mid-nose line, which is MuseTalk's own value. "
+                "Raise it to keep more of the original nose and cheeks, lower it only "
+                "if the chin needs more freedom."
+            ),
+        },
+        "MuseTalkCheekWidthSlider": {
+            "level": 2,
+            "label": "Cheek protection",
+            "min_value": "40",
+            "max_value": "140",
+            "default": "90",
+            "step": 5,
+            "data_type": "control",
+            "parentToggle": "MuseTalkFaceParsingToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "Half-width in pixels of the central column that keeps the full mask; "
+                "outside it the mask is eroded so the repaint cannot creep onto ears, "
+                "hair or background. MuseTalk's default is 90. Lower it if you see "
+                "bleeding at the sides of the face."
+            ),
+        },
+        "MuseTalkLipColorToggle": {
+            "level": 2,
+            "label": "Recover the lip colour",
+            "default": True,
+            "data_type": "control",
+            "parentToggle": "MuseTalkFaceParsingToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "MuseTalk paints its own magenta-ish lips regardless of the face "
+                "beneath, because it drives lip shape from audio. This pulls the lip "
+                "colour back toward the swapped face's own, shifting only the "
+                "chrominance over the segmented lips, so the lip-sync motion and the "
+                "teeth are left exactly as generated. Needs face segmentation on."
+            ),
+        },
+        "MuseTalkLipColorStrengthSlider": {
+            "level": 3,
+            "label": "Lip colour recovery",
+            "min_value": "0",
+            "max_value": "100",
+            "default": "70",
+            "step": 5,
+            "data_type": "control",
+            "parentToggle": "MuseTalkLipColorToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "How far the lip colour is pulled back toward the original face. 0 "
+                "keeps MuseTalk's own colour, 100 matches the swapped face's lips "
+                "completely. The default 70 removes most of the magenta while leaving "
+                "a touch of the model's own shading."
+            ),
+        },
+        "MuseTalkMouthWidthSlider": {
+            "level": 2,
+            "label": "Mouth area width",
+            "min_value": "20",
+            "max_value": "60",
+            "default": "42",
+            "step": 1,
+            "data_type": "control",
+            "parentToggle": "MuseTalkEnableToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "Only applies with 'Segment the face to blend' off. Half-width of the "
+                "fallback ellipse, as a percentage of the crop. Narrow it to repaint "
+                "the lips only and leave more of the cheeks untouched; widen it if the "
+                "paste edge shows near the mouth corners."
+            ),
+        },
+        "MuseTalkMouthHeightSlider": {
+            "level": 2,
+            "label": "Mouth area height",
+            "min_value": "15",
+            "max_value": "45",
+            "default": "30",
+            "step": 1,
+            "data_type": "control",
+            "parentToggle": "MuseTalkEnableToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "Only applies with 'Segment the face to blend' off. Half-height of the "
+                "fallback ellipse, as a percentage of the crop. Reduce it to keep the "
+                "chin and jawline original."
+            ),
+        },
+        "MuseTalkMouthCentreSlider": {
+            "level": 2,
+            "label": "Mouth area position",
+            "min_value": "50",
+            "max_value": "78",
+            "default": "64",
+            "step": 1,
+            "data_type": "control",
+            "parentToggle": "MuseTalkEnableToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "Only applies with 'Segment the face to blend' off. Vertical centre of "
+                "the fallback ellipse, as a percentage down the crop. Raise it if the "
+                "repaint sits below the lips, lower it if it reaches the nose."
+            ),
+        },
+    },
 }

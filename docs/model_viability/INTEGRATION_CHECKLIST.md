@@ -71,12 +71,13 @@ Weight download: from the project root, `python download_models.py` (or the port
 - **Where:** **Settings** → **Frame Interpolation** ON → method **Neural (ONNX)** → **Neural ONNX checkpoint**.
 - **Requirement:** **RifePreviewInterp** and/or **RifePreviewInterpAlt** downloaded.
 
-### PyTorch extras (InstantID / retalking — skeleton)
+### PyTorch extras (InstantID / MuseTalk)
 
-- **Description:** Optional dependencies and stubs for future PyTorch pipelines; they do not replace the hot ONNX swap path.
-- **Files:** `requirements-pytorch-extra.txt`, `app/processors/pytorch_extras/`.
-- **Enable:** `VISOFUSION_PYTORCH_EXTRAS=1` (or `true` / `yes` / `on`).
-- **Status:** informational console messages; full integration pending design.
+- **Description:** Optional PyTorch pipelines outside the hot ONNX swap path.
+- **Files:** `app/processors/pytorch_extras/` (incl. `musetalk/`). Deps live in `requirements_cu13.txt` (launcher **Check / Update Dependencies**).
+- **MuseTalk enable:** UI toggle **MuseTalk Lip-Sync** (default off). No env var required.
+- **Weights:** downloaded by default (launcher **Check / Update Models** or `python download_models.py`, ~4 GB). Opt out with `--skip-musetalk` / `VISOFUSION_SKIP_MUSETALK=1`. Frame hook is a no-op unless toggle + models + audio are ready.
+- **Status:** MuseTalk 1.5 realtime lip-sync integrated behind the toggle; InstantID remains a stub.
 
 ---
 

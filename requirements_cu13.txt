@@ -1,4 +1,5 @@
 absl-py==2.4.0
+accelerate==1.6.0
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.5
 aiosignal==1.4.0
@@ -10,6 +11,7 @@ charset-normalizer==3.4.7
 colorama==0.4.6
 cuda-toolkit==13.2.1
 darkdetect==0.7.1
+diffusers==0.30.2
 einops==0.8.2
 filelock==3.29.0
 flatbuffers==25.12.19
@@ -20,6 +22,7 @@ gast==0.7.0
 google-pasta==0.2.0
 grpcio==1.80.0
 h5py==3.14.0
+huggingface-hub==0.30.2
 idna==3.13
 imageio==2.37.3
 jinja2==3.1.6
@@ -28,6 +31,7 @@ kornia==0.8.2
 kornia-rs==0.1.11
 lazy-loader==0.5
 libclang==18.1.1
+librosa==0.11.0
 lightning==2.6.1
 lightning-utilities==0.15.3
 markdown-it-py==4.0.0
@@ -76,6 +80,7 @@ send2trash==2.1.0
 setuptools==81.0.0
 shiboken6==6.11.0
 six==1.17.0
+soundfile==0.13.1
 sympy==1.14.0
 tensorflow==2.21.0
 tensorrt-cu13==10.16.1.11
@@ -88,6 +93,7 @@ torchaudio==2.11.0+cu130
 torchmetrics==1.9.0
 torchvision==0.26.0+cu130
 tqdm==4.67.3
+transformers==4.46.3
 typing-extensions==4.15.0
 urllib3==2.6.3
 wcwidth==0.7.0

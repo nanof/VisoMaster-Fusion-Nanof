@@ -1,22 +1,27 @@
 """
-Stub para retalking / audio-driven head (p. ej. Wav2Lip, SadTalker, edtalk ONNX/PyTorch).
+Retalking / audio-driven lip-sync entrypoint.
 
-Pipeline típico: audio + vídeo → cola offline (no hot path de swap por frame).
+Preferred backend: MuseTalk 1.5 (see ``pytorch_extras.musetalk``).
+Activation is via the UI toggle 'MuseTalk Lip-Sync'; this helper only reports
+readiness. Dependencies and weights are installed by the launcher
+("Check / Update Dependencies" + "Check / Update Models").
 """
 
 from __future__ import annotations
 
-from app.processors.pytorch_extras import is_pytorch_extras_enabled
+from typing import Any
 
 
-def run_retalking_placeholder(*_args, **_kwargs) -> None:
-    if not is_pytorch_extras_enabled():
+def run_retalking_placeholder(*_args: Any, **_kwargs: Any) -> None:
+    from app.processors.pytorch_extras.musetalk.paths import musetalk_assets_ready
+
+    if not musetalk_assets_ready():
         print(
-            "[INFO] Retalking: defina VISOFUSION_PYTORCH_EXTRAS=1 e instale "
-            "requirements-pytorch-extra.txt para habilitar este pipeline."
+            "[INFO] MuseTalk: pesos no encontrados. Ejecute en el launcher "
+            "'Check / Update Dependencies' y 'Check / Update Models'."
         )
         return
     print(
-        "[INFO] Retalking: stub — añadir orquestación FFmpeg + modelo "
-        "(p. ej. edtalk_256.onnx en pytorch_weights/) en una iteración posterior."
+        "[INFO] MuseTalk listo: active el toggle 'MuseTalk Lip-Sync' en la UI "
+        "(Common) tras cargar un vídeo con audio."
     )

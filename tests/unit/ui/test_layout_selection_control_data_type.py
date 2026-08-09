@@ -101,3 +101,63 @@ def test_swapper_gender_filter_is_control_typed():
     entry = SWAPPER_LAYOUT_DATA["Swapper"]["GenderAppearanceFilterSelection"]
     assert entry["data_type"] == "control"
     assert entry["default"] == "All"
+
+
+_MUSETALK_LAYOUT = {
+    "MuseTalk Lip-Sync": {
+        "MuseTalkEnableToggle": {
+            "level": 1,
+            "label": "Enable MuseTalk Lip-Sync",
+            "default": False,
+            "data_type": "control",
+            "help": "toggle",
+        },
+        "MuseTalkAudioPathText": {
+            "level": 2,
+            "label": "External audio path",
+            "default": "",
+            "width": 220,
+            "data_type": "control",
+            "help": "text",
+        },
+        "MuseTalkExtraMarginSlider": {
+            "level": 2,
+            "label": "Crop extra margin",
+            "min_value": "0",
+            "max_value": "40",
+            "default": "10",
+            "step": 1,
+            "data_type": "control",
+            "help": "slider",
+        },
+    }
+}
+
+
+def test_musetalk_widgets_are_control_typed_in_parameter_tab(qapp):
+    mw = _MainWindowStub()
+    host = QtWidgets.QWidget()
+    container = QtWidgets.QVBoxLayout(host)
+    mw._test_host = host
+    layout_actions.add_widgets_to_tab_layout(
+        mw,
+        LAYOUT_DATA=_MUSETALK_LAYOUT,
+        layoutWidget=container,
+        data_type="parameter",
+    )
+    # Toggle, text and slider must all land in main_window.control (global),
+    # since the frame worker reads them from ``control``.
+    assert mw.control.get("MuseTalkEnableToggle") is False
+    assert "MuseTalkEnableToggle" not in mw.default_parameters
+    assert mw.control.get("MuseTalkAudioPathText") == ""
+    assert "MuseTalkAudioPathText" not in mw.default_parameters
+    assert int(mw.control.get("MuseTalkExtraMarginSlider")) == 10
+    assert "MuseTalkExtraMarginSlider" not in mw.default_parameters
+
+
+def test_common_layout_musetalk_section_is_control_typed():
+    from app.ui.widgets.common_layout_data import COMMON_LAYOUT_DATA
+
+    section = COMMON_LAYOUT_DATA["MuseTalk Lip-Sync"]
+    for key, entry in section.items():
+        assert entry.get("data_type") == "control", key

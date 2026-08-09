@@ -72,9 +72,11 @@ _PERF_BUNDLE_FLAGS = frozenset(
 
 
 def _pipeline_profile_collect_enabled(main_window: "MainWindow") -> bool:
-    return _env_flag("VISIOMASTER_PERF_STAGES") or bool(
-        main_window.control.get("PipelineProfileOverlayEnableToggle", False)
-    ) or bool(main_window.control.get("PipelineProfileDockEnableToggle", False))
+    return (
+        _env_flag("VISIOMASTER_PERF_STAGES")
+        or bool(main_window.control.get("PipelineProfileOverlayEnableToggle", False))
+        or bool(main_window.control.get("PipelineProfileDockEnableToggle", False))
+    )
 
 
 def _pipeline_profile_cuda_sync(main_window: "MainWindow") -> bool:
@@ -94,9 +96,11 @@ def _env_flag(name: str) -> bool:
     if v in ("1", "true", "yes", "on"):
         return True
     if name in _PERF_BUNDLE_FLAGS:
-        return (
-            os.environ.get("VISIOMASTER_PERF_BUNDLE", "").strip().lower()
-            in ("1", "true", "yes", "on")
+        return os.environ.get("VISIOMASTER_PERF_BUNDLE", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
         )
     return False
 
@@ -290,7 +294,9 @@ class FrameWorker(threading.Thread):
         # v2.Resize instances for every unique (H, W, interp) combination seen
         # across variable-resolution inputs.
         self._resize_cache: _OrderedDict = _OrderedDict()
-        self._RESIZE_CACHE_MAX = 40  # swap_core uses many dynamic (H,W) bilinear+AA pairs
+        self._RESIZE_CACHE_MAX = (
+            40  # swap_core uses many dynamic (H,W) bilinear+AA pairs
+        )
         self._gaussian_blur_cache: _OrderedDict = _OrderedDict()
         self._GAUSSIAN_BLUR_CACHE_MAX = 48
         # FW-PERF-15: Border mask at 128² depends only on sliders; swap_core + VR can call
@@ -404,6 +410,10 @@ class FrameWorker(threading.Thread):
         self._mouth_action_score: float = 0.0
 
         self.precomputed_bboxes: Optional[list] = None
+        # Faces and landmarks found by this worker when the feeder supplied none.
+        self._detected_bboxes: Optional[list] = None
+        self._detected_kpss: Optional[list] = None
+        self._detected_kpss_5: Optional[list] = None
         self.precomputed_kpss_5: Optional[list] = None
         self.precomputed_kpss: Optional[list] = None
         self.precomputed_kpss_203: Optional[list] = None
@@ -432,11 +442,7 @@ class FrameWorker(threading.Thread):
         use_sep = main_window.control.get("PipelineSeparateCudaStreamsToggle", False)
         self.worker_stream = (
             torch.cuda.Stream()
-            if (
-                use_sep
-                and device == "cuda"
-                and torch.cuda.is_available()
-            )
+            if (use_sep and device == "cuda" and torch.cuda.is_available())
             else None
         )
 
@@ -781,7 +787,9 @@ class FrameWorker(threading.Thread):
                 else:
                     # If no processing, convert RGB (feeder) → BGR for Qt/OpenCV display.
                     # Use cvtColor like the feeder path — faster than [:: -1] + ascontiguousarray.
-                    _t_pt = time.perf_counter() if (_perf_log or _profile_collect) else 0.0
+                    _t_pt = (
+                        time.perf_counter() if (_perf_log or _profile_collect) else 0.0
+                    )
                     self.frame = rgb_uint8_to_bgr_contiguous(self.frame)
                     if _perf_log:
                         _ms_pt = (time.perf_counter() - _t_pt) * 1000.0
@@ -792,11 +800,13 @@ class FrameWorker(threading.Thread):
                         )
                     if _profile_collect:
                         _ms_prof = (time.perf_counter() - _t_pt) * 1000.0
-                        self._pipeline_profile_merged = self._build_merged_pipeline_profile(
-                            {
-                                "stages": [("pass_through", _ms_prof)],
-                                "total_ms": _ms_prof,
-                            }
+                        self._pipeline_profile_merged = (
+                            self._build_merged_pipeline_profile(
+                                {
+                                    "stages": [("pass_through", _ms_prof)],
+                                    "total_ms": _ms_prof,
+                                }
+                            )
                         )
 
                 # _hwc_rgb_uint8_from_chw_tensor already synchronizes the active CUDA stream
@@ -1142,7 +1152,9 @@ class FrameWorker(threading.Thread):
                 arcface_model_for_swap,
                 control_global,
                 reaging_on=bool(_vr_reaging_on and _vr_aged_emb),
-                aged_embedding=_vr_aged_emb if _vr_reaging_on and _vr_aged_emb else None,
+                aged_embedding=_vr_aged_emb
+                if _vr_reaging_on and _vr_aged_emb
+                else None,
             )
 
         t_e_for_swap_np = target_face_button.get_embedding(arcface_model_for_swap)
@@ -1418,6 +1430,11 @@ class FrameWorker(threading.Thread):
         self._dynamic_side_mask_cache.clear()
         self._pipeline_profile_inswapper_px_set = set()
         self._pipeline_profile_inswapper_auto_any = False
+        # Cleared every frame: the sync preview worker is reused, so a stale value
+        # would aim lip-sync at wherever the face was on the previous frame.
+        self._detected_bboxes = None
+        self._detected_kpss = None
+        self._detected_kpss_5 = None
 
         if (
             self.is_pool_worker
@@ -1541,7 +1558,410 @@ class FrameWorker(threading.Thread):
         else:
             self._pipeline_profile_merged = None
 
-        return final_img_np_rgb_uint8[..., ::-1]
+        final_bgr = final_img_np_rgb_uint8[..., ::-1]
+        if os.environ.get("VISOFUSION_MUSETALK_DEBUG", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        ):
+            self._trace_musetalk_hook(control, final_bgr)
+        if self._musetalk_runs_after_swap(control):
+            # Hybrid only makes sense once the pre-swap pass has placed the mouth, so
+            # partial alpha re-sharpens the same pose. VR never runs that pass, so
+            # there it degrades to a full after-pass rather than ghosting.
+            hybrid_after = self._musetalk_order(
+                control
+            ) == "hybrid" and not control.get("VR180ModeEnableToggle", False)
+            final_bgr = self._musetalk_apply_bgr(
+                final_bgr, control, hybrid_after=hybrid_after
+            )
+        return final_bgr
+
+    def _musetalk_apply_bgr(
+        self, bgr: np.ndarray, control: dict, *, hybrid_after: bool = False
+    ) -> np.ndarray:
+        """Run lip-sync over a BGR frame. Never raises; returns it unchanged on any
+        failure, so a broken engine costs the mouth and nothing else.
+
+        ``hybrid_after`` marks the second, light pass of the hybrid order: it only
+        re-sharpens the mouth the pre-swap pass already placed, at a partial alpha,
+        so it needs face parsing to stay confined to the mouth. Without parsing it
+        would repaint the whole jaw and undo the swap's identity, so it stands down.
+        """
+        try:
+            if hybrid_after and not self._musetalk_mouth_only_available(control):
+                return bgr
+            engine = getattr(self.models_processor, "musetalk_engine", None)
+            if engine is None:
+                # clear_gpu_memory() drops the engine while the toggle stays on,
+                # so without this the feature dies without saying a word.
+                if not getattr(self, "_musetalk_gone_logged", False):
+                    print(
+                        "[WARN] MuseTalk is enabled but the engine was released "
+                        "(VRAM clear or provider/GPU switch). Toggle lip-sync off "
+                        "and on again to reload it."
+                    )
+                    self._musetalk_gone_logged = True
+                return bgr
+            self._musetalk_gone_logged = False
+            if not engine.is_ready_for_frame():
+                engine.log_not_ready_once()
+                return bgr
+            mt_dense, mt_five = self._musetalk_landmarks()
+            return engine.apply_frame_bgr(
+                bgr,
+                self.frame_number,
+                self._musetalk_bboxes(),
+                landmarks=mt_dense
+                if control.get("MuseTalkLandmarkCropToggle", True)
+                else None,
+                kpss_5=mt_five,
+                extra_margin=int(control.get("MuseTalkExtraMarginSlider", 10) or 10),
+                face_index=int(control.get("MuseTalkFaceIndexSlider", 0) or 0),
+                mask_options=self._musetalk_mask_options(
+                    control, hybrid_after=hybrid_after
+                ),
+                parse_labels=self._musetalk_parse_labels
+                if control.get("MuseTalkFaceParsingToggle", True)
+                else None,
+                restore_crop=self._musetalk_restore_crop(control)
+                if control.get("MuseTalkRestoreMouthToggle", False)
+                else None,
+            )
+        except Exception as e_mt:
+            if not getattr(self, "_musetalk_frame_err_logged", False):
+                print(f"[WARN] MuseTalk frame hook failed: {e_mt}")
+                self._musetalk_frame_err_logged = True
+            return bgr
+
+    def _musetalk_apply_before_swap(
+        self, img_chw_rgb_uint8: torch.Tensor, control: dict
+    ) -> torch.Tensor:
+        """Lip-sync the frame the swapper is about to read.
+
+        MuseTalk cannot be made to keep a face's own lip shape: the lower half is
+        masked out of its input and the shape comes from an audio-driven prior, so
+        whatever it paints last is what you see. Running it *before* the swap makes
+        it a driver instead: it supplies the mouth pose, and the swapper then
+        imposes the source identity over the whole face, mouth included. The
+        restorer and enhancers also get to run on the generated mouth afterwards.
+
+        Costs a round trip to host memory, since the swap works on GPU tensors and
+        lip-sync on BGR arrays. Small next to the UNet, and only when enabled.
+        """
+        if not self._musetalk_should_apply(control):
+            return img_chw_rgb_uint8
+        if self._musetalk_order(control) not in ("before", "hybrid"):
+            return img_chw_rgb_uint8
+        try:
+            rgb = self._hwc_rgb_uint8_from_chw_tensor(img_chw_rgb_uint8)
+            # Reverses the channel stride, so this is already a copy: the pinned
+            # buffer behind ``rgb`` is reused and must not be handed on.
+            bgr = np.ascontiguousarray(rgb[:, :, ::-1])
+            out = self._musetalk_apply_bgr(bgr, control)
+            if out is bgr or not isinstance(out, np.ndarray) or out.shape != bgr.shape:
+                return img_chw_rgb_uint8
+            return rgb_hwc_uint8_numpy_to_torch_chw(
+                np.ascontiguousarray(out[:, :, ::-1]),
+                img_chw_rgb_uint8.device,
+            )
+        except Exception as e:
+            if not getattr(self, "_musetalk_preswap_err_logged", False):
+                print(f"[WARN] MuseTalk pre-swap lip-sync failed, skipping it: {e}")
+                self._musetalk_preswap_err_logged = True
+            return img_chw_rgb_uint8
+
+    @staticmethod
+    def _musetalk_order(control: dict) -> str:
+        """``"before"``, ``"after"`` or ``"hybrid"``. Old workspaces have no key.
+
+        Hybrid runs both passes: the pre-swap one places the mouth so the swap keeps
+        identity, the post-swap one lightly re-sharpens the same pose that the swap
+        flattened. The default is "before", the safest for identity.
+        """
+        choice = str(control.get("MuseTalkPipelineOrderSelection", "") or "").lower()
+        if choice.startswith("after"):
+            return "after"
+        if "hybrid" in choice or "both" in choice:
+            return "hybrid"
+        return "before"
+
+    @staticmethod
+    def _musetalk_mouth_only_available(control: dict) -> bool:
+        """Whether the mouth-only mask can be built, which needs both toggles.
+
+        The hybrid after-pass depends on it: confined to the mouth it re-sharpens
+        without touching identity, but the moment it falls back to the jaw mask it
+        repaints the whole lower face at full strength and the swap's identity is
+        gone. So it must be able to prove the tight mask is available first.
+        """
+        return bool(control.get("MuseTalkMouthOnlyToggle", True)) and bool(
+            control.get("MuseTalkFaceParsingToggle", True)
+        )
+
+    def _musetalk_runs_after_swap(self, control: dict) -> bool:
+        """Whether the post-swap hook owns this frame.
+
+        VR180 has its own path that never reaches the pre-swap hook, so it keeps
+        the old order regardless of the setting rather than losing lip-sync.
+        """
+        if not self._musetalk_should_apply(control):
+            return False
+        if control.get("VR180ModeEnableToggle", False):
+            return True
+        return self._musetalk_order(control) in ("after", "hybrid")
+
+    @staticmethod
+    def _musetalk_should_apply(control: dict) -> bool:
+        """Whether this frame should pass through MuseTalk.
+
+        Bypass is deliberately separate from the enable toggle: it skips only
+        the frame hook, leaving the engine weights and prepared audio resident
+        for instant A/B comparison on the same paused frame.
+        """
+        return bool(control.get("MuseTalkEnableToggle")) and not bool(
+            control.get("MuseTalkBypassToggle", False)
+        )
+
+    def _musetalk_parse_labels(self, rgb: np.ndarray):
+        """Segment a crop with the same BiSeNet weights upstream MuseTalk uses.
+
+        ``FaceParsingBiSeNet18`` is the yakhyo resnet18 checkpoint the reference
+        implementation ships, and ``_faceparser_labels`` normalises identically,
+        so the CelebAMask class ids line up with what the reference mask expects.
+        The backbone is pinned rather than read from the user's face-parser
+        setting: ResNet34 is a different checkpoint and this mask is calibrated
+        against BiSeNet's output.
+        """
+        face_masks = getattr(self.models_processor, "face_masks", None)
+        if face_masks is None:
+            return None
+        square = cv2.resize(rgb, (512, 512), interpolation=cv2.INTER_AREA)
+        tensor = (
+            torch.from_numpy(np.ascontiguousarray(square))
+            .to(self.models_processor.get_effective_torch_device())
+            .permute(2, 0, 1)
+        )
+        labels = face_masks._faceparser_labels(
+            tensor, {"FaceParserBackboneSelection": "BiSeNet-18"}
+        )
+        return labels.detach().cpu().numpy()
+
+    _RESTORER_FIDELITY_DEFAULT = 0.9
+
+    def _restorer_fidelity_in_use(self) -> float:
+        """The fidelity weight the swap's restorer is already running with.
+
+        CodeFormer's CUDA graph is cached against this value, so passing a
+        different one for the mouth makes every frame invalidate the graph the
+        swap just built and rebuild it — which rebuilds it back on the next face,
+        flashing the build dialog nonstop. Matching the value keeps one graph.
+        """
+        for bucket in (self.parameters or {}).values():
+            if isinstance(bucket, dict) and "FaceFidelityWeightDecimalSlider" in bucket:
+                try:
+                    return float(bucket["FaceFidelityWeightDecimalSlider"])
+                except (TypeError, ValueError):
+                    break
+        return self._RESTORER_FIDELITY_DEFAULT
+
+    def _musetalk_restore_crop(self, control: dict):
+        """A callback that runs the app's face restorer over the generated mouth.
+
+        MuseTalk caps the mouth at 256px and returns it soft; the restorer adds
+        back the missing high frequencies (the official project's own advice for
+        the resolution limit). We reuse ``apply_facerestorer`` in its no-realign
+        ('Original') mode because the crop is not FFHQ-aligned, then alpha-blend
+        the result so the user can dial the sharpening down. Returns ``None`` when
+        no restorer is available so the engine simply skips the step.
+        """
+        mp = self.models_processor
+        if not hasattr(mp, "apply_facerestorer"):
+            return None
+        restorer_type = str(
+            control.get("MuseTalkRestoreMouthModelSelection", "GFPGAN-v1.4")
+            or "GFPGAN-v1.4"
+        )
+        raw = control.get("MuseTalkRestoreMouthStrengthSlider", 60)
+        try:
+            strength = 60.0 if raw is None or raw == "" else float(raw)
+        except (TypeError, ValueError):
+            strength = 60.0
+        alpha = max(0.0, min(1.0, strength / 100.0))
+        if alpha <= 0.0:
+            return None
+        fidelity = self._restorer_fidelity_in_use()
+        device = mp.get_effective_torch_device()
+
+        def restore(recon_bgr: np.ndarray) -> np.ndarray:
+            if recon_bgr is None or recon_bgr.size == 0:
+                return recon_bgr
+            side = int(recon_bgr.shape[0])
+            # The restorer works in RGB CHW, 0-255, like the swap path feeds it,
+            # and in 'Original' mode it does not resize: GFPGAN and friends assume
+            # the 512 crop the swap produces, so the 256 mouth has to be upscaled.
+            rgb = cv2.cvtColor(recon_bgr, cv2.COLOR_BGR2RGB)
+            if side != 512:
+                rgb = cv2.resize(rgb, (512, 512), interpolation=cv2.INTER_LANCZOS4)
+            t = (
+                torch.from_numpy(np.ascontiguousarray(rgb))
+                .permute(2, 0, 1)
+                .float()
+                .to(device)
+            )
+            # Trailing None is target_kps: unused in 'Original' mode, but the
+            # ModelsProcessor wrapper takes it positionally.
+            out = mp.apply_facerestorer(
+                t, "Original", restorer_type, 0, fidelity, 1.0, None
+            )
+            if out is None:
+                return recon_bgr
+            o = out.unsqueeze(0) if out.dim() == 3 else out
+            o = torch.nn.functional.interpolate(
+                o, size=(side, side), mode="bilinear", align_corners=False
+            ).squeeze(0)
+            arr = o.clamp(0.0, 255.0).permute(1, 2, 0).to(torch.uint8).cpu().numpy()
+            restored_bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+            return cv2.addWeighted(restored_bgr, alpha, recon_bgr, 1.0 - alpha, 0.0)
+
+        return restore
+
+    @staticmethod
+    def _first_non_empty(*candidates):
+        """First candidate that actually holds something, ignoring empty arrays."""
+        for c in candidates:
+            try:
+                if c is not None and len(c) > 0:
+                    return c
+            except TypeError:
+                continue
+        return None
+
+    def _musetalk_bboxes(self):
+        """Faces for lip-sync, from whichever stage actually ran detection.
+
+        The feeder fills ``precomputed_bboxes`` during playback; a paused preview
+        detects inside the standard path instead and leaves it empty.
+        """
+        return self._first_non_empty(self.precomputed_bboxes, self._detected_bboxes)
+
+    def _musetalk_landmarks(self):
+        """Dense landmarks and the 5-point set, for MuseTalk's crop convention."""
+        dense = self._first_non_empty(
+            self.precomputed_kpss_203, self.precomputed_kpss, self._detected_kpss
+        )
+        five = self._first_non_empty(self.precomputed_kpss_5, self._detected_kpss_5)
+        return dense, five
+
+    @staticmethod
+    def _musetalk_mask_options(control: dict, *, hybrid_after: bool = False) -> dict:
+        """Blend geometry and strength from the sliders, as mask fractions.
+
+        Sliders carry percentages because that is what reads well in the UI, while
+        the mask works in fractions of the crop. ``hybrid_after`` is the light
+        second pass of the hybrid order: it forces the mouth-only mask and drops its
+        opacity to the hybrid slider, so it re-sharpens the swap's flattened mouth
+        without repainting over the identity the swap just restored.
+        """
+
+        def pct(key: str, default: float) -> float:
+            try:
+                return float(control.get(key, default) or default) / 100.0
+            except (TypeError, ValueError):
+                return default / 100.0
+
+        def px(key: str, default: int) -> int:
+            try:
+                return int(control.get(key, default) or default)
+            except (TypeError, ValueError):
+                return default
+
+        # Chroma correction only runs when its toggle is on; a zero strength is the
+        # off signal the engine understands, so the whole feature is a no-op then.
+        lip_color = (
+            pct("MuseTalkLipColorStrengthSlider", 70.0)
+            if control.get("MuseTalkLipColorToggle", True)
+            else 0.0
+        )
+
+        return {
+            "strength": pct("MuseTalkBlendStrengthSlider", 100.0),
+            # Repaint only where the mouth is or ends up, at full opacity. Anything
+            # wider or more transparent leaves the original mouth and chin showing
+            # through the generated ones. Needs face parsing for both masks. The
+            # hybrid after-pass is confined to it unconditionally: without it the
+            # pass would repaint the jaw and undo the swap.
+            "mouth_only": hybrid_after
+            or (
+                bool(control.get("MuseTalkMouthOnlyToggle", True))
+                and bool(control.get("MuseTalkFaceParsingToggle", True))
+            ),
+            # The pre-swap pass and the after-only order paint the mouth at full
+            # opacity; only the hybrid after-pass steps it down, safely, because its
+            # input already holds the pose so both mouths line up.
+            "mouth_alpha": pct("MuseTalkHybridAfterStrengthSlider", 40.0)
+            if hybrid_after
+            else 1.0,
+            "mouth_padding": px("MuseTalkMouthPaddingSlider", 6),
+            # Upstream's bbox_shift: where the model's repaint boundary sits, in rows
+            # of the 256 crop. Positive opens the mouth more, negative keeps identity.
+            "bbox_shift": px("MuseTalkBboxShiftSlider", 0),
+            # Parsed mask (upstream's own knobs).
+            "upper_boundary_ratio": pct("MuseTalkRepaintTopSlider", 50.0),
+            "left_cheek_width": px("MuseTalkCheekWidthSlider", 90),
+            "right_cheek_width": px("MuseTalkCheekWidthSlider", 90),
+            # Chroma transfer that recovers the real lip colour (needs face parsing).
+            "lip_color_strength": lip_color,
+            # Geometric fallback, used only when face parsing is unavailable.
+            "radius_x": pct("MuseTalkMouthWidthSlider", 42.0),
+            "radius_y": pct("MuseTalkMouthHeightSlider", 30.0),
+            "centre_y": pct("MuseTalkMouthCentreSlider", 64.0),
+        }
+
+    def _trace_musetalk_hook(self, control: dict, final_bgr) -> None:
+        """Report the lip-sync hook's inputs every 25 frames. Never raises.
+
+        Traced outside the toggle check on purpose: the worker sees a snapshot of
+        ``control``, so "the toggle never arrived" and "the engine refused the
+        frame" look identical from the outside and need telling apart.
+        """
+        try:
+            self._musetalk_trace_n = getattr(self, "_musetalk_trace_n", 0) + 1
+            if self._musetalk_trace_n % 25 != 1:
+                return
+            engine = getattr(self.models_processor, "musetalk_engine", None)
+            bboxes = self._musetalk_bboxes()
+            feeder = self.precomputed_bboxes
+            source = "feeder" if feeder is not None and len(feeder) else "local"
+            n_bboxes = 0 if bboxes is None else len(bboxes)
+            mt_dense, _ = self._musetalk_landmarks()
+            try:
+                _lm_n = 0 if mt_dense is None else len(np.asarray(mt_dense[0]))
+            except (TypeError, IndexError, ValueError):
+                _lm_n = 0
+            first = ""
+            if n_bboxes:
+                try:
+                    first = " first_bbox=" + ",".join(
+                        f"{float(v):.0f}" for v in list(bboxes[0])[:4]
+                    )
+                except Exception:
+                    first = " first_bbox=?"
+            print(
+                f"[MUSETALK-TRACE] frame={self.frame_number} "
+                f"toggle_key_present={'MuseTalkEnableToggle' in control} "
+                f"toggle={control.get('MuseTalkEnableToggle')!r} "
+                f"engine={engine is not None} "
+                f"loaded={getattr(engine, 'is_loaded', None)} "
+                f"has_audio={getattr(engine, 'has_audio', None)} "
+                f"bboxes={n_bboxes} src={source}{first} "
+                f"landmarks={_lm_n} "
+                f"shape={getattr(final_bgr, 'shape', None)}",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"[MUSETALK-TRACE] trace failed: {e}")
 
     def _build_merged_pipeline_profile(
         self, worker_payload: dict[str, Any] | None
@@ -1616,9 +2036,9 @@ class FrameWorker(threading.Thread):
             auto = bool(parameters["SwapperResAutoSelectEnableToggle"])
         except (KeyError, TypeError):
             auto = False
-        self._pipeline_profile_inswapper_auto_any = bool(
-            getattr(self, "_pipeline_profile_inswapper_auto_any", False)
-        ) or auto
+        self._pipeline_profile_inswapper_auto_any = (
+            bool(getattr(self, "_pipeline_profile_inswapper_auto_any", False)) or auto
+        )
 
     def _merge_swap_core_perf_stages_from_collector(
         self, coll: _PerfStageCollector | None
@@ -1847,7 +2267,8 @@ class FrameWorker(threading.Thread):
         _cur_frame_size = (img_numpy_rgb_uint8.shape[0], img_numpy_rgb_uint8.shape[1])
         if self._vr_converter is None or self._vr_frame_size != _cur_frame_size:
             self._vr_converter = EquirectangularConverter(
-                img_numpy_rgb_uint8, device=self.models_processor.get_effective_torch_device()
+                img_numpy_rgb_uint8,
+                device=self.models_processor.get_effective_torch_device(),
             )
             self._vr_frame_size = _cur_frame_size
         else:
@@ -2394,7 +2815,9 @@ class FrameWorker(threading.Thread):
                         _rec_sim_vr,
                         _rec_model_vr,
                     )
-                if _batched_vr is not None and len(_batched_vr) == len(_vr_recognize_rows):
+                if _batched_vr is not None and len(_batched_vr) == len(
+                    _vr_recognize_rows
+                ):
                     _batch_ok_vr = all(x is not None for x in _batched_vr)
                     if _batch_ok_vr:
                         _emb_by_idx = list(_batched_vr)
@@ -2575,7 +2998,8 @@ class FrameWorker(threading.Thread):
         # P2E converter is properly recreated when the frame resolution changes.
         if self._vr_p2e_converter is None or self._vr_p2e_frame_size != _cur_frame_size:
             self._vr_p2e_converter = PerspectiveConverter(
-                img_numpy_rgb_uint8, device=self.models_processor.get_effective_torch_device()
+                img_numpy_rgb_uint8,
+                device=self.models_processor.get_effective_torch_device(),
             )
             self._vr_p2e_frame_size = _cur_frame_size
         p2e_converter = self._vr_p2e_converter
@@ -2819,7 +3243,9 @@ class FrameWorker(threading.Thread):
             "swap_restorecalc": swap_restorecalc.detach().cpu().contiguous().clone(),
         }
 
-    def _plane_ordered_share_primary_restorer_batch_key(self, ordered: list[dict]) -> bool:
+    def _plane_ordered_share_primary_restorer_batch_key(
+        self, ordered: list[dict]
+    ) -> bool:
         if len(ordered) < 2:
             return False
         if any(
@@ -2995,7 +3421,9 @@ class FrameWorker(threading.Thread):
             return _run_nn()
         if self.is_single_frame:
             return _run_nn()
-        if os.environ.get("VISIOMASTER_DISABLE_RESTORER_SUBSAMPLE", "").strip().lower() in (
+        if os.environ.get(
+            "VISIOMASTER_DISABLE_RESTORER_SUBSAMPLE", ""
+        ).strip().lower() in (
             "1",
             "true",
             "yes",
@@ -3102,9 +3530,7 @@ class FrameWorker(threading.Thread):
                         blendswap_source_rgb112=s.get("blendswap_src112"),
                         uniface_source_rgb256=s.get("uniface_src256"),
                         gather_pre_primary_restorer_tails=gather_tails,
-                        face_restorer_param_bucket_id=s.get(
-                            "face_restorer_bucket_id"
-                        ),
+                        face_restorer_param_bucket_id=s.get("face_restorer_bucket_id"),
                     )
                 except _GatherPrePrimaryRestorer:
                     continue
@@ -3169,9 +3595,7 @@ class FrameWorker(threading.Thread):
                     alignment_img=batch_snap,
                     blendswap_source_rgb112=s.get("blendswap_src112"),
                     uniface_source_rgb256=s.get("uniface_src256"),
-                    face_restorer_param_bucket_id=s.get(
-                        "face_restorer_bucket_id"
-                    ),
+                    face_restorer_param_bucket_id=s.get("face_restorer_bucket_id"),
                 )
             )
             if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -3215,9 +3639,7 @@ class FrameWorker(threading.Thread):
                         blendswap_source_rgb112=s0.get("blendswap_src112"),
                         uniface_source_rgb256=s0.get("uniface_src256"),
                         swapper_autores_track_id=int(s0.get("swap_tid", -1)),
-                        face_restorer_param_bucket_id=s0.get(
-                            "face_restorer_bucket_id"
-                        ),
+                        face_restorer_param_bucket_id=s0.get("face_restorer_bucket_id"),
                     )
                 )
                 if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -3268,9 +3690,7 @@ class FrameWorker(threading.Thread):
                         blendswap_source_rgb112=sp.get("blendswap_src112"),
                         uniface_source_rgb256=sp.get("uniface_src256"),
                         swapper_autores_track_id=int(sp.get("swap_tid", -1)),
-                        face_restorer_param_bucket_id=sp.get(
-                            "face_restorer_bucket_id"
-                        ),
+                        face_restorer_param_bucket_id=sp.get("face_restorer_bucket_id"),
                     )
                 )
                 if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -3286,7 +3706,9 @@ class FrameWorker(threading.Thread):
                     )
             return out
         except Exception as e:
-            print(f"[ERROR] Plane swap batch flush failed ({e}); falling back sequential.")
+            print(
+                f"[ERROR] Plane swap batch flush failed ({e}); falling back sequential."
+            )
             out = img
             for sp in specs:
                 try:
@@ -3358,9 +3780,7 @@ class FrameWorker(threading.Thread):
                         source_latent_cache=source_latent_cache,
                         blendswap_source_rgb112=sp.get("blendswap_src112"),
                         uniface_source_rgb256=sp.get("uniface_src256"),
-                        face_restorer_param_bucket_id=sp.get(
-                            "face_restorer_bucket_id"
-                        ),
+                        face_restorer_param_bucket_id=sp.get("face_restorer_bucket_id"),
                     )
                 )
                 if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -3413,9 +3833,7 @@ class FrameWorker(threading.Thread):
                 source_latent_out_cache=source_latent_cache,
                 blendswap_source_rgb112=s.get("blendswap_src112"),
                 uniface_source_rgb256=s.get("uniface_src256"),
-                swapper_autores_track_id=int(
-                    s.get("fface", {}).get("track_id", -1)
-                ),
+                swapper_autores_track_id=int(s.get("fface", {}).get("track_id", -1)),
             )
             if inp_f is None or dim != 1 or latent is None:
                 return _sequential_from_ordered()
@@ -3507,9 +3925,7 @@ class FrameWorker(threading.Thread):
                         source_latent_cache=source_latent_cache,
                         blendswap_source_rgb112=sp.get("blendswap_src112"),
                         uniface_source_rgb256=sp.get("uniface_src256"),
-                        face_restorer_param_bucket_id=sp.get(
-                            "face_restorer_bucket_id"
-                        ),
+                        face_restorer_param_bucket_id=sp.get("face_restorer_bucket_id"),
                     )
                 )
                 if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -3563,9 +3979,7 @@ class FrameWorker(threading.Thread):
                 source_latent_out_cache=source_latent_cache,
                 blendswap_source_rgb112=s.get("blendswap_src112"),
                 uniface_source_rgb256=s.get("uniface_src256"),
-                swapper_autores_track_id=int(
-                    s.get("fface", {}).get("track_id", -1)
-                ),
+                swapper_autores_track_id=int(s.get("fface", {}).get("track_id", -1)),
             )
             if inp_f is None or dim != 2 or latent is None:
                 return _sequential_from_ordered()
@@ -3762,9 +4176,10 @@ class FrameWorker(threading.Thread):
         # ByteTrack skip paths work. VR180 / single-frame preview: run here (fallback).
 
         std_detect_track_ids: list[int] | None = None
-        if getattr(self, "precomputed_bboxes", None) is not None and getattr(
-            self, "precomputed_kpss_5", None
-        ) is not None:
+        if (
+            getattr(self, "precomputed_bboxes", None) is not None
+            and getattr(self, "precomputed_kpss_5", None) is not None
+        ):
             bboxes = self.precomputed_bboxes
             kpss_5 = self.precomputed_kpss_5
             kpss = self.precomputed_kpss
@@ -3837,6 +4252,14 @@ class FrameWorker(threading.Thread):
             if _sequential_match_active and _local_out_track is not None:
                 std_detect_track_ids = _local_out_track
 
+            # Single-frame preview and VR180 detect here instead of in the feeder,
+            # which leaves ``precomputed_bboxes`` empty. Lip-sync reads that, so
+            # while paused it saw no face and skipped every frame — exactly when a
+            # user is trying to judge a slider.
+            self._detected_bboxes = bboxes
+            self._detected_kpss = kpss
+            self._detected_kpss_5 = kpss_5
+
             img_h_for_kps_ema = img.shape[-2]
             img_w_for_kps_ema = img.shape[-1]
             if isinstance(kpss_5, np.ndarray) and kpss_5.shape[0] > 0:
@@ -3904,6 +4327,12 @@ class FrameWorker(threading.Thread):
         if perf_stages is not None:
             perf_stages.mark("std_detect_feeder_or_fallback")
 
+        # Lip-sync here, with the detection in hand, so the swap reads a frame whose
+        # mouth already matches the audio and re-imposes identity on top of it.
+        img = self._musetalk_apply_before_swap(img, control)
+        if perf_stages is not None:
+            perf_stages.mark("musetalk_preswap")
+
         _rec_sim = str("Auto")
         _recognition_arc_model = self._arc_model_for_detected_embeddings(control)
         _use_recognition_cache = (
@@ -3922,9 +4351,8 @@ class FrameWorker(threading.Thread):
         ):
             _arcface_batch_on = control.get("ArcFaceBatchInferenceToggle", True)
             _work_faces: list[dict[str, Any]] = []
-            if (
-                std_detect_track_ids is not None
-                and len(std_detect_track_ids) != len(kpss_5)
+            if std_detect_track_ids is not None and len(std_detect_track_ids) != len(
+                kpss_5
             ):
                 std_detect_track_ids = None
             for i in range(len(kpss_5)):
@@ -3938,16 +4366,14 @@ class FrameWorker(threading.Thread):
                     _row_tid = int(std_detect_track_ids[i])
                 face_emb: np.ndarray | None = None
                 if _use_recognition_cache:
-                    _cached_emb = (
-                        self.video_processor.try_reuse_recognition_embedding(
-                            self.frame_number,
-                            i,
-                            _bbox_i,
-                            kpss_5[i],
-                            _recognition_arc_model,
-                            _rec_sim,
-                            track_id=_row_tid,
-                        )
+                    _cached_emb = self.video_processor.try_reuse_recognition_embedding(
+                        self.frame_number,
+                        i,
+                        _bbox_i,
+                        kpss_5[i],
+                        _recognition_arc_model,
+                        _rec_sim,
+                        track_id=_row_tid,
                     )
                     if _cached_emb is not None:
                         face_emb = _cached_emb
@@ -3964,9 +4390,7 @@ class FrameWorker(threading.Thread):
                         )
                 kps_all_i = kpss[i] if kpss is not None and i < len(kpss) else None
                 kps_203_i = (
-                    kpss_203[i]
-                    if kpss_203 is not None and i < len(kpss_203)
-                    else None
+                    kpss_203[i] if kpss_203 is not None and i < len(kpss_203) else None
                 )
                 _work_faces.append(
                     {
@@ -3990,9 +4414,7 @@ class FrameWorker(threading.Thread):
             if _need_emb:
                 try:
                     _stride_iv = int(
-                        control.get(
-                            "PerformanceMatchedTrackArcfaceStrideSlider", 1
-                        )
+                        control.get("PerformanceMatchedTrackArcfaceStrideSlider", 1)
                         or 1
                     )
                 except (TypeError, ValueError):
@@ -4014,25 +4436,21 @@ class FrameWorker(threading.Thread):
                     _tid = int(w.get("track_id", -1))
                     _lazy_e = None
                     if _lazy_iv > 1 and _tid >= 0:
-                        _lazy_e = (
-                            self.video_processor.try_lazy_arcface_track_embedding(
-                                self.frame_number,
-                                _tid,
-                                _recognition_arc_model,
-                                _rec_sim,
-                                _lazy_iv,
-                            )
+                        _lazy_e = self.video_processor.try_lazy_arcface_track_embedding(
+                            self.frame_number,
+                            _tid,
+                            _recognition_arc_model,
+                            _rec_sim,
+                            _lazy_iv,
                         )
                     if _lazy_e is None and _stride_iv > 1 and _tid >= 0:
-                        _lazy_e = (
-                            self.video_processor.try_matched_track_stride_reuse(
-                                self.frame_number,
-                                _tid,
-                                _recognition_arc_model,
-                                _rec_sim,
-                                _stride_iv,
-                                max_match_age_frames=_mt_mem,
-                            )
+                        _lazy_e = self.video_processor.try_matched_track_stride_reuse(
+                            self.frame_number,
+                            _tid,
+                            _recognition_arc_model,
+                            _rec_sim,
+                            _stride_iv,
+                            max_match_age_frames=_mt_mem,
                         )
                     if _lazy_e is not None:
                         w["embedding"] = _lazy_e
@@ -4062,18 +4480,20 @@ class FrameWorker(threading.Thread):
                 _icx = 0.5 * _iw
                 _icy = 0.5 * _ih
                 try:
-                    _wcent = float(
-                        control.get("PerformanceArcFaceCenterBiasSlider", 0) or 0
-                    ) / 100.0
+                    _wcent = (
+                        float(control.get("PerformanceArcFaceCenterBiasSlider", 0) or 0)
+                        / 100.0
+                    )
                 except (TypeError, ValueError):
                     _wcent = 0.0
                 try:
-                    _wmt = float(
-                        control.get(
-                            "PerformanceArcFaceMatchedTrackBoostSlider", 0
+                    _wmt = (
+                        float(
+                            control.get("PerformanceArcFaceMatchedTrackBoostSlider", 0)
+                            or 0
                         )
-                        or 0
-                    ) / 100.0
+                        / 100.0
+                    )
                 except (TypeError, ValueError):
                     _wmt = 0.0
                 try:
@@ -4108,10 +4528,7 @@ class FrameWorker(threading.Thread):
                         tid = int(w.get("track_id", -1))
                         if tid >= 0:
                             lm = _match_snap.get(tid)
-                            if (
-                                lm is not None
-                                and _fn - int(lm) <= _mt_mem_cap
-                            ):
+                            if lm is not None and _fn - int(lm) <= _mt_mem_cap:
                                 base *= 1.0 + _wmt
                     return base
 
@@ -4516,7 +4933,9 @@ class FrameWorker(threading.Thread):
                         _kv_rr = None
                         if denoiser_on_rr:
                             if getattr(in_btn, "kv_map", None) is None:
-                                with self.main_window.models_processor.kv_extraction_lock:
+                                with (
+                                    self.main_window.models_processor.kv_extraction_lock
+                                ):
                                     if getattr(in_btn, "kv_map", None) is None:
                                         try:
                                             from PIL import Image
@@ -4534,10 +4953,8 @@ class FrameWorker(threading.Thread):
                                                         (512, 512),
                                                         Image.Resampling.LANCZOS,
                                                     )
-                                                in_btn.kv_map = (
-                                                    self.models_processor.get_kv_map_for_face(
-                                                        pil_img
-                                                    )
+                                                in_btn.kv_map = self.models_processor.get_kv_map_for_face(
+                                                    pil_img
                                                 )
                                             else:
                                                 in_btn.kv_map = {}
@@ -4578,10 +4995,7 @@ class FrameWorker(threading.Thread):
                             face_bbox=fface["bbox"],
                         )
                         _t_e_rr = fface.get("embedding")
-                        if (
-                            not isinstance(_t_e_rr, np.ndarray)
-                            or _t_e_rr.size == 0
-                        ):
+                        if not isinstance(_t_e_rr, np.ndarray) or _t_e_rr.size == 0:
                             _t_e_rr = None
 
                         if (
@@ -4600,7 +5014,8 @@ class FrameWorker(threading.Thread):
                             _uf256_rr = None
                             if (
                                 swap_button_is_checked_global
-                                and params_rr["SwapModelSelection"] in self.UNIFACE_MODELS
+                                and params_rr["SwapModelSelection"]
+                                in self.UNIFACE_MODELS
                             ):
                                 _uf256_rr = self._compute_uniface_source_rgb256(
                                     input_face=in_btn
@@ -6410,12 +6825,16 @@ class FrameWorker(threading.Thread):
             for k in range(itex):
                 prev_face = input_face_affined.clone()
                 chw_rgb = input_face_affined.permute(2, 0, 1)
-                t_norm = v2.functional.normalize(
-                    chw_rgb,
-                    (0.5, 0.5, 0.5),
-                    (0.5, 0.5, 0.5),
-                    inplace=False,
-                ).unsqueeze(0).contiguous()
+                t_norm = (
+                    v2.functional.normalize(
+                        chw_rgb,
+                        (0.5, 0.5, 0.5),
+                        (0.5, 0.5, 0.5),
+                        inplace=False,
+                    )
+                    .unsqueeze(0)
+                    .contiguous()
+                )
                 src_rgb = latent if latent.dim() == 4 else latent.unsqueeze(0)
                 src_rgb = src_rgb.contiguous()
                 swapper_output = torch.empty(
@@ -6811,7 +7230,9 @@ class FrameWorker(threading.Thread):
         return mask
 
     @staticmethod
-    def _face_restorer_skip_for_small_face(parameters: dict, tform_scale: float) -> bool:
+    def _face_restorer_skip_for_small_face(
+        parameters: dict, tform_scale: float
+    ) -> bool:
         """True when user enabled gate and alignment scale ≥ threshold (small face in frame)."""
         if not parameters.get("FaceRestorerSkipSmallFaceToggle", False):
             return False
@@ -6852,23 +7273,23 @@ class FrameWorker(threading.Thread):
             return base_type
         prefer_fp16 = parameters.get("FaceRestorerUltraLightPreferFp16Toggle", True)
         fast = (
-            "GPEN-256 Fast FP16 (128→256)"
-            if prefer_fp16
-            else "GPEN-256 Fast (128→256)"
+            "GPEN-256 Fast FP16 (128→256)" if prefer_fp16 else "GPEN-256 Fast (128→256)"
         )
         on_live = bool(parameters.get("FaceRestorerUltraLightOnLiveToggle", True))
-        on_small = bool(parameters.get("FaceRestorerUltraLightOnSmallFaceToggle", False))
+        on_small = bool(
+            parameters.get("FaceRestorerUltraLightOnSmallFaceToggle", False)
+        )
         try:
-            thr = float(parameters.get("FaceRestorerUltraLightScaleGeDecimalSlider", 2.0))
+            thr = float(
+                parameters.get("FaceRestorerUltraLightScaleGeDecimalSlider", 2.0)
+            )
         except (TypeError, ValueError):
             thr = 2.0
         try:
             s = float(tform_scale)
         except (TypeError, ValueError):
             s = float("nan")
-        small_hit = (
-            on_small and math.isfinite(s) and s >= thr
-        )
+        small_hit = on_small and math.isfinite(s) and s >= thr
         live_hit = on_live and is_live_stream
         if live_hit or small_hit:
             return fast
@@ -7121,12 +7542,7 @@ class FrameWorker(threading.Thread):
         tform = faceutil.similarity_transform_from_correspondences(
             kps.astype(np.float64), dst
         )
-        M = (
-            torch.from_numpy(tform.params[0:2])
-            .float()
-            .unsqueeze(0)
-            .to(dev)
-        )
+        M = torch.from_numpy(tform.params[0:2]).float().unsqueeze(0).to(dev)
         warped = kgm.warp_affine(
             chw_bgr.unsqueeze(0),
             M,
@@ -7169,16 +7585,11 @@ class FrameWorker(threading.Thread):
             .to(dev)
             .float()
         )
-        dst = (self.models_processor.FFHQ_kps.astype(np.float64) * (256.0 / 512.0))
+        dst = self.models_processor.FFHQ_kps.astype(np.float64) * (256.0 / 512.0)
         tform = faceutil.similarity_transform_from_correspondences(
             kps.astype(np.float64), dst
         )
-        M = (
-            torch.from_numpy(tform.params[0:2])
-            .float()
-            .unsqueeze(0)
-            .to(dev)
-        )
+        M = torch.from_numpy(tform.params[0:2]).float().unsqueeze(0).to(dev)
         warped = kgm.warp_affine(
             chw_bgr.unsqueeze(0),
             M,
@@ -7386,14 +7797,20 @@ class FrameWorker(threading.Thread):
                 if k != tid:
                     self._restore_eyes_close_ema.pop(k, None)
                     self._restore_eyes_close_pix_max.pop(k, None)
-                    if len(self._restore_eyes_close_ema) <= self._RESTORE_EYES_CLOSE_EMA_MAX:
+                    if (
+                        len(self._restore_eyes_close_ema)
+                        <= self._RESTORE_EYES_CLOSE_EMA_MAX
+                    ):
                         break
         if len(self._restore_eyes_close_pix_max) > self._RESTORE_EYES_CLOSE_EMA_MAX:
             for k in list(self._restore_eyes_close_pix_max.keys()):
                 if k != tid:
                     self._restore_eyes_close_pix_max.pop(k, None)
                     self._restore_eyes_close_ema.pop(k, None)
-                    if len(self._restore_eyes_close_pix_max) <= self._RESTORE_EYES_CLOSE_EMA_MAX:
+                    if (
+                        len(self._restore_eyes_close_pix_max)
+                        <= self._RESTORE_EYES_CLOSE_EMA_MAX
+                    ):
                         break
 
         strength = float(parameters.get("RestoreEyesSmartCloseAmountSlider", 65))
@@ -7446,23 +7863,38 @@ class FrameWorker(threading.Thread):
             img = img.to(_swap_dev, non_blocking=False)
         if alignment_img is not None and alignment_img.device != _swap_dev:
             alignment_img = alignment_img.to(_swap_dev, non_blocking=False)
-        if prefetched_swap_chw_uint8 is not None and prefetched_swap_chw_uint8.device != _swap_dev:
+        if (
+            prefetched_swap_chw_uint8 is not None
+            and prefetched_swap_chw_uint8.device != _swap_dev
+        ):
             prefetched_swap_chw_uint8 = prefetched_swap_chw_uint8.to(
                 _swap_dev, non_blocking=False
             )
-        if prefetched_prev_face_hwc is not None and prefetched_prev_face_hwc.device != _swap_dev:
+        if (
+            prefetched_prev_face_hwc is not None
+            and prefetched_prev_face_hwc.device != _swap_dev
+        ):
             prefetched_prev_face_hwc = prefetched_prev_face_hwc.to(
                 _swap_dev, non_blocking=False
             )
-        if prefetched_native_mask is not None and prefetched_native_mask.device != _swap_dev:
+        if (
+            prefetched_native_mask is not None
+            and prefetched_native_mask.device != _swap_dev
+        ):
             prefetched_native_mask = prefetched_native_mask.to(
                 _swap_dev, non_blocking=False
             )
-        if blendswap_source_rgb112 is not None and blendswap_source_rgb112.device != _swap_dev:
+        if (
+            blendswap_source_rgb112 is not None
+            and blendswap_source_rgb112.device != _swap_dev
+        ):
             blendswap_source_rgb112 = blendswap_source_rgb112.to(
                 _swap_dev, non_blocking=False
             )
-        if uniface_source_rgb256 is not None and uniface_source_rgb256.device != _swap_dev:
+        if (
+            uniface_source_rgb256 is not None
+            and uniface_source_rgb256.device != _swap_dev
+        ):
             uniface_source_rgb256 = uniface_source_rgb256.to(
                 _swap_dev, non_blocking=False
             )
@@ -7779,7 +8211,9 @@ class FrameWorker(threading.Thread):
         # be unconditionally overwritten before first read; only deep-clone where the
         # initial all-ones value is truly consumed before the mask is reassigned.
         BgExclude = torch.ones(
-            (1, 512, 512), dtype=torch.float32, device=self.models_processor.get_effective_torch_device()
+            (1, 512, 512),
+            dtype=torch.float32,
+            device=self.models_processor.get_effective_torch_device(),
         )
         diff_mask = BgExclude
         texture_mask_view = BgExclude
@@ -7808,7 +8242,7 @@ class FrameWorker(threading.Thread):
             and (
                 parameters["FaceExpressionLipsToggle"]
                 or parameters["FaceExpressionEyesToggle"]
-                or                 parameters["FaceExpressionBrowsToggle"]
+                or parameters["FaceExpressionBrowsToggle"]
                 or parameters["FaceExpressionGeneralToggle"]
                 or parameters.get("FaceExpressionModeSelection", "Advanced") == "Simple"
                 or parameters.get("FaceExpressionModeSelection", "Advanced") == "Recast"
@@ -7927,7 +8361,18 @@ class FrameWorker(threading.Thread):
         def _swap_core_after_primary_restorer(
             swap_restorecalc_in: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-            nonlocal swap, swap_mask, swap_mask_noFP, debug_info, texture_exclude_512, diff_mask, texture_mask_view, calc_mask, calc_mask_dill, mask_forcalc_512, border_mask
+            nonlocal \
+                swap, \
+                swap_mask, \
+                swap_mask_noFP, \
+                debug_info, \
+                texture_exclude_512, \
+                diff_mask, \
+                texture_mask_view, \
+                calc_mask, \
+                calc_mask_dill, \
+                mask_forcalc_512, \
+                border_mask
             swap_restorecalc = swap_restorecalc_in
             # Occluder
             if parameters["OccluderEnableToggle"]:
@@ -8044,10 +8489,14 @@ class FrameWorker(threading.Thread):
                 dst_kps_5 = np.hstack([kps_5, ones_column]) @ M.T
 
                 img_swap_mask = torch.ones(
-                    (1, 512, 512), dtype=torch.float32, device=self.models_processor.get_effective_torch_device()
+                    (1, 512, 512),
+                    dtype=torch.float32,
+                    device=self.models_processor.get_effective_torch_device(),
                 )
                 img_orig_mask = torch.zeros(
-                    (1, 512, 512), dtype=torch.float32, device=self.models_processor.get_effective_torch_device()
+                    (1, 512, 512),
+                    dtype=torch.float32,
+                    device=self.models_processor.get_effective_torch_device(),
                 )
 
                 if _restore_mouth_on:
@@ -8088,9 +8537,10 @@ class FrameWorker(threading.Thread):
                         parameters["RestoreEyesSpacingOffsetSlider"],
                     ).clamp(0, 1)
                 elif _blink_eye_mask_on:
-                    _base_blink = float(
-                        parameters.get("BlinkAwareEyeMaskBlendSlider", 52)
-                    ) / 100.0
+                    _base_blink = (
+                        float(parameters.get("BlinkAwareEyeMaskBlendSlider", 52))
+                        / 100.0
+                    )
                     _eye_blend = self._effective_restore_eyes_blend_alpha(
                         _base_blink,
                         parameters,
@@ -8158,14 +8608,17 @@ class FrameWorker(threading.Thread):
                         inner_mouth_protection_512.unsqueeze(0)
                     ).squeeze(0)
 
-                img_mask_256, mask_forcalc_256, mask_forcalc_dill_256, outpred_noFP_256 = (
-                    self.models_processor.apply_dfl_xseg(
-                        img_xseg_256,
-                        -parameters["DFLXSegSizeSlider"],
-                        mouth_256 if mouth_256 is not None else 0,
-                        parameters,
-                        inner_mouth_mask=inner_mouth_protection_256,
-                    )
+                (
+                    img_mask_256,
+                    mask_forcalc_256,
+                    mask_forcalc_dill_256,
+                    outpred_noFP_256,
+                ) = self.models_processor.apply_dfl_xseg(
+                    img_xseg_256,
+                    -parameters["DFLXSegSizeSlider"],
+                    mouth_256 if mouth_256 is not None else 0,
+                    parameters,
+                    inner_mouth_mask=inner_mouth_protection_256,
                 )
 
                 if img_mask_256.shape[-1] != swap_mask.shape[-1]:
@@ -8231,10 +8684,14 @@ class FrameWorker(threading.Thread):
                     "swap_original must be set when FaceRestorerEnableToggle is active"
                 )
                 alpha_restorer = float(parameters["FaceRestorerBlendSlider"]) / 100.0
-                adjust_sharpness = float(parameters["FaceRestorerAutoSharpAdjustSlider"])
+                adjust_sharpness = float(
+                    parameters["FaceRestorerAutoSharpAdjustSlider"]
+                )
                 scale_factor = round(tform.scale, 2)
                 automasktoggle = parameters["FaceRestorerAutoMaskEnableToggle"]
-                automaskadjust = parameters["FaceRestorerAutoSharpMaskAdjustDecimalSlider"]
+                automaskadjust = parameters[
+                    "FaceRestorerAutoSharpMaskAdjustDecimalSlider"
+                ]
                 automaskblur = 2
 
                 alpha_auto, blur_value = self.face_restorer_auto(
@@ -8254,12 +8711,18 @@ class FrameWorker(threading.Thread):
                 if blur_value > 0:
                     kernel_size = 2 * blur_value + 1
                     sigma = blur_value * 0.1
-                    swap = self._get_cached_gaussian_blur(kernel_size, sigma)(swap_original)
+                    swap = self._get_cached_gaussian_blur(kernel_size, sigma)(
+                        swap_original
+                    )
                     debug_info["Restore1"] = f": {-blur_value:.2f}"
                 elif isinstance(alpha_auto, torch.Tensor):
-                    swap = swap_restorecalc * alpha_auto + swap_original * (1 - alpha_auto)
+                    swap = swap_restorecalc * alpha_auto + swap_original * (
+                        1 - alpha_auto
+                    )
                 elif alpha_auto != 0:
-                    swap = swap_restorecalc * alpha_auto + swap_original * (1 - alpha_auto)
+                    swap = swap_restorecalc * alpha_auto + swap_original * (
+                        1 - alpha_auto
+                    )
                     if debug:
                         debug_info["Restore1"] = f": {alpha_auto * 100:.2f}"
                 else:
@@ -8286,15 +8749,20 @@ class FrameWorker(threading.Thread):
                 and (
                     parameters["FaceExpressionLipsToggle"]
                     or parameters["FaceExpressionEyesToggle"]
-                    or                     parameters["FaceExpressionBrowsToggle"]
+                    or parameters["FaceExpressionBrowsToggle"]
                     or parameters["FaceExpressionGeneralToggle"]
-                    or parameters.get("FaceExpressionModeSelection", "Advanced") == "Simple"
-                    or parameters.get("FaceExpressionModeSelection", "Advanced") == "Recast"
+                    or parameters.get("FaceExpressionModeSelection", "Advanced")
+                    == "Simple"
+                    or parameters.get("FaceExpressionModeSelection", "Advanced")
+                    == "Recast"
                 )
                 and parameters["FaceExpressionBeforeTypeSelection"]
                 == "After First Restorer"
             ):
-                if parameters.get("FaceExpressionModeSelection", "Advanced") == "Recast":
+                if (
+                    parameters.get("FaceExpressionModeSelection", "Advanced")
+                    == "Recast"
+                ):
                     swap = self.frame_edits.apply_perform_recast(
                         original_face_512,
                         swap,
@@ -8315,7 +8783,8 @@ class FrameWorker(threading.Thread):
                 and self.local_control_state_from_feeder.get(
                     "edit_enabled", True
                 )  # FW-RACE-02
-                and parameters["FaceEditorBeforeTypeSelection"] == "After First Restorer"
+                and parameters["FaceEditorBeforeTypeSelection"]
+                == "After First Restorer"
             ):
                 editor_mask = swap_mask.clone()
                 swap = (
@@ -8351,7 +8820,9 @@ class FrameWorker(threading.Thread):
                 and not parameters["FaceRestorerEnable2EndToggle"]
             ):
                 swap_original2 = swap.clone()
-                if self._face_restorer_skip_for_small_face(parameters, float(tform.scale)):
+                if self._face_restorer_skip_for_small_face(
+                    parameters, float(tform.scale)
+                ):
                     swap2 = swap_original2
                 else:
                     _rt2 = self._face_restorer_effective_type(
@@ -8392,15 +8863,20 @@ class FrameWorker(threading.Thread):
                 and (
                     parameters["FaceExpressionLipsToggle"]
                     or parameters["FaceExpressionEyesToggle"]
-                    or                     parameters["FaceExpressionBrowsToggle"]
+                    or parameters["FaceExpressionBrowsToggle"]
                     or parameters["FaceExpressionGeneralToggle"]
-                    or parameters.get("FaceExpressionModeSelection", "Advanced") == "Simple"
-                    or parameters.get("FaceExpressionModeSelection", "Advanced") == "Recast"
+                    or parameters.get("FaceExpressionModeSelection", "Advanced")
+                    == "Simple"
+                    or parameters.get("FaceExpressionModeSelection", "Advanced")
+                    == "Recast"
                 )
                 and parameters["FaceExpressionBeforeTypeSelection"]
                 == "After Second Restorer"
             ):
-                if parameters.get("FaceExpressionModeSelection", "Advanced") == "Recast":
+                if (
+                    parameters.get("FaceExpressionModeSelection", "Advanced")
+                    == "Recast"
+                ):
                     swap = self.frame_edits.apply_perform_recast(
                         original_face_512,
                         swap,
@@ -8421,7 +8897,8 @@ class FrameWorker(threading.Thread):
                 and self.local_control_state_from_feeder.get(
                     "edit_enabled", True
                 )  # FW-RACE-02
-                and parameters["FaceEditorBeforeTypeSelection"] == "After Second Restorer"
+                and parameters["FaceEditorBeforeTypeSelection"]
+                == "After Second Restorer"
             ):
                 editor_mask = t512_mask(swap_mask).clone()
                 swap = (
@@ -8510,7 +8987,9 @@ class FrameWorker(threading.Thread):
                         mask_autocolor,
                         parameters["AutoColorBlendAmountSlider"],
                     )
-                elif parameters["AutoColorTransferTypeSelection"] == "AdaIN_Statistical":
+                elif (
+                    parameters["AutoColorTransferTypeSelection"] == "AdaIN_Statistical"
+                ):
                     swap = faceutil.apply_adain_color_transfer(
                         swap,
                         original_face_for_color,
@@ -8528,7 +9007,9 @@ class FrameWorker(threading.Thread):
 
                 mask_input_vgg = t128_mask(calc_mask.clone())
                 mask_vgg_512 = torch.ones(
-                    (1, 512, 512), dtype=torch.float32, device=self.models_processor.get_effective_torch_device()
+                    (1, 512, 512),
+                    dtype=torch.float32,
+                    device=self.models_processor.get_effective_torch_device(),
                 )
 
                 TextureFeatureLayerTypeSelection = "combo_relu3_3_relu3_1"
@@ -8560,7 +9041,9 @@ class FrameWorker(threading.Thread):
 
                     # Upscale to 512x512 IMMEDIATELY to prevent tensor mismatch
                     mask_vgg_512 = t512_mask(mask_vgg_raw).clamp(0.0, 1.0)
-                    diff_norm_texture_512 = t512_mask(diff_norm_texture_raw).clamp(0.0, 1.0)
+                    diff_norm_texture_512 = t512_mask(diff_norm_texture_raw).clamp(
+                        0.0, 1.0
+                    )
 
                     # Fallback to the raw difference texture if manipulation is disabled (Restoring old behavior)
                     if not parameters.get("ExcludeVGGMaskEnableToggle", False):
@@ -8596,7 +9079,9 @@ class FrameWorker(threading.Thread):
                         )
 
                     mask_final_512 = (
-                        torch.max(mask_vgg_512 * (1.0 - feature_mask), 1.0 - calc_mask_dill)
+                        torch.max(
+                            mask_vgg_512 * (1.0 - feature_mask), 1.0 - calc_mask_dill
+                        )
                     ).clamp(0.0, 1.0)
 
                 elif parameters.get("ExcludeOriginalVGGMaskEnableToggle", False):
@@ -8605,9 +9090,9 @@ class FrameWorker(threading.Thread):
                         mask_vgg_512 >= upper_thresh, upper_thresh, mask_vgg_512
                     )
                     # Protect background if no spatial exclusion is active
-                    mask_final_512 = torch.max(mask_vgg_512, 1.0 - calc_mask_dill).clamp(
-                        0.0, 1.0
-                    )
+                    mask_final_512 = torch.max(
+                        mask_vgg_512, 1.0 - calc_mask_dill
+                    ).clamp(0.0, 1.0)
 
                 else:
                     # Fallback to raw mask if everything is disabled
@@ -8732,12 +9217,12 @@ class FrameWorker(threading.Thread):
                 inv_high = 1.0 / max((1.0 - upper_thresh), eps)
 
                 res_low = diff_norm_texture * inv_lower * middle_value
-                res_mid = middle_value + (diff_norm_texture - lower_thresh) * inv_mid * (
-                    upper_value - middle_value
-                )
-                res_high = upper_value + (diff_norm_texture - upper_thresh) * inv_high * (
-                    1.0 - upper_value
-                )
+                res_mid = middle_value + (
+                    diff_norm_texture - lower_thresh
+                ) * inv_mid * (upper_value - middle_value)
+                res_high = upper_value + (
+                    diff_norm_texture - upper_thresh
+                ) * inv_high * (1.0 - upper_value)
 
                 piece = torch.where(
                     diff_norm_texture < lower_thresh,
@@ -8769,7 +9254,8 @@ class FrameWorker(threading.Thread):
                 and self.local_control_state_from_feeder.get(
                     "edit_enabled", True
                 )  # FW-RACE-02
-                and parameters["FaceEditorBeforeTypeSelection"] == "After Texture Transfer"
+                and parameters["FaceEditorBeforeTypeSelection"]
+                == "After Texture Transfer"
             ):
                 editor_mask = t512_mask(swap_mask).clone()
                 if swap.shape[-1] != 512:
@@ -8827,7 +9313,9 @@ class FrameWorker(threading.Thread):
                 swap = v2.functional.adjust_sharpness(
                     swap, parameters["ColorSharpnessDecimalSlider"]
                 )
-                swap = v2.functional.adjust_hue(swap, parameters["ColorHueDecimalSlider"])
+                swap = v2.functional.adjust_hue(
+                    swap, parameters["ColorHueDecimalSlider"]
+                )
 
                 swap = swap * 255.0
 
@@ -8840,7 +9328,9 @@ class FrameWorker(threading.Thread):
                 and parameters["FaceRestorerEnable2EndToggle"]
             ):
                 swap_original2 = swap.clone()
-                if self._face_restorer_skip_for_small_face(parameters, float(tform.scale)):
+                if self._face_restorer_skip_for_small_face(
+                    parameters, float(tform.scale)
+                ):
                     swap2 = swap_original2
                 else:
                     _rt2e = self._face_restorer_effective_type(
@@ -8880,8 +9370,10 @@ class FrameWorker(threading.Thread):
                 mouth_overlay_pkg = None
                 if hasattr(self.models_processor, "face_masks"):
                     # 'swap' now contains the fully restored face
-                    mouth_overlay_pkg = self.models_processor.face_masks.get_mouth_overlay(
-                        swap, original_face_512, parameters
+                    mouth_overlay_pkg = (
+                        self.models_processor.face_masks.get_mouth_overlay(
+                            swap, original_face_512, parameters
+                        )
                     )
 
                 if mouth_overlay_pkg is not None:
@@ -8926,7 +9418,9 @@ class FrameWorker(threading.Thread):
             if parameters.get("EndingColorTransferEnableToggle", False):
                 if parameters["EndingColorTransferTypeSelection"] == "Test":
                     swap = faceutil.histogram_matching(
-                        original_face_512, swap, parameters["EndingColorBlendAmountSlider"]
+                        original_face_512,
+                        swap,
+                        parameters["EndingColorBlendAmountSlider"],
                     )
                 elif parameters["EndingColorTransferTypeSelection"] == "Test_Mask":
                     swap = faceutil.histogram_matching_withmask(
@@ -8937,7 +9431,9 @@ class FrameWorker(threading.Thread):
                     )
                 elif parameters["EndingColorTransferTypeSelection"] == "DFL_Test":
                     swap = faceutil.histogram_matching_DFL_test(
-                        original_face_512, swap, parameters["EndingColorBlendAmountSlider"]
+                        original_face_512,
+                        swap,
+                        parameters["EndingColorBlendAmountSlider"],
                     )
                 elif parameters["EndingColorTransferTypeSelection"] == "DFL_Orig":
                     swap = faceutil.histogram_matching_DFL_Orig(
@@ -8946,7 +9442,10 @@ class FrameWorker(threading.Thread):
                         mask_autocolor,
                         parameters["EndingColorBlendAmountSlider"],
                     )
-                elif parameters["EndingColorTransferTypeSelection"] == "AdaIN_Statistical":
+                elif (
+                    parameters["EndingColorTransferTypeSelection"]
+                    == "AdaIN_Statistical"
+                ):
                     swap = faceutil.apply_adain_color_transfer(
                         swap,
                         original_face_512,
@@ -9042,7 +9541,9 @@ class FrameWorker(threading.Thread):
                     debug_info[f"JS:{_k}"] = _v
 
             if debug and debug_info:
-                one_liner = ", ".join(f"{key}={value}" for key, value in debug_info.items())
+                one_liner = ", ".join(
+                    f"{key}={value}" for key, value in debug_info.items()
+                )
                 print(f"[DEBUG] {one_liner}")
 
             if parameters.get("SwapLightTouchEnableToggle", False):
@@ -9123,7 +9624,9 @@ class FrameWorker(threading.Thread):
                         (swap_mask_clone, swap_mask_clone, swap_mask_clone), 0
                     )
                     swap_mask_clone = swap_mask_clone.permute(1, 2, 0)
-                    swap_mask_clone = torch.mul(swap_mask_clone, 255.0).type(torch.uint8)
+                    swap_mask_clone = torch.mul(swap_mask_clone, 255.0).type(
+                        torch.uint8
+                    )
 
             if _swap_core_perf is not None:
                 _swap_core_perf.mark("sc_tail_view_maskpost")
@@ -9211,9 +9714,7 @@ class FrameWorker(threading.Thread):
                         parameters.get("PoissonRingEdgeModeSelection", "Mixed")
                     ).strip()
                     _cv_mode = (
-                        cv2.NORMAL_CLONE
-                        if _mode_sel == "Normal"
-                        else cv2.MIXED_CLONE
+                        cv2.NORMAL_CLONE if _mode_sel == "Normal" else cv2.MIXED_CLONE
                     )
                     _so = swap_opaque.detach().cpu().contiguous()
                     if _so.dtype != torch.uint8:
@@ -9240,8 +9741,10 @@ class FrameWorker(threading.Thread):
                         peak_scale=_pk,
                         mask_blur_sigma=_bsig,
                     )
-                    swap = torch.from_numpy(_out_np).permute(2, 0, 1).to(
-                        device=img.device, dtype=torch.uint8
+                    swap = (
+                        torch.from_numpy(_out_np)
+                        .permute(2, 0, 1)
+                        .to(device=img.device, dtype=torch.uint8)
                     )
 
             img[0:3, top:bottom, left:right] = swap

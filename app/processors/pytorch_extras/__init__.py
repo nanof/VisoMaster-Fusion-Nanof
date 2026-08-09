@@ -1,5 +1,5 @@
 """
-Extensiones PyTorch opcionales (InstantID, retalking, etc.).
+Extensiones PyTorch opcionales (InstantID, MuseTalk lip-sync, etc.).
 
 Activación: variable de entorno VISOFUSION_PYTORCH_EXTRAS=1 (o "true").
 Sin activar, la app no importa estos módulos en el arranque.

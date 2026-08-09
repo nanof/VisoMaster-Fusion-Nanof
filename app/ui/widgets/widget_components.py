@@ -488,6 +488,10 @@ class TargetMediaCardButton(CardButton):
             main_window=main_window, face_id=None
         )
 
+        from app.ui.widgets.actions import control_actions
+
+        control_actions.refresh_musetalk_audio_for_media(main_window)
+
         main_window.loading_new_media = True
         common_widget_actions.refresh_frame(main_window, synchronous=True)
 

@@ -6,6 +6,7 @@
 *.jpg
 *.json
 !/version.json
+!app/processors/pytorch_extras/musetalk/musetalk_v15.json
 *.mp4
 *.onnx
 *.profile
@@ -31,6 +32,7 @@ input_face_favorites/
 merged_embeddings*.txt
 model_assets/liveportrait_onnx/*.onnx
 model_assets/liveportrait_onnx/*.trt
+model_assets/musetalk/
 model_assets/reference_kv_data/
 model_assets/torch_compile_cache
 output/

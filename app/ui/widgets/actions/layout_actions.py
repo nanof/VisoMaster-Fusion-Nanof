@@ -696,7 +696,7 @@ def add_widgets_to_tab_layout(
                     widget_data,
                 ):
                     new_value = text_widget.text()
-                    if data_type == "parameter":
+                    if widget_data.get("data_type", data_type) == "parameter":
                         common_widget_actions.update_parameter(
                             main_window,
                             text_widget_name,
@@ -737,7 +737,7 @@ def add_widgets_to_tab_layout(
                     category_layout, label, widget, widget.reset_default_button
                 )
 
-                if data_type == "parameter":
+                if widget_data_type == "parameter":
                     common_widget_actions.create_default_parameter(
                         main_window, widget_name, cast(str, widget_data["default"])
                     )

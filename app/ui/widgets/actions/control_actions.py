@@ -2,6 +2,7 @@ from typing import TYPE_CHECKING, Any
 from pathlib import Path
 import traceback
 
+import cv2
 import numpy as np
 import torch
 from torchvision.transforms import v2
@@ -68,9 +69,7 @@ def _maybe_warm_gfpgan_torch_restorer(
         except Exception as e:
             print(f"[GFPGANTorch] Warm-up failed (non-fatal): {e}", flush=True)
 
-    threading.Thread(
-        target=_warm, daemon=True, name="GFPGANWarmUp"
-    ).start()
+    threading.Thread(target=_warm, daemon=True, name="GFPGANWarmUp").start()
 
 
 def on_detector_model_selection_change(main_window: "MainWindow", new_model: str):
@@ -183,6 +182,7 @@ def change_execution_provider(main_window: "MainWindow", new_provider):
     main_window.video_processor.stop_processing()
     main_window.models_processor.switch_providers_priority(new_provider)
     main_window.models_processor.clear_gpu_memory()
+    reload_musetalk_if_enabled(main_window)
     main_window.models_processor.face_detectors.clear_declared_input_side_cache()
     detector_internal_size_ui.sync_detector_internal_size_combo(main_window)
     common_widget_actions.update_gpu_memory_progressbar(main_window)
@@ -217,6 +217,7 @@ def change_gpu_index(main_window: "MainWindow", new_gpu_index):
         main_window.models_processor.provider_name
     )
     main_window.models_processor.clear_gpu_memory()
+    reload_musetalk_if_enabled(main_window)
     main_window.models_processor.face_detectors.clear_declared_input_side_cache()
     detector_internal_size_ui.sync_detector_internal_size_combo(main_window)
     common_widget_actions.update_gpu_memory_progressbar(main_window)
@@ -574,9 +575,25 @@ def apply_restorer_required_global_settings(
 ) -> None:
     """Aplica ajustes globales (p. ej. landmarks) exigidos por un tipo de restorer; registra en log si cambia algo."""
     from app.processors.models_data import RESTORER_REQUIRED_CONTROL_SETTINGS
+
+    apply_required_global_settings(
+        main_window,
+        RESTORER_REQUIRED_CONTROL_SETTINGS.get(restorer_display_name),
+        f"Restorer «{restorer_display_name}»",
+    )
+
+
+def apply_required_global_settings(
+    main_window: "MainWindow", required: dict | None, label: str
+) -> None:
+    """Force global controls a feature depends on, and say so in the log and UI.
+
+    Silently producing worse output because a prerequisite is off is the failure
+    mode this avoids: MuseTalk's crop needs dense landmarks, and with landmark
+    detection disabled it can only fall back to the detector box.
+    """
     from app.ui.widgets.settings_layout_data import SETTINGS_LAYOUT_DATA
 
-    required = RESTORER_REQUIRED_CONTROL_SETTINGS.get(restorer_display_name)
     if not required:
         return
 
@@ -632,15 +649,14 @@ def apply_restorer_required_global_settings(
 
     if applied_parts:
         summary = ", ".join(applied_parts)
-        print(
-            f"[INFO] Restorer «{restorer_display_name}» requiere ajustes globales; "
-            f"aplicado: {summary}"
+        print(f"[INFO] {label} requiere ajustes globales; aplicado: {summary}")
+        from app.ui.widgets.actions import (
+            preview_notification_actions as _preview_notify,
         )
-        from app.ui.widgets.actions import preview_notification_actions as _preview_notify
 
         _preview_notify.show_preview_notification(
             main_window,
-            f"Auto-set for {restorer_display_name}: {summary}",
+            f"Auto-set for {label}: {summary}",
             duration_ms=3200,
         )
 
@@ -1027,7 +1043,10 @@ def handle_preview_nis_toggle(
     del control_name
     from app.ui.widgets.actions import graphics_view_actions
 
-    if graphics_view_actions.preview_nis_debug_env() or graphics_view_actions.preview_gl_khr_debug_env():
+    if (
+        graphics_view_actions.preview_nis_debug_env()
+        or graphics_view_actions.preview_gl_khr_debug_env()
+    ):
         gpu = graphics_view_actions.preview_nis_gpu_display_enabled_with_toggle(
             main_window, new_value
         )
@@ -1059,7 +1078,10 @@ def handle_preview_nis_shaders_toggle(
 ) -> None:
     from app.ui.widgets.actions import graphics_view_actions
 
-    if graphics_view_actions.preview_nis_debug_env() or graphics_view_actions.preview_gl_khr_debug_env():
+    if (
+        graphics_view_actions.preview_nis_debug_env()
+        or graphics_view_actions.preview_gl_khr_debug_env()
+    ):
         print(
             f"[NIS] «NIS shaders» → {bool(new_value)} "
             f"(False = solo blit, sin compute NVScaler)",
@@ -1139,9 +1161,7 @@ def handle_enhancer_model_selection_change(
         frame_enhancers.current_enhancer_model = new_model_name
 
 
-def _any_face_parameter_enabled(
-    main_window: "MainWindow", parameter_name: str
-) -> bool:
+def _any_face_parameter_enabled(main_window: "MainWindow", parameter_name: str) -> bool:
     """True if any target-face parameter set has *parameter_name* enabled."""
     params_map = getattr(main_window, "parameters", None) or {}
     for params in params_map.values():
@@ -1499,11 +1519,17 @@ def _apply_inswapper128_resolution_128(main_window: "MainWindow") -> None:
             fp = main_window.video_processor.feeder_parameters
             if fp:
                 for _fid, p in fp.items():
-                    if isinstance(p, dict) and p.get("SwapModelSelection") == "Inswapper128":
+                    if (
+                        isinstance(p, dict)
+                        and p.get("SwapModelSelection") == "Inswapper128"
+                    ):
                         p["SwapperResSelection"] = "128"
 
     for _fid, params in list(main_window.parameters.items()):
-        if isinstance(params, dict) and params.get("SwapModelSelection") == "Inswapper128":
+        if (
+            isinstance(params, dict)
+            and params.get("SwapModelSelection") == "Inswapper128"
+        ):
             params["SwapperResSelection"] = "128"
 
     if (
@@ -1599,7 +1625,9 @@ def apply_performance_preset_selection(main_window: "MainWindow", value: str) ->
             flush=True,
         )
         common_widget_actions.refresh_frame(main_window)
-        QtCore.QTimer.singleShot(0, lambda: _performance_preset_reset_combo(main_window))
+        QtCore.QTimer.singleShot(
+            0, lambda: _performance_preset_reset_combo(main_window)
+        )
         return
 
     if value == PERFORMANCE_PRESET_WEBCAM_LOW_LATENCY:
@@ -1629,7 +1657,9 @@ def apply_performance_preset_selection(main_window: "MainWindow", value: str) ->
             flush=True,
         )
         common_widget_actions.refresh_frame(main_window)
-        QtCore.QTimer.singleShot(0, lambda: _performance_preset_reset_combo(main_window))
+        QtCore.QTimer.singleShot(
+            0, lambda: _performance_preset_reset_combo(main_window)
+        )
         return
 
     _bundles: dict[str, tuple[dict[str, Any], str]] = {
@@ -1759,3 +1789,222 @@ def start_screen_capture_region_picker(main_window: "MainWindow"):
     overlay.region_chosen.connect(apply_rect)
     overlay.cancelled.connect(on_cancel)
     overlay.show()
+
+
+# MuseTalk crops from the 68 face landmarks: jaw to jaw, ending at the chin,
+# centred on the nose bridge. With landmark detection off the pipeline only
+# yields 5 points, whose extent stops at the mouth corners, so the crop would
+# fall back to the detector box and the model would return the small, generic
+# mouth this framing exists to avoid. "68" is requested rather than the denser
+# default because it is the scheme upstream indexes, making the crop exact.
+MUSETALK_REQUIRED_CONTROL_SETTINGS = {
+    "LandmarkDetectToggle": True,
+    "LandmarkDetectModelSelection": "68",
+}
+
+
+def handle_musetalk_toggle_change(
+    main_window: "MainWindow", new_value: Any = None, *_, **__
+) -> None:
+    """Load/unload MuseTalk when the lip-sync toggle changes. Never raises.
+
+    ``update_control`` runs exec functions *before* storing the new value, so the
+    toggle state comes from ``new_value``; reading the control here would give
+    the previous one.
+    """
+    try:
+        enabled = (
+            bool(main_window.control.get("MuseTalkEnableToggle", False))
+            if new_value is None
+            else bool(new_value)
+        )
+        mp = main_window.models_processor
+        if enabled:
+            if not mp.ensure_musetalk_loaded():
+                print(
+                    "[WARN] MuseTalk could not load. Run the launcher's "
+                    "'Check / Update Dependencies' and 'Check / Update Models'."
+                )
+                return
+            apply_required_global_settings(
+                main_window, MUSETALK_REQUIRED_CONTROL_SETTINGS, "MuseTalk lip-sync"
+            )
+            _prepare_musetalk_audio(main_window)
+        else:
+            mp.unload_musetalk()
+    except Exception as e:
+        print(f"[WARN] MuseTalk toggle handler failed: {e}")
+
+
+def handle_musetalk_audio_change(
+    main_window: "MainWindow", new_value: Any = None, control_name: str = "", *_, **__
+) -> None:
+    """Re-prepare Whisper chunks when audio source/path changes.
+
+    The changed key is still holding its previous value in ``main_window.control``
+    at this point, so it is overridden with ``new_value``.
+    """
+    try:
+        if not bool(main_window.control.get("MuseTalkEnableToggle", False)):
+            return
+        override: dict[str, str] = {}
+        if new_value is not None:
+            if control_name == "MuseTalkAudioSourceSelection":
+                override["source"] = str(new_value)
+            elif control_name == "MuseTalkAudioPathText":
+                override["audio_path"] = str(new_value)
+                # Filling in a path is a clear intent to dub, but the path alone
+                # changes nothing while the source still says 'Video track'.
+                source = str(
+                    main_window.control.get(
+                        "MuseTalkAudioSourceSelection", "Video track"
+                    )
+                )
+                if str(new_value).strip() and source != "External file":
+                    print(
+                        "[WARN] MuseTalk: external audio path set but Audio source is "
+                        f"'{source}'. Set it to 'External file' or the path is ignored."
+                    )
+        _prepare_musetalk_audio(main_window, **override)
+    except Exception as e:
+        print(f"[WARN] MuseTalk audio change handler failed: {e}")
+
+
+def reload_musetalk_if_enabled(main_window: "MainWindow") -> None:
+    """Bring lip-sync back after a VRAM flush. No-op when the toggle is off.
+
+    ``clear_gpu_memory`` releases the engine *and* its prepared audio, so the
+    toggle would keep claiming lip-sync is on while every frame passed through
+    untouched. Reloading here keeps the toggle the single source of truth.
+    """
+    try:
+        if not bool(main_window.control.get("MuseTalkEnableToggle", False)):
+            return
+        print("[INFO] MuseTalk: reloading after VRAM flush...")
+        if not main_window.models_processor.ensure_musetalk_loaded():
+            print("[WARN] MuseTalk could not be reloaded; lip-sync stays off.")
+            return
+        _prepare_musetalk_audio(main_window)
+    except Exception as e:
+        print(f"[WARN] MuseTalk reload failed: {e}")
+
+
+def refresh_musetalk_audio_for_media(main_window: "MainWindow") -> None:
+    """Re-derive lip-sync audio after new media loads. No-op when lip-sync is off."""
+    try:
+        if not bool(main_window.control.get("MuseTalkEnableToggle", False)):
+            return
+        _prepare_musetalk_audio(main_window)
+    except Exception as e:
+        print(f"[WARN] MuseTalk media refresh failed: {e}")
+
+
+def _fps_from_media_file(media_path) -> float:
+    """Read the container's frame rate straight from the file.
+
+    Opening the media directly makes fps detection independent of playback
+    state: at toggle time ``media_capture`` may be closed and
+    ``recording_source_fps`` is still 0 because ``process_video`` has not run,
+    so both would fall through to the 25.0 default.
+    """
+    if not media_path:
+        return 0.0
+    cap = None
+    try:
+        cap = cv2.VideoCapture(str(media_path))
+        if cap.isOpened():
+            fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+            if fps > 1e-3:
+                return fps
+    except Exception:
+        pass
+    finally:
+        if cap is not None:
+            cap.release()
+    return 0.0
+
+
+def _musetalk_source_fps(vp) -> float:
+    """Frame rate that maps frame indices to audio time.
+
+    The media's own rate, not ``vp.fps``: that one holds the playback/recording
+    target, which a user FPS cap can push away from the source rate. Sources are
+    tried most-authoritative first and the chosen one is logged so a wrong audio
+    alignment is diagnosable instead of silent.
+    """
+    # recording_source_fps is the source rate captured by process_video; the live
+    # media_capture is next; a direct file read covers the pre-playback toggle.
+    src_fps = 0.0
+    try:
+        src_fps = float(getattr(vp, "recording_source_fps", 0) or 0.0)
+    except (TypeError, ValueError):
+        src_fps = 0.0
+    if src_fps > 1e-3:
+        print(f"[INFO] MuseTalk: source fps {src_fps:.3f} (recording_source_fps)")
+        return src_fps
+
+    capture = getattr(vp, "media_capture", None)
+    if capture is not None:
+        try:
+            fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+            if fps > 1e-3:
+                print(f"[INFO] MuseTalk: source fps {fps:.3f} (media_capture)")
+                return fps
+        except Exception:
+            pass
+
+    media_path = getattr(vp, "media_path", None)
+    fps = _fps_from_media_file(media_path)
+    if fps > 1e-3:
+        print(f"[INFO] MuseTalk: source fps {fps:.3f} (container file)")
+        return fps
+
+    try:
+        fps = float(getattr(vp, "fps", 0) or 0.0)
+    except (TypeError, ValueError):
+        fps = 0.0
+    if fps > 1e-3:
+        print(f"[INFO] MuseTalk: source fps {fps:.3f} (playback target, capped?)")
+        return fps
+
+    print("[WARN] MuseTalk: could not detect source fps; assuming 25.0")
+    return 25.0
+
+
+def _prepare_musetalk_audio(
+    main_window: "MainWindow",
+    *,
+    source: str | None = None,
+    audio_path: str | None = None,
+) -> None:
+    mp = main_window.models_processor
+    engine = getattr(mp, "musetalk_engine", None)
+    if engine is None or not engine.is_loaded:
+        if not mp.ensure_musetalk_loaded():
+            return
+        engine = mp.musetalk_engine
+    if engine is None:
+        return
+
+    vp = getattr(main_window, "video_processor", None)
+    fps = 25.0 if vp is None else _musetalk_source_fps(vp)
+
+    if source is None:
+        source = str(
+            main_window.control.get("MuseTalkAudioSourceSelection", "Video track")
+        )
+    if source == "External file":
+        if audio_path is None:
+            audio_path = main_window.control.get("MuseTalkAudioPathText", "")
+        audio_path = str(audio_path or "").strip()
+        if not audio_path:
+            print("[WARN] MuseTalk: set External audio path.")
+            return
+        engine.prepare_audio(audio_path, fps, is_video_container=False)
+        return
+
+    media_path = getattr(vp, "media_path", None) if vp is not None else None
+    if not media_path:
+        print("[WARN] MuseTalk: load a video first (Video track audio).")
+        return
+    engine.prepare_audio(media_path, fps, is_video_container=True)

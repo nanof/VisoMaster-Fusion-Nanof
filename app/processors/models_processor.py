@@ -521,6 +521,8 @@ class ModelsProcessor(QtCore.QObject):
         self.face_editors = FaceEditors(self)
         self.face_reaging = FaceReaging(self)
         self.perform_recast = PerformRecast(self)
+        # Optional MuseTalk lip-sync (pytorch_extras). Created lazily; never loaded at init.
+        self.musetalk_engine = None
 
         # Initialize Mask Latent
         self.lp_mask_crop_latent = faceutil.create_faded_inner_mask(
@@ -2497,6 +2499,7 @@ class ModelsProcessor(QtCore.QObject):
             self.frame_enhancers.unload_rife_preview_model()
             self.face_editors.unload_models()
             self.perform_recast.unload_models()
+            self.unload_musetalk()
 
             # Unload any remaining models in the main dictionaries
             self.delete_models()
@@ -2671,6 +2674,39 @@ class ModelsProcessor(QtCore.QObject):
         """Unloads all loaded PerformRecast (Recast mode) models under the lock."""
         with self.model_lock:
             self.perform_recast.unload_models()
+
+    def ensure_musetalk_loaded(self) -> bool:
+        """Lazy-load MuseTalk engine. Activation is controlled by the UI toggle.
+
+        Returns False if optional deps/weights are missing.
+        """
+        try:
+            from app.processors.pytorch_extras.musetalk import MuseTalkEngine
+
+            if self.musetalk_engine is None:
+                self.musetalk_engine = MuseTalkEngine()
+                # MuseTalk infers on its own thread, so it must stand still while
+                # another model captures a CUDA graph: submitting work to a
+                # capturing stream fails and poisons the context.
+                self.musetalk_engine.gpu_capture_lock = self.cuda_graph_capture_lock
+            if self.musetalk_engine.is_loaded:
+                return True
+            device = "cuda" if str(self.device).startswith("cuda") else "cpu"
+            return bool(self.musetalk_engine.load(device=device, use_float16=True))
+        except Exception as e:
+            print(f"[WARN] ensure_musetalk_loaded failed: {e}")
+            return False
+
+    def unload_musetalk(self) -> None:
+        """Unload MuseTalk weights if present (no-op when never loaded)."""
+        engine = getattr(self, "musetalk_engine", None)
+        if engine is None:
+            return
+        try:
+            engine.unload()
+        except Exception as e:
+            print(f"[WARN] MuseTalk unload failed: {e}")
+        self.musetalk_engine = None
 
     def unload_face_mask_models(self):
         """Unloads all loaded face mask models under the model lock."""

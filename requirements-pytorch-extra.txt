@@ -1,8 +1,10 @@
-# Dependencias opcionales para pipelines PyTorch (InstantID, retalking, etc.).
-# Instalar solo si usas VISOFUSION_PYTORCH_EXTRAS=1 y módulos en app/processors/pytorch_extras/.
+# Deprecated as a separate install path.
+# MuseTalk deps (diffusers, transformers, librosa, soundfile, accelerate,
+# huggingface-hub) are now in requirements_cu13.txt and installed by the
+# launcher ("Check / Update Dependencies").
 #
-# pip install -r requirements-pytorch-extra.txt
+# Kept for reference / older docs only. Prefer:
+#   uv pip install -r requirements_cu13.txt
+# or the portable launcher dependency update.
 
-torch>=2.1.0
-torchvision>=0.16.0
-numpy>=1.24.0
+-r requirements_cu13.txt
