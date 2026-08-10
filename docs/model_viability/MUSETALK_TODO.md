@@ -86,8 +86,8 @@ Mark items with `[x]` / `[ ]` and add short notes under each section when status
 
 - [x] Optimize MuseTalk model (quantization?) — **FPS pass (2026-08-10):**
   - Already fp16; **not** INT8/TRT this round (quality risk; deferred).
-  - `torch.compile` on the UNet, env `VISOFUSION_MUSETALK_COMPILE` (**default off**, opt-in). Falls back to eager if Inductor/Triton unavailable. The VAE is *not* compiled: we call `vae.encode()`/`vae.decode()`, and `OptimizedModule` delegates everything but `forward()` to the original module, so `torch.compile(vae)` was a no-op that only cost warmup.
-  - Compiled with `dynamic=False` on fixed batch specs (powers of two up to `max_batch`), and `_infer_batch` pads the UNet input up to the next spec. Without the padding, playback batches of 3/5/6 triggered an Inductor recompile mid-stream and preview collapsed to **0.15 FPS** with `frame timed out waiting for the batcher`.
+  - `torch.compile` on the UNet, env `VISOFUSION_MUSETALK_COMPILE` (**default off**, opt-in). Falls back to eager if Inductor/Triton unavailable. `torch.compile(vae)` is a no-op — we call `vae.encode()`/`vae.decode()` and `OptimizedModule` delegates everything but `forward()` to the original module — so the **encoder/decoder submodules** are compiled instead (see the VAE hot path entry below; that is where the win turned out to be).
+  - Compiled with `dynamic=False` on fixed batch specs (powers of two up to `max_batch`), and `_infer_batch` pads up to the next spec **before the encode**, so the UNet *and* the VAE both stay on warm shapes. Without the padding, playback batches of 3/5/6 triggered an Inductor recompile mid-stream and preview collapsed to **0.15 FPS** with `frame timed out waiting for the batcher`.
   - Hot path: `torch.inference_mode()` + `channels_last` on CUDA.
   - Whisper stays on **CPU** (VRAM only; not hot-path FPS).
   - Bench: `python -m app.processors.pytorch_extras.musetalk.bench_musetalk` (needs CUDA). Load timing: `python scripts/time_musetalk_load.py` (one load per process; the in-process cache makes a second load meaningless).
@@ -107,12 +107,30 @@ Mark items with `[x]` / `[ ]` and add short notes under each section when status
       | 4 | on | 64.28 | 43.41 | 64.42 | 145.29 | 36.32 | 27.5 |
       | 8 | on | — | — | — | — | — | stalled recompiling >8 min |
 
-    - **Why it ships off (2026-08-10):** compile speeds up the UNet (63.6 → 49.8 ms at b1) but that is the *minority* of the work. At b8, encode+decode are **239 of 285 ms (84%)** while the UNet is 20%; we optimized the small half. End to end compile is a wash at b4 (36.3 vs 38.2 ms/frm) and *worse* at b1 (125.5 vs 103.5 ms), and at b8 it stalled recompiling for over 8 minutes despite the spec being warmed. Load cost, measured with `scripts/time_musetalk_load.py` on a warm on-disk Inductor cache: **6.3 s off vs 34.9 s on (+28.6 s per app start)**. Set `VISOFUSION_MUSETALK_COMPILE=1` only to experiment.
-    - **Next FPS work belongs in the VAE, not the UNet:** encode+decode are 84% of the batch-8 hot path and are pure eager. Options worth a spike: compile `vae.vae.encoder` / `vae.vae.decoder` as submodules (their `forward` *does* go through dynamo, unlike `vae.encode()`), a TensorRT export of the VAE, or avoiding the 2×N encode by caching the reference-branch latents, which are recomputed every frame for the same crop.
+    - **Why it shipped off at this point (superseded later the same day):** compile sped up the UNet (63.6 → 49.8 ms at b1) but that is the *minority* of the work. At b8, encode+decode were **239 of 285 ms (84%)** while the UNet was 20%; we had optimized the small half. End to end it was a wash at b4 and *worse* at b1, and b8 stalled recompiling for over 8 minutes. **Resolved by compiling the VAE submodules — see the VAE hot path entry, which supersedes this table.** It remains opt-in, now because of first-run warmup rather than lack of benefit.
     - In-app playback with lip-sync sits at ~**4–6.5 FPS** vs ~16–26 FPS without it, well below the bench's 35 ms/frm, so there is also per-frame cost outside the engine (BiSeNet parsing at 512×512 per frame, mouth restore, blending, GPU↔host round trips) worth profiling with `VISIOMASTER_PERF_STAGES=1`.
     - **Portable Python (2026-08-10):** embeddable builds lacked `Include/`+`libs/` so compile was skipped in the app. Fixed locally + script `scripts/ensure_portable_python_dev_headers.py` (also hooked from `Start_Portable.bat`). `compile_utils` auto-prepends MSVC `cl.exe` when missing from PATH. Needs VS Build Tools/Community once for first Triton host build; then cached.
-- [ ] MuseTalk VAE hot path (encode+decode ≈84% at batch 8): spike compile on `vae.vae.encoder`/`decoder`, TRT export, and/or cache reference-branch latents
-- [ ] Profile in-app lip-sync with `VISIOMASTER_PERF_STAGES=1` (BiSeNet / mouth restore / GPU↔host vs engine)
+- [x] MuseTalk VAE hot path — **done 2026-08-10, and it was the whole ballgame.** `_compile_vae()` now compiles `vae.vae.encoder` / `vae.vae.decoder` (the submodules `encode()`/`decode()` actually call) alongside the UNet, and `_infer_batch` pads **before the encode** so the VAE sees a warm shape too. RTX 5070 Ti, WARMUP=3 ITERS=10:
+
+  | batch | mode | encode | unet | decode | e2e | ms/frm | FPS~ |
+  |---|---|---|---|---|---|---|---|
+  | 1 | off | 19.65 | 81.21 | 22.20 | 93.06 | 93.06 | 10.7 |
+  | 4 | off | 64.40 | 61.31 | 64.02 | 165.57 | 41.39 | 24.2 |
+  | 8 | off | 135.40 | 60.58 | 132.74 | 304.17 | 38.02 | 26.3 |
+  | 1 | on | 14.60 | 43.62 | 14.76 | 72.47 | 72.47 | 13.8 |
+  | 4 | on | 40.44 | 39.63 | 51.99 | 108.95 | 27.24 | 36.7 |
+  | 8 | on | 78.04 | 35.03 | 85.00 | 191.33 | 23.92 | 41.8 |
+
+  End to end **1.28× (b1) / 1.52× (b4) / 1.59× (b8)**, up from the ~2% the UNet-only compile gave. Batch-8 no longer stalls.
+  - **Batch scaling, eager (why the UNet was never the target):** the UNet is a near-**constant** ~53–72 ms from b1 to b8 (launch-overhead bound, it never saturates the GPU), while encode/decode scale **linearly** at ~15 ms/frame each. At b8 the VAE is **88%** of the pass. Amortization saturates by b6: ms/frm 39.1 (b4) → 35.1 (b6) → 34.9 (b8), so raising the worker count from 4 to 8 would buy only ~11% — it is not a lever.
+  - **`dynamic=True` rejected (measured):** wins less (encode 1.47× / decode 1.32× vs **1.68× / 1.53×** specialised), takes **186 s** to warm up, and *still* recompiles on the small shapes — first call at batch 1 took **86 s** and batch 2 **76 s**, exactly the mid-playback batcher stall we already fixed once.
+  - **Cost is load time, all warmup:** **68–79 s** with a warm on-disk Inductor cache vs ~6–8 s eager, and **~477 s on the very first run** for a given GPU/shape set (portable Python first load with VAE compile: **~319 s**). That first-run cliff is why it stays opt-in via `VISOFUSION_MUSETALK_COMPILE=1`; for anything longer than a short preview it pays for itself quickly.
+  - **In-app confirmation (2026-08-10, portable, `VISOFUSION_MUSETALK_PERF=1`, n=768, batch median 3):** apply total **411 ms** vs **530 ms** off (~**1.29×**); infer **212 ms** vs **302** (~**1.43×**); encode/unet/decode **51 / 103 / 50** vs **69 / 160 / 70**. Bench promised ~1.5×; app lands closer to 1.3× on apply because batch is smaller and ~100 ms of parse/mouth/blend is untouched. UNet still ~2.5× slower than isolated bench (GPU contention with BiSeNet).
+  - Not pursued: caching the reference-branch latents. `get_latents_for_unet_batch` does encode **2N** images (masked + reference of the *same* crop), but the crop changes every frame in playback, so there is nothing to reuse across frames.
+- [x] Profile in-app lip-sync with `VISIOMASTER_PERF_STAGES=1` — **2026-08-10, 670 pool frames, compile=off, load 5.9 s:** total median **616 ms/frame**; **`musetalk_preswap` 551 ms (~89%)**, `std_swap_edit` 47 ms (~8%), `std_recognize` 16 ms (~3%). Rest negligible.
+- [x] Break down `apply_frame_bgr` with `VISOFUSION_MUSETALK_PERF=1` — **2026-08-10, n=815, batch median 4:** apply total **530 ms**. **`batch_wait` 420 ms (79%)** of which **`infer` 302 ms** (encode 69 / **unet 160** / decode 70) and **~116 ms** queue/gather beyond infer. Post-GPU: **mouth_only 44** + parse 29 + blend 27 ≈ **100 ms** (restore off). In-app UNet at b≈4 is **~2.6×** the isolated bench (160 vs 61 ms). Aggregator: `scripts/agg_musetalk_perf.py`.
+- [ ] ~~Cut second BiSeNet in `mouth_only`~~ **Blocked / re-scoped (2026-08-10):** the parser (`face_masks._faceparser_labels`) is a **fixed 512×512, batch-1** ORT/TRT session (output bound to `(1,19,512,512)`), and the two parses run on **different images** (frame crop vs. generated recon), so there is no reuse or cheap shrink. It also **won't raise FPS directly**: both parses run on the *worker* thread after the GPU handoff and overlap with the next batch's infer. Their only FPS effect is **GPU contention** with the batch loop's UNet (see next item). Real fix would be a **dynamic-batch BiSeNet engine** to fuse both parses into one call (medium effort; needs TRT re-export).
+- [ ] Investigate in-app UNet slowdown vs bench. Still open after VAE compile: in-app unet **~103 ms** (compile on, batch≈3) vs isolated compiled unet **~40 ms** at b4 — still ~2.5×. Working hypothesis unchanged: **GPU contention** from concurrent BiSeNet 512² parses while the batch loop runs. VAE compile cut infer 302→212 ms; next FPS lever is reducing that BiSeNet GPU load (or TRT for the VAE if compile load time is unacceptable).
 - [ ] Optimize Landmark detection
 
 ### Robustness
@@ -167,7 +185,8 @@ Keep MuseTalk as the **preview / realtime** path. Explore higher-fidelity or nex
 | Skip download | `--skip-musetalk` or `VISOFUSION_SKIP_MUSETALK=1`               |
 | Debug         | `VISOFUSION_MUSETALK_DEBUG=1`                                   |
 | Batch         | `VISOFUSION_MUSETALK_BATCH` (default 8)                         |
-| Compile       | `VISOFUSION_MUSETALK_COMPILE` (default **off**; UNet torch.compile, opt-in) |
+| Compile       | `VISOFUSION_MUSETALK_COMPILE` (default **off**; UNet + VAE encoder/decoder torch.compile, opt-in). ~1.5× at b4 / ~1.6× at b8; costs ~70 s of load (warm cache), several minutes on the first run ever. |
+| Perf          | `VISOFUSION_MUSETALK_PERF=1` → `[MUSETALK-PERF]` crop/batch_wait/encode/unet/decode/parse/… |
 | Bench         | `python -m app.processors.pytorch_extras.musetalk.bench_musetalk` |
 | Load timing   | `python scripts/time_musetalk_load.py`                          |
 | Code          | `app/processors/pytorch_extras/musetalk/`                       |
@@ -189,6 +208,8 @@ Keep MuseTalk as the **preview / realtime** path. Explore higher-fidelity or nex
 | 2026-08-09 | Noted hybrid pipeline; LatentSync = export-only spike; FlashLips = wait for public weights.        |
 | 2026-08-10 | FPS opts: torch.compile + channels_last + inference_mode; Whisper on CPU; bench script; INT8 deferred. |
 | 2026-08-10 | Compile ships **off** by default: UNet-only win, VAE dominates (~84% at b8); pad to fixed batch specs; portable Python Include/libs + MSVC PATH for opt-in compile; load 6.3 s off vs 34.9 s on. Next FPS: VAE / in-app `PERF_STAGES`. |
+| 2026-08-10 | **VAE encoder/decoder compiled** (the UNet is constant ~55 ms; the VAE was 88% of the pass and scales linearly). Padding moved before the encode. End to end **1.5× at b4 / 1.6× at b8**, b8 no longer stalls. `dynamic=True` measured and rejected (recompiles at b1/b2 with 76–86 s stalls). Still opt-in: first-ever compile ~477 s, ~70 s thereafter. |
+| 2026-08-10 | In-app confirm (n=768): apply **530→411 ms (~1.29×)**, infer **302→212 (~1.43×)** with compile on; first portable load ~319 s. Next: BiSeNet GPU contention. |
 
 
 

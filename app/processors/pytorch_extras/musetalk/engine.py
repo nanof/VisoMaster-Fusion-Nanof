@@ -73,12 +73,21 @@ def _env_flag(name: str, default: bool) -> bool:
 def musetalk_compile_enabled() -> bool:
     """True when VISOFUSION_MUSETALK_COMPILE asks for torch.compile (default off).
 
-    Off by default because it only pays at batch 1 (~1.4x on the UNet, i.e. the
-    paused preview). Playback batches several workers together, where the VAE
-    encode/decode dominates and the win drops to ~2%, while the warmup still
-    costs ~35 s of load time on every process start.
+    Worth turning on for anything longer than a quick preview: now that the VAE
+    encoder/decoder are compiled too (they are ~88% of the pass, not the UNet)
+    the end-to-end win is ~1.5x at batch 4 and ~1.6x at batch 8, up from the ~2%
+    it gave when only the UNet was compiled.
+
+    Still off by default because of load time, which is all warmup: ~70 s once
+    Inductor's on-disk cache is populated, but several minutes on the very first
+    run for a given GPU and shape set.
     """
     return _env_flag("VISOFUSION_MUSETALK_COMPILE", False)
+
+
+def musetalk_perf_enabled() -> bool:
+    """True when VISOFUSION_MUSETALK_PERF asks for per-frame apply timings."""
+    return _env_truthy("VISOFUSION_MUSETALK_PERF")
 
 
 def musetalk_debug_enabled() -> bool:
@@ -252,6 +261,12 @@ class _CropRequest:
     audio_index: int
     done: threading.Event = field(default_factory=threading.Event)
     recon: np.ndarray | None = None
+    # Filled by the batcher when VISOFUSION_MUSETALK_PERF is on.
+    batch_size: int = 0
+    encode_ms: float = 0.0
+    unet_ms: float = 0.0
+    decode_ms: float = 0.0
+    infer_ms: float = 0.0
 
 
 class MuseTalkEngine:
@@ -506,9 +521,51 @@ class MuseTalkEngine:
             print(f"[WARN] MuseTalk UNet torch.compile failed: {e}", flush=True)
             return
 
-        # The VAE stays eager: we call vae.encode()/vae.decode(), and an
-        # OptimizedModule forwards every attribute other than forward() to the
-        # original module, so torch.compile(vae) would only cost warmup time.
+        self._compile_vae(specs)
+
+    def _compile_vae(self, specs: list[int]) -> None:
+        """Compile the VAE encoder/decoder — the actual cost of the hot path.
+
+        ``torch.compile(vae)`` is a no-op: we call ``encode()``/``decode()``, and
+        an OptimizedModule forwards every attribute other than ``forward()`` to
+        the original module. Compiling the submodules those methods *do* call is
+        what pays: measured ~1.7x on encode and ~1.5x on decode at batch 8, where
+        the VAE is ~88% of the pass (the UNet is a near-constant ~55 ms whatever
+        the batch, so it was never the thing to optimise).
+
+        ``dynamic=True`` is deliberately not used: it wins less (~1.47x/1.32x)
+        and still recompiles on the small shapes, stalling the batcher for over
+        a minute mid-playback. Specialising on ``specs`` and padding up to them
+        in ``_infer_batch`` keeps every shape warm instead.
+        """
+        vae = self._vae
+        if vae is None or getattr(vae, "vae", None) is None:
+            return
+        import torch
+
+        try:
+            vae.vae.encoder = torch.compile(
+                vae.vae.encoder, mode="default", fullgraph=False, dynamic=False
+            )
+            vae.vae.decoder = torch.compile(
+                vae.vae.decoder, mode="default", fullgraph=False, dynamic=False
+            )
+            # Warm up through the wrapper, not the submodules: that covers
+            # quant_conv/post_quant_conv and the exact shapes playback produces
+            # (the encoder sees 2N, masked and reference concatenated).
+            blank = np.zeros((256, 256, 3), dtype=np.uint8)
+            with torch.inference_mode():
+                for size in specs:
+                    latents = vae.get_latents_for_unet_batch([blank] * size)
+                    vae.decode_latents(latents[:, :4].to(dtype=vae.vae.dtype))
+            if self._device is not None and self._device.type == "cuda":
+                torch.cuda.synchronize()
+            print(
+                f"[INFO] MuseTalk VAE torch.compile ready (batch specs {specs})",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"[WARN] MuseTalk VAE torch.compile failed: {e}", flush=True)
 
     def _start_batcher(self) -> None:
         self._batch_stop.clear()
@@ -584,18 +641,38 @@ class MuseTalkEngine:
             return
         unet_dtype = unet.model.dtype
         real = len(batch)
+        perf = musetalk_perf_enabled()
+
+        def _sync() -> None:
+            if perf and torch.cuda.is_available():
+                torch.cuda.synchronize()
+
         # Uncontended except while another model builds its CUDA graph, which is a
         # one-off per model, so this costs a lock acquire per batch.
         gate = self.gpu_capture_lock or contextlib.nullcontext()
+        t_infer0 = time.perf_counter() if perf else 0.0
+        encode_ms = unet_ms = decode_ms = 0.0
         with gate, torch.inference_mode():
             # The VAE mask stays the exact lower half. bbox_shift belongs to the
             # crop geometry (see framing.py); moving this line instead detaches it
             # from the blend boundary and shows up as a seam across the nose.
-            latents = vae.get_latents_for_unet_batch([r.crop for r in batch])
+            _sync()
+            t0 = time.perf_counter() if perf else 0.0
+            # Pad before the encode, not after: the VAE is compiled per shape too,
+            # so a raw batch size would recompile it mid-playback. With compile off
+            # _batch_specs is empty, pad is 0 and this is the plain batch.
+            pad = self._padded_batch_size(real) - real
+            crops = [r.crop for r in batch]
+            if pad > 0:
+                crops.extend([crops[-1]] * pad)
+            latents = vae.get_latents_for_unet_batch(crops)
             if getattr(self, "_channels_last", False) and getattr(
                 latents, "is_cuda", False
             ):
                 latents = latents.to(memory_format=torch.channels_last)
+            _sync()
+            if perf:
+                encode_ms = (time.perf_counter() - t0) * 1000.0
             audio = torch.cat(
                 [chunks[r.audio_index : r.audio_index + 1] for r in batch], dim=0
             )
@@ -603,25 +680,38 @@ class MuseTalkEngine:
                 unet_dtype
             )
             latents = latents.to(device=self._device, dtype=unet_dtype)
-            # Only the UNet is compiled, and only for the shapes warmed up at load.
-            # Padding it keeps Inductor from recompiling mid-playback (which stalls
-            # the batcher for minutes); the VAE stays on the real batch size.
-            pad = self._padded_batch_size(real) - real
+            # The latents already carry the padded batch; only the audio side,
+            # built from the real requests, still needs to catch up.
             if pad > 0:
-                latents = torch.cat([latents, latents[-1:].expand(pad, -1, -1, -1)])
                 audio_feat = torch.cat(
                     [audio_feat, audio_feat[-1:].expand(pad, -1, -1)]
                 )
+            _sync()
+            t0 = time.perf_counter() if perf else 0.0
             pred = unet.model(
                 latents,
                 self._timesteps,
                 encoder_hidden_states=audio_feat,
             ).sample
-            if pad > 0:
-                pred = pred[:real]
+            # Kept padded through the decode so the VAE also sees a warm shape;
+            # the extra rows are dropped when the results are handed back.
+            _sync()
+            if perf:
+                unet_ms = (time.perf_counter() - t0) * 1000.0
+            t0 = time.perf_counter() if perf else 0.0
             recon = vae.decode_latents(pred.to(dtype=vae.vae.dtype))
+            _sync()
+            if perf:
+                decode_ms = (time.perf_counter() - t0) * 1000.0
+        infer_ms = (time.perf_counter() - t_infer0) * 1000.0 if perf else 0.0
         for request, image in zip(batch, recon[:real]):
             request.recon = image
+            if perf:
+                request.batch_size = real
+                request.encode_ms = encode_ms
+                request.unet_ms = unet_ms
+                request.decode_ms = decode_ms
+                request.infer_ms = infer_ms
 
     def _padded_batch_size(self, n: int) -> int:
         """Round a batch up to a compiled shape so Inductor never recompiles."""
@@ -974,13 +1064,18 @@ class MuseTalkEngine:
         if crop.size == 0:
             self._note_skip("empty_crop")
             return frame_bgr
+        perf = musetalk_perf_enabled()
+        t_all = time.perf_counter() if perf else 0.0
+        t0 = t_all
         crop256 = cv2.resize(crop, (256, 256), interpolation=cv2.INTER_LANCZOS4)
+        crop_ms = (time.perf_counter() - t0) * 1000.0 if perf else 0.0
 
         pending = self._batch_queue
         if pending is None:
             self._note_skip("no_batcher")
             return frame_bgr
         request = _CropRequest(crop256, idx)
+        t0 = time.perf_counter() if perf else 0.0
         pending.put(request)
         if not request.done.wait(timeout=self._REQUEST_TIMEOUT_S):
             self._note_skip("batch_timeout")
@@ -988,6 +1083,7 @@ class MuseTalkEngine:
                 print("[WARN] MuseTalk frame timed out waiting for the batcher.")
                 self._warn_once.add("timeout")
             return frame_bgr
+        batch_wait_ms = (time.perf_counter() - t0) * 1000.0 if perf else 0.0
         if request.recon is None:
             self._note_skip("no_recon")
             return frame_bgr
@@ -995,9 +1091,13 @@ class MuseTalkEngine:
         # a smooth, generic mouth; a restorer (GFPGAN/CodeFormer) hallucinates the
         # missing high frequencies. Non-fatal: a failing restorer just leaves the
         # softer mouth rather than dropping the frame.
+        restore_ms = 0.0
         if restore_crop is not None:
             try:
+                t0 = time.perf_counter() if perf else 0.0
                 restored = restore_crop(request.recon)
+                if perf:
+                    restore_ms = (time.perf_counter() - t0) * 1000.0
                 if isinstance(restored, np.ndarray) and restored.size:
                     request.recon = restored
             except Exception as e:
@@ -1005,9 +1105,12 @@ class MuseTalkEngine:
                     print(f"[WARN] MuseTalk mouth restore failed, skipping it: {e}")
                     self._warn_once.add("restore")
         # Blending stays on the calling worker so the batch thread only does GPU work.
+        t0 = time.perf_counter() if perf else 0.0
         masks = self._blend_masks(
             frame_bgr, (x1, y1, x2, y2), parse_labels, mask_options
         )
+        parse_ms = (time.perf_counter() - t0) * 1000.0 if perf else 0.0
+        t0 = time.perf_counter() if perf else 0.0
         repaint = self._mouth_only_mask(
             masks.mouth,
             request.recon,
@@ -1015,6 +1118,8 @@ class MuseTalkEngine:
             (y2 - y1, x2 - x1),
             mask_options,
         )
+        mouth_only_ms = (time.perf_counter() - t0) * 1000.0 if perf else 0.0
+        t0 = time.perf_counter() if perf else 0.0
         blended = blend_face_region(
             frame_bgr,
             request.recon,
@@ -1026,6 +1131,19 @@ class MuseTalkEngine:
             ),
             mask_options=self._ellipse_options(mask_options),
         )
+        blend_ms = (time.perf_counter() - t0) * 1000.0 if perf else 0.0
+        if perf:
+            total_ms = (time.perf_counter() - t_all) * 1000.0
+            print(
+                f"[MUSETALK-PERF] frame={int(frame_index)} "
+                f"crop={crop_ms:.1f} batch_wait={batch_wait_ms:.1f} "
+                f"encode={request.encode_ms:.1f} unet={request.unet_ms:.1f} "
+                f"decode={request.decode_ms:.1f} infer={request.infer_ms:.1f} "
+                f"batch={request.batch_size} restore={restore_ms:.1f} "
+                f"parse={parse_ms:.1f} mouth_only={mouth_only_ms:.1f} "
+                f"blend={blend_ms:.1f} total={total_ms:.1f}ms",
+                flush=True,
+            )
         if self._probe is not None:
             with self._probe_lock:
                 self._probe.record(

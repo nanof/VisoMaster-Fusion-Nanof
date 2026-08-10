@@ -19,11 +19,13 @@ prepare_transformers_env()
 from app.processors.pytorch_extras.musetalk.engine import (  # noqa: E402
     MuseTalkEngine,
     musetalk_compile_enabled,
+    musetalk_perf_enabled,
 )
 
 __all__ = [
     "MuseTalkEngine",
     "musetalk_assets_ready",
     "musetalk_compile_enabled",
+    "musetalk_perf_enabled",
     "musetalk_root",
 ]
