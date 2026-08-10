@@ -132,7 +132,20 @@ Mark items with `[x]` / `[ ]` and add short notes under each section when status
 - [x] Break down `apply_frame_bgr` with `VISOFUSION_MUSETALK_PERF=1` — **2026-08-10, n=815, batch median 4:** apply total **530 ms**. **`batch_wait` 420 ms (79%)** of which **`infer` 302 ms** (encode 69 / **unet 160** / decode 70) and **~116 ms** queue/gather beyond infer. Post-GPU: **mouth_only 44** + parse 29 + blend 27 ≈ **100 ms** (restore off). In-app UNet at b≈4 is **~2.6×** the isolated bench (160 vs 61 ms). Aggregator: `scripts/agg_musetalk_perf.py`.
 - [ ] ~~Cut second BiSeNet in `mouth_only`~~ **Blocked / re-scoped (2026-08-10):** the parser (`face_masks._faceparser_labels`) is a **fixed 512×512, batch-1** ORT/TRT session (output bound to `(1,19,512,512)`), and the two parses run on **different images** (frame crop vs. generated recon), so there is no reuse or cheap shrink. It also **won't raise FPS directly**: both parses run on the *worker* thread after the GPU handoff and overlap with the next batch's infer. Their only FPS effect is **GPU contention** with the batch loop's UNet (see next item). Real fix would be a **dynamic-batch BiSeNet engine** to fuse both parses into one call (medium effort; needs TRT re-export).
 - [ ] Investigate in-app UNet slowdown vs bench. Still open after VAE compile: in-app unet **~103 ms** (compile on, batch≈3) vs isolated compiled unet **~40 ms** at b4 — still ~2.5×. Working hypothesis unchanged: **GPU contention** from concurrent BiSeNet 512² parses while the batch loop runs. VAE compile cut infer 302→212 ms; next FPS lever is reducing that BiSeNet GPU load (or TRT for the VAE if compile load time is unacceptable).
-- [ ] Optimize Landmark detection
+- [x] Optimize Landmark detection — **Profile + fix (2026-08-10, RTX 5070 Ti)**
+  - Script: `python scripts/bench_landmarks_profile.py`
+  - **Root cause of ~810 ms FaceLandmark203:** `_cuda_ep_memory_options` used `cudnn_conv_algo_search=DEFAULT`, which on this ORT/cuDNN stack puts ConvNeXt (and 106) Convs into cuDNN *Fallback* (~150×). Switched default to **`HEURISTIC`** (still avoids EXHAUSTIVE VRAM growth). Override: `VISIOMASTER_CUDNN_CONV_ALGO_SEARCH`.
+  - Also: bind only output `"856"` for 203; feeder/worker second 203 pass is landmark-only (no second RetinaFace); MuseTalk prefers `precomputed_kpss` (68) over `kpss_203`.
+  - **A/B CUDA EP only** (`session.run`, same arena/`max_workspace=0`, DEFAULT vs HEURISTIC):
+    | Model | DEFAULT | HEURISTIC | speedup |
+    |---|---:|---:|---:|
+    | FaceLandmark203 | 791.8 ms | **6.6 ms** | **119×** |
+    | FaceLandmark106 | 294.3 ms | **1.4 ms** | **210×** |
+    | FaceLandmark68 | 43.5 ms | 25.7 ms | 1.7× |
+  - **App path after fix** (`run_detect_landmark`, median ms / face): detect 10.3 · lm68 36.2 · **lm203 9.9** · 203→68 46.3 · detect+68 37.0 · detect+203 16.8 (was 810 / 1188 / 985 for 203 paths).
+  - Note: with UI provider **TensorRT-Engine**, FaceLandmark203 usually builds TRT and never hits the CUDA-EP Fallback path; the HEURISTIC fix is the safety net whenever a model falls back to CUDA EP (GPEN, TRT miss, or provider=CUDA).
+  - 68 remains slower by design (2dfan4 heatmaps @ 256² vs ConvNeXt/106 regression). MuseTalk still needs iBUG-68 for exact crop.
+  - Remaining levers: temporal subsample of dense landmarks; cable `SequentialDetector` target-only densos; Custom CUDA-graph path for 203; optional fan_68_5 / 203→68 map to avoid 2dfan4 for MuseTalk.
 
 ### Robustness
 

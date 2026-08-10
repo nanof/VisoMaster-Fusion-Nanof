@@ -2135,92 +2135,42 @@ class VideoProcessor(QObject):
                     # OPTIMIZATION: User already selected 203. Duplicate reference. Zero CUDA cost.
                     kpss_203 = kpss
                 else:
-                    # Second pass for 203 landmarks; align to pass-1 boxes (ByteTrack order).
-                    bboxes_203, _, raw_kpss_203 = (
-                        self.main_window.models_processor.run_detect(
-                            full_frame_tensor,
-                            local_control_for_worker.get(
-                                "DetectorModelSelection", "RetinaFace"
-                            ),
-                            max_num=int(
-                                local_control_for_worker.get(
-                                    "MaxFacesToDetectSlider", 20
-                                )
-                            ),
-                            score=local_control_for_worker.get(
-                                "DetectorScoreSlider", 50
-                            )
-                            / 100.0,
-                            input_size=misc_helpers.detector_input_size_from_control(
-                                local_control_for_worker
-                            ),
-                            use_landmark_detection=True,
-                            landmark_detect_mode="203",
-                            landmark_score=local_control_for_worker.get(
-                                "LandmarkDetectScoreSlider", 50
-                            )
-                            / 100.0,
-                            from_points=True,
-                            rotation_angles=[0]
-                            if not local_control_for_worker.get(
-                                "AutoRotationToggle", False
-                            )
-                            else [0, 90, 180, 270],
-                            use_mean_eyes=local_control_for_worker.get(
-                                "LandmarkMeanEyesToggle", False
-                            ),
-                            previous_detections=previous_faces_arg,
-                            bypass_bytetrack=True,
-                            control_override=detector_control_override,
-                        )
-                    )
-
+                    # Landmark-only second pass on pass-1 boxes (no second RetinaFace/YOLO).
+                    # MuseTalk forces UI mode 68 while LP/editor still need 203 — the old
+                    # full run_detect(…, landmark=203) re-paid detector + alignment matching.
                     if isinstance(bboxes, numpy.ndarray) and bboxes.shape[0] > 0:
                         aligned_kpss_203 = numpy.zeros(
                             (bboxes.shape[0], 203, 2), dtype=numpy.float32
                         )
-
-                        if (
-                            isinstance(bboxes_203, numpy.ndarray)
-                            and bboxes_203.shape[0] > 0
-                            and isinstance(raw_kpss_203, numpy.ndarray)
-                        ):
-                            c2_x = (bboxes_203[:, 0] + bboxes_203[:, 2]) / 2.0
-                            c2_y = (bboxes_203[:, 1] + bboxes_203[:, 3]) / 2.0
-
-                            # Track assigned faces to prevent many-to-one mapping
-                            available_mask = numpy.ones(bboxes_203.shape[0], dtype=bool)
-
-                            for i, box in enumerate(bboxes):
-                                c_x = (box[0] + box[2]) / 2.0
-                                c_y = (box[1] + box[3]) / 2.0
-                                face_width = box[2] - box[0]
-                                face_height = box[3] - box[1]
-                                dynamic_tolerance = 0.3 * max(face_width, face_height)
-
-                                # Filter distances to only consider UNASSIGNED Pass 2 faces
-                                valid_indices = numpy.where(available_mask)[0]
-                                if len(valid_indices) == 0:
-                                    break  # No more unassigned 203-landmarks available
-
-                                available_c2_x = c2_x[valid_indices]
-                                available_c2_y = c2_y[valid_indices]
-
-                                # Find closest matching face from available Pass 2 faces
-                                dists = numpy.sqrt(
-                                    (available_c2_x - c_x) ** 2
-                                    + (available_c2_y - c_y) ** 2
+                        use_mean_eyes = bool(
+                            local_control_for_worker.get(
+                                "LandmarkMeanEyesToggle", False
+                            )
+                        )
+                        for i, box in enumerate(bboxes):
+                            kps5_i = None
+                            if (
+                                isinstance(kpss_5, numpy.ndarray)
+                                and kpss_5.shape[0] > i
+                            ):
+                                kps5_i = kpss_5[i]
+                            _, lm_203, _ = (
+                                self.main_window.models_processor.run_detect_landmark(
+                                    full_frame_tensor,
+                                    box,
+                                    kps5_i,
+                                    detect_mode="203",
+                                    score=0.5,
+                                    from_points=kps5_i is not None,
+                                    use_mean_eyes=use_mean_eyes,
                                 )
-                                local_best_idx = numpy.argmin(dists)
-
-                                # Validation based on dynamic scale
-                                if dists[local_best_idx] < dynamic_tolerance:
-                                    global_best_idx = valid_indices[local_best_idx]
-                                    aligned_kpss_203[i] = raw_kpss_203[global_best_idx]
-                                    available_mask[global_best_idx] = (
-                                        False  # Mark as consumed
-                                    )
-
+                            )
+                            if (
+                                isinstance(lm_203, numpy.ndarray)
+                                and lm_203.ndim == 2
+                                and lm_203.shape[0] == 203
+                            ):
+                                aligned_kpss_203[i] = lm_203
                         kpss_203 = aligned_kpss_203
                     else:
                         kpss_203 = numpy.empty((0, 203, 2), dtype=numpy.float32)

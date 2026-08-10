@@ -269,8 +269,11 @@ def _cuda_ep_memory_options() -> dict:
     arena grows ~1GB on every inference until the device OOMs. Only destroying the
     session ("Clear VRAM") reclaims it.
 
-    These options are safe for every CUDA EP session (including the CUDA fallback in
-    the TensorRT provider list). Each is overridable via env var for experimentation.
+    Prefer ``HEURISTIC`` over ``DEFAULT`` for ``cudnn_conv_algo_search``: on RTX 50xx
+    + ORT CUDA EP, ``DEFAULT`` puts ConvNeXt / MobileNet-style graphs (notably
+    ``FaceLandmark203`` / ``FaceLandmark106``) into cuDNN *Fallback* mode
+    (~150× slower: ~5 ms → ~750–800 ms). ``HEURISTIC`` keeps the fast cuDNN path
+    without EXHAUSTIVE's workspace growth. Override via env for experimentation.
     """
     return {
         "arena_extend_strategy": os.environ.get(
@@ -278,9 +281,9 @@ def _cuda_ep_memory_options() -> dict:
         ).strip()
         or "kSameAsRequested",
         "cudnn_conv_algo_search": os.environ.get(
-            "VISIOMASTER_CUDNN_CONV_ALGO_SEARCH", "DEFAULT"
+            "VISIOMASTER_CUDNN_CONV_ALGO_SEARCH", "HEURISTIC"
         ).strip()
-        or "DEFAULT",
+        or "HEURISTIC",
         "cudnn_conv_use_max_workspace": os.environ.get(
             "VISIOMASTER_CUDNN_CONV_MAX_WORKSPACE", "0"
         ).strip()

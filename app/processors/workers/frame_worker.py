@@ -1847,9 +1847,15 @@ class FrameWorker(threading.Thread):
         return self._first_non_empty(self.precomputed_bboxes, self._detected_bboxes)
 
     def _musetalk_landmarks(self):
-        """Dense landmarks and the 5-point set, for MuseTalk's crop convention."""
+        """Dense landmarks and the 5-point set, for MuseTalk's crop convention.
+
+        Prefer the primary feeder densos (``precomputed_kpss``) over ``kpss_203``:
+        MuseTalk forces UI mode 68 and ``landmark_crop_bbox`` needs exact iBUG-68
+        (nose bridge index 29). Preferring 203 when LP/editor also ran produced a
+        203-point crop with an approximated bridge.
+        """
         dense = self._first_non_empty(
-            self.precomputed_kpss_203, self.precomputed_kpss, self._detected_kpss
+            self.precomputed_kpss, self.precomputed_kpss_203, self._detected_kpss
         )
         five = self._first_non_empty(self.precomputed_kpss_5, self._detected_kpss_5)
         return dense, five
@@ -4290,24 +4296,39 @@ class FrameWorker(threading.Thread):
                 if use_landmark and landmark_mode == "203":
                     kpss_203 = kpss
                 else:
-                    _, _, kpss_203 = self.models_processor.run_detect(
-                        img,
-                        control.get("DetectorModelSelection", "RetinaFace"),
-                        max_num=control.get("MaxFacesToDetectSlider", 1),
-                        score=control.get("DetectorScoreSlider", 50) / 100.0,
-                        input_size=detector_input_size_from_control(control),
-                        use_landmark_detection=True,
-                        landmark_detect_mode="203",
-                        landmark_score=control.get("LandmarkDetectScoreSlider", 50)
-                        / 100.0,
-                        from_points=from_points,
-                        rotation_angles=[0]
-                        if not control.get("AutoRotationToggle", False)
-                        else [0, 90, 180, 270],
-                        use_mean_eyes=control.get("LandmarkMeanEyesToggle", False),
-                        previous_detections=None,
-                        bypass_bytetrack=True,
-                    )
+                    # Landmark-only on pass-1 boxes (same as feeder) — avoid a second
+                    # full detector pass when MuseTalk forced 68 / other dense modes.
+                    if isinstance(bboxes, np.ndarray) and bboxes.shape[0] > 0:
+                        aligned_kpss_203 = np.zeros(
+                            (bboxes.shape[0], 203, 2), dtype=np.float32
+                        )
+                        use_mean_eyes = bool(
+                            control.get("LandmarkMeanEyesToggle", False)
+                        )
+                        for i, box in enumerate(bboxes):
+                            kps5_i = None
+                            if isinstance(kpss_5, np.ndarray) and kpss_5.shape[0] > i:
+                                kps5_i = kpss_5[i]
+                            _, lm_203, _ = self.models_processor.run_detect_landmark(
+                                img,
+                                box,
+                                kps5_i,
+                                detect_mode="203",
+                                score=0.5,
+                                from_points=bool(
+                                    from_points and kps5_i is not None
+                                ),
+                                use_mean_eyes=use_mean_eyes,
+                            )
+                            if (
+                                isinstance(lm_203, np.ndarray)
+                                and lm_203.ndim == 2
+                                and lm_203.shape[0] == 203
+                            ):
+                                aligned_kpss_203[i] = lm_203
+                        kpss_203 = aligned_kpss_203
+                    else:
+                        kpss_203 = np.empty((0, 203, 2), dtype=np.float32)
 
             # Match feeder: duplicate primary 203 landmarks into kpss_203 when requires_203
             # was false (e.g. only Auto Mouth on a face card not visible to feeder snapshot).

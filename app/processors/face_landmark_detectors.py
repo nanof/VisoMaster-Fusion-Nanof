@@ -651,14 +651,14 @@ class FaceLandmarkDetectors:
 
         aimg = torch.div(aimg.to(dtype=torch.float32), 255.0).unsqueeze(0).contiguous()
 
+        # Only bind fc_pts ("856"): coeff/lmk heads are unused and copy_outputs_to_cpu
+        # would still allocate+transfer them.
         out_lst = self._run_onnx_binding(
-            "FaceLandmark203", {"input": aimg}, ["output", "853", "856"]
+            "FaceLandmark203", {"input": aimg}, ["856"]
         )
-        if not out_lst or len(out_lst) < 3:
+        if not out_lst or len(out_lst) < 1:
             return [], [], []
-        out_pts = (
-            out_lst[2].reshape((-1, 2)) * 224.0
-        )  # The third output contains the landmarks.
+        out_pts = out_lst[0].reshape((-1, 2)) * 224.0
 
         out_pts = faceutil.trans_points(out_pts, IM)
         # Pass 'use_mean_eyes' to the converter.
