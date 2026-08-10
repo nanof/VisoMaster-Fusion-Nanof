@@ -148,3 +148,55 @@ def test_moving_to_a_device_is_forwarded_to_the_timeline():
     assert view.is_cuda is False
     assert view.dtype == torch.float32
     assert view.to(dtype=torch.float16).dtype == torch.float16
+
+
+def test_pcm_segments_stream_without_holding_the_whole_track(tmp_path):
+    """Long recordings must not ``librosa.load`` the full WAV into one buffer."""
+    import wave
+
+    import numpy as np
+
+    from app.processors.pytorch_extras.musetalk.audio import _iter_pcm16k_segments
+
+    sr = 16000
+    # Just over one 30 s boundary so the iterator yields two segments.
+    n = sr * 31
+    samples = (np.linspace(-0.2, 0.2, n, dtype=np.float32) * 32767.0).astype(np.int16)
+    wav = tmp_path / "longish.wav"
+    with wave.open(str(wav), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sr)
+        handle.writeframes(samples.tobytes())
+
+    lengths = []
+    totals = []
+    for segment, total in _iter_pcm16k_segments(wav, segment_seconds=30):
+        lengths.append(int(segment.shape[0]))
+        totals.append(int(total))
+        assert segment.nbytes <= 30 * sr * 4 + 64
+
+    assert lengths == [30 * sr, sr]
+    assert totals == [30 * sr, 31 * sr]
+
+
+def test_whisper_encode_keeps_host_timeline_in_float16():
+    """fp16 halves RAM for feature-length tracks; windows stay numerically close."""
+
+    class _Encoder:
+        def __call__(self, feature, output_hidden_states=True):
+            return type("_Out", (), {"hidden_states": [feature] * STEPS})()
+
+    whisper = type("_Whisper", (), {"encoder": _Encoder()})()
+    processor = MuseTalkAudioProcessor.__new__(MuseTalkAudioProcessor)
+    duration_s = 2
+    chunks = processor.get_whisper_chunk(
+        [torch.zeros((1, duration_s * 50 + 20, DEPTH))],
+        torch.device("cpu"),
+        torch.float32,
+        whisper,
+        librosa_length=duration_s * 16000,
+        fps=25.0,
+    )
+    assert chunks.dtype == torch.float16
+    assert len(chunks) == duration_s * 25

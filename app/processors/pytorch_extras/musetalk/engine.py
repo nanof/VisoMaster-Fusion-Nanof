@@ -270,8 +270,13 @@ class _CropRequest:
     infer_ms: float = 0.0
 
 
+# Sentinel: omit request_timeout_s to use MuseTalkEngine._REQUEST_TIMEOUT_S.
+_REQUEST_TIMEOUT_DEFAULT = object()
+
+
 class MuseTalkEngine:
-    # How long a worker waits for its batched result before giving up on the frame.
+    # How long a preview/playback worker waits before giving up on the frame.
+    # Recording / segment export passes timeout=None and waits until done or stop.
     _REQUEST_TIMEOUT_S = 20.0
     # Cancellation must be noticed quickly when a seek tears down pool workers.
     _REQUEST_CANCEL_POLL_S = 0.025
@@ -632,7 +637,9 @@ class MuseTalkEngine:
                     self._batch_stop.set()
                     break
                 batch.append(nxt)
-            active_batch = [request for request in batch if not request.cancelled.is_set()]
+            active_batch = [
+                request for request in batch if not request.cancelled.is_set()
+            ]
             try:
                 if active_batch:
                     self._infer_batch(active_batch)
@@ -822,32 +829,28 @@ class MuseTalkEngine:
                     extract_wav_from_media(path, tmp_wav)
                 wav_path = tmp_wav
 
-            feats, librosa_len = self._audio_proc.get_audio_feature(
-                wav_path, weight_dtype=torch.float32
-            )
-            if feats is None or librosa_len <= 0:
-                self._last_error = "Failed to extract audio features"
-                print(f"[WARN] MuseTalk: {self._last_error}")
-                return False
-
             whisper_device = next(self._whisper.parameters()).device
             with self._lock:
-                chunks = self._audio_proc.get_whisper_chunk(
-                    feats,
+                # Stream the WAV and encode Whisper one 30 s segment at a time so a
+                # long recording does not keep the whole PCM + every mel feature
+                # resident while the timeline is built. Timeline stays float16 on
+                # the host; apply_frame_bgr only ever lifts one frame's window.
+                chunks = self._audio_proc.build_whisper_windows(
+                    wav_path,
                     whisper_device,
                     torch.float32,
                     self._whisper,
-                    librosa_len,
                     fps=float(fps),
                 )
-                # Park the whole track in system RAM: at ~37 KB per frame it would
-                # cost GBs of VRAM on a long video, and apply_frame_bgr only ever
-                # needs one frame's slice on the device.
+                if chunks is None or len(chunks) <= 0:
+                    self._last_error = "Failed to extract audio features"
+                    print(f"[WARN] MuseTalk: {self._last_error}")
+                    return False
                 self._whisper_chunks = self._to_host(chunks)
                 self._audio_error = None
                 self._audio_key = key_hash
                 self._audio_fps = float(fps)
-                n = 0 if chunks is None else int(chunks.shape[0])
+                n = int(chunks.shape[0])
                 print(f"[INFO] MuseTalk audio ready: {n} frames @ {fps:.3f} fps")
                 return n > 0
         except Exception as e:
@@ -871,8 +874,14 @@ class MuseTalkEngine:
         kpss_5: Sequence[Any] | None = None,
         restore_crop: Callable[[np.ndarray], np.ndarray] | None = None,
         cancel_event: threading.Event | None = None,
+        request_timeout_s: Any = _REQUEST_TIMEOUT_DEFAULT,
     ) -> np.ndarray:
-        """Lip-sync one BGR frame. On any failure returns ``frame_bgr`` unchanged."""
+        """Lip-sync one BGR frame. On any failure returns ``frame_bgr`` unchanged.
+
+        ``request_timeout_s``: omit for the preview default; pass ``None`` while
+        recording so a slow batch (compile warm-up, GPU contention) cannot punch
+        holes in the export — only ``cancel_event`` abandons the wait.
+        """
         if frame_bgr is None or not isinstance(frame_bgr, np.ndarray):
             self._note_skip("bad_frame")
             return frame_bgr
@@ -892,6 +901,7 @@ class MuseTalkEngine:
                 kpss_5=kpss_5,
                 restore_crop=restore_crop,
                 cancel_event=cancel_event,
+                request_timeout_s=request_timeout_s,
             )
         except Exception as e:
             self._note_skip("exception")
@@ -1031,6 +1041,7 @@ class MuseTalkEngine:
         kpss_5: Sequence[Any] | None = None,
         restore_crop: Callable[[np.ndarray], np.ndarray] | None = None,
         cancel_event: threading.Event | None = None,
+        request_timeout_s: Any = _REQUEST_TIMEOUT_DEFAULT,
     ) -> np.ndarray:
         chunks = self._whisper_chunks
         if chunks is None or chunks.shape[0] == 0:
@@ -1039,6 +1050,10 @@ class MuseTalkEngine:
         if cancel_event is not None and cancel_event.is_set():
             self._note_skip("cancelled")
             return frame_bgr
+        if request_timeout_s is _REQUEST_TIMEOUT_DEFAULT:
+            timeout_s: float | None = self._REQUEST_TIMEOUT_S
+        else:
+            timeout_s = request_timeout_s
         self._bbox_shift = int((mask_options or {}).get("bbox_shift", 0))
         idx = int(frame_index)
         if idx < 0 or idx >= int(chunks.shape[0]):
@@ -1102,7 +1117,7 @@ class MuseTalkEngine:
         request = _CropRequest(crop256, idx)
         t0 = time.perf_counter() if perf else 0.0
         pending.put(request)
-        wait_result = self._wait_for_request(request, cancel_event)
+        wait_result = self._wait_for_request(request, cancel_event, timeout_s=timeout_s)
         if wait_result == "cancelled":
             self._note_skip("cancelled")
             return frame_bgr
@@ -1184,16 +1199,26 @@ class MuseTalkEngine:
         self,
         request: _CropRequest,
         cancel_event: threading.Event | None,
+        *,
+        timeout_s: float | None = None,
     ) -> str:
-        """Wait for a batch result while allowing seek/stop to abandon stale work."""
-        deadline = time.monotonic() + self._REQUEST_TIMEOUT_S
+        """Wait for a batch result while allowing seek/stop to abandon stale work.
+
+        ``timeout_s=None`` waits until the batcher finishes or ``cancel_event``
+        fires — used for long recordings so a slow pass cannot drop lip-sync.
+        """
+        deadline = None if timeout_s is None else time.monotonic() + float(timeout_s)
         while True:
             if cancel_event is not None and cancel_event.is_set():
                 request.cancelled.set()
                 return "cancelled"
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                request.cancelled.set()
-                return "timeout"
-            if request.done.wait(min(self._REQUEST_CANCEL_POLL_S, remaining)):
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    request.cancelled.set()
+                    return "timeout"
+                wait_s = min(self._REQUEST_CANCEL_POLL_S, remaining)
+            else:
+                wait_s = self._REQUEST_CANCEL_POLL_S
+            if request.done.wait(wait_s):
                 return "done"

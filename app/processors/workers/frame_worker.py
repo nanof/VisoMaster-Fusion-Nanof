@@ -1609,26 +1609,41 @@ class FrameWorker(threading.Thread):
                 engine.log_not_ready_once()
                 return bgr
             mt_dense, mt_five = self._musetalk_landmarks()
+            # Preview keeps a soft timeout so a stuck batcher cannot freeze scrubbing.
+            # Long recordings / segment export must wait: dropping lip-sync mid-frame
+            # leaves permanent holes in the file, while stop_event still cancels fast.
+            vp = self.video_processor
+            recording = bool(
+                getattr(vp, "recording", False)
+                or getattr(vp, "is_processing_segments", False)
+            )
+            apply_kwargs = {
+                "landmarks": mt_dense
+                if control.get("MuseTalkLandmarkCropToggle", True)
+                else None,
+                "kpss_5": mt_five,
+                "extra_margin": int(
+                    control.get("MuseTalkExtraMarginSlider", 10) or 10
+                ),
+                "face_index": int(control.get("MuseTalkFaceIndexSlider", 0) or 0),
+                "mask_options": self._musetalk_mask_options(
+                    control, hybrid_after=hybrid_after
+                ),
+                "parse_labels": self._musetalk_parse_labels
+                if control.get("MuseTalkFaceParsingToggle", True)
+                else None,
+                "restore_crop": self._musetalk_restore_crop(control)
+                if control.get("MuseTalkRestoreMouthToggle", False)
+                else None,
+                "cancel_event": self.stop_event,
+            }
+            if recording:
+                apply_kwargs["request_timeout_s"] = None
             return engine.apply_frame_bgr(
                 bgr,
                 self.frame_number,
                 self._musetalk_bboxes(),
-                landmarks=mt_dense
-                if control.get("MuseTalkLandmarkCropToggle", True)
-                else None,
-                kpss_5=mt_five,
-                extra_margin=int(control.get("MuseTalkExtraMarginSlider", 10) or 10),
-                face_index=int(control.get("MuseTalkFaceIndexSlider", 0) or 0),
-                mask_options=self._musetalk_mask_options(
-                    control, hybrid_after=hybrid_after
-                ),
-                parse_labels=self._musetalk_parse_labels
-                if control.get("MuseTalkFaceParsingToggle", True)
-                else None,
-                restore_crop=self._musetalk_restore_crop(control)
-                if control.get("MuseTalkRestoreMouthToggle", False)
-                else None,
-                cancel_event=self.stop_event,
+                **apply_kwargs,
             )
         except Exception as e_mt:
             if not getattr(self, "_musetalk_frame_err_logged", False):

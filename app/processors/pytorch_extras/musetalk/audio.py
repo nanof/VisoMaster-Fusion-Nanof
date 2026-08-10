@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 
 class FrameFeatureWindows:
@@ -79,6 +79,91 @@ class FrameFeatureWindows:
         return self._window_at(index)[0]
 
 
+def _iter_pcm16k_segments(
+    wav_path: Path, *, segment_seconds: int = 30, sample_rate: int = 16000
+) -> Iterator[tuple[Any, int]]:
+    """Yield (mono float32 PCM @ 16 kHz, sample_count_so_far) without holding the track.
+
+    Long recordings used to ``librosa.load`` the whole file, then keep every 30 s
+    mel feature in a list before Whisper ran. Peak RAM tracked the full duration
+    twice. Streaming one segment at a time keeps the peak near a single chunk.
+    """
+    import numpy as np
+
+    # Prefer soundfile when present: block-reads native 16 kHz mono without a
+    # resample of the whole file. Falls through for other rates/channels.
+    try:
+        import soundfile as sf
+
+        info = sf.info(str(wav_path))
+        if int(info.samplerate) == sample_rate and info.channels == 1:
+            total = 0
+            with sf.SoundFile(str(wav_path)) as handle:
+                frames = segment_seconds * sample_rate
+                while True:
+                    block = handle.read(frames, dtype="float32", always_2d=False)
+                    if block is None or len(block) == 0:
+                        break
+                    segment = np.asarray(block, dtype=np.float32).reshape(-1)
+                    total += int(segment.shape[0])
+                    yield segment, total
+            return
+        duration_s = float(info.duration)
+    except Exception:
+        duration_s = None
+
+    # Stdlib path for 16-bit mono PCM at the target rate (unit tests / no deps).
+    if duration_s is None:
+        try:
+            import wave
+
+            with wave.open(str(wav_path), "rb") as handle:
+                if (
+                    handle.getnchannels() == 1
+                    and handle.getsampwidth() == 2
+                    and handle.getframerate() == sample_rate
+                ):
+                    frames_per_seg = segment_seconds * sample_rate
+                    total = 0
+                    while True:
+                        raw = handle.readframes(frames_per_seg)
+                        if not raw:
+                            break
+                        segment = (
+                            np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+                        )
+                        total += int(segment.shape[0])
+                        yield segment, total
+                    return
+                duration_s = handle.getnframes() / float(handle.getframerate())
+        except Exception:
+            duration_s = None
+
+    import librosa
+
+    if duration_s is None:
+        duration_s = float(librosa.get_duration(path=str(wav_path)))
+
+    # Other rates/channels: librosa resamples one segment at a time via offset.
+    offset = 0.0
+    total = 0
+    while offset < duration_s - 1e-6:
+        segment, sr = librosa.load(
+            str(wav_path),
+            sr=sample_rate,
+            mono=True,
+            offset=offset,
+            duration=float(segment_seconds),
+        )
+        assert sr == sample_rate
+        if segment is None or len(segment) == 0:
+            break
+        segment = np.asarray(segment, dtype=np.float32).reshape(-1)
+        total += int(segment.shape[0])
+        yield segment, total
+        offset += float(segment_seconds)
+
+
 class MuseTalkAudioProcessor:
     def __init__(self, feature_extractor_path: str | Path) -> None:
         from app.processors.pytorch_extras.musetalk.paths import (
@@ -95,27 +180,23 @@ class MuseTalkAudioProcessor:
     def get_audio_feature(
         self, wav_path: str | Path, weight_dtype: Any = None
     ) -> tuple[list[Any], int] | tuple[None, int]:
-        import librosa
-
+        """Extract mel features in 30 s segments (compat path for callers/tests)."""
         wav_path = Path(wav_path)
         if not wav_path.is_file():
             return None, 0
-        librosa_output, sampling_rate = librosa.load(str(wav_path), sr=16000)
-        assert sampling_rate == 16000
-        segment_length = 30 * sampling_rate
-        segments = [
-            librosa_output[i : i + segment_length]
-            for i in range(0, len(librosa_output), segment_length)
-        ]
         features: list[Any] = []
-        for segment in segments:
+        librosa_length = 0
+        for segment, total in _iter_pcm16k_segments(wav_path):
+            librosa_length = total
             audio_feature = self.feature_extractor(
-                segment, return_tensors="pt", sampling_rate=sampling_rate
+                segment, return_tensors="pt", sampling_rate=16000
             ).input_features
             if weight_dtype is not None:
                 audio_feature = audio_feature.to(dtype=weight_dtype)
             features.append(audio_feature)
-        return features, int(len(librosa_output))
+        if librosa_length <= 0:
+            return None, 0
+        return features, int(librosa_length)
 
     def get_whisper_chunk(
         self,
@@ -128,23 +209,105 @@ class MuseTalkAudioProcessor:
         audio_padding_length_left: int = 2,
         audio_padding_length_right: int = 2,
     ) -> Any:
+        return self._windows_from_encoder_parts(
+            self._encode_whisper_parts(
+                whisper_input_features, device, weight_dtype, whisper
+            ),
+            librosa_length=librosa_length,
+            fps=fps,
+            audio_padding_length_left=audio_padding_length_left,
+            audio_padding_length_right=audio_padding_length_right,
+        )
+
+    def build_whisper_windows(
+        self,
+        wav_path: str | Path,
+        device: Any,
+        weight_dtype: Any,
+        whisper: Any,
+        fps: float = 25.0,
+        audio_padding_length_left: int = 2,
+        audio_padding_length_right: int = 2,
+    ) -> Any | None:
+        """Stream the WAV, encode Whisper one segment at a time, return lazy windows.
+
+        Preferred over ``get_audio_feature`` + ``get_whisper_chunk`` for long
+        recordings: mel features are freed after each encode, and the timeline is
+        kept as float16 in system RAM.
+        """
+        wav_path = Path(wav_path)
+        if not wav_path.is_file():
+            return None
+        parts: list[Any] = []
+        librosa_length = 0
+        for segment, total in _iter_pcm16k_segments(wav_path):
+            librosa_length = total
+            mel = self.feature_extractor(
+                segment, return_tensors="pt", sampling_rate=16000
+            ).input_features
+            if weight_dtype is not None:
+                mel = mel.to(dtype=weight_dtype)
+            parts.append(
+                self._encode_one_whisper_part(mel, device, weight_dtype, whisper)
+            )
+            del mel
+        if librosa_length <= 0 or not parts:
+            return None
+        return self._windows_from_encoder_parts(
+            parts,
+            librosa_length=librosa_length,
+            fps=fps,
+            audio_padding_length_left=audio_padding_length_left,
+            audio_padding_length_right=audio_padding_length_right,
+        )
+
+    def _encode_whisper_parts(
+        self,
+        whisper_input_features: list[Any],
+        device: Any,
+        weight_dtype: Any,
+        whisper: Any,
+    ) -> list[Any]:
+        parts: list[Any] = []
+        for input_feature in whisper_input_features:
+            parts.append(
+                self._encode_one_whisper_part(
+                    input_feature, device, weight_dtype, whisper
+                )
+            )
+        return parts
+
+    @staticmethod
+    def _encode_one_whisper_part(
+        input_feature: Any, device: Any, weight_dtype: Any, whisper: Any
+    ) -> Any:
+        import torch
+
+        feature = input_feature.to(device).to(weight_dtype)
+        audio_feats = whisper.encoder(feature, output_hidden_states=True).hidden_states
+        # Straight to the host as float16: only one 30-second segment needs to be
+        # resident on the device, and a long timeline at fp32 is ~2× the RAM of the
+        # half-precision copy apply_frame_bgr casts from anyway.
+        stacked = torch.stack(audio_feats, dim=2).to(device="cpu", dtype=torch.float16)
+        del feature, audio_feats
+        return stacked
+
+    def _windows_from_encoder_parts(
+        self,
+        whisper_feature_parts: list[Any],
+        *,
+        librosa_length: int,
+        fps: float,
+        audio_padding_length_left: int,
+        audio_padding_length_right: int,
+    ) -> Any:
         import torch
 
         audio_feature_length_per_frame = 2 * (
             audio_padding_length_left + audio_padding_length_right + 1
         )
-        whisper_feature_parts: list[Any] = []
-        for input_feature in whisper_input_features:
-            input_feature = input_feature.to(device).to(weight_dtype)
-            audio_feats = whisper.encoder(
-                input_feature, output_hidden_states=True
-            ).hidden_states
-            # Straight to the host: only one 30-second segment needs to be resident
-            # on the device, whereas joining the whole track there is what ran the
-            # GPU out of memory on long videos.
-            whisper_feature_parts.append(torch.stack(audio_feats, dim=2).to("cpu"))
-
         whisper_feature = torch.cat(whisper_feature_parts, dim=1)
+        del whisper_feature_parts
         sr = 16000
         audio_fps = 50
         # Keep the container's exact rate. Rounding 23.976/29.97 to an integer

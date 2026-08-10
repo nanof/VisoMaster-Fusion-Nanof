@@ -157,7 +157,7 @@ Mark items with `[x]` / `[ ]` and add short notes under each section when status
 
 - [x] Fill SHA256 hashes in `musetalk_assets_list` (currently `hash: ""`)
 - [x] Seek / scrub with lip-sync on (correct chunks, no stalls) — **2026-08-10:** Whisper windows now preserve exact fractional container FPS (no long-clip drift), sought frames use absolute chunk indices instead of wrapping unrelated audio with modulo, and out-of-range audio leaves the frame untouched. Worker cancellation reaches queued MuseTalk requests within 25 ms; stale requests are discarded by the batcher, and pool workers are signalled before feeder/detection shutdown joins so timeline scrubs do not wait on the 20 s batch timeout.
-- [ ] Long recordings: audio memory, batcher, timeouts
+- [x] Long recordings: audio memory, batcher, timeouts — **2026-08-10:** Audio prep streams the WAV in 30 s segments (no full-track `librosa.load` peak), encodes Whisper one segment at a time onto a **float16** host timeline, and keeps lazy `FrameFeatureWindows`. Preview still soft-times out at 20 s; **recording / segment export** pass `request_timeout_s=None` so a slow batch cannot punch lip-sync holes, while `stop_event` still cancels within 25 ms and the batcher drops cancelled requests.
 - [ ] VR / non-standard layouts behaviour (if applicable)
 - [ ] Clearer error messages when weights or deps are missing
 
@@ -231,6 +231,8 @@ Keep MuseTalk as the **preview / realtime** path. Explore higher-fidelity or nex
 | 2026-08-10 | **VAE encoder/decoder compiled** (the UNet is constant ~55 ms; the VAE was 88% of the pass and scales linearly). Padding moved before the encode. End to end **1.5× at b4 / 1.6× at b8**, b8 no longer stalls. `dynamic=True` measured and rejected (recompiles at b1/b2 with 76–86 s stalls). Still opt-in: first-ever compile ~477 s, ~70 s thereafter. |
 | 2026-08-10 | In-app confirm (n=768): apply **530→411 ms (~1.29×)**, infer **302→212 (~1.43×)** with compile on; first portable load ~319 s. Next: BiSeNet GPU contention. |
 | 2026-08-10 | Settings → MuseTalk **torch.compile** toggle (`MuseTalkCompileToggle`); env still overrides when set. |
+| 2026-08-10 | Seek/scrub: fractional FPS Whisper windows, no modulo wrap, fast cancel + batcher drop of stale requests. |
+| 2026-08-10 | Long recordings: stream WAV + incremental Whisper to fp16 host timeline; recording waits without soft timeout (preview keeps 20 s). |
 
 
 

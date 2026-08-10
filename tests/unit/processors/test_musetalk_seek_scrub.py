@@ -45,13 +45,14 @@ def test_out_of_range_seek_never_wraps_audio_to_frame_zero(frame_index: int) -> 
 
 def test_seek_cancellation_releases_waiter_without_batch_timeout() -> None:
     engine = _bare_engine()
-    engine._REQUEST_TIMEOUT_S = 5.0
     request = _CropRequest(np.zeros((256, 256, 3), dtype=np.uint8), 2)
     cancel = threading.Event()
     result: list[str] = []
 
     waiter = threading.Thread(
-        target=lambda: result.append(engine._wait_for_request(request, cancel))
+        target=lambda: result.append(
+            engine._wait_for_request(request, cancel, timeout_s=5.0)
+        )
     )
     started = time.perf_counter()
     waiter.start()
@@ -60,6 +61,36 @@ def test_seek_cancellation_releases_waiter_without_batch_timeout() -> None:
 
     assert not waiter.is_alive()
     assert result == ["cancelled"]
+    assert request.cancelled.is_set()
+    assert time.perf_counter() - started < 0.5
+
+
+def test_recording_wait_ignores_soft_timeout_until_batch_finishes() -> None:
+    """Export must not punch lip-sync holes when the batcher is slow."""
+    engine = _bare_engine()
+    request = _CropRequest(np.zeros((256, 256, 3), dtype=np.uint8), 1)
+    result: list[str] = []
+
+    def _finish_later() -> None:
+        time.sleep(0.08)
+        request.recon = np.zeros((256, 256, 3), dtype=np.uint8)
+        request.done.set()
+
+    threading.Thread(target=_finish_later, daemon=True).start()
+    started = time.perf_counter()
+    # A 20 ms soft timeout would have fired; recording passes timeout_s=None.
+    result.append(engine._wait_for_request(request, None, timeout_s=None))
+    assert result == ["done"]
+    assert time.perf_counter() - started >= 0.05
+    assert not request.cancelled.is_set()
+
+
+def test_preview_soft_timeout_still_abandons_a_stuck_batch() -> None:
+    engine = _bare_engine()
+    request = _CropRequest(np.zeros((256, 256, 3), dtype=np.uint8), 0)
+    started = time.perf_counter()
+    outcome = engine._wait_for_request(request, None, timeout_s=0.05)
+    assert outcome == "timeout"
     assert request.cancelled.is_set()
     assert time.perf_counter() - started < 0.5
 
