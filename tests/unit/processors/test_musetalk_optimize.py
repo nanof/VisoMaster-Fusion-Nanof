@@ -14,8 +14,8 @@ from app.processors.pytorch_extras.musetalk.engine import (
 @pytest.mark.parametrize(
     "raw, expected",
     [
-        (None, True),
-        ("", True),
+        (None, False),
+        ("", False),
         ("1", True),
         ("true", True),
         ("0", False),
@@ -23,7 +23,7 @@ from app.processors.pytorch_extras.musetalk.engine import (
         ("off", False),
     ],
 )
-def test_compile_flag_defaults_on(raw, expected, monkeypatch):
+def test_compile_flag_defaults_off(raw, expected, monkeypatch):
     if raw is None:
         monkeypatch.delenv("VISOFUSION_MUSETALK_COMPILE", raising=False)
     else:
@@ -149,3 +149,57 @@ def test_infer_batch_uses_inference_mode_path():
     batch = [_CropRequest(crop=np.zeros((256, 256, 3), np.uint8), audio_index=0)]
     eng._infer_batch(batch)
     assert batch[0].recon is not None
+
+
+def test_compile_specs_cover_powers_of_two():
+    from app.processors.pytorch_extras.musetalk.engine import _compile_batch_specs
+
+    assert _compile_batch_specs(8) == [1, 2, 4, 8]
+    assert _compile_batch_specs(6) == [1, 2, 4, 6]
+    assert _compile_batch_specs(1) == [1]
+
+
+def test_infer_batch_pads_unet_to_a_compiled_shape():
+    """An odd batch must reach the compiled UNet padded, or Inductor recompiles."""
+    torch = pytest.importorskip("torch")
+    from app.processors.pytorch_extras.musetalk.engine import _CropRequest
+
+    seen: list[int] = []
+
+    class _Vae:
+        vae = type("_Inner", (), {"dtype": torch.float32})()
+
+        def get_latents_for_unet_batch(self, crops):
+            return torch.zeros((len(crops), 8, 32, 32))
+
+        def decode_latents(self, pred):
+            return [np.zeros((256, 256, 3), np.uint8) for _ in range(pred.shape[0])]
+
+    class _Unet:
+        def __init__(self):
+            self.model = self
+
+        dtype = torch.float32
+
+        def __call__(self, latents, _timesteps, encoder_hidden_states=None):
+            seen.append(latents.shape[0])
+            assert encoder_hidden_states.shape[0] == latents.shape[0]
+            return type("_Out", (), {"sample": latents})()
+
+    eng = MuseTalkEngine.__new__(MuseTalkEngine)
+    eng._vae = _Vae()
+    eng._unet = _Unet()
+    eng._pe = lambda audio: audio
+    eng._whisper_chunks = torch.zeros((8, 50, 384))
+    eng._device = torch.device("cpu")
+    eng._timesteps = torch.zeros(1)
+    eng._channels_last = False
+    eng._batch_specs = [1, 2, 4, 8]
+    eng.gpu_capture_lock = None
+    batch = [
+        _CropRequest(crop=np.zeros((256, 256, 3), np.uint8), audio_index=i)
+        for i in range(3)
+    ]
+    eng._infer_batch(batch)
+    assert seen == [4]
+    assert all(r.recon is not None for r in batch)

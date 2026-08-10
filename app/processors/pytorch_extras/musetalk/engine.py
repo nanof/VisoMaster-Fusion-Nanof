@@ -71,8 +71,14 @@ def _env_flag(name: str, default: bool) -> bool:
 
 
 def musetalk_compile_enabled() -> bool:
-    """True when VISOFUSION_MUSETALK_COMPILE asks for torch.compile (default on)."""
-    return _env_flag("VISOFUSION_MUSETALK_COMPILE", True)
+    """True when VISOFUSION_MUSETALK_COMPILE asks for torch.compile (default off).
+
+    Off by default because it only pays at batch 1 (~1.4x on the UNet, i.e. the
+    paused preview). Playback batches several workers together, where the VAE
+    encode/decode dominates and the win drops to ~2%, while the warmup still
+    costs ~35 s of load time on every process start.
+    """
+    return _env_flag("VISOFUSION_MUSETALK_COMPILE", False)
 
 
 def musetalk_debug_enabled() -> bool:
@@ -84,6 +90,17 @@ def musetalk_debug_enabled() -> bool:
 _MUSETALK_AUDIO_TOKENS = 50
 _MUSETALK_AUDIO_DIM = 384
 _MUSETALK_LATENT_HW = 32
+
+
+def _compile_batch_specs(max_batch: int) -> list[int]:
+    """Batch sizes worth compiling: powers of two up to ``max_batch``."""
+    n = max(1, int(max_batch))
+    specs = {1, n}
+    size = 2
+    while size < n:
+        specs.add(size)
+        size *= 2
+    return sorted(specs)
 
 
 class _EffectProbe:
@@ -272,6 +289,7 @@ class MuseTalkEngine:
         self._warn_once: set[str] = set()
         self._compiled = False
         self._channels_last = False
+        self._batch_specs: list[int] = []
 
     @property
     def is_loaded(self) -> bool:
@@ -421,7 +439,7 @@ class MuseTalkEngine:
             print(f"[WARN] MuseTalk channels_last skipped: {e}")
 
     def _try_torch_compile(self) -> None:
-        """Compile UNet (and VAE if stable). Failures stay on eager path."""
+        """Compile the UNet for fixed batch shapes. Failures stay on eager path."""
         import torch
 
         if self._unet is None or self._device is None or self._device.type != "cuda":
@@ -451,8 +469,11 @@ class MuseTalkEngine:
             return
 
         setup_compile_env(compile_mode="default")
-        # Specialize on batch 1 and max_batch (dynamic=True thrashes sympy on this
-        # UNet and has hung/crashed the process on Windows + triton-windows).
+        # Specialize on fixed batch sizes (dynamic=True thrashes sympy on this UNet
+        # and has hung/crashed the process on Windows + triton-windows). Runtime
+        # batches are padded up to one of these in _infer_batch, otherwise Inductor
+        # recompiles mid-playback and the batcher stalls for minutes.
+        specs = _compile_batch_specs(n)
         audio_full = torch.zeros(
             (n, _MUSETALK_AUDIO_TOKENS, _MUSETALK_AUDIO_DIM),
             device=device,
@@ -465,7 +486,7 @@ class MuseTalkEngine:
                 self._unet.model, mode="default", fullgraph=False, dynamic=False
             )
             with torch.inference_mode():
-                for size in sorted({1, n}):
+                for size in specs:
                     s = sample[:size]
                     a = audio_full[:size]
                     if self._channels_last:
@@ -476,35 +497,19 @@ class MuseTalkEngine:
                 torch.cuda.synchronize()
             self._unet.model = compiled_unet
             self._compiled = True
-            print("[INFO] MuseTalk UNet torch.compile ready", flush=True)
+            self._batch_specs = list(specs)
+            print(
+                f"[INFO] MuseTalk UNet torch.compile ready (batch specs {specs})",
+                flush=True,
+            )
         except Exception as e:
             print(f"[WARN] MuseTalk UNet torch.compile failed: {e}", flush=True)
             return
 
-        if self._vae is None:
-            return
-        try:
-            compiled_vae = torch.compile(
-                self._vae.vae, mode="default", fullgraph=False, dynamic=False
-            )
-            img_full = torch.zeros((n, 3, 256, 256), device=device, dtype=dtype)
-            with torch.inference_mode():
-                for size in sorted({1, n}):
-                    img = img_full[:size]
-                    if self._channels_last:
-                        img = img.to(memory_format=torch.channels_last)
-                    for _ in range(2):
-                        lat = compiled_vae.encode(img).latent_dist.sample()
-                        _ = compiled_vae.decode(lat).sample
-            if device.type == "cuda":
-                torch.cuda.synchronize()
-            self._vae.vae = compiled_vae
-            print("[INFO] MuseTalk VAE torch.compile ready", flush=True)
-        except Exception as e:
-            print(
-                f"[WARN] MuseTalk VAE torch.compile failed (UNet still compiled): {e}",
-                flush=True,
-            )
+        # The VAE stays eager: we call vae.encode()/vae.decode(), and an
+        # OptimizedModule forwards every attribute other than forward() to the
+        # original module, so torch.compile(vae) would only cost warmup time.
+
     def _start_batcher(self) -> None:
         self._batch_stop.clear()
         self._batch_queue = queue.Queue()
@@ -578,6 +583,7 @@ class MuseTalkEngine:
         if vae is None or unet is None or pe is None or chunks is None:
             return
         unet_dtype = unet.model.dtype
+        real = len(batch)
         # Uncontended except while another model builds its CUDA graph, which is a
         # one-off per model, so this costs a lock acquire per batch.
         gate = self.gpu_capture_lock or contextlib.nullcontext()
@@ -596,14 +602,33 @@ class MuseTalkEngine:
             audio_feat = pe(audio.to(device=self._device, dtype=unet_dtype)).to(
                 unet_dtype
             )
+            latents = latents.to(device=self._device, dtype=unet_dtype)
+            # Only the UNet is compiled, and only for the shapes warmed up at load.
+            # Padding it keeps Inductor from recompiling mid-playback (which stalls
+            # the batcher for minutes); the VAE stays on the real batch size.
+            pad = self._padded_batch_size(real) - real
+            if pad > 0:
+                latents = torch.cat([latents, latents[-1:].expand(pad, -1, -1, -1)])
+                audio_feat = torch.cat(
+                    [audio_feat, audio_feat[-1:].expand(pad, -1, -1)]
+                )
             pred = unet.model(
-                latents.to(device=self._device, dtype=unet_dtype),
+                latents,
                 self._timesteps,
                 encoder_hidden_states=audio_feat,
             ).sample
+            if pad > 0:
+                pred = pred[:real]
             recon = vae.decode_latents(pred.to(dtype=vae.vae.dtype))
-        for request, image in zip(batch, recon):
+        for request, image in zip(batch, recon[:real]):
             request.recon = image
+
+    def _padded_batch_size(self, n: int) -> int:
+        """Round a batch up to a compiled shape so Inductor never recompiles."""
+        for spec in getattr(self, "_batch_specs", ()):
+            if spec >= n:
+                return spec
+        return n
 
     def unload(self) -> None:
         self._stop_batcher()
@@ -620,6 +645,7 @@ class MuseTalkEngine:
             self._loaded = False
             self._compiled = False
             self._channels_last = False
+            self._batch_specs = []
             try:
                 import torch
 

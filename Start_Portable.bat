@@ -374,4 +374,11 @@ goto :eof
     powershell -Command "(New-Object Net.WebClient).DownloadFile('https://bootstrap.pypa.io/get-pip.py', '%PYTHON_DIR%\get-pip.py')"
     "%PYTHON_EXE%" "%PYTHON_DIR%\get-pip.py" --no-warn-script-location
     del "%PYTHON_DIR%\get-pip.py"
+
+    :: Triton / torch.compile on Windows need Python.h + pythonXY.lib (omitted from
+    :: embeddable builds). Pull matching headers/libs from the NuGet python package.
+    if exist "%APP_DIR%\scripts\ensure_portable_python_dev_headers.py" (
+        echo Ensuring portable Python Include/ + libs/ for torch.compile...
+        "%PYTHON_EXE%" "%APP_DIR%\scripts\ensure_portable_python_dev_headers.py"
+    )
 goto :eof

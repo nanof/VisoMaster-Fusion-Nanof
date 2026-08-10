@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -34,6 +35,90 @@ def register_compile_callbacks(
     if show_fn is not None: _show_fn = show_fn
     if hide_fn is not None: _hide_fn = hide_fn
 
+def _ensure_windows_msvc_on_path() -> None:
+    """Prepend MSVC Hostx64/x64 to PATH so Triton's first host build can find cl.exe.
+
+    Cached Triton/Inductor artefacts do not need the compiler afterwards, but the
+    first ``torch.compile`` on a machine (or after a cache wipe) links a small
+    CUDA utils extension with the MSVC toolchain. Portable launches often omit
+    VsDevCmd, so we locate a standard VS 2022/2019 install when ``cl`` is absent.
+    """
+    if sys.platform != "win32":
+        return
+    if shutil.which("cl"):
+        return
+
+    candidates: list[Path] = []
+    vswhere = (
+        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
+        / "Microsoft Visual Studio"
+        / "Installer"
+        / "vswhere.exe"
+    )
+    if vswhere.is_file():
+        try:
+            import subprocess
+
+            out = subprocess.check_output(
+                [
+                    str(vswhere),
+                    "-latest",
+                    "-products",
+                    "*",
+                    "-requires",
+                    "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                    "-property",
+                    "installationPath",
+                ],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+            ).strip()
+            if out:
+                msvc_root = Path(out) / "VC" / "Tools" / "MSVC"
+                if msvc_root.is_dir():
+                    versions = sorted(
+                        (p for p in msvc_root.iterdir() if p.is_dir()),
+                        reverse=True,
+                    )
+                    for ver in versions:
+                        host = ver / "bin" / "Hostx64" / "x64"
+                        if (host / "cl.exe").is_file():
+                            candidates.append(host)
+                            break
+        except Exception:
+            pass
+
+    if not candidates:
+        for edition in ("Community", "Professional", "Enterprise", "BuildTools"):
+            for year in ("2022", "2019"):
+                base = (
+                    Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+                    / "Microsoft Visual Studio"
+                    / year
+                    / edition
+                    / "VC"
+                    / "Tools"
+                    / "MSVC"
+                )
+                if not base.is_dir():
+                    continue
+                for ver in sorted((p for p in base.iterdir() if p.is_dir()), reverse=True):
+                    host = ver / "bin" / "Hostx64" / "x64"
+                    if (host / "cl.exe").is_file():
+                        candidates.append(host)
+                        break
+                if candidates:
+                    break
+            if candidates:
+                break
+
+    if not candidates:
+        return
+    host_bin = str(candidates[0])
+    os.environ["PATH"] = host_bin + os.pathsep + os.environ.get("PATH", "")
+
+
 def setup_compile_env(cache_dir: Optional[str] = None, compile_mode: str = "default") -> None:
     global _compile_env_set_up
 
@@ -50,6 +135,8 @@ def setup_compile_env(cache_dir: Optional[str] = None, compile_mode: str = "defa
     os.environ["TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER"] = "0"
     os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
     os.environ.setdefault("TORCHINDUCTOR_MULTI_KERNEL", "0")
+
+    _ensure_windows_msvc_on_path()
 
     if cache_dir is None and not os.environ.get("TORCHINDUCTOR_CACHE_DIR"):
         _project_root = Path(__file__).parent.parent
