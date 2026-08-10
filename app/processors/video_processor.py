@@ -4747,6 +4747,11 @@ class VideoProcessor(QObject):
 
     def _stop_phase1_abort_through_release(self, *, stop_audio_on_main_thread: bool) -> None:
         """Flags, timers, optional audio, tracker reset, and release capture (feeder unblocks)."""
+        # Do this before joining feeder/detection threads. In particular, MuseTalk
+        # workers may be waiting on their batch result; delaying stop_event until
+        # join_and_clear_threads made a timeline scrub wait through those joins or
+        # even the batcher's full timeout.
+        self._signal_pool_workers_to_stop()
         self.gpu_memory_update_timer.stop()
         self.preroll_timer.stop()
         pm = getattr(self, "precise_metronome", None)
@@ -5038,6 +5043,17 @@ class VideoProcessor(QObject):
 
         return True
 
+    def _signal_pool_workers_to_stop(self) -> None:
+        """Set worker cancellation events without joining or touching their queues."""
+        for thread in self.worker_threads:
+            if hasattr(thread, "stop_event") and not thread.stop_event.is_set():
+                try:
+                    thread.stop_event.set()
+                except Exception as e:
+                    print(
+                        f"[WARN] Error setting stop_event on thread {thread.name}: {e}"
+                    )
+
     def join_and_clear_threads(self, *, skip_post_join_gpu_cleanup: bool = False):
         """
         Stops and waits for all pool worker threads to finish.
@@ -5051,14 +5067,7 @@ class VideoProcessor(QObject):
         print(f"[INFO] Signaling {len(active_threads)} active worker(s) to stop...")
 
         # 1. Set stop event for all workers in the pool
-        for thread in active_threads:
-            if hasattr(thread, "stop_event") and not thread.stop_event.is_set():
-                try:
-                    thread.stop_event.set()
-                except Exception as e:
-                    print(
-                        f"[WARN] Error setting stop_event on thread {thread.name}: {e}"
-                    )
+        self._signal_pool_workers_to_stop()
 
         # 2. Wake up any workers blocked on queue.get() by sending a "poison pill" (None).
         try:

@@ -156,7 +156,7 @@ Mark items with `[x]` / `[ ]` and add short notes under each section when status
 ### Robustness
 
 - [x] Fill SHA256 hashes in `musetalk_assets_list` (currently `hash: ""`)
-- [ ] Seek / scrub with lip-sync on (correct chunks, no stalls)
+- [x] Seek / scrub with lip-sync on (correct chunks, no stalls) — **2026-08-10:** Whisper windows now preserve exact fractional container FPS (no long-clip drift), sought frames use absolute chunk indices instead of wrapping unrelated audio with modulo, and out-of-range audio leaves the frame untouched. Worker cancellation reaches queued MuseTalk requests within 25 ms; stale requests are discarded by the batcher, and pool workers are signalled before feeder/detection shutdown joins so timeline scrubs do not wait on the 20 s batch timeout.
 - [ ] Long recordings: audio memory, batcher, timeouts
 - [ ] VR / non-standard layouts behaviour (if applicable)
 - [ ] Clearer error messages when weights or deps are missing

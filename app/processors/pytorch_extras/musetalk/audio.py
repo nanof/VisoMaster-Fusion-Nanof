@@ -147,9 +147,12 @@ class MuseTalkAudioProcessor:
         whisper_feature = torch.cat(whisper_feature_parts, dim=1)
         sr = 16000
         audio_fps = 50
-        fps_i = max(1, int(round(float(fps))))
-        whisper_idx_multiplier = audio_fps / fps_i
-        num_frames = math.floor((librosa_length / sr) * fps_i)
+        # Keep the container's exact rate. Rounding 23.976/29.97 to an integer
+        # looks harmless near frame zero but drifts several seconds over a long
+        # clip, which becomes especially visible after seeking deep into it.
+        fps_f = max(1.0, float(fps))
+        whisper_idx_multiplier = audio_fps / fps_f
+        num_frames = math.floor((librosa_length / sr) * fps_f)
         actual_length = math.floor((librosa_length / sr) * audio_fps)
         whisper_feature = whisper_feature[:, :actual_length, ...]
 

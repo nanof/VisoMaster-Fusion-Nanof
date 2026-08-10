@@ -16,6 +16,7 @@ torch = pytest.importorskip("torch")
 
 from app.processors.pytorch_extras.musetalk.audio import (  # noqa: E402
     FrameFeatureWindows,
+    MuseTalkAudioProcessor,
 )
 
 WINDOW = 10  # 2 * (2 left + 2 right + 1)
@@ -44,7 +45,7 @@ def _eager(timeline, num_frames: int, multiplier: float, window: int):
     return stacked.reshape(stacked.shape[0], window * STEPS, DEPTH)
 
 
-@pytest.mark.parametrize("fps", [25, 24, 30, 60])
+@pytest.mark.parametrize("fps", [25, 24, 23.976, 29.97, 30, 60])
 def test_every_window_matches_the_eager_version(fps):
     multiplier = 50 / fps
     timeline = _timeline(400)
@@ -54,6 +55,30 @@ def test_every_window_matches_the_eager_version(fps):
     assert len(view) == want.shape[0]
     for i in range(len(view)):
         assert torch.equal(view[i : i + 1], want[i : i + 1]), i
+
+
+def test_whisper_chunking_keeps_fractional_container_fps():
+    """A seek deep into 29.97 fps media must not use a rounded 30 fps window."""
+
+    class _Encoder:
+        def __call__(self, feature, output_hidden_states=True):
+            return type("_Out", (), {"hidden_states": [feature] * STEPS})()
+
+    whisper = type("_Whisper", (), {"encoder": _Encoder()})()
+    processor = MuseTalkAudioProcessor.__new__(MuseTalkAudioProcessor)
+    duration_s = 10
+    fps = 29.97
+    chunks = processor.get_whisper_chunk(
+        [torch.zeros((1, duration_s * 50 + 20, DEPTH))],
+        torch.device("cpu"),
+        torch.float32,
+        whisper,
+        librosa_length=duration_s * 16000,
+        fps=fps,
+    )
+
+    assert chunks._multiplier == pytest.approx(50 / fps)
+    assert len(chunks) == math.floor(duration_s * fps)
 
 
 def test_the_shape_matches_the_eager_version():

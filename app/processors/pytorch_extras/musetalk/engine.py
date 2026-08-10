@@ -260,6 +260,7 @@ class _CropRequest:
     crop: np.ndarray
     audio_index: int
     done: threading.Event = field(default_factory=threading.Event)
+    cancelled: threading.Event = field(default_factory=threading.Event)
     recon: np.ndarray | None = None
     # Filled by the batcher when VISOFUSION_MUSETALK_PERF is on.
     batch_size: int = 0
@@ -272,6 +273,8 @@ class _CropRequest:
 class MuseTalkEngine:
     # How long a worker waits for its batched result before giving up on the frame.
     _REQUEST_TIMEOUT_S = 20.0
+    # Cancellation must be noticed quickly when a seek tears down pool workers.
+    _REQUEST_CANCEL_POLL_S = 0.025
     # Window the batcher keeps open for sibling workers to join the same pass.
     _GATHER_S = 0.004
 
@@ -629,8 +632,10 @@ class MuseTalkEngine:
                     self._batch_stop.set()
                     break
                 batch.append(nxt)
+            active_batch = [request for request in batch if not request.cancelled.is_set()]
             try:
-                self._infer_batch(batch)
+                if active_batch:
+                    self._infer_batch(active_batch)
             except Exception as e:
                 if "batch" not in self._warn_once:
                     print(f"[WARN] MuseTalk batch inference failed: {e}")
@@ -865,6 +870,7 @@ class MuseTalkEngine:
         landmarks: Sequence[Any] | None = None,
         kpss_5: Sequence[Any] | None = None,
         restore_crop: Callable[[np.ndarray], np.ndarray] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> np.ndarray:
         """Lip-sync one BGR frame. On any failure returns ``frame_bgr`` unchanged."""
         if frame_bgr is None or not isinstance(frame_bgr, np.ndarray):
@@ -885,6 +891,7 @@ class MuseTalkEngine:
                 landmarks=landmarks,
                 kpss_5=kpss_5,
                 restore_crop=restore_crop,
+                cancel_event=cancel_event,
             )
         except Exception as e:
             self._note_skip("exception")
@@ -1023,13 +1030,22 @@ class MuseTalkEngine:
         landmarks: Sequence[Any] | None = None,
         kpss_5: Sequence[Any] | None = None,
         restore_crop: Callable[[np.ndarray], np.ndarray] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> np.ndarray:
         chunks = self._whisper_chunks
         if chunks is None or chunks.shape[0] == 0:
             self._note_skip("no_chunks")
             return frame_bgr
+        if cancel_event is not None and cancel_event.is_set():
+            self._note_skip("cancelled")
+            return frame_bgr
         self._bbox_shift = int((mask_options or {}).get("bbox_shift", 0))
-        idx = int(frame_index) % int(chunks.shape[0])
+        idx = int(frame_index)
+        if idx < 0 or idx >= int(chunks.shape[0]):
+            # Never wrap to the beginning: after seeking beyond a short/external
+            # audio track, modulo used unrelated speech from frame zero.
+            self._note_skip("audio_out_of_range")
+            return frame_bgr
 
         # Length, never truthiness: the frame worker hands over a numpy array of
         # boxes, and ``if bboxes:`` raises "truth value of an array is ambiguous"
@@ -1086,7 +1102,11 @@ class MuseTalkEngine:
         request = _CropRequest(crop256, idx)
         t0 = time.perf_counter() if perf else 0.0
         pending.put(request)
-        if not request.done.wait(timeout=self._REQUEST_TIMEOUT_S):
+        wait_result = self._wait_for_request(request, cancel_event)
+        if wait_result == "cancelled":
+            self._note_skip("cancelled")
+            return frame_bgr
+        if wait_result == "timeout":
             self._note_skip("batch_timeout")
             if "timeout" not in self._warn_once:
                 print("[WARN] MuseTalk frame timed out waiting for the batcher.")
@@ -1159,3 +1179,21 @@ class MuseTalkEngine:
                     frame_bgr, blended, (x1, y1, x2, y2), int(frame_index)
                 )
         return blended
+
+    def _wait_for_request(
+        self,
+        request: _CropRequest,
+        cancel_event: threading.Event | None,
+    ) -> str:
+        """Wait for a batch result while allowing seek/stop to abandon stale work."""
+        deadline = time.monotonic() + self._REQUEST_TIMEOUT_S
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                request.cancelled.set()
+                return "cancelled"
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                request.cancelled.set()
+                return "timeout"
+            if request.done.wait(min(self._REQUEST_CANCEL_POLL_S, remaining)):
+                return "done"

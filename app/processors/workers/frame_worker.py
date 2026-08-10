@@ -1628,6 +1628,7 @@ class FrameWorker(threading.Thread):
                 restore_crop=self._musetalk_restore_crop(control)
                 if control.get("MuseTalkRestoreMouthToggle", False)
                 else None,
+                cancel_event=self.stop_event,
             )
         except Exception as e_mt:
             if not getattr(self, "_musetalk_frame_err_logged", False):
