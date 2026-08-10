@@ -3,6 +3,7 @@ from typing import Dict, Optional
 from pathlib import Path
 from functools import partial
 import copy
+import os
 import time
 
 from PySide6 import QtWidgets, QtGui
@@ -423,6 +424,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self._preview_active_settings_timer.start()
         graphics_view_actions.update_preview_active_settings_overlay(self)
 
+        if os.environ.get("VISIOMASTER_UI_LAG", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        ):
+            self._setup_ui_lag_monitor()
+
         video_control_actions.enable_zoom_and_pan(self, self.graphicsViewFrame)
 
         video_slider_event_filter = VideoSeekSliderEventFilter(
@@ -747,6 +756,28 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.scan_progress_dialog.setAutoClose(False)
         self.scan_progress_dialog.setAutoReset(False)
         self.scan_progress_dialog.close()
+
+    def _setup_ui_lag_monitor(
+        self, interval_ms: int = 50, report_threshold_ms: float = 120.0
+    ):
+        """Reports GUI event-loop stalls (VISIOMASTER_UI_LAG=1) to locate blocking work."""
+        self._ui_lag_interval_ms = int(interval_ms)
+        self._ui_lag_threshold_ms = float(report_threshold_ms)
+        self._ui_lag_last_tick = time.perf_counter()
+
+        def _on_tick():
+            now = time.perf_counter()
+            lag_ms = (now - self._ui_lag_last_tick) * 1000.0 - self._ui_lag_interval_ms
+            self._ui_lag_last_tick = now
+            if lag_ms >= self._ui_lag_threshold_ms:
+                print(f"[UI_LAG] GUI thread blocked ~{lag_ms:.0f} ms", flush=True)
+
+        self._ui_lag_timer = QtCore.QTimer(self)
+        self._ui_lag_timer.setTimerType(QtCore.Qt.TimerType.PreciseTimer)
+        self._ui_lag_timer.setInterval(self._ui_lag_interval_ms)
+        self._ui_lag_timer.timeout.connect(_on_tick)
+        self._ui_lag_timer.start()
+        print("[INFO] UI lag monitor enabled (VISIOMASTER_UI_LAG).", flush=True)
 
     def update_denoiser_controls_visibility_for_pass(
         self, pass_suffix: str, current_mode_text: str

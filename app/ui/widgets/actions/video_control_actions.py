@@ -4,6 +4,7 @@ import copy
 from functools import partial
 import os
 from pathlib import Path
+import time
 import traceback
 
 from PySide6.QtCore import QPoint
@@ -2310,7 +2311,21 @@ def play_video(main_window: "MainWindow", checked: bool):
         video_processor = main_window.video_processor
         # print("play_video: Stopping video processing.")
         set_play_button_icon_to_play(main_window)
-        video_processor.stop_processing()
+        _t0 = time.perf_counter()
+        # Heavy cleanup (joins, capture reopen, GC) runs on _HeavyStopThread so the
+        # GUI stays responsive; recording/segment stops still use the blocking path.
+        video_processor.stop_processing(block=False)
+        if os.environ.get("VISIOMASTER_PERF_STOP", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        ):
+            print(
+                f"[PERF_STOP] play_button.stop_processing (GUI blocked): "
+                f"{(time.perf_counter() - _t0) * 1000.0:.1f} ms",
+                flush=True,
+            )
         main_window.buttonMediaRecord.blockSignals(True)
         main_window.buttonMediaRecord.setChecked(False)
         main_window.buttonMediaRecord.blockSignals(False)
@@ -2663,7 +2678,8 @@ def on_change_video_seek_slider(main_window: "MainWindow", new_position=0):
     # print("Called on_change_video_seek_slider()")
     video_processor = main_window.video_processor
 
-    was_processing = video_processor.stop_processing()
+    # Scrubbing stops repeatedly; defer the ~130 ms GC so rapid seeks coalesce it.
+    was_processing = video_processor.stop_processing(defer_gpu_gc=True)
     if was_processing:
         print("[WARN] Processing in progress. Stopping current processing.")
 

@@ -207,6 +207,33 @@ class Av1ScrubPreviewEmitter(QObject):
     frame_ready = Signal(int, object)
 
 
+def _stop_perf_enabled() -> bool:
+    """True when VISIOMASTER_PERF_STOP is set, enabling stop-phase wall-time prints."""
+    return os.environ.get("VISIOMASTER_PERF_STOP", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+@contextlib.contextmanager
+def _stop_perf_phase(label: str):
+    """Times a single stop phase and reports which thread paid for it."""
+    if not _stop_perf_enabled():
+        yield
+        return
+    t0 = time.perf_counter()
+    try:
+        yield
+    finally:
+        print(
+            f"[PERF_STOP] {label}: {(time.perf_counter() - t0) * 1000.0:.1f} ms "
+            f"(thread={threading.current_thread().name})",
+            flush=True,
+        )
+
+
 class _HeavyStopThread(QThread):
     """Runs feeder/worker joins, subprocess cleanup, capture reopen, and GPU queue cleanup off the GUI thread."""
 
@@ -407,6 +434,10 @@ class VideoProcessor(QObject):
         self._async_stop_in_progress: bool = False
         self._heavy_stop_thread: _HeavyStopThread | None = None
         self._stop_context: Dict[str, Any] = {}
+        # Slider position computed by the heavy stop body; applied on the GUI thread.
+        self._stop_pending_slider_pos: int | None = None
+        # When set, the current stop skips the inline GC and debounces it instead.
+        self._stop_defer_gpu_gc: bool = False
 
         # --- Metronome and Timing ---
         self.processing_start_frame: int = (
@@ -2689,14 +2720,35 @@ class VideoProcessor(QObject):
                 detect_track_ids,
                 rr_input_indices,
             )
-            self.frame_queue.put(task)
+            if not self._detection_put_task_or_abort(task):
+                print(
+                    "[INFO] Detection pipeline thread aborting (stop requested).",
+                    flush=True,
+                )
+                return
 
-        for _ in range(len(self.worker_threads)):
-            try:
-                self.frame_queue.put(None, timeout=30.0)
-            except Exception:
-                break
+        if self.processing or self.is_processing_segments:
+            for _ in range(len(self.worker_threads)):
+                try:
+                    self.frame_queue.put(None, timeout=30.0)
+                except Exception:
+                    break
         print("[INFO] Detection pipeline thread finished.", flush=True)
+
+    def _detection_put_task_or_abort(self, task: tuple) -> bool:
+        """Enqueue a detection result, bailing out if a stop lands while the queue is full.
+
+        A plain blocking ``put`` deadlocks on stop: the workers are already signalled and
+        no longer drain ``frame_queue``, so the join times out and leaves a zombie thread
+        that would block the next playback session.
+        """
+        while True:
+            try:
+                self.frame_queue.put(task, timeout=0.1)
+                return True
+            except queue.Full:
+                if not (self.processing or self.is_processing_segments):
+                    return False
 
     def _overlay_playback_live_control_keys(self, local_control: dict) -> None:
         """Actualiza claves de UI que deben reflejarse al vuelo durante el vídeo."""
@@ -3446,7 +3498,9 @@ class VideoProcessor(QObject):
                 self._finalize_default_style_recording()
                 return
             elif should_stop_playback:
-                self.stop_processing()
+                # Loop restarts immediately and needs a settled pipeline; a plain
+                # end-of-media stop can clean up off the GUI thread.
+                self.stop_processing(block=bool(is_playback_loop_enabled))
                 if is_playback_loop_enabled:
                     self.process_video()
                 return
@@ -4733,6 +4787,7 @@ class VideoProcessor(QObject):
             "was_recording_default_style": was_recording_default_style,
             "was_processing_segments": was_processing_segments,
             "video_seek_frame": int(self.main_window.videoSeekSlider.value()),
+            "video_seek_max": int(self.main_window.videoSeekSlider.maximum()),
             "next_frame_to_display": int(self.next_frame_to_display),
             "max_frame_number": int(self.max_frame_number),
             "processing_start_frame": int(getattr(self, "processing_start_frame", 0)),
@@ -4751,22 +4806,29 @@ class VideoProcessor(QObject):
         # workers may be waiting on their batch result; delaying stop_event until
         # join_and_clear_threads made a timeline scrub wait through those joins or
         # even the batcher's full timeout.
-        self._signal_pool_workers_to_stop()
+        with _stop_perf_phase("phase1.signal_workers"):
+            self._signal_pool_workers_to_stop()
         self.gpu_memory_update_timer.stop()
         self.preroll_timer.stop()
         pm = getattr(self, "precise_metronome", None)
         if pm is not None:
-            pm.stop()
-        self._smooth_decouple_stop_presenter()
+            with _stop_perf_phase("phase1.metronome_stop"):
+                pm.stop()
+        with _stop_perf_phase("phase1.decouple_presenter_stop"):
+            self._smooth_decouple_stop_presenter()
         if stop_audio_on_main_thread:
-            self.stop_live_sound()
-        self.main_window.models_processor.face_detectors.reset_tracker()
+            with _stop_perf_phase("phase1.stop_live_sound"):
+                self.stop_live_sound()
+        with _stop_perf_phase("phase1.reset_tracker"):
+            self.main_window.models_processor.face_detectors.reset_tracker()
 
         print("[INFO] Releasing media capture to unblock feeder thread...")
         if self.media_capture:
-            misc_helpers.release_capture(self.media_capture)
+            with _stop_perf_phase("phase1.release_capture"):
+                misc_helpers.release_capture(self.media_capture)
             self.media_capture = None
-        self._stop_recording_ffmpeg_input_stream()
+        with _stop_perf_phase("phase1.stop_ffmpeg_input_stream"):
+            self._stop_recording_ffmpeg_input_stream()
 
     def _execute_heavy_stop_body(self) -> None:
         """Runs on _HeavyStopThread: audio reap, joins, FFmpeg/temp cleanup, reopen capture."""
@@ -4775,27 +4837,39 @@ class VideoProcessor(QObject):
         was_processing_segments = bool(ctx.get("was_processing_segments"))
         video_seek_frame = int(ctx.get("video_seek_frame", 0))
 
-        self.stop_live_sound()
+        with _stop_perf_phase("heavy.stop_live_sound"):
+            self.stop_live_sound()
 
         print("[INFO] Waiting for feeder thread to complete...")
-        if self.feeder_thread and self.feeder_thread.is_alive():
-            self.feeder_thread.join(timeout=3.0)
-            if self.feeder_thread.is_alive():
-                print("[WARN] Feeder thread did not join gracefully within 3s timeout.")
+        with _stop_perf_phase("heavy.join_feeder"):
+            if self.feeder_thread and self.feeder_thread.is_alive():
+                self.feeder_thread.join(timeout=3.0)
+                if self.feeder_thread.is_alive():
+                    print(
+                        "[WARN] Feeder thread did not join gracefully within 3s timeout."
+                    )
         self.feeder_thread = None
         print("[INFO] Feeder thread joined.")
 
-        self._join_detection_pipeline_thread()
+        # Drop pending tasks first: the detection thread may be blocked on a full
+        # frame_queue, and joining it before clearing would wait out the timeout.
+        with _stop_perf_phase("heavy.clear_queues_and_caches"):
+            self._clear_frames_to_display_and_profiles()
+            self.clear_recognition_embedding_cache()
+            self._seek_cached_frame = None
+            self.webcam_frames_to_display.queue.clear()
+            self._clear_frame_and_raw_queues()
 
-        self._clear_frames_to_display_and_profiles()
-        self.clear_recognition_embedding_cache()
-        self._seek_cached_frame = None
-        self.webcam_frames_to_display.queue.clear()
-        self._clear_frame_and_raw_queues()
+        with _stop_perf_phase("heavy.join_detection_pipeline"):
+            self._join_detection_pipeline_thread()
 
         print("[INFO] Waiting for worker threads to complete...")
-        self.join_and_clear_threads()
-        self.clear_restorer_infer_cache()
+        with _stop_perf_phase("heavy.join_and_clear_threads"):
+            self.join_and_clear_threads(
+                skip_post_join_gpu_cleanup=self._stop_defer_gpu_gc
+            )
+        with _stop_perf_phase("heavy.clear_restorer_infer_cache"):
+            self.clear_restorer_infer_cache()
         print("[INFO] Worker threads joined.")
 
         if self.recording_sp:
@@ -4850,14 +4924,15 @@ class VideoProcessor(QObject):
                     round(float(last_processed) * rec_src_fps / out_fps),
                 )
             current_slider_pos = max(start_frame, last_processed)
-            src_slider_max = self.main_window.videoSeekSlider.maximum()
+            src_slider_max = int(ctx.get("video_seek_max", current_slider_pos))
             current_slider_pos = min(current_slider_pos, src_slider_max)
-            if self._reopen_video_capture(current_slider_pos):
+            with _stop_perf_phase("heavy.reopen_video_capture"):
+                reopened = self._reopen_video_capture(current_slider_pos)
+            if reopened:
                 if was_recording_default_style:
                     self._restore_source_frame_state_after_capture_reopen()
-                self.main_window.videoSeekSlider.blockSignals(True)
-                self.main_window.videoSeekSlider.setValue(current_slider_pos)
-                self.main_window.videoSeekSlider.blockSignals(False)
+                # Widget writes must happen on the GUI thread (see _stop_finalize).
+                self._stop_pending_slider_pos = current_slider_pos
                 print(
                     f"[INFO] Video capture re-opened and seeked to {current_slider_pos} after stop."
                 )
@@ -4892,30 +4967,51 @@ class VideoProcessor(QObject):
         self._stop_finalize_ui_and_metrics()
 
     def _stop_finalize_ui_and_metrics(self) -> None:
-        layout_actions.enable_all_parameters_and_control_widget(self.main_window)
+        pending_slider_pos = self._stop_pending_slider_pos
+        self._stop_pending_slider_pos = None
+        if pending_slider_pos is not None:
+            self.main_window.videoSeekSlider.blockSignals(True)
+            self.main_window.videoSeekSlider.setValue(pending_slider_pos)
+            self.main_window.videoSeekSlider.blockSignals(False)
+
+        with _stop_perf_phase("finalize.enable_all_widgets"):
+            layout_actions.enable_all_parameters_and_control_widget(self.main_window)
         video_control_actions.reset_media_buttons(self.main_window)
 
-        def _deferred_gpu_gc() -> None:
-            print("[INFO] Clearing GPU Cache and running garbage collection.")
-            try:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except ImportError:
-                pass
-            except Exception as e:
-                print(f"[WARN] Error clearing Torch cache: {e}")
-            gc.collect()
+        if self._stop_defer_gpu_gc:
+            # Scrub path: coalesce GC/empty_cache across rapid seeks (debounced),
+            # instead of paying it on every stop.
+            self.schedule_preview_gpu_cleanup()
+        else:
 
-        QTimer.singleShot(0, _deferred_gpu_gc)
+            def _deferred_gpu_cache_flush() -> None:
+                # gc.collect() already ran in join_and_clear_threads (off the GUI thread
+                # on async stops); a second full collection here only freezes the UI.
+                print("[INFO] Clearing GPU Cache.")
+                with _stop_perf_phase("finalize.deferred_empty_cache"):
+                    try:
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    except ImportError:
+                        pass
+                    except Exception as e:
+                        print(f"[WARN] Error clearing Torch cache: {e}")
+
+            QTimer.singleShot(0, _deferred_gpu_cache_flush)
 
         try:
-            self.disable_virtualcam()
+            with _stop_perf_phase("finalize.disable_virtualcam"):
+                self.disable_virtualcam()
         except Exception:
             pass
 
-        self.play_end_time, end_frame_for_calc, frames_actually_processed, duration = (
-            self._compute_play_end()
-        )
+        with _stop_perf_phase("finalize.compute_play_end"):
+            (
+                self.play_end_time,
+                end_frame_for_calc,
+                frames_actually_processed,
+                duration,
+            ) = self._compute_play_end()
         if duration is not None:
             print(
                 f"[INFO] Probed temp video duration during abort: {duration:.3f}s (recorded clip length), "
@@ -4943,7 +5039,7 @@ class VideoProcessor(QObject):
         self.playback_display_start_time = 0.0
         self.processing_stopped_signal.emit()
 
-    def stop_processing(self, block: bool = True) -> bool:
+    def stop_processing(self, block: bool = True, defer_gpu_gc: bool = False) -> bool:
         """
         General Stop / Abort Function.
         Stops *any* active processing (playback, recording, segments, webcam).
@@ -4953,10 +5049,15 @@ class VideoProcessor(QObject):
                 (feeder/worker joins, capture reopen, ffplay wait) on a background
                 thread so the GUI stays responsive. Recording and multi-segment
                 modes always use a fully blocking stop.
+            defer_gpu_gc: If True, skip the inline ``gc.collect()`` during the worker
+                join and instead schedule the debounced preview GPU cleanup. Used by
+                slider scrubbing so rapid seeks coalesce into a single collection
+                instead of paying ~130 ms per stop on the GUI thread.
 
         Returns:
             True if any active processing was stopped or a broken capture was recovered.
         """
+        self._stop_defer_gpu_gc = bool(defer_gpu_gc)
         if block:
             self._wait_if_async_stop_pending()
         elif self._async_stop_in_progress:
@@ -5087,7 +5188,8 @@ class VideoProcessor(QObject):
         for thread in active_threads:
             try:
                 if thread.is_alive():
-                    thread.join(timeout=2.0)
+                    with _stop_perf_phase(f"join_workers.{thread.name}"):
+                        thread.join(timeout=2.0)
                     if thread.is_alive():
                         print(f"[WARN] Thread {thread.name} did not join gracefully.")
             except Exception as e:
@@ -5103,9 +5205,11 @@ class VideoProcessor(QObject):
         if not skip_post_join_gpu_cleanup:
             import gc as _gc
 
-            _gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            with _stop_perf_phase("join_workers.gc_collect"):
+                _gc.collect()
+            with _stop_perf_phase("join_workers.empty_cache"):
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
     @staticmethod
     def _scaled_dimensions_for_height(
