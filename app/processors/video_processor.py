@@ -4218,6 +4218,7 @@ class VideoProcessor(QObject):
         self.stopped_by_error_limit = False  # Reset error limit flag for new processing
         self.tail_pending_stall_start_sec = 0.0
         self.tail_force_finalize_due_to_stall = False
+        graphics_view_actions.start_playback_fps_preview_session(self.main_window)
 
         # Initialize feeder state with the current UI global state
         with self.state_lock:
@@ -8520,6 +8521,7 @@ class VideoProcessor(QObject):
         self.is_processing_segments = True
         self.recording = False
         self.processing = True  # Master flag
+        graphics_view_actions.start_playback_fps_preview_session(self.main_window)
         self.triggered_by_job_manager = triggered_by_job_manager
         self.stopped_by_error_limit = False  # Reset error limit flag for new processing
         # Ensure all elements in 'segments' are strictly tuples of integers.
@@ -9410,6 +9412,7 @@ class VideoProcessor(QObject):
         self.processing = True
         self.is_processing_segments = False
         self.recording = False
+        graphics_view_actions.start_playback_fps_preview_session(self.main_window)
         self.sync_feeder_ui_face_flags_from_main_window()
         self.clear_recognition_embedding_cache()
 
@@ -9482,6 +9485,7 @@ class VideoProcessor(QObject):
         self.processing = True
         self.is_processing_segments = False
         self.recording = False
+        graphics_view_actions.start_playback_fps_preview_session(self.main_window)
         self.sync_feeder_ui_face_flags_from_main_window()
         self.clear_recognition_embedding_cache()
 

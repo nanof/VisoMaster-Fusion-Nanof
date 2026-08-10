@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
 
 _PREVIEW_FPS_STALE_SEC = 1.15
-# Session-average FPS (second overlay line): ignore this many seconds after Play (buffer/preroll).
+# Session-average FPS ('AVG:' overlay line): ignore this many seconds after Play (buffer/preroll).
 _SESSION_FPS_WARMUP_SEC = 3.0
 
 
@@ -870,13 +870,15 @@ def zoom_andfit_image_to_view_onchange(main_window: "MainWindow", new_transform)
 
 
 def _session_fps_line(main_window: "MainWindow", now: float) -> str | None:
-    """Second line: 'session: X.X' live while playing or frozen after Stop."""
+    """Second line: 'AVG: X.X FPS' live while playing, frozen after Stop, '—' until
+    there are samples. Only for media with playback (video/webcam/screen)."""
     vp = main_window.video_processor
     frozen = getattr(main_window, "_preview_session_fps_frozen", None)
     active = getattr(main_window, "_playback_preview_fps_active", False)
+    has_playback_media = vp.file_type in ("video", "webcam", "screen")
 
     live_avg: float | None = None
-    if active and vp.processing and vp.file_type in ("video", "webcam", "screen"):
+    if active and vp.processing and has_playback_media:
         t0 = getattr(main_window, "_playback_session_fps_measure_t0", None)
         n = int(getattr(main_window, "_playback_session_fps_frames", 0))
         if t0 is not None:
@@ -885,9 +887,11 @@ def _session_fps_line(main_window: "MainWindow", now: float) -> str | None:
                 live_avg = float(n) / elapsed
 
     if live_avg is not None:
-        return f"session: {live_avg:.1f}"
+        return f"AVG: {live_avg:.1f} FPS"
     if frozen is not None:
-        return f"session: {frozen:.1f}"
+        return f"AVG: {frozen:.1f} FPS"
+    if has_playback_media:
+        return "AVG: — FPS"
     return None
 
 
@@ -1208,6 +1212,7 @@ def start_playback_fps_preview_session(main_window: "MainWindow") -> None:
     main_window._preview_fps_sec_last_fire = time.perf_counter()
     main_window._preview_fps_sec_frames = 0
     main_window._playback_preview_fps_active = True
+    main_window._preview_session_fps_frozen = None
     _t0 = time.perf_counter()
     main_window._playback_session_warmup_until = _t0 + _SESSION_FPS_WARMUP_SEC
     main_window._playback_session_fps_measure_t0 = None
@@ -1216,7 +1221,7 @@ def start_playback_fps_preview_session(main_window: "MainWindow") -> None:
 
 
 def reset_playback_fps_preview_session(main_window: "MainWindow") -> None:
-    """On stop, freeze session-average FPS; value remains visible on the 'session:' line."""
+    """On stop, freeze session-average FPS; value remains visible on the 'AVG:' line."""
     main_window._preview_fps_sec_last_fire = time.perf_counter()
     main_window._preview_fps_sec_frames = 0
     now = time.perf_counter()

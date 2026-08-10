@@ -302,7 +302,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         )
         self.previewFpsLabel.setToolTip(
             "First line: average preview FPS over the last second (updated once per second).\n"
-            "Second line: session: value — average while playing excluding the first ~3 s after Play "
+            "Second line: AVG — session average while playing, excluding the first ~3 s after Play "
             "(buffer/preroll); after Stop the last average stays visible."
         )
         self.previewFpsLabel.setAttribute(
