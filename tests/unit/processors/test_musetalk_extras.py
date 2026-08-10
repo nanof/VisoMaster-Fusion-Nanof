@@ -10,7 +10,12 @@ from app.processors.pytorch_extras.musetalk.blending import (
     soft_lower_face_mask,
 )
 from app.processors.pytorch_extras.musetalk.paths import (
+    format_musetalk_import_error,
+    format_musetalk_load_error,
+    musetalk_assets_error_message,
     musetalk_assets_ready,
+    musetalk_deps_error_message,
+    musetalk_missing_assets,
     musetalk_root,
     unet_config_path,
 )
@@ -47,12 +52,51 @@ def test_expand_bbox_clamps():
 
 def test_retalking_placeholder_reports_readiness(capsys):
     # Activation is via the UI toggle, not the env var. The helper just reports
-    # whether weights are present.
+    # whether weights/deps are present.
     run_retalking_placeholder()
     out = capsys.readouterr().out
     assert "MuseTalk" in out
+    assert "Check / Update" in out or "ready" in out.lower()
 
 
 def test_assets_ready_false_without_weights():
     # Fresh clone / CI without MuseTalk download.
     assert musetalk_assets_ready() in (True, False)
+
+
+def test_assets_error_message_lists_missing_or_is_empty():
+    msg = musetalk_assets_error_message()
+    if musetalk_assets_ready():
+        assert msg == ""
+        assert musetalk_missing_assets() == []
+    else:
+        assert "Missing:" in msg
+        assert "Check / Update Models" in msg
+        assert musetalk_missing_assets()
+
+
+def test_deps_error_message_mentions_launcher():
+    msg = musetalk_deps_error_message(["diffusers", "librosa"])
+    assert "diffusers" in msg
+    assert "librosa" in msg
+    assert "Check / Update Dependencies" in msg
+
+
+def test_format_import_error_maps_known_package():
+    err = ImportError("No module named 'diffusers'")
+    err.name = "diffusers"
+    msg = format_musetalk_import_error(err)
+    assert msg is not None
+    assert "diffusers" in msg
+    assert "Check / Update Dependencies" in msg
+
+
+def test_format_load_error_oom_hint():
+    msg = format_musetalk_load_error(RuntimeError("CUDA out of memory"))
+    assert "GPU memory" in msg or "out of" in msg.lower()
+
+
+def test_format_load_error_generic():
+    msg = format_musetalk_load_error(RuntimeError("boom"))
+    assert "boom" in msg
+    assert msg.startswith("MuseTalk load failed:")

@@ -1818,6 +1818,32 @@ def musetalk_required_control_settings(main_window: "MainWindow") -> dict:
     return dict(MUSETALK_REQUIRED_CONTROL_SETTINGS)
 
 
+def _musetalk_last_error(main_window: "MainWindow") -> str:
+    """Best available load-failure text from the engine (or a generic fallback)."""
+    engine = getattr(main_window.models_processor, "musetalk_engine", None)
+    detail = getattr(engine, "_last_error", None) if engine is not None else None
+    if detail:
+        return str(detail)
+    return (
+        "MuseTalk could not load. Run the launcher's "
+        "'Check / Update Dependencies' and 'Check / Update Models'."
+    )
+
+
+def _warn_musetalk_load_failed(
+    main_window: "MainWindow", *, title: str = "MuseTalk Lip-Sync"
+) -> None:
+    """Print and show a dialog with the concrete weights/deps failure."""
+    message = _musetalk_last_error(main_window)
+    print(f"[WARN] {message}")
+    try:
+        if isinstance(main_window, QtWidgets.QWidget):
+            QtWidgets.QMessageBox.warning(main_window, title, message)
+    except Exception:
+        # Headless / tests: console warning is enough.
+        pass
+
+
 def handle_musetalk_toggle_change(
     main_window: "MainWindow", new_value: Any = None, *_, **__
 ) -> None:
@@ -1836,10 +1862,7 @@ def handle_musetalk_toggle_change(
         mp = main_window.models_processor
         if enabled:
             if not mp.ensure_musetalk_loaded():
-                print(
-                    "[WARN] MuseTalk could not load. Run the launcher's "
-                    "'Check / Update Dependencies' and 'Check / Update Models'."
-                )
+                _warn_musetalk_load_failed(main_window)
                 return
             apply_required_global_settings(
                 main_window,
@@ -1908,7 +1931,9 @@ def handle_musetalk_compile_change(
             print("[INFO] MuseTalk: reloading to apply torch.compile setting...")
             mp.unload_musetalk()
         if not mp.ensure_musetalk_loaded(compile=want):
-            print("[WARN] MuseTalk could not load after compile toggle.")
+            _warn_musetalk_load_failed(
+                main_window, title="MuseTalk torch.compile"
+            )
             return
         _prepare_musetalk_audio(main_window)
     except Exception as e:
@@ -1961,7 +1986,10 @@ def reload_musetalk_if_enabled(main_window: "MainWindow") -> None:
             return
         print("[INFO] MuseTalk: reloading after VRAM flush...")
         if not main_window.models_processor.ensure_musetalk_loaded():
-            print("[WARN] MuseTalk could not be reloaded; lip-sync stays off.")
+            print(
+                f"[WARN] MuseTalk could not be reloaded; lip-sync stays off. "
+                f"{_musetalk_last_error(main_window)}"
+            )
             return
         _prepare_musetalk_audio(main_window)
     except Exception as e:

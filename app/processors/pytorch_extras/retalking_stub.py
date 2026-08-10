@@ -13,15 +13,21 @@ from typing import Any
 
 
 def run_retalking_placeholder(*_args: Any, **_kwargs: Any) -> None:
-    from app.processors.pytorch_extras.musetalk.paths import musetalk_assets_ready
+    from app.processors.pytorch_extras.musetalk.paths import (
+        musetalk_assets_error_message,
+        musetalk_assets_ready,
+        musetalk_deps_error_message,
+        musetalk_missing_python_deps,
+    )
 
     if not musetalk_assets_ready():
-        print(
-            "[INFO] MuseTalk: pesos no encontrados. Ejecute en el launcher "
-            "'Check / Update Dependencies' y 'Check / Update Models'."
-        )
+        print(f"[INFO] {musetalk_assets_error_message()}")
+        return
+    missing_deps = musetalk_missing_python_deps()
+    if missing_deps:
+        print(f"[INFO] {musetalk_deps_error_message(missing_deps)}")
         return
     print(
-        "[INFO] MuseTalk listo: active el toggle 'MuseTalk Lip-Sync' en la UI "
-        "(Common) tras cargar un vídeo con audio."
+        "[INFO] MuseTalk ready: enable 'MuseTalk Lip-Sync' in Common after "
+        "loading a video with audio."
     )

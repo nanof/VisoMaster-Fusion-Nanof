@@ -2709,7 +2709,11 @@ class ModelsProcessor(QtCore.QObject):
                 )
             )
         except Exception as e:
-            print(f"[WARN] ensure_musetalk_loaded failed: {e}")
+            from app.processors.pytorch_extras.musetalk.paths import (
+                format_musetalk_load_error,
+            )
+
+            print(f"[WARN] ensure_musetalk_loaded failed: {format_musetalk_load_error(e)}")
             return False
 
     def unload_musetalk(self) -> None:

@@ -41,7 +41,11 @@ from app.processors.pytorch_extras.musetalk.parsing import (
     parsed_masks,
 )
 from app.processors.pytorch_extras.musetalk.paths import (
+    format_musetalk_load_error,
+    musetalk_assets_error_message,
     musetalk_assets_ready,
+    musetalk_deps_error_message,
+    musetalk_missing_python_deps,
     musetalk_root,
     prepare_transformers_env,
     unet_config_path,
@@ -331,10 +335,10 @@ class MuseTalkEngine:
             return
         self._warn_once.add("not_ready")
         if not self._loaded:
-            print(
-                "[WARN] MuseTalk is enabled but not loaded. Toggle it off and on "
-                "again, then check the load error in the log."
+            detail = self._last_error or (
+                "Toggle it off and on again, then check the load error in the log."
             )
+            print(f"[WARN] MuseTalk is enabled but not loaded: {detail}")
         elif self._audio_error:
             # Preparing the track was attempted and failed, so advice about picking a
             # file would send the user looking in the wrong place entirely.
@@ -362,10 +366,12 @@ class MuseTalkEngine:
         the Enable MuseTalk Lip-Sync toggle.
         """
         if not musetalk_assets_ready():
-            self._last_error = (
-                f"Weights missing under {musetalk_root()}. "
-                "Run the launcher's 'Check / Update Models' (or python download_models.py)."
-            )
+            self._last_error = musetalk_assets_error_message()
+            print(f"[WARN] MuseTalk: {self._last_error}")
+            return False
+        missing_deps = musetalk_missing_python_deps()
+        if missing_deps:
+            self._last_error = musetalk_deps_error_message(missing_deps)
             print(f"[WARN] MuseTalk: {self._last_error}")
             return False
         with self._lock:
@@ -430,8 +436,8 @@ class MuseTalkEngine:
                 )
                 return True
             except Exception as e:
-                self._last_error = str(e)
-                print(f"[ERROR] MuseTalk load failed: {e}")
+                self._last_error = format_musetalk_load_error(e)
+                print(f"[ERROR] {self._last_error}")
                 traceback.print_exc()
                 self.unload()
                 return False

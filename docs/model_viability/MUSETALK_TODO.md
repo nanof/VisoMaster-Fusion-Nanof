@@ -159,7 +159,7 @@ Mark items with `[x]` / `[ ]` and add short notes under each section when status
 - [x] Seek / scrub with lip-sync on (correct chunks, no stalls) — **2026-08-10:** Whisper windows now preserve exact fractional container FPS (no long-clip drift), sought frames use absolute chunk indices instead of wrapping unrelated audio with modulo, and out-of-range audio leaves the frame untouched. Worker cancellation reaches queued MuseTalk requests within 25 ms; stale requests are discarded by the batcher, and pool workers are signalled before feeder/detection shutdown joins so timeline scrubs do not wait on the 20 s batch timeout.
 - [x] Long recordings: audio memory, batcher, timeouts — **2026-08-10:** Audio prep streams the WAV in 30 s segments (no full-track `librosa.load` peak), encodes Whisper one segment at a time onto a **float16** host timeline, and keeps lazy `FrameFeatureWindows`. Preview still soft-times out at 20 s; **recording / segment export** pass `request_timeout_s=None` so a slow batch cannot punch lip-sync holes, while `stop_event` still cancels within 25 ms and the batcher drops cancelled requests.
 - [x] VR / non-standard layouts behaviour (if applicable) — **2026-08-10:** MuseTalk now lip-syncs each VR180 **perspective crop** after swap / before P2E stitch (`_musetalk_apply_vr_crop`), using crop-local landmarks and a dummy inset bbox (same convention as VR landmark detection). The equirect post-swap hook is **disabled** under `VR180ModeEnableToggle` (it had no feeder detections → `no_bbox` skip, and equirect boxes would be geometrically wrong). Both Eyes / Single Eye reuse the existing E2P→stitch path; flat SBS/OU remains out of scope. Pipeline order Before/Hybrid still do not apply in VR (always after-swap on the crop). Tests: `test_musetalk_pipeline_order.py`.
-- [ ] Clearer error messages when weights or deps are missing
+- [x] Clearer error messages when weights or deps are missing — lists missing files under `model_assets/musetalk/`, names missing Python packages (`torch`/`diffusers`/…), maps ImportError/OOM to launcher fix hints; toggle/compile failures show a QMessageBox with the same text.
 
 
 
@@ -233,7 +233,7 @@ Keep MuseTalk as the **preview / realtime** path. Explore higher-fidelity or nex
 | 2026-08-10 | Settings → MuseTalk **torch.compile** toggle (`MuseTalkCompileToggle`); env still overrides when set. |
 | 2026-08-10 | Seek/scrub: fractional FPS Whisper windows, no modulo wrap, fast cancel + batcher drop of stale requests. |
 | 2026-08-10 | Long recordings: stream WAV + incremental Whisper to fp16 host timeline; recording waits without soft timeout (preview keeps 20 s). |
-| 2026-08-10 | VR180: MuseTalk on perspective crops (after swap, before stitch); equirect post-hook off. |
+| 2026-08-10 | Clearer MuseTalk load errors: missing weight files listed; missing deps named; UI dialog on toggle/compile failure. |
 
 
 
