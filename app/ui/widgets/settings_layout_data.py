@@ -539,6 +539,26 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "step": 1,
             "help": "Set the maximum FPS of the video when playing",
         },
+        "PreviewFpsCapEnableToggle": {
+            "level": 1,
+            "label": "Limit Preview Processing FPS",
+            "default": False,
+            "help": "Preview only: sample the source with FFmpeg before detection/swap so high-FPS "
+            "videos need fewer pipeline runs while keeping normal playback speed and audio pitch. "
+            "Takes precedence over custom playback FPS when both are enabled.",
+        },
+        "PreviewMaxFpsSlider": {
+            "level": 2,
+            "label": "Maximum Preview Processing FPS",
+            "min_value": "1",
+            "max_value": "120",
+            "default": "30",
+            "parentToggle": "PreviewFpsCapEnableToggle",
+            "requiredToggleValue": True,
+            "step": 1,
+            "help": "Maximum number of source samples processed per second during preview. "
+            "The timeline and Live Sound remain at the source video's normal speed.",
+        },
         "VideoPlaybackBufferingToggle": {
             "level": 1,
             "label": "Playback Buffering",

@@ -427,6 +427,7 @@ class VideoProcessor(QObject):
         self.ffmpeg_input_width: int = 0
         self.ffmpeg_input_height: int = 0
         self._used_ffmpeg_cap: bool = False
+        self._preview_fps_cap_active: bool = False
         self.ffmpeg_input_prefetched_frame: Optional[numpy.ndarray] = None
         self.tail_pending_stall_start_sec: float = 0.0
         self.tail_force_finalize_due_to_stall: bool = False
@@ -1248,19 +1249,24 @@ class VideoProcessor(QObject):
                 if want_audio_master:
                     # Re-read slider so stop/play/seek cannot leave a stale anchor vs ffplay -ss.
                     anchor_ui = self._timeline_frame_from_ui()
-                    self._audio_sync_anchor_fn = anchor_ui
+                    anchor_processing = self._timeline_to_processing_frame(anchor_ui)
+                    self._audio_sync_anchor_fn = anchor_processing
                     self._playback_clock_t0 = self._audio_sync_wall_t0
-                    self._playback_clock_anchor_frame = anchor_ui
+                    self._playback_clock_anchor_frame = anchor_processing
                     self._wall_clock_use_audio_file_rate = True
                     with self.state_lock:
-                        self.next_frame_to_display = anchor_ui
+                        self.next_frame_to_display = anchor_processing
                     print(
                         "[INFO] Preview: audio-master wall clock (target frame from ffplay timeline)."
                     )
                 else:
                     self._wall_clock_use_audio_file_rate = False
                     self._playback_clock_t0 = time.perf_counter()
-                    self._playback_clock_anchor_frame = self._timeline_frame_from_ui()
+                    self._playback_clock_anchor_frame = (
+                        self._timeline_to_processing_frame(
+                            self._timeline_frame_from_ui()
+                        )
+                    )
                     with self.state_lock:
                         self.next_frame_to_display = self._playback_clock_anchor_frame
             else:
@@ -2811,6 +2817,9 @@ class VideoProcessor(QObject):
                         pending_interactive_seek = self._interactive_playback_seek_pending
                         self._interactive_playback_seek_pending = None
                 if pending_interactive_seek is not None:
+                    pending_processing_seek = self._timeline_to_processing_frame(
+                        pending_interactive_seek
+                    )
                     if os.environ.get("VISIOMASTER_PERF_SEEK", "").strip().lower() in (
                         "1",
                         "true",
@@ -2819,20 +2828,31 @@ class VideoProcessor(QObject):
                     ):
                         print(
                             "[VISIOMASTER_PERF_SEEK] feeder applied "
-                            f"interactive_pending fn={pending_interactive_seek}"
+                            f"interactive_pending source_fn={pending_interactive_seek} "
+                            f"processing_fn={pending_processing_seek}"
                         )
                     with self.state_lock:
                         self._clear_frames_to_display_and_profiles()
-                        self.current_frame_number = pending_interactive_seek
-                        self.next_frame_to_display = pending_interactive_seek
+                        self.current_frame_number = pending_processing_seek
+                        self.next_frame_to_display = pending_processing_seek
                     self._clear_frame_and_raw_queues()
-                    seek_before_read = pending_interactive_seek
+                    if self._preview_fps_cap_active:
+                        if not self._restart_preview_fps_cap_stream(
+                            pending_processing_seek, cached_target_height
+                        ):
+                            print(
+                                "[ERROR] Preview FPS-cap stream could not seek; stopping feeder."
+                            )
+                            break
+                        seek_before_read = None
+                    else:
+                        seek_before_read = pending_processing_seek
                     self.consecutive_read_errors = 0
                     self._audio_sync_last_seek_monotonic = time.perf_counter()
                     self._clear_sequential_detection_feed_state()
                     if self._playback_benchmark_same_frame_active:
                         self._benchmark_same_frame_rgb_cache = None
-                        self._benchmark_same_frame_seq = int(pending_interactive_seek)
+                        self._benchmark_same_frame_seq = int(pending_processing_seek)
                         self._benchmark_same_frame_anchor_fn = int(
                             pending_interactive_seek
                         )
@@ -2911,7 +2931,18 @@ class VideoProcessor(QObject):
                                     # starve the UI when catch-up retried without a read (issue: loop
                                     # of seek+clear+continue never reached read_frame/enqueue).
                                     self._clear_frames_to_display_and_profiles()
-                                seek_before_read = jump_to
+                                if self._preview_fps_cap_active:
+                                    if not self._restart_preview_fps_cap_stream(
+                                        jump_to, cached_target_height
+                                    ):
+                                        print(
+                                            "[ERROR] Preview FPS-cap stream could not catch up; "
+                                            "stopping feeder."
+                                        )
+                                        break
+                                    seek_before_read = None
+                                else:
+                                    seek_before_read = jump_to
                                 self._clear_frame_and_raw_queues()
                                 self._clear_sequential_detection_feed_state()
                                 print(
@@ -2965,13 +2996,17 @@ class VideoProcessor(QObject):
                 if _bench_same and self._benchmark_same_frame_rgb_cache is not None:
                     self.consecutive_read_errors = 0
                     frame_num_to_process = int(self.current_frame_number)
-                    marker_data = self.main_window.markers.get(frame_num_to_process)
+                    marker_timeline_frame, marker_data = (
+                        self._marker_data_for_processing_frame(
+                            frame_num_to_process
+                        )
+                    )
                     local_params_for_worker: FacesParametersTypes
                     local_control_for_worker: ControlTypes
                     with self.state_lock:
                         if marker_data and marker_data != last_marker_data:
                             print(
-                                f"[INFO] Frame {frame_num_to_process} is a marker. Updating feeder state."
+                                f"[INFO] Frame {marker_timeline_frame} is a marker. Updating feeder state."
                             )
                             self.feeder_parameters = copy.deepcopy(
                                 marker_data["parameters"]
@@ -3137,7 +3172,9 @@ class VideoProcessor(QObject):
                 frame_num_to_process = self.current_frame_number
 
                 # Get marker data *only* for the exact frame
-                marker_data = self.main_window.markers.get(frame_num_to_process)
+                marker_timeline_frame, marker_data = (
+                    self._marker_data_for_processing_frame(frame_num_to_process)
+                )
 
                 local_params_for_worker: FacesParametersTypes
                 local_control_for_worker: ControlTypes
@@ -3147,7 +3184,7 @@ class VideoProcessor(QObject):
                     if marker_data and marker_data != last_marker_data:
                         # This frame IS a marker, update the feeder's state
                         print(
-                            f"[INFO] Frame {frame_num_to_process} is a marker. Updating feeder state."
+                            f"[INFO] Frame {marker_timeline_frame} is a marker. Updating feeder state."
                         )
 
                         self.feeder_parameters = copy.deepcopy(
@@ -3437,6 +3474,35 @@ class VideoProcessor(QObject):
             fn = self._playback_clock_anchor_frame + int(elapsed * float(self.fps))
 
         return max(0, min(fn, self.max_frame_number))
+
+    def _timeline_to_processing_frame(self, frame_number: int) -> int:
+        """Map a source-timeline frame to the active pipeline's frame space."""
+        if self._used_ffmpeg_cap:
+            return self.source_to_output_frame(frame_number)
+        return max(0, int(frame_number))
+
+    def _processing_to_timeline_frame(self, frame_number: int) -> int:
+        """Map an active pipeline frame back to the source-timeline frame space."""
+        if self._used_ffmpeg_cap:
+            return self.output_to_source_frame(frame_number)
+        return max(0, int(frame_number))
+
+    def _marker_data_for_processing_frame(self, frame_number: int) -> tuple[int, Any]:
+        """Resolve marker state for a frame, including markers skipped by FPS sampling."""
+        timeline_frame = self._processing_to_timeline_frame(frame_number)
+        marker_data = self.main_window.markers.get(timeline_frame)
+        if marker_data is not None or not self._used_ffmpeg_cap:
+            return timeline_frame, marker_data
+
+        prior_frames = [
+            int(marker_frame)
+            for marker_frame in self.main_window.markers
+            if int(marker_frame) <= timeline_frame
+        ]
+        if not prior_frames:
+            return timeline_frame, None
+        marker_frame = max(prior_frames)
+        return marker_frame, self.main_window.markers.get(marker_frame)
 
     def _advance_past_skipped_for_display(self, fn: int) -> int:
         while fn in self.skipped_frames and fn <= self.max_frame_number:
@@ -4058,6 +4124,7 @@ class VideoProcessor(QObject):
         self.recording_source_fps = float(src_fps)
 
         if self.recording:
+            self._preview_fps_cap_active = False
             fps_cap_enabled = bool(
                 self.main_window.control.get("OutputFpsCapEnableToggle", False)
             )
@@ -4093,8 +4160,41 @@ class VideoProcessor(QObject):
                     self._used_ffmpeg_cap = False
                     self.fps = self.recording_source_fps
         else:
-            self._used_ffmpeg_cap = False
-            if self.main_window.control["VideoPlaybackCustomFpsToggle"]:
+            preview_cap_enabled = bool(
+                self.main_window.control.get("PreviewFpsCapEnableToggle", False)
+            )
+            preview_cap_value = float(
+                self.main_window.control.get("PreviewMaxFpsSlider", 30) or 30
+            )
+            self._preview_fps_cap_active = (
+                preview_cap_enabled
+                and preview_cap_value > 0
+                and self.recording_source_fps > preview_cap_value
+            )
+            self._used_ffmpeg_cap = self._preview_fps_cap_active
+
+            if self._preview_fps_cap_active:
+                self.fps = preview_cap_value
+                _fps_src = "preview processing cap"
+                src_frame_count = int(self.media_capture.get(cv2.CAP_PROP_FRAME_COUNT))
+                duration_sec = (
+                    src_frame_count / self.recording_source_fps
+                    if self.recording_source_fps > 0
+                    else 0
+                )
+                if src_frame_count > 0 and duration_sec > 0:
+                    output_frames = max(1, int(round(duration_sec * self.fps)))
+                    self.max_frame_number = output_frames - 1
+                else:
+                    print(
+                        "[WARN] Preview FPS cap: could not compute source duration; "
+                        "falling back to normal source FPS."
+                    )
+                    self._preview_fps_cap_active = False
+                    self._used_ffmpeg_cap = False
+                    self.fps = self.recording_source_fps
+                    _fps_src = "container (preview cap fallback)"
+            elif self.main_window.control["VideoPlaybackCustomFpsToggle"]:
                 self.fps = self.main_window.control["VideoPlaybackCustomFpsSlider"]
                 _fps_src = "custom slider"
             else:
@@ -4232,12 +4332,12 @@ class VideoProcessor(QObject):
                 target_fps=float(self.fps),
                 target_height=target_height,
             ):
-                print("[ERROR] Failed to start FFmpeg recording input stream.")
+                print("[ERROR] Failed to start FFmpeg FPS-cap input stream.")
                 self.stop_processing()
                 return
 
             print(
-                "[INFO] Sync: Reading first frame from FFmpeg recording input stream..."
+                "[INFO] Sync: Reading first frame from FFmpeg FPS-cap input stream..."
             )
             ret, frame_bgr = self._read_frame_from_ffmpeg_input_stream()
             print(f"[INFO] Sync: Initial FFmpeg stream read complete (Result: {ret}).")
@@ -4348,7 +4448,9 @@ class VideoProcessor(QObject):
             )
         else:
             self.play_start_time = (
-                float(actual_start_frame) / float(self.fps) if self.fps > 0 else 0.0
+                float(actual_start_frame) / float(self.recording_source_fps)
+                if self.recording_source_fps > 0
+                else 0.0
             )
 
         # 7f. Update the slider
@@ -4929,7 +5031,7 @@ class VideoProcessor(QObject):
             with _stop_perf_phase("heavy.reopen_video_capture"):
                 reopened = self._reopen_video_capture(current_slider_pos)
             if reopened:
-                if was_recording_default_style:
+                if was_recording_default_style or used_cap:
                     self._restore_source_frame_state_after_capture_reopen()
                 # Widget writes must happen on the GUI thread (see _stop_finalize).
                 self._stop_pending_slider_pos = current_slider_pos
@@ -5037,6 +5139,8 @@ class VideoProcessor(QObject):
 
         self._log_processing_summary(processing_time_sec, num_frames_processed)
         self.playback_display_start_time = 0.0
+        self._used_ffmpeg_cap = False
+        self._preview_fps_cap_active = False
         self.processing_stopped_signal.emit()
 
     def stop_processing(self, block: bool = True, defer_gpu_gc: bool = False) -> bool:
@@ -5235,7 +5339,7 @@ class VideoProcessor(QObject):
         target_fps: float,
         target_height: Optional[int],
     ) -> bool:
-        """Start FFmpeg rawvideo stream for recording FPS-cap mode."""
+        """Start an FFmpeg rawvideo stream for recording or preview FPS-cap mode."""
         if not self.media_path:
             print("[ERROR] Cannot start FFmpeg input stream: media path is missing.")
             return False
@@ -5317,19 +5421,19 @@ class VideoProcessor(QObject):
             self.ffmpeg_input_height = out_h
             self._used_ffmpeg_cap = True
             self.ffmpeg_input_prefetched_frame = None
+            stream_kind = "preview" if self._preview_fps_cap_active else "recording"
             print(
-                f"[INFO] Recording input stream enabled via FFmpeg: {out_w}x{out_h} @ {target_fps:.3f}fps"
+                f"[INFO] {stream_kind.capitalize()} input stream enabled via FFmpeg: "
+                f"{out_w}x{out_h} @ {target_fps:.3f}fps"
             )
             return True
         except FileNotFoundError:
-            print("[ERROR] FFmpeg not found while starting recording input stream.")
+            print("[ERROR] FFmpeg not found while starting FPS-cap input stream.")
             self.ffmpeg_input_sp = None
-            self._used_ffmpeg_cap = False
             return False
         except Exception as e:
-            print(f"[ERROR] Failed to start FFmpeg recording input stream: {e}")
+            print(f"[ERROR] Failed to start FFmpeg FPS-cap input stream: {e}")
             self.ffmpeg_input_sp = None
-            self._used_ffmpeg_cap = False
             return False
 
     def _read_frame_from_ffmpeg_input_stream(
@@ -5363,8 +5467,20 @@ class VideoProcessor(QObject):
         )
         return True, frame.copy()
 
+    def _restart_preview_fps_cap_stream(
+        self, processing_frame: int, target_height: Optional[int]
+    ) -> bool:
+        """Seek a capped preview by rebuilding its sequential FFmpeg pipe."""
+        if not self._preview_fps_cap_active or self.fps <= 0:
+            return False
+        return self._start_recording_ffmpeg_input_stream(
+            start_frame=max(0, int(processing_frame)),
+            target_fps=float(self.fps),
+            target_height=target_height,
+        )
+
     def _stop_recording_ffmpeg_input_stream(self) -> None:
-        """Stop and cleanup FFmpeg recording input stream process."""
+        """Stop and cleanup an FFmpeg FPS-cap input stream process."""
         proc = self.ffmpeg_input_sp
         if not proc:
             self.ffmpeg_input_width = 0
@@ -9020,6 +9136,7 @@ class VideoProcessor(QObject):
             self.stop_live_sound()
 
         anchor_fn = self._timeline_frame_from_ui()
+        anchor_processing_fn = self._timeline_to_processing_frame(anchor_fn)
         cap_fps = misc_helpers.capture_get_prop(self.media_capture, cv2.CAP_PROP_FPS)
         try:
             cap_fps_f = float(cap_fps)
@@ -9034,6 +9151,7 @@ class VideoProcessor(QObject):
         if (
             self.main_window.control["VideoPlaybackCustomFpsToggle"]
             and not self.recording
+            and not self._preview_fps_cap_active
         ):
             fpsorig = misc_helpers.capture_get_prop(
                 self.media_capture, cv2.CAP_PROP_FPS
@@ -9050,16 +9168,22 @@ class VideoProcessor(QObject):
         if fps_file <= 0:
             fps_file = float(self.fps) if self.fps > 0 else 30.0
         self._audio_sync_wall_t0 = time.perf_counter()
-        self._audio_sync_anchor_fn = anchor_fn
-        self._audio_sync_fps_file = fps_file
-        self._audio_sync_rate = float(fpsdiv)
+        self._audio_sync_anchor_fn = anchor_processing_fn
+        if self._preview_fps_cap_active:
+            # The pipeline uses capped/output-frame space while ffplay remains at
+            # normal media speed. Advancing at the cap FPS represents the same time.
+            self._audio_sync_fps_file = float(self.fps)
+            self._audio_sync_rate = 1.0
+        else:
+            self._audio_sync_fps_file = fps_file
+            self._audio_sync_rate = float(fpsdiv)
 
         _did_audio_realign = False
         with self.state_lock:
-            self.next_frame_to_display = anchor_fn
+            self.next_frame_to_display = anchor_processing_fn
             cur = int(self.current_frame_number)
-            if cur != anchor_fn:
-                self.current_frame_number = anchor_fn
+            if cur != anchor_processing_fn and not self._preview_fps_cap_active:
+                self.current_frame_number = anchor_processing_fn
                 try:
                     misc_helpers.seek_frame(self.media_capture, anchor_fn)
                 except Exception as e:
@@ -9136,7 +9260,9 @@ class VideoProcessor(QObject):
             and self.main_window.liveSoundButton.isChecked()
             and self._audio_sync_wall_t0 > 0.0
         ):
-            anchor_fn = self._timeline_frame_from_ui()
+            anchor_fn = self._timeline_to_processing_frame(
+                self._timeline_frame_from_ui()
+            )
             self._audio_sync_anchor_fn = anchor_fn
             self._audio_sync_last_seek_monotonic = 0.0
             with self.state_lock:
