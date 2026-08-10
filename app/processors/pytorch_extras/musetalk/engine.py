@@ -62,27 +62,27 @@ def _env_truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def _env_flag(name: str, default: bool) -> bool:
-    """Read a 0/1 env flag; missing/empty keeps ``default``."""
-    raw = os.environ.get(name)
-    if raw is None or not str(raw).strip():
-        return default
-    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+def musetalk_compile_enabled(control: dict | None = None) -> bool:
+    """Whether MuseTalk should torch.compile (default off).
 
+    Resolution order:
+    1. ``VISOFUSION_MUSETALK_COMPILE`` when set to a non-empty value (benches /
+       scripts; explicit ``0`` forces off even if the UI toggle is on).
+    2. Else ``control["MuseTalkCompileToggle"]`` when a control dict is passed
+       (Settings → MuseTalk).
+    3. Else off.
 
-def musetalk_compile_enabled() -> bool:
-    """True when VISOFUSION_MUSETALK_COMPILE asks for torch.compile (default off).
-
-    Worth turning on for anything longer than a quick preview: now that the VAE
-    encoder/decoder are compiled too (they are ~88% of the pass, not the UNet)
-    the end-to-end win is ~1.5x at batch 4 and ~1.6x at batch 8, up from the ~2%
-    it gave when only the UNet was compiled.
-
-    Still off by default because of load time, which is all warmup: ~70 s once
-    Inductor's on-disk cache is populated, but several minutes on the very first
-    run for a given GPU and shape set.
+    Worth turning on for anything longer than a quick preview: compiling the VAE
+    encoder/decoder as well as the UNet gives ~1.5× at batch 4 / ~1.6× at batch 8
+    in isolation (~1.3× apply time in-app). Load cost is all warmup: ~70 s once
+    Inductor's on-disk cache is populated, several minutes on the first run ever.
     """
-    return _env_flag("VISOFUSION_MUSETALK_COMPILE", False)
+    raw = os.environ.get("VISOFUSION_MUSETALK_COMPILE")
+    if raw is not None and str(raw).strip():
+        return str(raw).strip().lower() in ("1", "true", "yes", "on")
+    if control is not None:
+        return bool(control.get("MuseTalkCompileToggle", False))
+    return False
 
 
 def musetalk_perf_enabled() -> bool:
@@ -341,11 +341,17 @@ class MuseTalkEngine:
                 "WAV/MP3. Lip-sync is skipped until then."
             )
 
-    def load(self, device: str | None = None, use_float16: bool = True) -> bool:
+    def load(
+        self,
+        device: str | None = None,
+        use_float16: bool = True,
+        compile: bool | None = None,
+    ) -> bool:
         """Load UNet + VAE + Whisper. Returns False if assets/deps missing.
 
-        Activation is controlled by the UI toggle; the pytorch-extras env var is
-        only an optional override and is not required here.
+        ``compile`` overrides the env/UI resolution when not None (ModelsProcessor
+        passes the resolved Settings toggle). Activation itself is still gated by
+        the Enable MuseTalk Lip-Sync toggle.
         """
         if not musetalk_assets_ready():
             self._last_error = (
@@ -372,6 +378,9 @@ class MuseTalkEngine:
                     device = "cuda" if torch.cuda.is_available() else "cpu"
                 self._device = torch.device(device)
                 use_fp16 = bool(use_float16) and self._device.type == "cuda"
+                do_compile = (
+                    musetalk_compile_enabled() if compile is None else bool(compile)
+                )
 
                 t0 = time.perf_counter()
                 self._vae = MuseTalkVAE(
@@ -398,7 +407,7 @@ class MuseTalkEngine:
                 self._timesteps = torch.tensor([0], device=self._device)
                 if self._device.type == "cuda":
                     self._prefer_channels_last()
-                    if musetalk_compile_enabled():
+                    if do_compile:
                         self._try_torch_compile()
                 self._probe = self._build_probe()
                 self._start_batcher()

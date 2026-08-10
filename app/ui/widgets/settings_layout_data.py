@@ -1465,6 +1465,20 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "exec_funtion_args": [],
         },
     },
+    "MuseTalk": {
+        "MuseTalkCompileToggle": {
+            "level": 1,
+            "label": "MuseTalk: torch.compile (faster, slower load)",
+            "default": False,
+            "help": "Compile MuseTalk's UNet + VAE with torch.compile for ~1.3× "
+            "faster lip-sync preview. First enable takes several minutes of "
+            "warmup; later loads ~1 minute once the Inductor cache is warm. "
+            "Only applies when MuseTalk Lip-Sync is enabled; toggling reloads "
+            "the model. Override with VISOFUSION_MUSETALK_COMPILE=0/1.",
+            "exec_function": control_actions.handle_musetalk_compile_change,
+            "exec_function_args": ["MuseTalkCompileToggle"],
+        },
+    },
     "Misc": {
         "KeepModelsAliveToggle": {
             "level": 1,

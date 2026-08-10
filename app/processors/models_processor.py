@@ -2675,14 +2675,22 @@ class ModelsProcessor(QtCore.QObject):
         with self.model_lock:
             self.perform_recast.unload_models()
 
-    def ensure_musetalk_loaded(self) -> bool:
+    def ensure_musetalk_loaded(self, compile: bool | None = None) -> bool:
         """Lazy-load MuseTalk engine. Activation is controlled by the UI toggle.
 
-        Returns False if optional deps/weights are missing.
+        ``compile`` is the resolved torch.compile preference. When omitted, it is
+        taken from ``VISOFUSION_MUSETALK_COMPILE`` (if set) else Settings →
+        ``MuseTalkCompileToggle``. Returns False if optional deps/weights are missing.
         """
         try:
-            from app.processors.pytorch_extras.musetalk import MuseTalkEngine
+            from app.processors.pytorch_extras.musetalk import (
+                MuseTalkEngine,
+                musetalk_compile_enabled,
+            )
 
+            if compile is None:
+                control = getattr(self.main_window, "control", None) or {}
+                compile = musetalk_compile_enabled(control)
             if self.musetalk_engine is None:
                 self.musetalk_engine = MuseTalkEngine()
                 # MuseTalk infers on its own thread, so it must stand still while
@@ -2692,7 +2700,11 @@ class ModelsProcessor(QtCore.QObject):
             if self.musetalk_engine.is_loaded:
                 return True
             device = "cuda" if str(self.device).startswith("cuda") else "cpu"
-            return bool(self.musetalk_engine.load(device=device, use_float16=True))
+            return bool(
+                self.musetalk_engine.load(
+                    device=device, use_float16=True, compile=bool(compile)
+                )
+            )
         except Exception as e:
             print(f"[WARN] ensure_musetalk_loaded failed: {e}")
             return False

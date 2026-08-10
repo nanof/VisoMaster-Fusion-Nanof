@@ -1836,6 +1836,42 @@ def handle_musetalk_toggle_change(
         print(f"[WARN] MuseTalk toggle handler failed: {e}")
 
 
+def handle_musetalk_compile_change(
+    main_window: "MainWindow", new_value: Any = None, *_, **__
+) -> None:
+    """Apply Settings → MuseTalk torch.compile; reload if lip-sync is already on.
+
+    ``update_control`` runs this *before* writing the new value into
+    ``main_window.control``, so the desired state comes from ``new_value`` and is
+    passed explicitly into ``ensure_musetalk_loaded(compile=...)``. Env
+    ``VISOFUSION_MUSETALK_COMPILE`` still wins when set.
+    """
+    try:
+        from app.processors.pytorch_extras.musetalk import musetalk_compile_enabled
+
+        want_ui = (
+            bool(main_window.control.get("MuseTalkCompileToggle", False))
+            if new_value is None
+            else bool(new_value)
+        )
+        want = musetalk_compile_enabled({"MuseTalkCompileToggle": want_ui})
+        if not bool(main_window.control.get("MuseTalkEnableToggle", False)):
+            return
+        mp = main_window.models_processor
+        engine = getattr(mp, "musetalk_engine", None)
+        if engine is not None and getattr(engine, "is_loaded", False):
+            if bool(getattr(engine, "_compiled", False)) == want:
+                return
+            print("[INFO] MuseTalk: reloading to apply torch.compile setting...")
+            mp.unload_musetalk()
+        if not mp.ensure_musetalk_loaded(compile=want):
+            print("[WARN] MuseTalk could not load after compile toggle.")
+            return
+        _prepare_musetalk_audio(main_window)
+    except Exception as e:
+        print(f"[WARN] MuseTalk compile toggle failed: {e}")
+
+
 def handle_musetalk_audio_change(
     main_window: "MainWindow", new_value: Any = None, control_name: str = "", *_, **__
 ) -> None:

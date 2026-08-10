@@ -39,6 +39,7 @@ Mark items with `[x]` / `[ ]` and add short notes under each section when status
 - [x] Mouth width / height / centre
 - [x] Restore mouth (model + strength) on the 256px crop
 - [x] Required global settings adjustment on enable (68 landmarks, etc.)
+- [x] Settings → MuseTalk **torch.compile** toggle (`MuseTalkCompileToggle`; env override)
 
 
 
@@ -185,13 +186,13 @@ Keep MuseTalk as the **preview / realtime** path. Explore higher-fidelity or nex
 | Skip download | `--skip-musetalk` or `VISOFUSION_SKIP_MUSETALK=1`               |
 | Debug         | `VISOFUSION_MUSETALK_DEBUG=1`                                   |
 | Batch         | `VISOFUSION_MUSETALK_BATCH` (default 8)                         |
-| Compile       | `VISOFUSION_MUSETALK_COMPILE` (default **off**; UNet + VAE encoder/decoder torch.compile, opt-in). ~1.5× at b4 / ~1.6× at b8; costs ~70 s of load (warm cache), several minutes on the first run ever. |
+| Compile       | Settings → MuseTalk → **torch.compile** toggle, or `VISOFUSION_MUSETALK_COMPILE` (env wins when set; default **off**). UNet + VAE encoder/decoder. ~1.5× at b4 / ~1.6× at b8 isolated; ~1.3× apply in-app. Load ~70 s warm cache, several minutes first run. |
 | Perf          | `VISOFUSION_MUSETALK_PERF=1` → `[MUSETALK-PERF]` crop/batch_wait/encode/unet/decode/parse/… |
 | Bench         | `python -m app.processors.pytorch_extras.musetalk.bench_musetalk` |
 | Load timing   | `python scripts/time_musetalk_load.py`                          |
 | Code          | `app/processors/pytorch_extras/musetalk/`                       |
 | Frame hook    | `frame_worker.py` (before / after / hybrid vs swap)             |
-| Controls      | `common_layout_data.py` + `control_actions.py`                  |
+| Controls      | `common_layout_data.py` + Settings → MuseTalk (`MuseTalkCompileToggle`) + `control_actions.py` |
 
 
 ---
@@ -210,6 +211,7 @@ Keep MuseTalk as the **preview / realtime** path. Explore higher-fidelity or nex
 | 2026-08-10 | Compile ships **off** by default: UNet-only win, VAE dominates (~84% at b8); pad to fixed batch specs; portable Python Include/libs + MSVC PATH for opt-in compile; load 6.3 s off vs 34.9 s on. Next FPS: VAE / in-app `PERF_STAGES`. |
 | 2026-08-10 | **VAE encoder/decoder compiled** (the UNet is constant ~55 ms; the VAE was 88% of the pass and scales linearly). Padding moved before the encode. End to end **1.5× at b4 / 1.6× at b8**, b8 no longer stalls. `dynamic=True` measured and rejected (recompiles at b1/b2 with 76–86 s stalls). Still opt-in: first-ever compile ~477 s, ~70 s thereafter. |
 | 2026-08-10 | In-app confirm (n=768): apply **530→411 ms (~1.29×)**, infer **302→212 (~1.43×)** with compile on; first portable load ~319 s. Next: BiSeNet GPU contention. |
+| 2026-08-10 | Settings → MuseTalk **torch.compile** toggle (`MuseTalkCompileToggle`); env still overrides when set. |
 
 
 

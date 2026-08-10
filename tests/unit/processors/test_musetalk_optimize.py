@@ -32,6 +32,24 @@ def test_compile_flag_defaults_off(raw, expected, monkeypatch):
     assert musetalk_compile_enabled() is expected
 
 
+def test_compile_flag_reads_ui_toggle_when_env_unset(monkeypatch):
+    monkeypatch.delenv("VISOFUSION_MUSETALK_COMPILE", raising=False)
+    assert musetalk_compile_enabled({"MuseTalkCompileToggle": True}) is True
+    assert musetalk_compile_enabled({"MuseTalkCompileToggle": False}) is False
+
+
+def test_compile_env_overrides_ui_toggle(monkeypatch):
+    monkeypatch.setenv("VISOFUSION_MUSETALK_COMPILE", "0")
+    assert musetalk_compile_enabled({"MuseTalkCompileToggle": True}) is False
+    monkeypatch.setenv("VISOFUSION_MUSETALK_COMPILE", "1")
+    assert musetalk_compile_enabled({"MuseTalkCompileToggle": False}) is True
+
+
+def test_compile_empty_env_falls_through_to_ui(monkeypatch):
+    monkeypatch.setenv("VISOFUSION_MUSETALK_COMPILE", "")
+    assert musetalk_compile_enabled({"MuseTalkCompileToggle": True}) is True
+
+
 @pytest.mark.parametrize(
     "raw, expected",
     [
