@@ -757,19 +757,19 @@ musetalk_assets_list: list = [
     {
         "model_name": "MuseTalkV15-Config",
         "local_path": str(models_dir / "musetalk" / "musetalkV15" / "musetalk.json"),
-        "hash": "",
+        "hash": "5b6923aee04d71692e0e9846c471e0a4ea07a4f686d39545e472bd4ba17e1b47",
         "url": f"{_hf_mt}/musetalkV15/musetalk.json",
     },
     {
         "model_name": "MuseTalk-SDVAE-Config",
         "local_path": str(models_dir / "musetalk" / "sd-vae" / "config.json"),
-        "hash": "",
+        "hash": "92d3dfb746fca211a2c9e019e285f8597412211728dce3c5bcf4eda0f2d62e7e",
         "url": f"{_hf_vae}/config.json",
     },
     {
         "model_name": "MuseTalk-Whisper-Config",
         "local_path": str(models_dir / "musetalk" / "whisper" / "config.json"),
-        "hash": "",
+        "hash": "ffdccec4f3211f4c63310f2b7098f309fe70f3952cedc5e4d11e43f5b2379b98",
         "url": f"{_hf_wh}/config.json",
     },
     {
@@ -777,13 +777,13 @@ musetalk_assets_list: list = [
         "local_path": str(
             models_dir / "musetalk" / "whisper" / "preprocessor_config.json"
         ),
-        "hash": "",
+        "hash": "9b5cd03a36fbb8a627c64d98a5b5b126ead95a77720723944487311f0110b666",
         "url": f"{_hf_wh}/preprocessor_config.json",
     },
     {
         "model_name": "MuseTalk-Whisper-Weights",
         "local_path": str(models_dir / "musetalk" / "whisper" / "pytorch_model.bin"),
-        "hash": "",
+        "hash": "9607f98a2b22d9e229ae43c52ecea79dcede9e0c5cfae67e8da6eda86d8aac1d",
         "url": f"{_hf_wh}/pytorch_model.bin",
     },
     {
@@ -791,13 +791,13 @@ musetalk_assets_list: list = [
         "local_path": str(
             models_dir / "musetalk" / "sd-vae" / "diffusion_pytorch_model.bin"
         ),
-        "hash": "",
+        "hash": "1b4889b6b1d4ce7ae320a02dedaeff1780ad77d415ea0d744b476155c6377ddc",
         "url": f"{_hf_vae}/diffusion_pytorch_model.bin",
     },
     {
         "model_name": "MuseTalkV15-UNet",
         "local_path": str(models_dir / "musetalk" / "musetalkV15" / "unet.pth"),
-        "hash": "",
+        "hash": "7ebf6c98c181e20838e4c0054e96e944ac60d5d692cc01db42839fe11b787007",
         "url": f"{_hf_mt}/musetalkV15/unet.pth",
     },
 ]

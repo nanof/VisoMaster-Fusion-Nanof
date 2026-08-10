@@ -155,7 +155,7 @@ Mark items with `[x]` / `[ ]` and add short notes under each section when status
 
 ### Robustness
 
-- [ ] Fill SHA256 hashes in `musetalk_assets_list` (currently `hash: ""`)
+- [x] Fill SHA256 hashes in `musetalk_assets_list` (currently `hash: ""`)
 - [ ] Seek / scrub with lip-sync on (correct chunks, no stalls)
 - [ ] Long recordings: audio memory, batcher, timeouts
 - [ ] VR / non-standard layouts behaviour (if applicable)
