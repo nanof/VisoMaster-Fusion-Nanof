@@ -1298,7 +1298,9 @@ COMMON_LAYOUT_DATA: Any = {
                 "word, which syncs harder but normalises the mouth toward the model's "
                 "own prior. Hybrid: does 'before' for identity, then a light second "
                 "pass on the mouth only to bring back the sharpness the swap flattens "
-                "— costs a second inference per frame. VR180 always uses 'After'."
+                "— costs a second inference per frame. VR180 always lip-syncs each "
+                "perspective crop after the swap (before stitching); Before/Hybrid "
+                "do not apply there."
             ),
         },
         "MuseTalkHybridAfterStrengthSlider": {

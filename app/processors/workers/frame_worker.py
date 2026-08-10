@@ -1568,18 +1568,23 @@ class FrameWorker(threading.Thread):
             self._trace_musetalk_hook(control, final_bgr)
         if self._musetalk_runs_after_swap(control):
             # Hybrid only makes sense once the pre-swap pass has placed the mouth, so
-            # partial alpha re-sharpens the same pose. VR never runs that pass, so
-            # there it degrades to a full after-pass rather than ghosting.
-            hybrid_after = self._musetalk_order(
-                control
-            ) == "hybrid" and not control.get("VR180ModeEnableToggle", False)
+            # partial alpha re-sharpens the same pose.
+            hybrid_after = self._musetalk_order(control) == "hybrid"
             final_bgr = self._musetalk_apply_bgr(
                 final_bgr, control, hybrid_after=hybrid_after
             )
         return final_bgr
 
     def _musetalk_apply_bgr(
-        self, bgr: np.ndarray, control: dict, *, hybrid_after: bool = False
+        self,
+        bgr: np.ndarray,
+        control: dict,
+        *,
+        hybrid_after: bool = False,
+        bboxes=None,
+        landmarks=None,
+        kpss_5=None,
+        face_index: int | None = None,
     ) -> np.ndarray:
         """Run lip-sync over a BGR frame. Never raises; returns it unchanged on any
         failure, so a broken engine costs the mouth and nothing else.
@@ -1588,6 +1593,10 @@ class FrameWorker(threading.Thread):
         re-sharpens the mouth the pre-swap pass already placed, at a partial alpha,
         so it needs face parsing to stay confined to the mouth. Without parsing it
         would repaint the whole jaw and undo the swap's identity, so it stands down.
+
+        Optional ``bboxes`` / ``landmarks`` / ``kpss_5`` / ``face_index`` override the
+        worker's frame-level detections. VR180 uses that to drive each perspective
+        crop with crop-local geometry (equirect boxes would be wrong).
         """
         try:
             if hybrid_after and not self._musetalk_mouth_only_available(control):
@@ -1608,7 +1617,10 @@ class FrameWorker(threading.Thread):
             if not engine.is_ready_for_frame():
                 engine.log_not_ready_once()
                 return bgr
-            mt_dense, mt_five = self._musetalk_landmarks()
+            if landmarks is None and kpss_5 is None:
+                mt_dense, mt_five = self._musetalk_landmarks()
+            else:
+                mt_dense, mt_five = landmarks, kpss_5
             # Preview keeps a soft timeout so a stuck batcher cannot freeze scrubbing.
             # Long recordings / segment export must wait: dropping lip-sync mid-frame
             # leaves permanent holes in the file, while stop_event still cancels fast.
@@ -1625,7 +1637,11 @@ class FrameWorker(threading.Thread):
                 "extra_margin": int(
                     control.get("MuseTalkExtraMarginSlider", 10) or 10
                 ),
-                "face_index": int(control.get("MuseTalkFaceIndexSlider", 0) or 0),
+                "face_index": int(
+                    face_index
+                    if face_index is not None
+                    else (control.get("MuseTalkFaceIndexSlider", 0) or 0)
+                ),
                 "mask_options": self._musetalk_mask_options(
                     control, hybrid_after=hybrid_after
                 ),
@@ -1639,10 +1655,13 @@ class FrameWorker(threading.Thread):
             }
             if recording:
                 apply_kwargs["request_timeout_s"] = None
+            use_bboxes = (
+                bboxes if bboxes is not None else self._musetalk_bboxes()
+            )
             return engine.apply_frame_bgr(
                 bgr,
                 self.frame_number,
-                self._musetalk_bboxes(),
+                use_bboxes,
                 **apply_kwargs,
             )
         except Exception as e_mt:
@@ -1650,6 +1669,60 @@ class FrameWorker(threading.Thread):
                 print(f"[WARN] MuseTalk frame hook failed: {e_mt}")
                 self._musetalk_frame_err_logged = True
             return bgr
+
+    def _musetalk_apply_vr_crop(
+        self,
+        crop_chw_rgb_uint8: torch.Tensor,
+        control: dict,
+        *,
+        kps_5_on_crop: np.ndarray | None,
+        kps_all_on_crop: np.ndarray | None,
+    ) -> torch.Tensor:
+        """Lip-sync one VR180 perspective crop (after swap, before P2E stitch).
+
+        MuseTalk is trained on perspective faces. Driving it from equirectangular
+        boxes paints nothing useful (and historically skipped with ``no_bbox``
+        because the feeder never detects under VR180). Each eye's E2P crop already
+        has landmarks in crop space — the same geometry swap uses — so lip-sync
+        here, then stitch.
+        """
+        if not self._musetalk_should_apply(control):
+            return crop_chw_rgb_uint8
+        try:
+            h = int(crop_chw_rgb_uint8.shape[-2])
+            w = int(crop_chw_rgb_uint8.shape[-1])
+            # Same 2.5% inset the VR landmark path uses as a dummy detector box.
+            pad = max(1, int(min(h, w) * 0.025))
+            bbox = np.array(
+                [pad, pad, w - pad, h - pad], dtype=np.float32
+            )
+            dense = None
+            if kps_all_on_crop is not None and len(kps_all_on_crop) > 0:
+                dense = [np.asarray(kps_all_on_crop)]
+            five = None
+            if kps_5_on_crop is not None and len(kps_5_on_crop) > 0:
+                five = [np.asarray(kps_5_on_crop)]
+            rgb = self._hwc_rgb_uint8_from_chw_tensor(crop_chw_rgb_uint8)
+            bgr = np.ascontiguousarray(rgb[:, :, ::-1])
+            out = self._musetalk_apply_bgr(
+                bgr,
+                control,
+                bboxes=[bbox],
+                landmarks=dense,
+                kpss_5=five,
+                face_index=0,
+            )
+            if out is bgr or not isinstance(out, np.ndarray) or out.shape != bgr.shape:
+                return crop_chw_rgb_uint8
+            return rgb_hwc_uint8_numpy_to_torch_chw(
+                np.ascontiguousarray(out[:, :, ::-1]),
+                crop_chw_rgb_uint8.device,
+            )
+        except Exception as e:
+            if not getattr(self, "_musetalk_vr_err_logged", False):
+                print(f"[WARN] MuseTalk VR crop lip-sync failed, skipping it: {e}")
+                self._musetalk_vr_err_logged = True
+            return crop_chw_rgb_uint8
 
     def _musetalk_apply_before_swap(
         self, img_chw_rgb_uint8: torch.Tensor, control: dict
@@ -1717,15 +1790,17 @@ class FrameWorker(threading.Thread):
         )
 
     def _musetalk_runs_after_swap(self, control: dict) -> bool:
-        """Whether the post-swap hook owns this frame.
+        """Whether the equirect/full-frame post-swap hook owns this frame.
 
-        VR180 has its own path that never reaches the pre-swap hook, so it keeps
-        the old order regardless of the setting rather than losing lip-sync.
+        VR180 applies lip-sync on each perspective crop inside
+        ``_process_frame_vr180`` (after swap, before P2E stitch). Running again
+        here on the stitched equirect would lack crop-local landmarks and either
+        skip (``no_bbox``) or paint a geometrically wrong mouth.
         """
         if not self._musetalk_should_apply(control):
             return False
         if control.get("VR180ModeEnableToggle", False):
-            return True
+            return False
         return self._musetalk_order(control) in ("after", "hybrid")
 
     @staticmethod
@@ -2969,6 +3044,15 @@ class FrameWorker(threading.Thread):
             else:
                 processed_crop_for_stitching = item_data["face_crop_tensor"]
                 vr_crop_swap_mask = None
+
+            # Lip-sync on the perspective crop (not the stitched equirect). Same
+            # landmarks the swap used; order is always after-swap / before-stitch.
+            processed_crop_for_stitching = self._musetalk_apply_vr_crop(
+                processed_crop_for_stitching,
+                control,
+                kps_5_on_crop=item_data["kps_on_crop"],
+                kps_all_on_crop=item_data["kps_all_on_crop"],
+            )
 
             if compare_mode_active_vr and original_crop_for_compare is not None:
                 vr_compare_crops.append(

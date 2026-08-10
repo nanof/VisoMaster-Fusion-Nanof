@@ -117,15 +117,104 @@ def test_hybrid_after_needs_both_mouth_toggles() -> None:
     )
 
 
-def test_vr180_keeps_the_old_order_rather_than_losing_lip_sync() -> None:
-    """The VR path never reaches the pre-swap hook, so it must own the frame."""
+def test_vr180_does_not_use_the_equirect_post_swap_hook() -> None:
+    """VR lip-sync runs per perspective crop; the equirect hook would lack geometry."""
     worker = _worker()
     control = {
         **ON,
         "MuseTalkPipelineOrderSelection": "Before the swap",
         "VR180ModeEnableToggle": True,
     }
-    assert worker._musetalk_runs_after_swap(control)
+    assert not worker._musetalk_runs_after_swap(control)
+    control_after = {
+        **ON,
+        "MuseTalkPipelineOrderSelection": "After the swap",
+        "VR180ModeEnableToggle": True,
+    }
+    assert not worker._musetalk_runs_after_swap(control_after)
+
+
+def test_vr_crop_lip_sync_passes_crop_local_geometry(monkeypatch) -> None:
+    """Perspective crops must not fall back to empty equirect detections."""
+    seen: dict[str, object] = {}
+
+    def fake_apply(
+        bgr,
+        control,
+        *,
+        hybrid_after=False,
+        bboxes=None,
+        landmarks=None,
+        kpss_5=None,
+        face_index=None,
+    ):
+        seen["shape"] = bgr.shape
+        seen["bboxes"] = bboxes
+        seen["landmarks"] = landmarks
+        seen["kpss_5"] = kpss_5
+        seen["face_index"] = face_index
+        out = bgr.copy()
+        out[:, :] = (1, 2, 3)
+        return out
+
+    worker = _worker()
+    monkeypatch.setattr(worker, "_musetalk_apply_bgr", fake_apply, raising=False)
+    monkeypatch.setattr(
+        worker,
+        "_hwc_rgb_uint8_from_chw_tensor",
+        lambda t: t.permute(1, 2, 0).cpu().numpy(),
+        raising=False,
+    )
+
+    crop = torch.zeros((3, 64, 64), dtype=torch.uint8)
+    k5 = np.array(
+        [[20.0, 20.0], [44.0, 20.0], [32.0, 32.0], [24.0, 44.0], [40.0, 44.0]],
+        dtype=np.float32,
+    )
+    k68 = np.zeros((68, 2), dtype=np.float32)
+    k68[:, 0] = np.linspace(16, 48, 68)
+    k68[:, 1] = 32.0
+    out = worker._musetalk_apply_vr_crop(
+        crop, {**ON}, kps_5_on_crop=k5, kps_all_on_crop=k68
+    )
+    assert seen["face_index"] == 0
+    assert seen["shape"] == (64, 64, 3)
+    assert len(seen["bboxes"]) == 1
+    bb = np.asarray(seen["bboxes"][0])
+    assert bb[0] >= 1 and bb[2] <= 63
+    assert len(seen["landmarks"]) == 1
+    assert np.asarray(seen["landmarks"][0]).shape == (68, 2)
+    assert len(seen["kpss_5"]) == 1
+    assert out.shape == (3, 64, 64)
+    assert tuple(int(v) for v in out[:, 0, 0]) == (3, 2, 1)
+
+
+def test_vr_crop_lip_sync_stands_aside_when_disabled(monkeypatch) -> None:
+    worker = _worker()
+
+    def boom(*_a, **_k):
+        raise AssertionError("must not run")
+
+    monkeypatch.setattr(worker, "_musetalk_apply_bgr", boom, raising=False)
+    crop = torch.zeros((3, 16, 16), dtype=torch.uint8)
+    assert (
+        worker._musetalk_apply_vr_crop(
+            crop,
+            {"MuseTalkEnableToggle": False},
+            kps_5_on_crop=None,
+            kps_all_on_crop=None,
+        )
+        is crop
+    )
+    assert (
+        worker._musetalk_apply_vr_crop(
+            crop,
+            {**ON, "MuseTalkBypassToggle": True},
+            kps_5_on_crop=None,
+            kps_all_on_crop=None,
+        )
+        is crop
+    )
 
 
 def test_neither_stage_runs_when_lip_sync_is_off_or_bypassed() -> None:
