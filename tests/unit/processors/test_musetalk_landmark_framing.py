@@ -11,8 +11,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from app.processors.dmdnet_landmarks import landmarks106_to_68_xy
 from app.processors.pytorch_extras.musetalk.framing import (
     IBUG68_NOSE_BRIDGE,
+    as_ibug68,
     landmark_crop_bbox,
 )
 
@@ -91,6 +93,59 @@ def test_the_bottom_is_the_chin_plus_the_margin():
     land = _face_68()
     _, _, _, y2 = landmark_crop_bbox(land, None, FRAME, extra_margin=10)
     assert y2 == pytest.approx(float(land[:, 1].max()) + 10, abs=1.0)
+
+
+def _face_106(cx: float = 640, cy: float = 360) -> np.ndarray:
+    """106 distinguishable points: jaw arc 0..32, the rest spread over the face.
+
+    The values only have to be unique and plausibly placed; what is under test is
+    that the framing re-indexes them the same way the shared map does.
+    """
+    pts = np.zeros((106, 2), dtype=np.float32)
+    for i in range(33):
+        t = (i - 16) / 16.0
+        pts[i] = (cx + t * 110, cy + 60 - 34 * t * t)
+    for i in range(33, 106):
+        pts[i] = (cx - 60 + (i % 13) * 10, cy - 70 + ((i - 33) % 11) * 9)
+    return pts
+
+
+def test_106_landmarks_are_reindexed_to_the_68_scheme():
+    pts = _face_106()
+    mapped = as_ibug68(pts)
+    assert mapped.shape == (68, 2)
+    np.testing.assert_allclose(mapped, landmarks106_to_68_xy(pts))
+
+
+def test_106_landmarks_frame_the_same_window_as_their_68_mapping():
+    """The cheap detector must land on upstream's window, not an approximation."""
+    pts = _face_106()
+    assert landmark_crop_bbox(pts, None, FRAME) == _upstream(landmarks106_to_68_xy(pts))
+
+
+def test_106_landmarks_use_the_exact_bridge_not_the_five_point_guess():
+    """A 5-point set pointing elsewhere must not move the window."""
+    pts = _face_106()
+    misleading_kps_5 = np.array(
+        [
+            [500.0, 100.0],
+            [560.0, 100.0],
+            [530.0, 300.0],
+            [510.0, 340.0],
+            [550.0, 340.0],
+        ],
+        dtype=np.float32,
+    )
+    assert landmark_crop_bbox(pts, misleading_kps_5, FRAME) == landmark_crop_bbox(
+        pts, None, FRAME
+    )
+
+
+def test_other_schemes_are_left_untouched_by_the_reindexing():
+    land = _face_68()
+    assert as_ibug68(land) is land
+    dense = np.repeat(land, 3, axis=0)
+    assert as_ibug68(dense) is dense
 
 
 def test_a_dense_scheme_without_a_bridge_index_uses_the_five_point_set():

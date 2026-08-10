@@ -145,7 +145,13 @@ Mark items with `[x]` / `[ ]` and add short notes under each section when status
   - **App path after fix** (`run_detect_landmark`, median ms / face): detect 10.3 · lm68 36.2 · **lm203 9.9** · 203→68 46.3 · detect+68 37.0 · detect+203 16.8 (was 810 / 1188 / 985 for 203 paths).
   - Note: with UI provider **TensorRT-Engine**, FaceLandmark203 usually builds TRT and never hits the CUDA-EP Fallback path; the HEURISTIC fix is the safety net whenever a model falls back to CUDA EP (GPEN, TRT miss, or provider=CUDA).
   - 68 remains slower by design (2dfan4 heatmaps @ 256² vs ConvNeXt/106 regression). MuseTalk still needs iBUG-68 for exact crop.
-  - Remaining levers: temporal subsample of dense landmarks; cable `SequentialDetector` target-only densos; Custom CUDA-graph path for 203; optional fan_68_5 / 203→68 map to avoid 2dfan4 for MuseTalk.
+  - Remaining levers: temporal subsample of dense landmarks; cable `SequentialDetector` target-only densos; Custom CUDA-graph path for 203.
+- [x] Derive MuseTalk's 68 from the cheap 106 detector — **`MuseTalkFastLandmarksToggle` (default off)**
+  - `framing.as_ibug68()` re-indexes 106 → iBUG-68 with the map already shared with DMDNet (`dmdnet_landmarks.landmarks106_to_68_xy`), so the crop keeps the **exact** bridge (index 29) instead of the interpolated one non-68 schemes fall back to.
+  - When the toggle is on, enabling MuseTalk forces `LandmarkDetectModelSelection="106"` instead of `"68"` (`musetalk_required_control_settings`).
+  - **App path, per face (RTX 5070 Ti, CUDA EP):** exact 68 (2dfan4) **34.5 ms** → fast 106 + reindex **5.1 ms** = **6.8×**, saves ~29.5 ms/face.
+  - Trade-off: 106 samples the jaw contour more coarsely than 2dfan4, so the window can move a pixel or two; the bridge, the chin and the jaw-to-jaw width are unchanged. Tests in `test_musetalk_landmark_framing.py` assert 106 frames the same window as its own 68 mapping and ignores a misleading kps_5.
+  - Not chosen: FaceFusion's `fan_68_5` (5→68) — cheaper still, but the chin/jaw it invents does not follow an open mouth, which is exactly what lip-sync moves.
 
 ### Robustness
 

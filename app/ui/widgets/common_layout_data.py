@@ -1476,6 +1476,24 @@ COMMON_LAYOUT_DATA: Any = {
                 "mouth. Turn this off to fall back to the detector box."
             ),
         },
+        "MuseTalkFastLandmarksToggle": {
+            "level": 2,
+            "label": "Fast landmarks (106 instead of 68)",
+            "default": False,
+            "data_type": "control",
+            "parentToggle": "MuseTalkEnableToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "Detect the face with the 106-point model instead of the 68-point "
+                "one and re-index it to the 68-point scheme MuseTalk crops with. "
+                "The 106 model costs a fraction of the 68 one (measured 1.4 ms vs "
+                "26 ms per face), and the crop still uses the exact nose bridge, "
+                "but the jaw contour is sampled more coarsely so the window can "
+                "shift by a pixel or two. Turn off for the exact 68-point crop."
+            ),
+            "exec_function": control_actions.handle_musetalk_fast_landmarks_change,
+            "exec_function_args": ["MuseTalkFastLandmarksToggle"],
+        },
         "MuseTalkFaceParsingToggle": {
             "level": 2,
             "label": "Segment the face to blend",

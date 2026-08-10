@@ -1802,6 +1802,21 @@ MUSETALK_REQUIRED_CONTROL_SETTINGS = {
     "LandmarkDetectModelSelection": "68",
 }
 
+# The fast path: 106 costs a fraction of 2dfan4 (measured 1.4 ms vs 26 ms per
+# face on a 5070 Ti) and the framing re-indexes it to iBUG-68, so the crop keeps
+# the exact bridge instead of the interpolated one other schemes fall back to.
+MUSETALK_FAST_LANDMARK_CONTROL_SETTINGS = {
+    "LandmarkDetectToggle": True,
+    "LandmarkDetectModelSelection": "106",
+}
+
+
+def musetalk_required_control_settings(main_window: "MainWindow") -> dict:
+    """Which landmark scheme MuseTalk asks for, per the fast-landmarks toggle."""
+    if bool(main_window.control.get("MuseTalkFastLandmarksToggle", False)):
+        return dict(MUSETALK_FAST_LANDMARK_CONTROL_SETTINGS)
+    return dict(MUSETALK_REQUIRED_CONTROL_SETTINGS)
+
 
 def handle_musetalk_toggle_change(
     main_window: "MainWindow", new_value: Any = None, *_, **__
@@ -1827,13 +1842,41 @@ def handle_musetalk_toggle_change(
                 )
                 return
             apply_required_global_settings(
-                main_window, MUSETALK_REQUIRED_CONTROL_SETTINGS, "MuseTalk lip-sync"
+                main_window,
+                musetalk_required_control_settings(main_window),
+                "MuseTalk lip-sync",
             )
             _prepare_musetalk_audio(main_window)
         else:
             mp.unload_musetalk()
     except Exception as e:
         print(f"[WARN] MuseTalk toggle handler failed: {e}")
+
+
+def handle_musetalk_fast_landmarks_change(
+    main_window: "MainWindow", new_value: Any = None, *_, **__
+) -> None:
+    """Switch the forced landmark scheme between 106 (fast) and 68 (exact).
+
+    ``update_control`` runs exec functions before storing the new value, so the
+    desired state comes from ``new_value``.
+    """
+    try:
+        if not bool(main_window.control.get("MuseTalkEnableToggle", False)):
+            return
+        fast = (
+            bool(main_window.control.get("MuseTalkFastLandmarksToggle", False))
+            if new_value is None
+            else bool(new_value)
+        )
+        required = (
+            MUSETALK_FAST_LANDMARK_CONTROL_SETTINGS
+            if fast
+            else MUSETALK_REQUIRED_CONTROL_SETTINGS
+        )
+        apply_required_global_settings(main_window, dict(required), "MuseTalk lip-sync")
+    except Exception as e:
+        print(f"[WARN] MuseTalk fast-landmarks toggle failed: {e}")
 
 
 def handle_musetalk_compile_change(

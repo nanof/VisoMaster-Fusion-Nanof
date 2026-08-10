@@ -1850,8 +1850,9 @@ class FrameWorker(threading.Thread):
         """Dense landmarks and the 5-point set, for MuseTalk's crop convention.
 
         Prefer the primary feeder densos (``precomputed_kpss``) over ``kpss_203``:
-        MuseTalk forces UI mode 68 and ``landmark_crop_bbox`` needs exact iBUG-68
-        (nose bridge index 29). Preferring 203 when LP/editor also ran produced a
+        MuseTalk forces the UI to 68 (or 106 with fast landmarks, which the
+        framing re-indexes to 68) and ``landmark_crop_bbox`` needs the exact
+        iBUG-68 bridge. Preferring 203 when LP/editor also ran produced a
         203-point crop with an approximated bridge.
         """
         dense = self._first_non_empty(
@@ -4315,9 +4316,7 @@ class FrameWorker(threading.Thread):
                                 kps5_i,
                                 detect_mode="203",
                                 score=0.5,
-                                from_points=bool(
-                                    from_points and kps5_i is not None
-                                ),
+                                from_points=bool(from_points and kps5_i is not None),
                                 use_mean_eyes=use_mean_eyes,
                             )
                             if (
