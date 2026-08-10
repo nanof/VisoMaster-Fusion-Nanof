@@ -4,10 +4,12 @@ from collections import deque
 from functools import partial
 from typing import TYPE_CHECKING, Dict, Type
 from pathlib import Path
+import base64
 import sys
 import os
 import uuid
 import subprocess
+import threading
 import time
 import traceback
 import faulthandler
@@ -1593,20 +1595,126 @@ def set_up_list_widget_placeholder(
     list_widget.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
 
 
-def _open_existing_path_in_os_file_manager(path: str) -> None:
-    """Open an existing file or directory in the OS file manager."""
+# Reuses an already open Explorer window (Shell.Application) instead of spawning a
+# duplicate one: brings it to the front and selects the item when there is one.
+_EXPLORER_REVEAL_SCRIPT = """
+$ErrorActionPreference = 'SilentlyContinue'
+$targetDir = $env:VISOMASTER_REVEAL_DIR
+$targetItem = $env:VISOMASTER_REVEAL_ITEM
+if (-not $targetDir) { exit 1 }
+$targetDir = $targetDir.TrimEnd('\\')
+Add-Type -Namespace VisoMaster -Name Win32Window -MemberDefinition '
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+[DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+[DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool fAltTab);
+'
+$shell = New-Object -ComObject Shell.Application
+foreach ($window in $shell.Windows()) {
+    $folder = $null
+    try { $folder = $window.Document.Folder } catch { continue }
+    if (-not $folder) { continue }
+    $folderPath = $null
+    try { $folderPath = $folder.Self.Path } catch { continue }
+    if (-not $folderPath) { continue }
+    if ($folderPath.TrimEnd('\\') -ine $targetDir) { continue }
+    $handle = [IntPtr]$window.HWND
+    if ([VisoMaster.Win32Window]::IsIconic($handle)) {
+        [void][VisoMaster.Win32Window]::ShowWindow($handle, 9)
+    }
+    if (-not [VisoMaster.Win32Window]::SetForegroundWindow($handle)) {
+        [VisoMaster.Win32Window]::SwitchToThisWindow($handle, $true)
+    }
+    if ($targetItem) {
+        try {
+            $folderItem = $folder.ParseName($targetItem)
+            if ($folderItem) {
+                # SVSI_SELECT | SVSI_DESELECTOTHERS | SVSI_ENSUREVISIBLE | SVSI_FOCUSED
+                $window.Document.SelectItem($folderItem, 29)
+            }
+        } catch { }
+    }
+    exit 0
+}
+exit 1
+"""
+
+
+def _reveal_in_open_explorer_window(target_dir: str, item_name: str) -> bool:
+    """Focus an Explorer window already showing ``target_dir`` and select ``item_name``.
+
+    Returns ``True`` when such a window was found, so no new window is needed.
+    """
+    environment = os.environ.copy()
+    environment["VISOMASTER_REVEAL_DIR"] = target_dir
+    environment["VISOMASTER_REVEAL_ITEM"] = item_name
+    # -EncodedCommand avoids any command line quoting issue with the inline script.
+    encoded_script = base64.b64encode(
+        _EXPLORER_REVEAL_SCRIPT.encode("utf-16-le")
+    ).decode("ascii")
+    try:
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                encoded_script,
+            ],
+            capture_output=True,
+            timeout=10,
+            env=environment,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        return False
+    return result.returncode == 0
+
+
+def _reveal_in_windows_explorer(normalized_path: str) -> None:
+    """Show ``normalized_path`` in Explorer, reusing an open window when possible."""
+    is_file = os.path.isfile(normalized_path)
+    target_dir = os.path.dirname(normalized_path) if is_file else normalized_path
+    item_name = os.path.basename(normalized_path) if is_file else ""
+    if _reveal_in_open_explorer_window(target_dir, item_name):
+        return
+    arguments = ["/select,", normalized_path] if is_file else [normalized_path]
+    try:
+        subprocess.Popen(["explorer", *arguments])
+    except FileNotFoundError:
+        subprocess.Popen([r"C:\Windows\explorer.exe", *arguments])
+
+
+def _open_existing_path_in_os_file_manager(
+    path: str, select_file: str | None = None
+) -> None:
+    """Open an existing file or directory in the OS file manager.
+
+    ``select_file`` optionally points to a file that should be highlighted; when it
+    does not exist the containing directory is opened instead.
+    """
     if not isinstance(path, str) or not path or not os.path.exists(path):
         return
     normalized_path = os.path.normpath(os.path.abspath(path))
+    if isinstance(select_file, str) and select_file and os.path.isfile(select_file):
+        normalized_path = os.path.normpath(os.path.abspath(select_file))
     if sys.platform == "win32":
-        try:
-            subprocess.Popen(["explorer", normalized_path])
-        except FileNotFoundError:
-            subprocess.Popen([r"C:\Windows\explorer.exe", normalized_path])
+        # Inspecting/activating Explorer windows spawns PowerShell and takes a
+        # couple of seconds, so it must not run on the UI thread.
+        threading.Thread(
+            target=_reveal_in_windows_explorer,
+            args=(normalized_path,),
+            name="ExplorerReveal",
+            daemon=True,
+        ).start()
     elif sys.platform == "darwin":
-        subprocess.run(["open", "-R", path])
+        subprocess.run(["open", "-R", normalized_path])
     else:
-        directory = os.path.dirname(os.path.abspath(path))
+        directory = (
+            os.path.dirname(normalized_path)
+            if os.path.isfile(normalized_path)
+            else normalized_path
+        )
         subprocess.run(["xdg-open", directory])
 
 
@@ -1649,12 +1757,16 @@ def select_output_media_folder(main_window: "MainWindow"):
         )
 
 
-def open_output_media_folder(main_window: "MainWindow", folder_name: str | None = None):
+def open_output_media_folder(
+    main_window: "MainWindow",
+    folder_name: str | None = None,
+    select_file: str | None = None,
+):
     if not folder_name:
         configured_folder = main_window.control.get("OutputMediaFolder")
         folder_name = configured_folder if isinstance(configured_folder, str) else None
     if isinstance(folder_name, str) and folder_name:
-        _open_existing_path_in_os_file_manager(folder_name)
+        _open_existing_path_in_os_file_manager(folder_name, select_file=select_file)
 
 
 def show_shortcuts(main_window: "MainWindow"):

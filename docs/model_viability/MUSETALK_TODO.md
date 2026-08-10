@@ -81,7 +81,7 @@ Mark items with `[x]` / `[ ]` and add short notes under each section when status
 - [ ] Multi-face behaviour (`MuseTalkFaceIndexSlider`) and small/distant faces
 - [ ] Typical VRAM / FPS profile (note hardware + recommended batch size) — **partial:** RTX 5070 Ti ≈ 1.8 GiB; eager ~10 / ~28 FPS (b1/b8); compile ~14.4 / ~28.4 FPS. Recommend batch 8 when multi-worker; compile is off by default because it only helps at batch 1.
 - [ ] Decide whether crop needs temporal stabilisation (landmark jitter)
-- [ ] After finish recording try to not open another winfow explorer if there is one opened in the same folder 
+- [x] After finish recording try to not open another winfow explorer if there is one opened in the same folder 
 
 ### Optimizations
 

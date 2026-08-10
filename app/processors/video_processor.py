@@ -7856,6 +7856,7 @@ class VideoProcessor(QObject):
             )
 
             # 8. Audio Merging
+            recorded_output_path = ""
             if self.play_end_time <= self.play_start_time:
                 print("[WARN] Recording produced no frames. Skipping audio merge.")
                 if self.temp_file and os.path.exists(self.temp_file):
@@ -7919,6 +7920,7 @@ class VideoProcessor(QObject):
                         f"[WARN] Output marked as incomplete due to excessive read errors: {final_file_path}"
                     )
 
+                recorded_output_path = final_file_path
                 output_dir = os.path.dirname(final_file_path)
                 if output_dir and not os.path.exists(output_dir):
                     os.makedirs(output_dir, exist_ok=True)
@@ -8155,7 +8157,9 @@ class VideoProcessor(QObject):
                 and not self.triggered_by_job_manager
             ):
                 try:
-                    list_view_actions.open_output_media_folder(self.main_window)
+                    list_view_actions.open_output_media_folder(
+                        self.main_window, select_file=recorded_output_path
+                    )
                 except Exception:
                     pass
 
@@ -8876,7 +8880,7 @@ class VideoProcessor(QObject):
             if self.main_window.control["OpenOutputToggle"]:
                 try:
                     list_view_actions.open_output_media_folder(
-                        self.main_window, output_dir
+                        self.main_window, output_dir, select_file=final_file_path
                     )
                 except Exception:
                     pass
