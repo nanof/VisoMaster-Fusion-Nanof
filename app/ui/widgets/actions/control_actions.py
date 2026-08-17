@@ -2115,3 +2115,17 @@ def _prepare_musetalk_audio(
         print("[WARN] MuseTalk: load a video first (Video track audio).")
         return
     engine.prepare_audio(media_path, fps, is_video_container=True)
+
+
+def handle_sort_embeddings_az_toggle(
+    main_window: "MainWindow", new_value: bool, *args
+) -> None:
+    if not new_value:
+        return
+    try:
+        from app.ui.widgets.actions import list_view_actions
+
+        list_view_actions.sort_embeddings_list_az(main_window)
+    except Exception as e:
+        print(f"[ERROR] sort embeddings: {e}")
+        traceback.print_exc()

@@ -586,6 +586,14 @@ def load_saved_workspace(
             # This instantly populates `main_window.input_faces` before the next loop tries to access them.
             QtWidgets.QApplication.processEvents()
 
+            # Drain remaining input-face batches, then hide placeholder if faces exist
+            while getattr(main_window, "_pending_input_face_thumbnails", None):
+                list_view_actions._flush_input_face_thumbnail_batch(main_window)
+                QtWidgets.QApplication.processEvents()
+            main_window.placeholder_update_signal.emit(
+                main_window.inputFacesList, False
+            )
+
             for face_id, input_face_data in data.get("input_faces_data", {}).items():
                 if face_id in main_window.input_faces:
                     input_face_button = main_window.input_faces[face_id]

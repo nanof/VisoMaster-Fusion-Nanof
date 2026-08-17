@@ -35,8 +35,6 @@ _TARGET_BUTTON_SIZE = (90, 90)
 _SMALL_FACE_BUTTON_SIZE = (70, 70)
 _LARGE_FACE_BUTTON_SIZE = (96, 96)
 _FACE_BUTTON_SIZE = _SMALL_FACE_BUTTON_SIZE
-_EMBED_BUTTON_SIZE = (120, 25)
-_EMBED_LIST_HEIGHT = 140
 _TARGET_MEDIA_BATCH_SIZE = 24
 _TARGET_MEDIA_BATCH_INTERVAL_MS = 1
 _THUMB_ZOOM_MIN = 0.5
@@ -1078,24 +1076,15 @@ def initialize_media_list_widgets(main_window: "MainWindow"):
 def initialize_embeddings_list_widget(main_window: "MainWindow"):
     """One-time configuration for the inputEmbeddingsList widget."""
     inputEmbeddingsList = main_window.inputEmbeddingsList
-    button_size = QtCore.QSize(*_EMBED_BUTTON_SIZE)
-    grid_size_with_padding = button_size + QtCore.QSize(4, 4)
-
-    inputEmbeddingsList.setGridSize(grid_size_with_padding)
+    inputEmbeddingsList.setUniformItemSizes(False)
     inputEmbeddingsList.setWrapping(True)
     inputEmbeddingsList.setFlow(QtWidgets.QListView.TopToBottom)
-    inputEmbeddingsList.setResizeMode(QtWidgets.QListView.Fixed)
-    inputEmbeddingsList.setSpacing(2)
-    inputEmbeddingsList.setUniformItemSizes(True)
+    inputEmbeddingsList.setResizeMode(QtWidgets.QListView.Adjust)
+    inputEmbeddingsList.setSpacing(4)
     inputEmbeddingsList.setViewMode(QtWidgets.QListView.IconMode)
     inputEmbeddingsList.setMovement(QtWidgets.QListView.Static)
-
-    inputEmbeddingsList.setFixedHeight(_EMBED_LIST_HEIGHT)
-
-    col_width = grid_size_with_padding.width()
-    min_width = (3 * col_width) + 16
-    inputEmbeddingsList.setMinimumWidth(min_width)
-
+    # Four rows (~24px buttons + spacing) with padding for longer embedding names
+    inputEmbeddingsList.setFixedHeight(112)
     inputEmbeddingsList.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
     inputEmbeddingsList.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
     inputEmbeddingsList.setVerticalScrollMode(
@@ -1104,10 +1093,34 @@ def initialize_embeddings_list_widget(main_window: "MainWindow"):
     inputEmbeddingsList.setHorizontalScrollMode(
         QtWidgets.QAbstractItemView.ScrollPerPixel
     )
-
     inputEmbeddingsList.setLayoutDirection(QtCore.Qt.LeftToRight)
-    inputEmbeddingsList.setLayoutMode(QtWidgets.QListView.Batched)
+    inputEmbeddingsList.setLayoutMode(QtWidgets.QListView.SinglePass)
     _set_up_panel_context_menu(main_window, inputEmbeddingsList, "embeddings")
+
+
+def sort_embeddings_list_az(main_window: "MainWindow") -> None:
+    """Reorder embeddings A-Z via Qt sort (safe with item widgets)."""
+    if not main_window.control.get("SortEmbeddingsAZToggle", False):
+        return
+
+    list_widget = getattr(main_window, "inputEmbeddingsList", None)
+    if list_widget is None or list_widget.count() <= 1:
+        return
+
+    for i in range(list_widget.count()):
+        item = list_widget.item(i)
+        button = list_widget.itemWidget(item)
+        name = getattr(button, "embedding_name", "") if button else ""
+        item.setText(name or "")
+
+    list_widget.sortItems(QtCore.Qt.AscendingOrder)
+
+    for i in range(list_widget.count()):
+        item = list_widget.item(i)
+        item.setText("")
+        button = list_widget.itemWidget(item)
+        if button is not None:
+            button.list_item = item
 
 
 def create_and_add_embed_button_to_list(
@@ -1120,18 +1133,21 @@ def create_and_add_embed_button_to_list(
         embedding_store=embedding_store,
         embedding_id=embedding_id,
     )
+    embed_button.setStyleSheet("QPushButton { padding: 2px 8px; }")
 
-    button_size = QtCore.QSize(*_EMBED_BUTTON_SIZE)
-    embed_button.setFixedSize(button_size)
+    size = embed_button.sizeHint()
+    size.setHeight(24)
+    size.setWidth(max(size.width(), 60))
+    embed_button.setFixedSize(size)
 
     list_item = QtWidgets.QListWidgetItem(inputEmbeddingsList)
-    list_item.setSizeHint(button_size)
-    embed_button.list_item = list_item
+    list_item.setSizeHint(size)
     list_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-
+    embed_button.list_item = list_item
     inputEmbeddingsList.setItemWidget(list_item, embed_button)
 
     main_window.merged_embeddings[embed_button.embedding_id] = embed_button
+    sort_embeddings_list_az(main_window)
 
 
 def clear_stop_loading_target_media(main_window: "MainWindow", clear_list: bool = True):
@@ -1365,14 +1381,15 @@ def clear_all_target_media(main_window: "MainWindow") -> bool:
     if not main_window.target_videos:
         return False
 
-    confirmed = _confirm_panel_clear(
-        main_window,
-        "Clear All Media",
-        "This will remove all target media, including webcams, and reset the "
-        "Target Media panel.\n\nFiles on disk will not be deleted.",
-    )
-    if not confirmed:
-        return False
+    if not main_window.control.get("SkipClearConfirmationToggle", False):
+        confirmed = _confirm_panel_clear(
+            main_window,
+            "Clear All Media",
+            "This will remove all target media, including webcams, and reset the "
+            "Target Media panel.\n\nFiles on disk will not be deleted.",
+        )
+        if not confirmed:
+            return False
 
     clear_stop_loading_target_media(main_window, clear_list=False)
 
@@ -1414,14 +1431,15 @@ def clear_all_input_faces(main_window: "MainWindow") -> bool:
     if not faces_to_clear:
         return False
 
-    confirmed = _confirm_panel_clear(
-        main_window,
-        "Clear All Faces",
-        "This will remove all input faces and reset the Input Faces panel.\n\n"
-        "Favorites and files on disk will not be deleted.",
-    )
-    if not confirmed:
-        return False
+    if not main_window.control.get("SkipClearConfirmationToggle", False):
+        confirmed = _confirm_panel_clear(
+            main_window,
+            "Clear All Faces",
+            "This will remove all input faces and reset the Input Faces panel.\n\n"
+            "Favorites and files on disk will not be deleted.",
+        )
+        if not confirmed:
+            return False
 
     clear_stop_loading_input_media(main_window, clear_list=False)
 
@@ -1448,14 +1466,15 @@ def clear_all_embeddings(main_window: "MainWindow") -> bool:
     if not main_window.merged_embeddings:
         return False
 
-    confirmed = _confirm_panel_clear(
-        main_window,
-        "Clear All Embeddings",
-        "This will remove all embeddings and reset the Embeddings panel.\n\n"
-        "Files on disk will not be deleted.",
-    )
-    if not confirmed:
-        return False
+    if not main_window.control.get("SkipClearConfirmationToggle", False):
+        confirmed = _confirm_panel_clear(
+            main_window,
+            "Clear All Embeddings",
+            "This will remove all embeddings and reset the Embeddings panel.\n\n"
+            "Files on disk will not be deleted.",
+        )
+        if not confirmed:
+            return False
 
     card_actions.clear_merged_embeddings(main_window)
     return True
