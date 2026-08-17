@@ -4,6 +4,7 @@ import numpy as np
 from typing import Any, Callable, Optional
 
 from app.processors.utils import faceutil
+from app.processors.utils import cuda_sync
 from app.processors.ort_io_dtype_utils import (
     _numpy_scalar_type_to_torch_dtype,
     _ort_warmup_numpy_dtype_for_input,
@@ -215,7 +216,7 @@ class DFMModel:
             )
 
         if self.device == "cuda":
-            torch.cuda.current_stream().synchronize()
+            cuda_sync.blocking_stream_sync()
         if self._ort_run_with_iobinding is not None:
             self._ort_run_with_iobinding(self._sess, io_binding)
         elif self.device == "cuda" and self._ort_cuda_run_lock is not None:
@@ -223,6 +224,11 @@ class DFMModel:
                 self._sess.run_with_iobinding(io_binding)
         else:
             self._sess.run_with_iobinding(io_binding)
+
+        # POST-INFERENCE SYNC: binding_outputs are pre-allocated PyTorch VRAM tensors
+        # and ORT writes them asynchronously on its own stream. They are read directly
+        # below, so without this we can consume half-written data.
+        io_binding.synchronize_outputs()
 
         # Process outputs (resize, clip channels, and convert back to original dtype)
         out_face_mask = self.to_dtype(

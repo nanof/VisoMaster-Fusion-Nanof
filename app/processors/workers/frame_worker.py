@@ -23,6 +23,7 @@ import torch.nn.functional as F
 import cv2
 
 from app.processors.utils import faceutil
+from app.processors.utils import cuda_sync
 
 from app.helpers.miscellaneous import (
     ParametersDict,
@@ -531,7 +532,7 @@ class FrameWorker(threading.Thread):
                 )
                 self._d2h_pin_shape = shape
             self._d2h_pin_hwc.copy_(hwc, non_blocking=True)
-            torch.cuda.current_stream().synchronize()
+            cuda_sync.blocking_stream_sync()
             return np.ascontiguousarray(self._d2h_pin_hwc.numpy())
         x = chw_uint8.permute(1, 2, 0).contiguous()
         if x.device.type != "cpu":
@@ -1526,7 +1527,7 @@ class FrameWorker(threading.Thread):
                 assert img_numpy_rgb_uint8 is not None
                 self._pipeline_profile_merged = None
                 if self.worker_stream is not None:
-                    self.worker_stream.synchronize()
+                    cuda_sync.blocking_stream_sync(self.worker_stream)
                 return img_numpy_rgb_uint8[..., ::-1]
 
             processed_tensor_rgb_uint8 = self._enhance_frame_maybe_offloaded(
@@ -4338,26 +4339,36 @@ class FrameWorker(threading.Thread):
                         requires_203 = True
                         break
 
-            bboxes, kpss_5, kpss = self.models_processor.run_detect(
-                img,
-                control.get("DetectorModelSelection", "RetinaFace"),
-                max_num=int(control.get("MaxFacesToDetectSlider", 20)),
-                score=control.get("DetectorScoreSlider", 50) / 100.0,
-                input_size=detector_input_size_from_control(control),
-                use_landmark_detection=use_landmark,
-                landmark_detect_mode=landmark_mode,
-                landmark_score=control.get("LandmarkDetectScoreSlider", 50) / 100.0,
-                from_points=from_points,
-                rotation_angles=[0]
-                if not control.get("AutoRotationToggle", False)
-                else [0, 90, 180, 270],
-                use_mean_eyes=control.get("LandmarkMeanEyesToggle", False),
-                previous_detections=None,
-                bypass_bytetrack=_bypass_bt_std,
-                out_track_ids=_local_out_track,
-            )
-            if _sequential_match_active and _local_out_track is not None:
-                std_detect_track_ids = _local_out_track
+            # --- Strict Early Exit (No Targets in Single-Frame) ---
+            show_bboxes = control.get(
+                "ShowAllDetectedFacesBBoxToggle", False
+            ) or control.get("ShowByteTrackBBoxToggle", False)
+
+            if len(target_faces_snapshot) == 0 and not show_bboxes:
+                bboxes = np.empty((0, 4), dtype=np.float32)
+                kpss_5 = np.empty((0, 5, 2), dtype=np.float32)
+                kpss = np.empty((0, 68, 2), dtype=np.float32)
+            else:
+                bboxes, kpss_5, kpss = self.models_processor.run_detect(
+                    img,
+                    control.get("DetectorModelSelection", "RetinaFace"),
+                    max_num=int(control.get("MaxFacesToDetectSlider", 20)),
+                    score=control.get("DetectorScoreSlider", 50) / 100.0,
+                    input_size=detector_input_size_from_control(control),
+                    use_landmark_detection=use_landmark,
+                    landmark_detect_mode=landmark_mode,
+                    landmark_score=control.get("LandmarkDetectScoreSlider", 50) / 100.0,
+                    from_points=from_points,
+                    rotation_angles=[0]
+                    if not control.get("AutoRotationToggle", False)
+                    else [0, 90, 180, 270],
+                    use_mean_eyes=control.get("LandmarkMeanEyesToggle", False),
+                    previous_detections=None,
+                    bypass_bytetrack=_bypass_bt_std,
+                    out_track_ids=_local_out_track,
+                )
+                if _sequential_match_active and _local_out_track is not None:
+                    std_detect_track_ids = _local_out_track
 
             # Single-frame preview and VR180 detect here instead of in the feeder,
             # which leaves ``precomputed_bboxes`` empty. Lip-sync reads that, so
@@ -4926,6 +4937,17 @@ class FrameWorker(threading.Thread):
                                 else None,
                             )
 
+                        # --- Early Exit for No-Op Swaps ---
+                        _is_dfm = params["SwapModelSelection"] == "DeepFaceLive (DFM)"
+                        _has_input = (s_e is not None) or _is_dfm
+                        _force_swap = control.get("ForceSwapToggle", True)
+                        if (
+                            not _has_input
+                            and not edit_button_is_checked_global
+                            and not _force_swap
+                        ):
+                            continue
+
                         _aged_kv = getattr(target_face, "aged_kv_map", None)
                         _reaging_kv = (
                             _aged_kv
@@ -5283,6 +5305,17 @@ class FrameWorker(threading.Thread):
                                 if _reaging_on and _aged_emb_bt
                                 else None,
                             )
+
+                        # --- Early Exit for No-Op Swaps ---
+                        _is_dfm = params["SwapModelSelection"] == "DeepFaceLive (DFM)"
+                        _has_input = (s_e is not None) or _is_dfm
+                        _force_swap = control.get("ForceSwapToggle", True)
+                        if (
+                            not _has_input
+                            and not edit_button_is_checked_global
+                            and not _force_swap
+                        ):
+                            continue
 
                         _aged_kv_bt = getattr(best_target, "aged_kv_map", None)
                         _reaging_kv = (
@@ -6611,7 +6644,7 @@ class FrameWorker(threading.Thread):
                         self.models_processor.device == "cuda"
                         and self.models_processor.provider_name != "Custom"
                     ):
-                        torch.cuda.current_stream().synchronize()
+                        cuda_sync.blocking_stream_sync()
 
                     if use_mode_2:
                         temp_output = input_face_affined.clone()
@@ -7144,7 +7177,7 @@ class FrameWorker(threading.Thread):
             with self.models_processor.dfm_inference_lock:
                 # PRE-SYNC: Ensure GPU input is ready
                 if self.models_processor.device == "cuda":
-                    torch.cuda.current_stream().synchronize()
+                    cuda_sync.blocking_stream_sync()
 
                 out_celeb, _, _ = dfm_model.convert(
                     dfm_input,

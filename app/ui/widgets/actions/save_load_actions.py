@@ -38,6 +38,31 @@ def sanitize_removed_settings_controls(control_data: dict | None) -> dict:
     }
 
 
+def sanitize_state_dictionary(loaded_dict: dict, reference_dict: dict) -> dict:
+    """Sanitize loaded parameters/controls against a reference schema.
+
+    Removes obsolete keys and fills missing keys from defaults so old job/
+    workspace files inject safely into UI and worker pipelines.
+    """
+    if not isinstance(loaded_dict, dict):
+        return copy.deepcopy(reference_dict)
+
+    sanitized_dict = {}
+    for key, default_value in reference_dict.items():
+        if key in loaded_dict:
+            sanitized_dict[key] = loaded_dict[key]
+        else:
+            sanitized_dict[key] = default_value
+
+    obsolete_keys = set(loaded_dict.keys()) - set(reference_dict.keys())
+    if obsolete_keys:
+        print(
+            f"[INFO] Sanitization: Removed obsolete keys during load: {obsolete_keys}"
+        )
+
+    return sanitized_dict
+
+
 def purge_removed_settings_controls(control_data: dict) -> None:
     for control_name in REMOVED_SETTINGS_CONTROL_KEYS:
         control_data.pop(control_name, None)

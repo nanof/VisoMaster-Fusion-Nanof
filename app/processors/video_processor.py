@@ -35,6 +35,7 @@ from PySide6.QtGui import QPixmap
 
 # Internal project imports
 from app.processors.workers.frame_worker import FrameWorker, _env_flag
+from app.processors.utils import cuda_sync
 from app.ui.widgets.actions import graphics_view_actions
 from app.ui.widgets.actions import common_actions as common_widget_actions
 from app.ui.widgets.actions import video_control_actions
@@ -998,6 +999,10 @@ class VideoProcessor(QObject):
         return graphics_view_actions.ensure_video_preview_opengl_viewport(self.main_window)
 
     def _clear_frames_to_display_and_profiles(self) -> None:
+        # Explicitly drop array refs so CPython can reclaim RAM sooner than .clear().
+        for key in list(self.frames_to_display.keys()):
+            arr = self.frames_to_display.pop(key)
+            del arr
         self.frames_to_display.clear()
         self.frames_pipeline_profile.clear()
         self._reset_enhancer_temporal_smooth_state()
@@ -1314,9 +1319,12 @@ class VideoProcessor(QObject):
         if self.last_display_schedule_time_sec < now_sec:
             self.last_display_schedule_time_sec = now_sec + 0.001
         wait_time_sec = self.last_display_schedule_time_sec - now_sec
-        wait_ms = int(wait_time_sec * 1000)
-        if wait_ms <= 0:
-            wait_ms = 1
+        # Recording and segment export run the metronome at ~9999 fps, so this
+        # floor decides the real tick rate. At 1ms a Qt PreciseTimer raises the
+        # global Windows timer resolution and wakes the GUI thread up to 1000x/s
+        # for the whole job. Playback keeps the 1ms floor for smoothness.
+        is_export = bool(self.recording or self.is_processing_segments)
+        wait_ms = max(4 if is_export else 1, int(wait_time_sec * 1000))
         self.precise_metronome.start(wait_ms)
 
     def _check_preroll_and_start_playback(self):
@@ -2242,7 +2250,7 @@ class VideoProcessor(QObject):
                 if torch.cuda.is_available() and str(
                     self.main_window.models_processor.device
                 ).startswith("cuda"):
-                    torch.cuda.current_stream().synchronize()
+                    cuda_sync.blocking_stream_sync()
 
         # TensorRT and ONNX reuse memory buffers for maximum performance.
         # If we do not copy these arrays, the feeder thread will overwrite the memory
@@ -2543,6 +2551,9 @@ class VideoProcessor(QObject):
         for q in (self.frame_queue,):
             try:
                 with q.mutex:
+                    while len(q.queue) > 0:
+                        item = q.queue.popleft()
+                        del item
                     q.queue.clear()
                     q.not_full.notify_all()
                     q.all_tasks_done.notify_all()
@@ -2551,6 +2562,9 @@ class VideoProcessor(QObject):
         rq = self._raw_frame_queue
         if rq is not None:
             with rq.mutex:
+                while len(rq.queue) > 0:
+                    item = rq.queue.popleft()
+                    del item
                 rq.queue.clear()
                 rq.not_full.notify_all()
 

@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from app.processors.models_processor import ModelsProcessor
 
 from app.processors.utils import faceutil
+from app.processors.utils import cuda_sync
 
 
 def _env_torch_compile_enabled() -> bool:
@@ -729,7 +730,7 @@ class FaceDetectors:
             # PRE-INFERENCE SYNC: Ensure PyTorch has finished preparing the memory
             # before ONNX Runtime starts reading from the IOBinding pointers.
             if self.models_processor.uses_cuda_ep_for_thread():
-                torch.cuda.current_stream().synchronize()
+                cuda_sync.blocking_stream_sync()
             elif self.models_processor.device != "cpu":
                 self.models_processor.syncvec.cpu()
 
@@ -744,7 +745,7 @@ class FaceDetectors:
                 "on",
             ):
                 if self.models_processor.uses_cuda_ep_for_thread():
-                    torch.cuda.current_stream().synchronize()
+                    cuda_sync.blocking_stream_sync()
                 elif self.models_processor.device != "cpu":
                     self.models_processor.syncvec.cpu()
 

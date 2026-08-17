@@ -18,6 +18,7 @@ import onnx
 from torchvision.transforms import v2
 
 from app.processors.utils import faceutil
+from app.processors.utils import cuda_sync
 from app.processors.ort_io_dtype_utils import (
     SessionIoDtypeCache,
     _numpy_scalar_type_to_torch_dtype,
@@ -1942,7 +1943,7 @@ class ModelsProcessor(QtCore.QObject):
 
         try:
             if self.uses_cuda_ep_for_thread():
-                torch.cuda.current_stream().synchronize()
+                cuda_sync.blocking_stream_sync()
             elif self.device != "cpu":
                 self.syncvec.cpu()
 
@@ -3554,7 +3555,7 @@ class ModelsProcessor(QtCore.QObject):
             # CUDA Stream Sync: Ensure all non-blocking PCIe transfers are complete
             # before ONNX/TensorRT execution begins to prevent race conditions.
             if torch.cuda.is_available():
-                torch.cuda.current_stream().synchronize()
+                cuda_sync.blocking_stream_sync()
 
             self.face_restorers.run_ref_ldm_unet(
                 x_noisy_plus_lq_latent=unet_input_16_channel,
@@ -3665,7 +3666,7 @@ class ModelsProcessor(QtCore.QObject):
                 unet_input_cond[:, latent_shape[1] :] = lq_latent_x0_scaled_for_unet
 
                 if torch.cuda.is_available():
-                    torch.cuda.current_stream().synchronize()
+                    cuda_sync.blocking_stream_sync()
 
                 self.face_restorers.run_ref_ldm_unet(
                     x_noisy_plus_lq_latent=unet_input_cond,
@@ -3689,7 +3690,7 @@ class ModelsProcessor(QtCore.QObject):
                     )
 
                     if torch.cuda.is_available():
-                        torch.cuda.current_stream().synchronize()
+                        cuda_sync.blocking_stream_sync()
 
                     self.face_restorers.run_ref_ldm_unet(
                         x_noisy_plus_lq_latent=unet_input_uncond,
