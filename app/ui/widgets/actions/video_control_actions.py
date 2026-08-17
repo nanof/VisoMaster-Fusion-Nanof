@@ -150,285 +150,12 @@ def update_video_time_line_edit(
 
 
 def set_up_video_seek_slider(main_window: "MainWindow"):
+    """Deprecated: slider paint/markers live on CompositeTimelineWidget.
+
+    Kept as a no-op for any lingering call sites. Timeline setup is done in
+    main_ui via CompositeTimelineWidget.setup + set_up_timeline_zoom.
     """
-    Configures the video seek slider with custom painting, marker management, and
-    job-bracket rendering.  Attaches add_marker_and_paint, remove_marker_and_paint,
-    and a custom paintEvent directly to the slider instance.
-    """
-    main_window.videoSeekSlider.markers = set()  # Store unique tick positions
-    main_window.videoSeekSlider.markers_sorted = []  # Sorted list for iteration in paintEvent
-    main_window.videoSeekSlider.issue_markers = set()
-    main_window.videoSeekSlider.issue_markers_sorted = []
-    main_window.videoSeekSlider.dropped_markers = set()
-    main_window.videoSeekSlider.dropped_markers_sorted = []
-    main_window.videoSeekSlider.setTickPosition(
-        QtWidgets.QSlider.TickPosition.TicksBelow
-    )
-
-    def add_marker_and_paint(self: QtWidgets.QSlider, value=None):
-        """Add a tick mark at a specific slider value."""
-        if value is None or isinstance(value, bool):  # Default to current slider value
-            value = self.value()
-        if self.minimum() <= value <= self.maximum() and value not in self.markers:
-            self.markers.add(value)
-            if value not in self.markers_sorted:
-                self.markers_sorted.append(value)
-                self.markers_sorted.sort()
-            self.update()
-
-    def remove_marker_and_paint(self: QtWidgets.QSlider, value=None):
-        """Remove a tick mark."""
-        if value is None or isinstance(value, bool):  # Default to current slider value
-            value = self.value()
-        if value in self.markers:
-            self.markers.remove(value)
-            if value in self.markers_sorted:
-                self.markers_sorted.remove(value)
-            self.update()
-
-    def _add_sorted_marker(
-        marker_set: set[int], marker_list: list[int], value: int
-    ) -> bool:
-        if value not in marker_set:
-            marker_set.add(value)
-            marker_list.append(value)
-            marker_list.sort()
-            return True
-        return False
-
-    def _remove_sorted_marker(
-        marker_set: set[int], marker_list: list[int], value: int
-    ) -> bool:
-        if value in marker_set:
-            marker_set.remove(value)
-            if value in marker_list:
-                marker_list.remove(value)
-            return True
-        return False
-
-    def add_issue_marker_and_paint(self: QtWidgets.QSlider, value=None):
-        if value is None or isinstance(value, bool):
-            value = self.value()
-        if self.minimum() <= value <= self.maximum() and _add_sorted_marker(
-            self.issue_markers, self.issue_markers_sorted, value
-        ):
-            self.update()
-
-    def remove_issue_marker_and_paint(self: QtWidgets.QSlider, value=None):
-        if value is None or isinstance(value, bool):
-            value = self.value()
-        if _remove_sorted_marker(self.issue_markers, self.issue_markers_sorted, value):
-            self.update()
-
-    def add_dropped_marker_and_paint(self: QtWidgets.QSlider, value=None):
-        if value is None or isinstance(value, bool):
-            value = self.value()
-        if self.minimum() <= value <= self.maximum() and _add_sorted_marker(
-            self.dropped_markers, self.dropped_markers_sorted, value
-        ):
-            self.update()
-
-    def remove_dropped_marker_and_paint(self: QtWidgets.QSlider, value=None):
-        if value is None or isinstance(value, bool):
-            value = self.value()
-        if _remove_sorted_marker(
-            self.dropped_markers, self.dropped_markers_sorted, value
-        ):
-            self.update()
-
-    def paintEvent(self: QtWidgets.QSlider, event: QtGui.QPaintEvent):
-        """Custom paint: draws the groove, a thin white handle, coloured marker ticks, and job-bracket characters."""
-        if self.maximum() == self.minimum():
-            return super(QtWidgets.QSlider, self).paintEvent(event)
-        # Do not draw the slider if the current media is a single image
-        if main_window.video_processor.file_type == "image":
-            return super(QtWidgets.QSlider, self).paintEvent(event)
-        # Set up the painter and style option
-        painter = QtWidgets.QStylePainter(self)
-        opt = QtWidgets.QStyleOptionSlider()
-        self.initStyleOption(opt)
-        style = self.style()
-
-        # Get groove and handle geometry
-        groove_rect = style.subControlRect(
-            QtWidgets.QStyle.ComplexControl.CC_Slider,
-            opt,
-            QtWidgets.QStyle.SubControl.SC_SliderGroove,
-        )
-        groove_y = (
-            groove_rect.top() + groove_rect.bottom()
-        ) // 2  # Groove's vertical center
-        groove_start = groove_rect.left()
-        groove_end = groove_rect.right()
-        groove_width = groove_end - groove_start
-
-        # Calculate handle position based on the current slider value
-        normalized_value = (self.value() - self.minimum()) / (
-            self.maximum() - self.minimum()
-        )
-        handle_center_x = groove_start + normalized_value * groove_width
-
-        # Make the handle thinner
-        handle_width = 5  # Fixed width for thin handle
-        handle_height = groove_rect.height()  # Slightly shorter than groove height
-        handle_left_x = handle_center_x - (handle_width // 2)
-        handle_top_y = groove_y - (handle_height // 2)
-
-        # Define the handle rectangle
-        handle_rect = QtCore.QRect(
-            handle_left_x, handle_top_y, handle_width, handle_height
-        )
-
-        # Draw the groove
-        painter.setPen(
-            QtGui.QPen(QtGui.QColor("gray"), 3)
-        )  # Groove color and thickness
-        painter.drawLine(groove_start, groove_y, groove_end, groove_y)
-
-        # Draw the thin handle
-        painter.setPen(QtGui.QPen(QtGui.QColor("white"), 1))  # Handle border color
-        painter.setBrush(QtGui.QBrush(QtGui.QColor("white")))  # Handle fill color
-        painter.drawRect(handle_rect)
-
-        def marker_x_for_value(value: int) -> float:
-            marker_normalized_value = (value - self.minimum()) / (
-                self.maximum() - self.minimum()
-            )
-            return groove_start + marker_normalized_value * groove_width
-
-        # Draw issue markers underneath saved markers.
-        if self.issue_markers:
-            issue_pen = QtGui.QPen(QtGui.QColor("#ff9800"), 3)
-            issue_pen.setCapStyle(QtCore.Qt.PenCapStyle.SquareCap)
-            painter.setPen(issue_pen)
-            issue_top = groove_y - 2
-            issue_bottom = groove_y + 2
-            for value in self.issue_markers_sorted:
-                if value in self.dropped_markers:
-                    continue
-                marker_x = marker_x_for_value(value)
-                painter.drawLine(marker_x, issue_top, marker_x, issue_bottom)
-
-        # Draw standard markers (if any)
-        if self.markers:
-            painter.setPen(
-                QtGui.QPen(QtGui.QColor("#4090a3"), 3)
-            )  # Marker color and thickness
-            for value in self.markers_sorted:
-                marker_x = marker_x_for_value(value)
-                painter.drawLine(
-                    marker_x, groove_rect.top(), marker_x, groove_rect.bottom()
-                )
-
-        # Draw dropped markers above all frame markers.
-        if self.dropped_markers:
-            painter.setPen(QtGui.QPen(QtGui.QColor("#e8483c"), 3))
-            for value in self.dropped_markers_sorted:
-                marker_x = marker_x_for_value(value)
-                painter.drawLine(
-                    marker_x, groove_rect.top(), marker_x, groove_rect.bottom()
-                )
-
-        # Draw Job Start/End Brackets on the groove line
-        painter.setFont(QtGui.QFont("Arial", 16, QtGui.QFont.Bold))
-        font_metrics = painter.fontMetrics()
-        bracket_height = font_metrics.height()
-        bracket_y_pos = groove_y + (bracket_height // 4)
-
-        for start_frame, end_frame in main_window.job_marker_pairs:
-            if start_frame is not None:
-                start_x = marker_x_for_value(int(start_frame))
-                painter.setPen(QtGui.QPen(QtGui.QColor("#4CAF50"), 1))
-                painter.drawText(int(start_x - 4), int(bracket_y_pos), "[")
-
-            if end_frame is not None:
-                end_x = marker_x_for_value(int(end_frame))
-                painter.setPen(QtGui.QPen(QtGui.QColor("#e8483c"), 1))
-                painter.drawText(int(end_x - 4), int(bracket_y_pos), "]")
-
-    main_window.videoSeekSlider.add_marker_and_paint = partial(
-        add_marker_and_paint, main_window.videoSeekSlider
-    )
-    main_window.videoSeekSlider.remove_marker_and_paint = partial(
-        remove_marker_and_paint, main_window.videoSeekSlider
-    )
-    main_window.videoSeekSlider.add_issue_marker_and_paint = partial(
-        add_issue_marker_and_paint, main_window.videoSeekSlider
-    )
-    main_window.videoSeekSlider.remove_issue_marker_and_paint = partial(
-        remove_issue_marker_and_paint, main_window.videoSeekSlider
-    )
-    main_window.videoSeekSlider.add_dropped_marker_and_paint = partial(
-        add_dropped_marker_and_paint, main_window.videoSeekSlider
-    )
-    main_window.videoSeekSlider.remove_dropped_marker_and_paint = partial(
-        remove_dropped_marker_and_paint, main_window.videoSeekSlider
-    )
-    main_window.videoSeekSlider.paintEvent = partial(
-        paintEvent, main_window.videoSeekSlider
-    )
-
-    # Click-to-seek runs heavy work from valueChanged inside QSlider.mousePressEvent
-    # *before* Qt assigns pressedControl / setSliderDown(True). A MouseButtonRelease
-    # delivered in that window (nested processEvents) is discarded by Qt, then the
-    # press finishes with the handle latched and following the cursor.
-    #
-    # Fix: mark the press before Qt handles it (so valueChanged can skip post-seek
-    # work), and immediately unlatch after mousePressEvent returns if the button
-    # is already up. Keep a short watchdog as a backup.
-    slider = main_window.videoSeekSlider
-    slider._vm_seek_mouse_down = False
-    _qt_mouse_press = QtWidgets.QSlider.mousePressEvent
-    _qt_mouse_release = QtWidgets.QSlider.mouseReleaseEvent
-
-    def _button_physically_up() -> bool:
-        return (
-            QtGui.QGuiApplication.mouseButtons()
-            == QtCore.Qt.MouseButton.NoButton
-        )
-
-    def _unlatch_if_button_up(self: QtWidgets.QSlider, *, warn: bool) -> None:
-        if not self.isSliderDown() or not _button_physically_up():
-            return
-        if warn:
-            print(
-                "[WARN] Video seek slider stayed latched after release. Unlatching."
-            )
-        self.setSliderDown(False)  # Emits sliderReleased -> on_slider_released
-
-    def mousePressEvent(self: QtWidgets.QSlider, event: QtGui.QMouseEvent) -> None:
-        if event.button() == QtCore.Qt.MouseButton.LeftButton:
-            self._vm_seek_mouse_down = True
-        _qt_mouse_press(self, event)
-        # Release may have been discarded while valueChanged ran; unlatch now.
-        if event.button() == QtCore.Qt.MouseButton.LeftButton:
-            if _button_physically_up():
-                self._vm_seek_mouse_down = False
-            _unlatch_if_button_up(self, warn=True)
-
-    def mouseReleaseEvent(self: QtWidgets.QSlider, event: QtGui.QMouseEvent) -> None:
-        _qt_mouse_release(self, event)
-        if event.button() == QtCore.Qt.MouseButton.LeftButton:
-            self._vm_seek_mouse_down = False
-            # If Qt ignored the release (pressedControl still unset), force clear.
-            _unlatch_if_button_up(self, warn=False)
-
-    slider.mousePressEvent = partial(mousePressEvent, slider)
-    slider.mouseReleaseEvent = partial(mouseReleaseEvent, slider)
-
-    latch_watchdog = QtCore.QTimer(slider)
-    latch_watchdog.setInterval(50)
-
-    def release_latched_handle(self: QtWidgets.QSlider):
-        if not self.isSliderDown():
-            latch_watchdog.stop()
-            return
-        _unlatch_if_button_up(self, warn=True)
-
-    latch_watchdog.timeout.connect(partial(release_latched_handle, slider))
-    slider.sliderPressed.connect(latch_watchdog.start)
-    slider.sliderReleased.connect(latch_watchdog.stop)
-    slider.latch_watchdog = latch_watchdog
+    return
 
 
 def set_up_timeline_zoom(main_window: "MainWindow"):
@@ -470,7 +197,11 @@ def set_up_timeline_zoom(main_window: "MainWindow"):
         if zoom_label:
             zoom_label.setText("Zoom - x1.0")
 
-        main_window.videoSeekSlider.setMinimumWidth(0)
+        container = getattr(main_window, "timelineContainer", None)
+        if container is not None:
+            container.setMinimumWidth(0)
+        else:
+            main_window.videoSeekSlider.setMinimumWidth(0)
 
     def on_zoom_changed(slider_val: int) -> None:
         video_processor = getattr(main_window, "video_processor", None)
@@ -500,7 +231,11 @@ def set_up_timeline_zoom(main_window: "MainWindow"):
             viewport_width = 800
 
         new_width = int(viewport_width * (actual_zoom / 100.0))
-        main_window.videoSeekSlider.setMinimumWidth(new_width)
+        container = getattr(main_window, "timelineContainer", None)
+        if container is not None:
+            container.setMinimumWidth(new_width)
+        else:
+            main_window.videoSeekSlider.setMinimumWidth(new_width)
 
         scrollbar = scroll_area.horizontalScrollBar()
         target_scroll_pos = int((new_width * relative_pos) - (viewport_width / 2))
@@ -534,21 +269,10 @@ def set_up_timeline_zoom(main_window: "MainWindow"):
     QtCore.QTimer.singleShot(500, connect_dynamic_settings)
     main_window.refresh_timeline_zoom = on_settings_changed
 
-    original_set_maximum = main_window.videoSeekSlider.setMaximum
-
-    def custom_set_maximum(max_val: int) -> None:
-        original_set_maximum(max_val)
-        on_video_duration_changed(max_val)
-
-    main_window.videoSeekSlider.setMaximum = custom_set_maximum
-
-    original_set_range = main_window.videoSeekSlider.setRange
-
-    def custom_set_range(min_val: int, max_val: int) -> None:
-        original_set_range(min_val, max_val)
-        on_video_duration_changed(max_val)
-
-    main_window.videoSeekSlider.setRange = custom_set_range
+    # Native Qt signal whenever setMaximum() or setRange() is called on the slider.
+    main_window.videoSeekSlider.rangeChanged.connect(
+        lambda min_val, max_val: on_video_duration_changed(max_val)
+    )
 
     on_video_duration_changed(main_window.videoSeekSlider.maximum())
     zoom_slider.valueChanged.connect(on_zoom_changed)
