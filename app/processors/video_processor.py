@@ -5280,8 +5280,32 @@ class VideoProcessor(QObject):
         This function's *only* job is to set events, send pills, and join.
         It does NOT clear the queue.
         """
+
+        def _clear_vr_module_caches() -> None:
+            # Drop geometry-keyed VR caches between jobs so coverage/projection
+            # changes and resolution switches do not keep large CPU/GPU grids.
+            try:
+                from app.helpers.vr_utils import clear_feathered_mask_cache
+
+                clear_feathered_mask_cache()
+            except Exception:
+                pass
+            try:
+                from app.processors.external.Equirec2Perspec_vr import clear_persp_cache
+
+                clear_persp_cache()
+            except Exception:
+                pass
+            try:
+                from app.processors.external.Perspec2Equirec_vr import clear_p2e_caches
+
+                clear_p2e_caches()
+            except Exception:
+                pass
+
         active_threads = self.worker_threads
         if not active_threads:
+            _clear_vr_module_caches()
             return  # Nothing to do
 
         print(f"[INFO] Signaling {len(active_threads)} active worker(s) to stop...")
@@ -5316,6 +5340,7 @@ class VideoProcessor(QObject):
 
         # 4. Clear the worker list
         self.worker_threads.clear()
+        _clear_vr_module_caches()
 
         # 5. Release GPU memory held by the now-dead workers (kernel tensors,
         #    FrameEnhancers/FrameEdits helpers, etc.).  CPython's reference-counting
