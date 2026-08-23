@@ -520,9 +520,10 @@ class FaceDetectors:
                 refined_kpss.append(
                     landmark_kpss if len(landmark_kpss) > 0 else kpss_5[i]
                 )
-                # If the new landmarks have a higher confidence, replace the old 5-point landmarks.
+                # '478' and 'orformer98' bypass score comparison (not detection confidence).
                 if len(landmark_kpss_5) > 0 and (
-                    len(landmark_scores) == 0
+                    landmark_detect_mode in ("478", "orformer98")
+                    or len(landmark_scores) == 0
                     or np.mean(landmark_scores) > np.mean(score_values[i])
                 ):
                     kpss_5[i] = landmark_kpss_5

@@ -28,6 +28,8 @@ for _sub in (
     os.makedirs(models_dir / _sub, exist_ok=True)
 
 assets_repo = "https://github.com/visomaster/visomaster-assets/releases/download"
+tufa_repo = "https://github.com/Glat0s/TUFA-onnx/releases/download/v0.0.1"
+orformer_repo = "https://github.com/Glat0s/ORFormer-onnx/releases/download/v0.0.1"
 
 arcface_mapping_model_dict = {
     "Inswapper128": "Inswapper128ArcFace",
@@ -68,7 +70,12 @@ landmark_model_mapping = {
     "106": "FaceLandmark106",
     "203": "FaceLandmark203",
     "478": "FaceLandmark478",
+    "tufa98": "FaceLandmarkTUFA98",
+    "orformer98": "FaceLandmarkORFormer98",
 }
+
+# DO NOT add FaceLandmarkTUFA98 or FaceLandmarkORFormer98 to fp16_safe_models_list.
+# TUFA fp16 fails silently (~69 px error); ORFormer fp16 crashes during TRT build.
 
 # Restauradores (nombre en la UI) → ajustes globales (main_window.control) que deben cumplirse.
 # Se aplican al elegir el tipo o al activar el restorer si ya estaba seleccionado.
@@ -362,6 +369,18 @@ models_list = [
         "local_path": f"{models_dir}/face_landmarks_detector_Nx3x256x256.onnx",
         "hash": "6d7932bdefc38871f57dd915b8c723d855e599f29cf4cdf19616fb35d0ed572e",
         "url": f"{assets_repo}/v0.1.0/face_landmarks_detector_Nx3x256x256.onnx",
+    },
+    {
+        "model_name": "FaceLandmarkTUFA98",
+        "local_path": f"{models_dir}/tufa_vits8_256_98pt.onnx",
+        "hash": "cf8fab1d1e748b3a4b9f7e8421620659b0219d4c6a69792438086c6d610e52cc",
+        "url": f"{tufa_repo}/tufa_vits8_256_98pt.onnx",
+    },
+    {
+        "model_name": "FaceLandmarkORFormer98",
+        "local_path": f"{models_dir}/orformer_hgnet_wflw_98pt_256.onnx",
+        "hash": "219835e107a44cebf73ce3b8d592b0ed8e2f25400bee918e8fccab36fbb43f1b",
+        "url": f"{orformer_repo}/orformer_hgnet_wflw_98pt_256.onnx",
     },
     {
         "model_name": "FaceBlendShapes",

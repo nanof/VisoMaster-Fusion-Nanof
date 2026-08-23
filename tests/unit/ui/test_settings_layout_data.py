@@ -50,6 +50,7 @@ except ImportError:
     sys.modules["cv2"] = MagicMock()
 
 # Now import the real module
+from app.processors.models_data import landmark_model_mapping  # noqa: E402
 from app.ui.widgets.settings_layout_data import SETTINGS_LAYOUT_DATA  # noqa: E402
 
 
@@ -216,3 +217,11 @@ def test_confirm_before_stopping_recording_toggle_exists_in_video_recording_sett
     ]
     assert entry["label"] == "Confirm Before Stopping Recording"
     assert entry["default"] is True
+
+
+def test_landmark_detect_model_includes_tufa_and_orformer():
+    entry = SETTINGS_LAYOUT_DATA["Detectors"]["LandmarkDetectModelSelection"]
+    assert "tufa98" in entry["options"]
+    assert "orformer98" in entry["options"]
+    assert landmark_model_mapping["tufa98"] == "FaceLandmarkTUFA98"
+    assert landmark_model_mapping["orformer98"] == "FaceLandmarkORFormer98"

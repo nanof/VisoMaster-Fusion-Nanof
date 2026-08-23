@@ -96,6 +96,14 @@ class FaceLandmarkDetectors:
                 "model_name": "FaceLandmark478",
                 "function": self.detect_face_landmark_478,
             },
+            "tufa98": {
+                "model_name": "FaceLandmarkTUFA98",
+                "function": self.detect_face_landmark_tufa98,
+            },
+            "orformer98": {
+                "model_name": "FaceLandmarkORFormer98",
+                "function": self.detect_face_landmark_orformer98,
+            },
         }
 
     def run_detect_landmark(
@@ -156,7 +164,10 @@ class FaceLandmarkDetectors:
         if has_result:
             # FW-BUG-FIX: Exclude '478' from the threshold filter because its 'scores'
             # are actually 52 BlendShape values (expressions), not a detection confidence!
-            if has_scores and detect_mode not in ["478"]:
+            # 'orformer98' is excluded for the same class of reason: its scores are
+            # per-point visibility derived from ORFormer's internal codebook blend
+            # weight, which hovers near 0.5 even on a clean, fully visible face.
+            if has_scores and detect_mode not in ["478", "orformer98"]:
                 # If the model supports scoring (e.g., 5, 68, 98), we apply the threshold filter.
                 if np.mean(scores) >= score:
                     return kpss_5, kpss, scores
@@ -732,3 +743,72 @@ class FaceLandmarkDetectors:
             )
             return landmark_5, landmark, landmark_score
         return [], [], []
+
+    def _prepare_upright_square_crop(
+        self,
+        img: torch.Tensor,
+        bbox: np.ndarray,
+        det_kpss: np.ndarray | None,
+        crop_scale: float,
+    ) -> tuple[torch.Tensor | None, np.ndarray | None]:
+        """Upright square crop for TUFA / ORFormer, resized to 256."""
+        aimg, _M, IM = self._prepare_crop(
+            img,
+            bbox,
+            det_kpss,
+            from_points=False,
+            target_size=256,
+            scale=crop_scale,
+        )
+        if aimg is None:
+            return None, None
+        aimg = torch.div(aimg.to(dtype=torch.float32), 255.0).unsqueeze(0).contiguous()
+        return aimg, IM
+
+    def detect_face_landmark_tufa98(
+        self, img, bbox, det_kpss, from_points=False, **kwargs
+    ):
+        """TUFA, 98-point WFLW topology. Output is normalised, hence the * 256.0."""
+        del from_points, kwargs
+        aimg, IM = self._prepare_upright_square_crop(img, bbox, det_kpss, 1.15)
+        if aimg is None:
+            return [], [], []
+
+        net_outs = self._run_onnx_binding(
+            "FaceLandmarkTUFA98", {"image": aimg}, ["landmarks"]
+        )
+        if not net_outs or len(net_outs) < 1:
+            return [], [], []
+
+        pred = net_outs[0].reshape((-1, 2)) * 256.0
+        pred = faceutil.trans_points2d(pred, IM)
+
+        landmark_5, _ = faceutil.convert_face_landmark_98_to_5(pred, np.zeros(98))
+        return landmark_5, pred, []
+
+    def detect_face_landmark_orformer98(
+        self, img, bbox, det_kpss, from_points=False, **kwargs
+    ):
+        """ORFormer, 98-point WFLW topology with per-point visibility scores."""
+        del from_points, kwargs
+        aimg, IM = self._prepare_upright_square_crop(img, bbox, det_kpss, 1.20)
+        if aimg is None:
+            return [], [], []
+
+        net_outs = self._run_onnx_binding(
+            "FaceLandmarkORFormer98", {"image": aimg}, ["landmarks", "occlusion"]
+        )
+        if not net_outs or len(net_outs) < 2:
+            return [], [], []
+
+        pred = net_outs[0].reshape((-1, 2))
+        occlusion = net_outs[1].reshape(16, 16)
+
+        cell = 256.0 / 16.0
+        gx = np.clip((pred[:, 0] / cell).astype(np.int32), 0, 15)
+        gy = np.clip((pred[:, 1] / cell).astype(np.int32), 0, 15)
+        visibility = (1.0 - occlusion[gy, gx]).astype(np.float32)
+
+        pred = faceutil.trans_points2d(pred, IM)
+        landmark_5, _ = faceutil.convert_face_landmark_98_to_5(pred, visibility)
+        return landmark_5, pred, visibility
