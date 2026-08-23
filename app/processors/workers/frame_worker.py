@@ -3910,7 +3910,7 @@ class FrameWorker(threading.Thread):
                 else "bilinear"
             )
             original_faces = self.get_transformed_and_scaled_faces(
-                tform, batch_snap, interp_mode=_interp
+                tform, batch_snap, interp_mode=_interp, only_256=swap_model == "AlphaFace"
             )
             _sl = None
             if source_latent_cache is not None and s["s_e"] is not None:
@@ -4056,7 +4056,7 @@ class FrameWorker(threading.Thread):
                 else "bilinear"
             )
             original_faces = self.get_transformed_and_scaled_faces(
-                tform, batch_snap, interp_mode=_interp
+                tform, batch_snap, interp_mode=_interp, only_256=swap_model == "AlphaFace"
             )
             _sl = None
             if source_latent_cache is not None and s["s_e"] is not None:
@@ -5769,7 +5769,25 @@ class FrameWorker(threading.Thread):
                     )
         # FW-QUAL-10: use GHOSTFACE_MODELS frozenset instead of chained != comparisons
         # HyperSwap-v* / Inswapper / SimSwap / … use arcface128 (not Ghost arcfacemap).
-        elif swapper_model not in self.GHOSTFACE_MODELS and swapper_model != "CSCS":
+        elif swapper_model in self.GHOSTFACE_MODELS or swapper_model == "AlphaFace":
+            tform = trans.SimilarityTransform()
+            dst = faceutil.get_arcface_template(image_size=512, mode="arcfacemap")
+            if swapper_model == "AlphaFace":
+                # AlphaFace only matches the five yaw templates. The two trailing
+                # pitch templates can select a noticeably different crop scale for
+                # near-profile faces, which pops between frames.
+                dst = dst[:5]
+                dst = dst * (112.0 / 128.0)
+                dst[:, :, 0] += (512.0 / 128.0) * 8.0
+
+            M, _ = faceutil.estimate_norm_arcface_template(kps_5, src=dst)
+            if M is None or np.any(np.isnan(M)) or np.any(np.isinf(M)):
+                raise ValueError(
+                    f"{swapper_model} transform estimation failed "
+                    "(degenerate face geometry)"
+                )
+            tform.params[0:2] = M
+        else:
             dst = faceutil.get_arcface_template(image_size=512, mode="arcface128")
             dst = np.squeeze(dst)
             # Use instance initialization + .estimate() for older skimage versions
@@ -5784,20 +5802,10 @@ class FrameWorker(threading.Thread):
                 # FW-ROBUST-11: check return value of tform.estimate()
                 if not tform.estimate(kps_5, dst):
                     raise ValueError("Similarity transform estimation failed for face")
-        else:
-            # FW-QUAL-10: swapper_model in GHOSTFACE_MODELS
-            tform = trans.SimilarityTransform()
-            dst = faceutil.get_arcface_template(image_size=512, mode="arcfacemap")
-            M, _ = faceutil.estimate_norm_arcface_template(kps_5, src=dst)
-            if M is None or np.any(np.isnan(M)) or np.any(np.isinf(M)):
-                raise ValueError(
-                    "GhostFace transform estimation failed (degenerate face geometry)"
-                )
-            tform.params[0:2] = M
         return tform
 
     def get_transformed_and_scaled_faces(
-        self, tform, img, interp_mode: str = "bilinear"
+        self, tform, img, interp_mode: str = "bilinear", only_256: bool = False
     ):
         """
         Applies the similarity transform to extract aligned face crops at four resolutions.
@@ -5807,6 +5815,8 @@ class FrameWorker(threading.Thread):
             tform:       Fitted ``SimilarityTransform`` from ``get_face_similarity_tform``.
             img:         Full-frame CHW uint8 tensor.
             interp_mode: Interpolation mode for warp_affine (e.g. "bilinear" or "bicubic").
+            only_256:    Skip the 384px and 128px resizes and alias those slots onto
+                         the 512px/256px crops (used by AlphaFace).
 
         Returns:
             Tuple ``(face_512, face_384, face_256, face_128)``, all CHW uint8 tensors.
@@ -5833,17 +5843,25 @@ class FrameWorker(threading.Thread):
         # Convert back to original dtype (uint8) before passing to torchvision resizers
         original_face_512 = original_face_512.to(img.dtype)
 
-        assert self.t384 is not None, (
-            "t384 must be initialized via set_scaling_transforms"
-        )
         assert self.t256 is not None, (
             "t256 must be initialized via set_scaling_transforms"
+        )
+        original_face_256 = self.t256(original_face_512)
+        if only_256:
+            return (
+                original_face_512,
+                original_face_512,
+                original_face_256,
+                original_face_256,
+            )
+
+        assert self.t384 is not None, (
+            "t384 must be initialized via set_scaling_transforms"
         )
         assert self.t128 is not None, (
             "t128 must be initialized via set_scaling_transforms"
         )
         original_face_384 = self.t384(original_face_512)
-        original_face_256 = self.t256(original_face_512)
         original_face_128 = self.t128(original_face_256)
         return (
             original_face_512,
@@ -6080,6 +6098,47 @@ class FrameWorker(threading.Thread):
                     input_face_affined = original_face_512
 
             self._note_pipeline_profile_inswapper_dim(dim, parameters)
+
+        # --- AlphaFace Logic ---
+        elif swapper_model == "AlphaFace":
+            _device = self.models_processor.get_effective_torch_device()
+            _s_latent_np = self.models_processor.calc_swapper_latent_alphaface(s_e)
+            if _s_latent_np is None:
+                print(
+                    "[ERROR] calc_swapper_latent_alphaface returned None. Skipping swap."
+                )
+                return input_face_affined, dfm_model_instance, dim, latent
+
+            latent = torch.from_numpy(_s_latent_np).float().to(_device)
+            self._store_raw_source_latent_in_cache(
+                latent, source_latent_out_cache, s_e, swapper_model
+            )
+
+            if parameters.get("FaceLikenessEnableToggle", False):
+                _t_latent_np = self.models_processor.calc_swapper_latent_alphaface(t_e)
+                if _t_latent_np is None:
+                    print(
+                        "[ERROR] calc_swapper_latent_alphaface returned None for the "
+                        "target face. Skipping swap."
+                    )
+                    return input_face_affined, dfm_model_instance, dim, None
+                dst_latent = torch.from_numpy(_t_latent_np).float().to(_device)
+                latent = self._apply_likeness(latent, dst_latent, parameters)
+
+            alpha_res = str(parameters.get("AlphaFaceResSelection", "256"))
+            if alpha_res == "Auto":
+                if tform.scale <= 1.10:
+                    dim = 4
+                    input_face_affined = original_face_512
+                else:
+                    dim = 2
+                    input_face_affined = original_face_256
+            elif alpha_res == "512":
+                dim = 4
+                input_face_affined = original_face_512
+            else:
+                dim = 2
+                input_face_affined = original_face_256
 
         # --- InStyleSwapper Logic ---
         elif swapper_model in (
@@ -6811,6 +6870,92 @@ class FrameWorker(threading.Thread):
                     output = swapper_output.clone()
                     output = torch.mul(output, 255)
                     output = torch.clamp(output, 0, 255)
+
+        elif swapper_model == "AlphaFace":
+            _use_batched_512 = dim > 2
+
+            for k in range(itex):
+                prev_face = input_face_affined
+
+                if _use_batched_512:
+                    dim_res = dim // 2
+                    h_tgt = 256
+                    w_tgt = 256
+
+                    batch_input = (
+                        input_face_affined.view(h_tgt, dim_res, w_tgt, dim_res, 3)
+                        .permute(1, 3, 4, 0, 2)
+                        .reshape(dim_res * dim_res, 3, h_tgt, w_tgt)
+                        .contiguous()
+                    )
+
+                    batch_output = torch.empty_like(batch_input)
+                    self.models_processor.run_swapper_alphaface_batched(
+                        batch_input, latent, batch_output
+                    )
+
+                    tile_sums = batch_output.abs().sum(dim=(1, 2, 3), keepdim=True)
+                    zero_mask = tile_sums < 1e-4
+                    batch_output = torch.where(zero_mask, batch_input, batch_output)
+
+                    temp_output = (
+                        batch_output.view(dim_res, dim_res, 3, h_tgt, w_tgt)
+                        .permute(3, 0, 4, 1, 2)
+                        .reshape(dim_res * h_tgt, dim_res * w_tgt, 3)
+                        .contiguous()
+                    )
+
+                    if use_mode_2:
+                        curr_chw = temp_output.permute(2, 0, 1)
+                        if k == 0:
+                            first_pass_face = curr_chw.clone()
+                        else:
+                            prev_chw = prev_face.permute(2, 0, 1)
+                            curr_chw = self._fix_drift_and_texture(
+                                curr_chw, prev_chw, first_pass_face
+                            )
+                            temp_output = curr_chw.permute(1, 2, 0)
+
+                    input_face_affined = temp_output
+                    output = torch.clamp(temp_output * 255.0, 0, 255)
+
+                else:
+                    input_face_disc = (
+                        input_face_affined.permute(2, 0, 1).unsqueeze(0).contiguous()
+                    )
+                    swapper_output = torch.empty(
+                        (1, 3, 256, 256),
+                        dtype=torch.float32,
+                        device=self.models_processor.get_effective_torch_device(),
+                    )
+
+                    self.models_processor.run_swapper_alphaface(
+                        input_face_disc, latent, swapper_output
+                    )
+
+                    swapper_output = swapper_output.squeeze(0)
+                    valid_output = torch.logical_and(
+                        torch.isfinite(swapper_output).all(),
+                        swapper_output.abs().mean() >= 1e-4,
+                    )
+                    swapper_output = torch.where(
+                        valid_output,
+                        swapper_output,
+                        input_face_affined.permute(2, 0, 1),
+                    )
+
+                    if use_mode_2:
+                        if k == 0:
+                            first_pass_face = swapper_output.clone()
+                        else:
+                            swapper_output = self._fix_drift_and_texture(
+                                swapper_output,
+                                prev_face.permute(2, 0, 1),
+                                first_pass_face,
+                            )
+
+                    input_face_affined = swapper_output.permute(1, 2, 0)
+                    output = torch.clamp(input_face_affined * 255.0, 0, 255)
 
         # FW-QUAL-10: use GHOSTFACE_MODELS frozenset
         elif swapper_model in self.GHOSTFACE_MODELS:
@@ -8119,10 +8264,12 @@ class FrameWorker(threading.Thread):
             if parameters.get("FaceAlignmentInterpolation", "Bilinear") == "Bicubic"
             else "bilinear"
         )
+        _only_256 = swapper_model == "AlphaFace"
         _img_align = img if alignment_img is None else alignment_img
+        alphaface_scale_val = 1.0
         original_face_512, original_face_384, original_face_256, original_face_128 = (
             self.get_transformed_and_scaled_faces(
-                tform, _img_align, interp_mode=_face_interp
+                tform, _img_align, interp_mode=_face_interp, only_256=_only_256
             )
         )
         original_faces = (
@@ -8212,15 +8359,20 @@ class FrameWorker(threading.Thread):
             else:
                 # Optional Face Scaling adjustment
                 if parameters["FaceAdjEnableToggle"]:
-                    input_face_affined = v2.functional.affine(
-                        input_face_affined,
-                        0,
-                        (0, 0),
-                        1 + parameters["FaceScaleAmountSlider"] / 100,
-                        0,
-                        center=(dim * 128 / 2, dim * 128 / 2),
-                        interpolation=v2.InterpolationMode.BILINEAR,
-                    )
+                    scale_val = 1.0 + parameters["FaceScaleAmountSlider"] / 100
+                    if swapper_model == "AlphaFace":
+                        if scale_val != 1.0:
+                            alphaface_scale_val = scale_val
+                    else:
+                        input_face_affined = v2.functional.affine(
+                            input_face_affined,
+                            0,
+                            (0, 0),
+                            scale_val,
+                            0,
+                            center=(dim * 128 / 2, dim * 128 / 2),
+                            interpolation=v2.InterpolationMode.BILINEAR,
+                        )
 
                 itex = 1
                 if parameters["StrengthEnableToggle"]:
@@ -9798,6 +9950,17 @@ class FrameWorker(threading.Thread):
 
             # --- UNTRANSFORM (PASTE BACK): ROI + affine on patch (faster than full-frame warp)
             _tinv = cast(np.ndarray, tform.inverse.params)
+            if alphaface_scale_val != 1.0:
+                scale_matrix = np.array(
+                    [
+                        [alphaface_scale_val, 0.0, 256.0 * (1.0 - alphaface_scale_val)],
+                        [0.0, alphaface_scale_val, 256.0 * (1.0 - alphaface_scale_val)],
+                        [0.0, 0.0, 1.0],
+                    ],
+                    dtype=np.float32,
+                )
+                _tinv = _tinv @ scale_matrix
+            tform_paste = trans.SimilarityTransform(matrix=_tinv)
             IM512 = _tinv[0:2, :]
             corners = np.array([[0, 0], [0, 511], [511, 0], [511, 511]])
 
@@ -9823,9 +9986,9 @@ class FrameWorker(threading.Thread):
             assert self.interpolation_Untransform is not None
             swap = v2.functional.affine(
                 swap,
-                tform.inverse.rotation * 57.2958,
-                (tform.inverse.translation[0], tform.inverse.translation[1]),
-                tform.inverse.scale,
+                tform_paste.rotation * 57.2958,
+                (tform_paste.translation[0], tform_paste.translation[1]),
+                tform_paste.scale,
                 0,
                 interpolation=self.interpolation_Untransform,
                 center=(0, 0),
@@ -9835,9 +9998,9 @@ class FrameWorker(threading.Thread):
             swap_opaque = v2.functional.pad(swap_opaque, (0, 0, pad_w, pad_h))
             swap_opaque = v2.functional.affine(
                 swap_opaque,
-                tform.inverse.rotation * 57.2958,
-                (tform.inverse.translation[0], tform.inverse.translation[1]),
-                tform.inverse.scale,
+                tform_paste.rotation * 57.2958,
+                (tform_paste.translation[0], tform_paste.translation[1]),
+                tform_paste.scale,
                 0,
                 interpolation=self.interpolation_Untransform,
                 center=(0, 0),
@@ -9847,9 +10010,9 @@ class FrameWorker(threading.Thread):
             swap_mask = v2.functional.pad(swap_mask, (0, 0, pad_w, pad_h))
             swap_mask = v2.functional.affine(
                 swap_mask,
-                tform.inverse.rotation * 57.2958,
-                (tform.inverse.translation[0], tform.inverse.translation[1]),
-                tform.inverse.scale,
+                tform_paste.rotation * 57.2958,
+                (tform_paste.translation[0], tform_paste.translation[1]),
+                tform_paste.scale,
                 0,
                 interpolation=v2.InterpolationMode.BILINEAR,
                 center=(0, 0),

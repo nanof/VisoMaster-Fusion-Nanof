@@ -3046,12 +3046,21 @@ class ModelsProcessor(QtCore.QObject):
     def calc_swapper_latent_ghost(self, source_embedding):
         return self.face_swappers.calc_swapper_latent_ghost(source_embedding)
 
+    def calc_swapper_latent_alphaface(self, source_embedding):
+        return self.face_swappers.calc_swapper_latent_alphaface(source_embedding)
+
     def run_swapper_ghostface(
         self, image, embedding, output, swapper_model="GhostFace-v2"
     ):
         self.face_swappers.run_swapper_ghostface(
             image, embedding, output, swapper_model
         )
+
+    def run_swapper_alphaface(self, image, embedding, output):
+        self.face_swappers.run_swapper_alphaface(image, embedding, output)
+
+    def run_swapper_alphaface_batched(self, images, embedding, output):
+        self.face_swappers.run_swapper_alphaface_batched(images, embedding, output)
 
     def calc_hyperswap_latent(self, source_embedding):
         return self.face_swappers.calc_hyperswap_latent(source_embedding)

@@ -3,6 +3,7 @@ import torch
 import threading
 from torchvision.transforms import v2
 from app.processors.utils import faceutil
+from app.processors.models_data import models_dir
 import numpy as np
 from numpy.linalg import norm as l2norm
 from typing import TYPE_CHECKING, List, Optional, Union
@@ -43,6 +44,7 @@ class FaceSwappers:
         )
         self.swapper_models = [
             "Inswapper128",
+            "AlphaFace",
             "InStyleSwapper256 Version A",
             "InStyleSwapper256 Version B",
             "InStyleSwapper256 Version C",
@@ -69,6 +71,8 @@ class FaceSwappers:
             "CSCSArcFace",
             "CSCSIDArcFace",
         ]
+        # AlphaFace ships its own ArcFace->ID projection matrix; loaded on first use.
+        self._alphaface_emap: np.ndarray | None = None
 
     def unload_models(self):
         with self.models_processor.model_lock:
@@ -825,6 +829,35 @@ class FaceSwappers:
 
         return latent
 
+    def calc_swapper_latent_alphaface(
+        self, source_embedding: np.ndarray
+    ) -> np.ndarray | None:
+        """Projects the shared W600K ArcFace embedding into AlphaFace ID space."""
+        if self._alphaface_emap is None:
+            emap_path = models_dir / "alphaface" / "emp.npy"
+            try:
+                emap = np.load(emap_path).astype(np.float32)
+            except (OSError, ValueError) as exc:
+                print(f"[ERROR] Could not load AlphaFace identity projection: {exc}")
+                return None
+            if emap.shape != (512, 512):
+                print(
+                    "[ERROR] AlphaFace identity projection must have shape (512, 512)."
+                )
+                return None
+            self._alphaface_emap = emap
+
+        embedding = np.asarray(source_embedding, dtype=np.float32).reshape(1, -1)
+        if embedding.shape[1] != 512:
+            print("[ERROR] AlphaFace requires a 512-dimensional ArcFace embedding.")
+            return None
+        latent = np.dot(embedding, self._alphaface_emap)
+        latent_norm = np.linalg.norm(latent)
+        if not np.isfinite(latent_norm) or latent_norm <= 1e-12:
+            print("[ERROR] AlphaFace produced an invalid identity projection.")
+            return None
+        return latent / latent_norm
+
     def calc_swapper_latent_iss(self, source_embedding, version="A"):
         if source_embedding is None:
             return None
@@ -960,6 +993,66 @@ class FaceSwappers:
         self._run_model_with_lazy_build_check(
             model_name, ghostfaceswap_model, io_binding
         )
+
+    @torch.no_grad()
+    def run_swapper_alphaface(
+        self, image: torch.Tensor, embedding: torch.Tensor, output: torch.Tensor
+    ) -> None:
+        model_name = "AlphaFace"
+        model = self._load_swapper_model(model_name)
+        if not model:
+            output.zero_()
+            print(
+                "[ERROR] AlphaFace model not loaded. Run 'python download_models.py' "
+                "to install model_assets/alphaface/alphaface_swapper_fused_norm.onnx."
+            )
+            return
+
+        io_binding = model.io_binding()
+        image = self.models_processor.bind_ort_io_input(
+            io_binding,
+            model_name,
+            "target",
+            image.contiguous(),
+            session=model,
+        )
+        embedding = self.models_processor.bind_ort_io_input(
+            io_binding,
+            model_name,
+            "source_embedding",
+            embedding.contiguous(),
+            session=model,
+        )
+        self.models_processor.bind_ort_io_output(
+            io_binding,
+            model_name,
+            "output",
+            output.contiguous(),
+            session=model,
+        )
+        self._run_model_with_lazy_build_check(model_name, model, io_binding)
+
+    @torch.no_grad()
+    def run_swapper_alphaface_batched(
+        self, images: torch.Tensor, embedding: torch.Tensor, output: torch.Tensor
+    ) -> None:
+        """Batched AlphaFace inference for sub-pixel 512px phase-shift resolution mode."""
+        model_name = "AlphaFace"
+        model = self._load_swapper_model(model_name)
+        if not model:
+            output.zero_()
+            print("[ERROR] AlphaFace model not loaded for batched execution.")
+            return
+
+        images = images.contiguous()
+        embedding = embedding.contiguous()
+        output = output.contiguous()
+        batch_size = int(images.shape[0])
+
+        for idx in range(batch_size):
+            self.run_swapper_alphaface(
+                images[idx : idx + 1], embedding, output[idx : idx + 1]
+            )
 
     def run_swapper_ghostface_batched(
         self,

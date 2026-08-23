@@ -12,6 +12,7 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "label": "Swapper Model",
             "options": [
                 "Inswapper128",
+                "AlphaFace",
                 "InStyleSwapper256 Version A",
                 "InStyleSwapper256 Version B",
                 "InStyleSwapper256 Version C",
@@ -50,6 +51,19 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "parentSelection": "SwapModelSelection",
             "requiredSelectionValue": "Inswapper128",
             "help": "Select the resolution for the swapped face in pixels. Higher values offer better quality but are slower to process. Auto dynamically selects the best resolution based on the input image size.",
+        },
+        "AlphaFaceResSelection": {
+            "level": 2,
+            "label": "AlphaFace Resolution",
+            "options": ["256", "512", "Auto"],
+            "default": "256",
+            "parentSelection": "SwapModelSelection",
+            "requiredSelectionValue": "AlphaFace",
+            "help": (
+                "256 runs a single 256px pass. 512 uses phase-shift tiling for higher "
+                "detail. Auto picks 512 when the aligned face is large enough "
+                "(scale <= 1.10)."
+            ),
         },
         "HyperSwapNativeMaskEnableToggle": {
             "level": 2,

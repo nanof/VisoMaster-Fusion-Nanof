@@ -10,6 +10,7 @@ os.makedirs(refldm_ckpts_path, exist_ok=True)
 # destinations exist regardless of how models arrive (download vs. copy-in).
 # The downloader also creates parent dirs on demand (belt-and-suspenders).
 for _sub in (
+    "alphaface",
     "swap_512",
     "matting",
     "sam2",
@@ -28,11 +29,15 @@ for _sub in (
     os.makedirs(models_dir / _sub, exist_ok=True)
 
 assets_repo = "https://github.com/visomaster/visomaster-assets/releases/download"
+alphaface_repo = (
+    "https://github.com/kodek4/VisoMaster-Fusion/releases/download/alphaface-model-v1"
+)
 tufa_repo = "https://github.com/Glat0s/TUFA-onnx/releases/download/v0.0.1"
 orformer_repo = "https://github.com/Glat0s/ORFormer-onnx/releases/download/v0.0.1"
 
 arcface_mapping_model_dict = {
     "Inswapper128": "Inswapper128ArcFace",
+    "AlphaFace": "Inswapper128ArcFace",
     "InStyleSwapper256 Version A": "Inswapper128ArcFace",
     "InStyleSwapper256 Version B": "Inswapper128ArcFace",
     "InStyleSwapper256 Version C": "Inswapper128ArcFace",
@@ -167,6 +172,7 @@ fp16_safe_models_list = [
     # --- Texture ---
     "combo_relu3_3_relu3_1",
     # --- Swappers ---
+    "AlphaFace",
     "InStyleSwapper256 Version A",
     "InStyleSwapper256 Version B",
     "InStyleSwapper256 Version C",
@@ -187,6 +193,7 @@ fp16_safe_models_list = [
 # (``*.trtshape.onnx``) for these models. See ModelsProcessor._ensure_trt_ready_onnx.
 tensorrt_shape_infer_models = [
     "PerformRecastWarpingModule",
+    "AlphaFace",
 ]
 
 models_list = [
@@ -195,6 +202,13 @@ models_list = [
         "local_path": f"{models_dir}/inswapper_128.fp16.onnx",
         "hash": "6d51a9278a1f650cffefc18ba53f38bf2769bf4bbff89267822cf72945f8a38b",
         "url": f"{assets_repo}/v0.1.0/inswapper_128.fp16.onnx",
+    },
+    {
+        # FP32 graph; the TensorRT EP casts it to FP16 via fp16_safe_models_list.
+        "model_name": "AlphaFace",
+        "local_path": f"{models_dir}/alphaface/alphaface_swapper_fused_norm.onnx",
+        "hash": "5514d967ab6cc27e1b0edc092e05ee97d235adccb4da68574a9b1a1e221a4c6a",
+        "url": f"{alphaface_repo}/alphaface_swapper_fused_norm.onnx",
     },
     {
         "model_name": "InStyleSwapper256 Version A",
