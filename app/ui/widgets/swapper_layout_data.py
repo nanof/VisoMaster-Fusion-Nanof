@@ -45,19 +45,11 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
         "SwapperResSelection": {
             "level": 2,
             "label": "Swapper Resolution",
-            "options": ["128", "256", "384", "512"],
+            "options": ["128", "256", "384", "512", "Auto"],
             "default": "128",
             "parentSelection": "SwapModelSelection",
             "requiredSelectionValue": "Inswapper128",
-            "help": "Select the resolution for the swapped face in pixels. Higher values offer better quality but are slower to process.",
-        },
-        "SwapperResAutoSelectEnableToggle": {
-            "level": 2,
-            "label": "Enable Auto Resolution",
-            "default": False,
-            "parentSelection": "SwapModelSelection",
-            "requiredSelectionValue": "Inswapper128",
-            "help": "Autoselect Swapper Resolution based on original Face Size (only for Inswapper).",
+            "help": "Select the resolution for the swapped face in pixels. Higher values offer better quality but are slower to process. Auto dynamically selects the best resolution based on the input image size.",
         },
         "HyperSwapNativeMaskEnableToggle": {
             "level": 2,

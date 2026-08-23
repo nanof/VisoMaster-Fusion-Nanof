@@ -2114,6 +2114,27 @@ class FrameWorker(threading.Thread):
             )
         return out
 
+    @staticmethod
+    def _swapper_res_auto_enabled(parameters: dict) -> bool:
+        if parameters.get("SwapperResSelection") == "Auto":
+            return True
+        return bool(parameters.get("SwapperResAutoSelectEnableToggle", False))
+
+    def _apply_face_shaping_if_enabled(
+        self,
+        swap: torch.Tensor,
+        kps_ref: np.ndarray,
+        parameters: dict,
+        stage: str,
+    ) -> torch.Tensor:
+        if (
+            parameters.get("FaceShapingEnableToggle", False)
+            and self.local_control_state_from_feeder.get("edit_enabled", True)
+            and parameters.get("FaceEditorBeforeTypeSelection", "Beginning") == stage
+        ):
+            return self.frame_edits.apply_face_shaping_gpu(swap, kps_ref, parameters)
+        return swap
+
     def _note_pipeline_profile_inswapper_dim(
         self, dim: int, parameters: dict | Any
     ) -> None:
@@ -2133,7 +2154,7 @@ class FrameWorker(threading.Thread):
             self._pipeline_profile_inswapper_px_set = s
         s.add(px)
         try:
-            auto = bool(parameters["SwapperResAutoSelectEnableToggle"])
+            auto = self._swapper_res_auto_enabled(parameters)
         except (KeyError, TypeError):
             auto = False
         self._pipeline_profile_inswapper_auto_any = (
@@ -6002,7 +6023,7 @@ class FrameWorker(threading.Thread):
             latent = self._apply_likeness(latent_s, dst_latent, parameters)
 
             dim = 1
-            if parameters["SwapperResAutoSelectEnableToggle"]:
+            if self._swapper_res_auto_enabled(parameters):
                 sc = float(tform.scale)
                 if sc <= 1.00:
                     raw_dim = 4
@@ -8413,6 +8434,10 @@ class FrameWorker(threading.Thread):
                 control,
             )
 
+        swap = self._apply_face_shaping_if_enabled(
+            swap, kps_ref, parameters, "Beginning"
+        )
+
         # First Denoiser pass - Before Restorers
         if control.get("DenoiserUNetEnableBeforeRestorersToggle", False):
             swap = self._apply_denoiser_pass(swap, control, "Before", kv_map)
@@ -8933,6 +8958,10 @@ class FrameWorker(threading.Thread):
                 else:
                     swap_mask = swap_mask_noFP
 
+            swap = self._apply_face_shaping_if_enabled(
+                swap, kps_ref, parameters, "After First Restorer"
+            )
+
             # Second Denoiser pass - After First Restorer
             if control.get("DenoiserAfterFirstRestorerToggle", False):
                 swap = self._apply_denoiser_pass(
@@ -9046,6 +9075,10 @@ class FrameWorker(threading.Thread):
                     )(swap_mask_noFP)
                 else:
                     swap_mask = swap_mask_noFP
+
+            swap = self._apply_face_shaping_if_enabled(
+                swap, kps_ref, parameters, "After Second Restorer"
+            )
 
             # --- AUTO COLOR (Mask 512) ---
             # FW-QUAL-12: AutoColorEnableToggle runs here — BEFORE FaceParser mask is applied
@@ -9407,6 +9440,10 @@ class FrameWorker(threading.Thread):
                     )(swap_mask_noFP)
                 else:
                     swap_mask = swap_mask_noFP
+
+            swap = self._apply_face_shaping_if_enabled(
+                swap, kps_ref, parameters, "After Texture Transfer"
+            )
 
             # --- COLOR CORRECTIONS ---
             if parameters["ColorEnableToggle"]:

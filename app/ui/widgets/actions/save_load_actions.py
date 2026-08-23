@@ -1,10 +1,13 @@
 import os
 import json
+import hashlib
+import io
+import threading
 from pathlib import Path
 import uuid
 import copy
 from functools import partial
-from typing import TYPE_CHECKING, Dict, Union, cast
+from typing import TYPE_CHECKING, Dict, Union, cast, Optional, List
 
 from PySide6 import QtWidgets, QtCore
 import numpy as np
@@ -26,6 +29,112 @@ from app.ui.widgets.settings_layout_data import REMOVED_SETTINGS_CONTROL_KEYS
 
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
+
+# Global lock for registry I/O to ensure thread safety across concurrent saves
+_KV_REGISTRY_LOCK = threading.Lock()
+
+
+def _load_registry(registry_path: Path) -> Dict[str, List[str]]:
+    """
+    Loads the KV map registry safely.
+    Returns an empty dictionary if the file is missing or corrupted.
+    """
+    if not registry_path.exists():
+        return {}
+    try:
+        with open(registry_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"[WARN] Failed to read KV registry (might be corrupted), resetting: {e}")
+        return {}
+
+
+def _update_registry(
+    main_window: "MainWindow",
+    kv_filename: str,
+    parent_file_paths: Union[str, List[str]],
+    sub_folder: str = "reference_kv_data",
+) -> None:
+    """
+    Thread-safe function to update the central KV registry.
+    Adds one or more parent file paths (workspaces, jobs, or source image paths)
+    to the list of dependents for the specified KV map.
+    """
+    if not parent_file_paths:
+        return
+
+    if isinstance(parent_file_paths, str):
+        parent_file_paths = [parent_file_paths]
+
+    registry_path = (
+        main_window.project_root_path / "model_assets" / sub_folder / "kv_registry.json"
+    )
+
+    with _KV_REGISTRY_LOCK:
+        registry = _load_registry(registry_path)
+
+        if kv_filename not in registry:
+            registry[kv_filename] = []
+
+        registry_modified = False
+        for path in parent_file_paths:
+            if not path:
+                continue
+            normalized_path = str(Path(path).resolve())
+            if normalized_path not in registry[kv_filename]:
+                registry[kv_filename].append(normalized_path)
+                registry_modified = True
+
+        if registry_modified:
+            try:
+                with open(registry_path, "w", encoding="utf-8") as f:
+                    json.dump(registry, f, indent=4)
+            except IOError as e:
+                print(f"[ERROR] Failed to write KV registry to {registry_path}: {e}")
+
+
+def _save_hashed_kv_payload(
+    main_window: "MainWindow",
+    payload: dict,
+    sub_folder: str = "reference_kv_data",
+    parent_file_paths: Optional[Union[str, List[str]]] = None,
+) -> Optional[str]:
+    """
+    Serializes a K/V map payload, computes its SHA-256 hash, and saves it to disk.
+    Prevents duplicates by only saving if the hash-based file doesn't exist.
+    Registers multiple dependencies in a central JSON manifest.
+    """
+    try:
+        buffer = io.BytesIO()
+        torch.save(payload, buffer)
+        buffer_bytes = buffer.getvalue()
+
+        payload_hash = hashlib.sha256(buffer_bytes).hexdigest()
+
+        kv_data_dir = main_window.project_root_path / "model_assets" / sub_folder
+        kv_data_dir.mkdir(parents=True, exist_ok=True)
+
+        kv_map_file = kv_data_dir / f"kv_{payload_hash}.pt"
+
+        if not kv_map_file.exists():
+            with open(kv_map_file, "wb") as f:
+                f.write(buffer_bytes)
+            print(f"[INFO] Saved new K/V map: {kv_map_file.name}")
+        else:
+            print(
+                f"[INFO] K/V map {kv_map_file.name} already exists. Skipping disk write."
+            )
+
+        if parent_file_paths:
+            _update_registry(
+                main_window, kv_map_file.name, parent_file_paths, sub_folder
+            )
+
+        return str(kv_map_file)
+
+    except Exception as e:
+        print(f"[ERROR] Failed to hash and save K/V map payload: {e}")
+        return None
 
 
 def sanitize_removed_settings_controls(control_data: dict | None) -> dict:
@@ -220,7 +329,7 @@ def open_embeddings_from_file(main_window: "MainWindow"):
     )
     if embedding_filename:
         try:
-            with open(embedding_filename, "r") as embed_file:  # pylint: disable=unspecified-encoding
+            with open(embedding_filename, "r", encoding="utf-8") as embed_file:
                 embeddings_list = json.load(embed_file)
                 card_actions.clear_merged_embeddings(main_window)
 
@@ -252,15 +361,21 @@ def open_embeddings_from_file(main_window: "MainWindow"):
                         kv_map_path = embed_data.get("kv_map")
                         if kv_map_path and os.path.exists(kv_map_path):
                             try:
-                                import torch
-
-                                payload = torch.load(kv_map_path, map_location="cpu")
+                                payload = torch.load(
+                                    kv_map_path, map_location="cpu", weights_only=False
+                                )
                                 if isinstance(payload, dict):
                                     embed_button.kv_map = payload.get("kv_map")
                                 else:
                                     embed_button.kv_map = payload
                                 print(
                                     f"[INFO] Restored standalone K/V map for imported embedding: {embed_data['name']}"
+                                )
+                                _update_registry(
+                                    main_window,
+                                    Path(kv_map_path).name,
+                                    str(embedding_filename),
+                                    "reference_kv_data",
                                 )
                             except Exception as e:
                                 print(
@@ -288,7 +403,7 @@ def save_embeddings_to_file(main_window: "MainWindow", save_as=False):
         )
         return
 
-    # Define the save filename
+    # Define the save filename at the start so we can register dependencies
     embedding_filename = main_window.loaded_embedding_filename
     if (
         not embedding_filename
@@ -298,6 +413,8 @@ def save_embeddings_to_file(main_window: "MainWindow", save_as=False):
         embedding_filename, _ = QtWidgets.QFileDialog.getSaveFileName(
             main_window, filter="JSON (*.json)"
         )
+        if not embedding_filename:
+            return
     elif (
         QtWidgets.QMessageBox.question(
             main_window,
@@ -319,17 +436,18 @@ def save_embeddings_to_file(main_window: "MainWindow", save_as=False):
         kv_map_path = None
         # If embedding has KV maps we save on disk
         if getattr(embed_button, "kv_map", None) is not None:
-            kv_data_dir = (
-                main_window.project_root_path / "model_assets" / "reference_kv_data"
-            )
-            kv_data_dir.mkdir(parents=True, exist_ok=True)
-            kv_map_file = kv_data_dir / f"embedding_standalone_{embedding_id}.pt"
             try:
                 payload = {"kv_map": embed_button.kv_map}
-                torch.save(payload, str(kv_map_file))
-                kv_map_path = str(kv_map_file)
+                kv_map_path = _save_hashed_kv_payload(
+                    main_window,
+                    payload,
+                    "reference_kv_data",
+                    parent_file_paths=str(embedding_filename),
+                )
             except Exception as e:
-                print(f"[ERROR] Error saving K/V map for embedding {embedding_id}: {e}")
+                print(
+                    f"[ERROR] Error saving hashed K/V map for embedding {embedding_id}: {e}"
+                )
 
         embeddings_list.append(
             {
@@ -343,7 +461,7 @@ def save_embeddings_to_file(main_window: "MainWindow", save_as=False):
 
     # Save to file
     if embedding_filename:
-        with open(embedding_filename, "w") as embed_file:  # pylint: disable=unspecified-encoding
+        with open(embedding_filename, "w", encoding="utf-8") as embed_file:
             embeddings_as_json = json.dumps(
                 embeddings_list, indent=4
             )  # Save with indentation for readability
@@ -623,13 +741,28 @@ def load_saved_workspace(
                 if face_id in main_window.input_faces:
                     input_face_button = main_window.input_faces[face_id]
                     kv_map_path = input_face_data.get("kv_map")
+                    media_path = input_face_data.get("media_path")
+
                     if kv_map_path and os.path.exists(kv_map_path):
                         try:
-                            payload = torch.load(kv_map_path, map_location="cpu")
+                            payload = torch.load(
+                                kv_map_path, map_location="cpu", weights_only=False
+                            )
                             if isinstance(payload, dict):
                                 input_face_button.kv_map = payload.get("kv_map")
                             else:  # Backwards compatibility
                                 input_face_button.kv_map = payload
+
+                            parents_to_register = [str(data_filename)]
+                            if media_path:
+                                parents_to_register.append(str(media_path))
+
+                            _update_registry(
+                                main_window,
+                                Path(kv_map_path).name,
+                                parents_to_register,
+                                "reference_kv_data",
+                            )
                         except Exception as e:
                             print(
                                 f"[ERROR] Error loading K/V map from {kv_map_path}: {e}"
@@ -662,13 +795,21 @@ def load_saved_workspace(
                     kv_map_path = embedding_data.get("kv_map")
                     if kv_map_path and os.path.exists(kv_map_path):
                         try:
-                            payload = torch.load(kv_map_path, map_location="cpu")
+                            payload = torch.load(
+                                kv_map_path, map_location="cpu", weights_only=False
+                            )
                             if isinstance(payload, dict):
                                 embed_button.kv_map = payload.get("kv_map")
                             else:
                                 embed_button.kv_map = payload
                             print(
                                 f"[INFO] Restored K/V map for embedding: {embedding_name}"
+                            )
+                            _update_registry(
+                                main_window,
+                                Path(kv_map_path).name,
+                                str(data_filename),
+                                "reference_kv_data",
                             )
                         except Exception as e:
                             print(
@@ -1088,6 +1229,16 @@ def load_saved_workspace(
 def save_current_workspace(
     main_window: "MainWindow", data_filename: str | bool = False
 ):
+    if data_filename is False:
+        dialog_filename, _ = QtWidgets.QFileDialog.getSaveFileName(
+            main_window, filter="JSON (*.json)"
+        )
+        if not dialog_filename:
+            return
+        data_filename = dialog_filename
+
+    resolved_parent_path = str(data_filename)
+
     target_faces_data = {}
     embeddings_data = {}
     input_faces_data = {}
@@ -1215,19 +1366,20 @@ def save_current_workspace(
     for face_id, input_face in main_window.input_faces.items():
         kv_map_path = None
         if is_denoiser_enabled and getattr(input_face, "kv_map", None) is not None:
-            # Use Pathlib
-            kv_data_dir = (
-                main_window.project_root_path / "model_assets" / "reference_kv_data"
-            )
-            kv_data_dir.mkdir(parents=True, exist_ok=True)
-            kv_map_file = kv_data_dir / f"input_{input_face.face_id}.pt"
             try:
                 payload = {"kv_map": input_face.kv_map}
-                torch.save(payload, str(kv_map_file))
-                kv_map_path = str(kv_map_file)
+                kv_map_path = _save_hashed_kv_payload(
+                    main_window,
+                    payload,
+                    "reference_kv_data",
+                    parent_file_paths=[
+                        resolved_parent_path,
+                        str(input_face.media_path),
+                    ],
+                )
             except Exception as e:
                 print(
-                    f"[ERROR] Error saving K/V map for input face {input_face.face_id} to {kv_map_file}: {e}"
+                    f"[ERROR] Error saving hashed K/V map for input face {input_face.face_id}: {e}"
                 )
         input_faces_data[face_id] = {
             "media_path": input_face.media_path,
@@ -1265,18 +1417,17 @@ def save_current_workspace(
     for embedding_id, embedding_button in main_window.merged_embeddings.items():
         kv_map_path = None
         if getattr(embedding_button, "kv_map", None) is not None:
-            kv_data_dir = (
-                main_window.project_root_path / "model_assets" / "reference_kv_data"
-            )
-            kv_data_dir.mkdir(parents=True, exist_ok=True)
-            kv_map_file = kv_data_dir / f"embedding_{embedding_id}.pt"
             try:
                 payload = {"kv_map": embedding_button.kv_map}
-                torch.save(payload, str(kv_map_file))
-                kv_map_path = str(kv_map_file)
+                kv_map_path = _save_hashed_kv_payload(
+                    main_window,
+                    payload,
+                    "reference_kv_data",
+                    parent_file_paths=resolved_parent_path,
+                )
             except Exception as e:
                 print(
-                    f"[ERROR] Error saving K/V map for embedding {embedding_id} to {kv_map_file}: {e}"
+                    f"[ERROR] Error saving hashed K/V map for embedding {embedding_id}: {e}"
                 )
 
         embeddings_data[embedding_id] = {
@@ -1354,14 +1505,10 @@ def save_current_workspace(
         "tab_state": tab_state,  # Add the tab state to the saved data
         "window_state_data": window_state_data,
     }
-    if data_filename is False:
-        data_filename, _ = QtWidgets.QFileDialog.getSaveFileName(
-            main_window, filter="JSON (*.json)"
-        )
 
     if data_filename:
         try:
-            with open(data_filename, "w") as data_file:  # pylint: disable=unspecified-encoding
+            with open(data_filename, "w", encoding="utf-8") as data_file:
                 data_as_json = json.dumps(
                     data, indent=4
                 )  # Save with indentation for readability
@@ -1385,7 +1532,7 @@ def save_current_workspace(
                 common_widget_actions.create_and_show_messagebox(
                     main_window,
                     "Save Error",
-                    f"Failed to save workspace:\\n{e}",
+                    f"Failed to save workspace:\n{e}",
                     main_window,
                 )
 
@@ -1429,6 +1576,11 @@ def save_current_job(main_window: "MainWindow"):
     else:
         return  # User cancelled
 
+    jobs_dir = main_window.project_root_path / ".jobs"
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+    save_path = jobs_dir / f"{job_name}.json"
+    resolved_parent_path = str(save_path)
+
     # --- Check if Denoiser is enabled ---
     control = main_window.control
     is_denoiser_enabled = (
@@ -1442,19 +1594,20 @@ def save_current_job(main_window: "MainWindow"):
     for face_id, input_face in main_window.input_faces.items():
         kv_map_path = None
         if is_denoiser_enabled and getattr(input_face, "kv_map", None) is not None:
-            # Use Pathlib
-            kv_data_dir = (
-                main_window.project_root_path / "model_assets" / "reference_kv_data"
-            )
-            kv_data_dir.mkdir(parents=True, exist_ok=True)
-            kv_map_file = kv_data_dir / f"input_{input_face.face_id}.pt"
             try:
                 payload = {"kv_map": input_face.kv_map}
-                torch.save(payload, str(kv_map_file))
-                kv_map_path = str(kv_map_file)
+                kv_map_path = _save_hashed_kv_payload(
+                    main_window,
+                    payload,
+                    "reference_kv_data",
+                    parent_file_paths=[
+                        resolved_parent_path,
+                        str(input_face.media_path),
+                    ],
+                )
             except Exception as e:
                 print(
-                    f"[ERROR] Error saving K/V map for input face {input_face.face_id} to {kv_map_file}: {e}"
+                    f"[ERROR] Error saving hashed K/V map for input face {input_face.face_id}: {e}"
                 )
         input_faces_data[face_id] = {
             "media_path": input_face.media_path,
@@ -1466,17 +1619,16 @@ def save_current_job(main_window: "MainWindow"):
     for eid, emb in main_window.merged_embeddings.items():
         kv_map_path = None
         if getattr(emb, "kv_map", None) is not None:
-            kv_data_dir = (
-                main_window.project_root_path / "model_assets" / "reference_kv_data"
-            )
-            kv_data_dir.mkdir(parents=True, exist_ok=True)
-            kv_map_file = kv_data_dir / f"embedding_{eid}.pt"
             try:
                 payload = {"kv_map": emb.kv_map}
-                torch.save(payload, str(kv_map_file))
-                kv_map_path = str(kv_map_file)
+                kv_map_path = _save_hashed_kv_payload(
+                    main_window,
+                    payload,
+                    "reference_kv_data",
+                    parent_file_paths=resolved_parent_path,
+                )
             except Exception as e:
-                print(f"[ERROR] Error saving K/V map for embedding {eid}: {e}")
+                print(f"[ERROR] Error saving hashed K/V map for embedding {eid}: {e}")
 
         embeddings_data[eid] = {
             "name": emb.embedding_name,
@@ -1551,14 +1703,9 @@ def save_current_job(main_window: "MainWindow"):
             ),
         }
 
-    # Use pathlib
-    jobs_dir = main_window.project_root_path / ".jobs"
-    jobs_dir.mkdir(parents=True, exist_ok=True)
-    save_path = jobs_dir / f"{job_name}.json"
-
     # Save the job file
     try:
-        with open(save_path, "w") as f:
+        with open(save_path, "w", encoding="utf-8") as f:
             json.dump(job_data, f, indent=4)
         common_widget_actions.create_and_show_toast_message(
             main_window, "Job Saved", f"Job '{job_name}' saved successfully."
@@ -1570,4 +1717,118 @@ def save_current_job(main_window: "MainWindow"):
         print(f"[ERROR] Failed to save job '{job_name}': {e}")
         common_widget_actions.create_and_show_messagebox(
             main_window, "Save Job Error", f"Failed to save job:\n{e}", main_window
+        )
+
+
+def purge_unused_kv_maps(main_window: "MainWindow"):
+    """
+    Scans the KV registry for missing parent files and orphaned .pt hashes.
+    Prompts the user for verification before safely deleting unused tensors.
+    """
+    registry_path = (
+        main_window.project_root_path
+        / "model_assets"
+        / "reference_kv_data"
+        / "kv_registry.json"
+    )
+    kv_data_dir = main_window.project_root_path / "model_assets" / "reference_kv_data"
+
+    with _KV_REGISTRY_LOCK:
+        registry = _load_registry(registry_path)
+
+    unique_parent_paths = set()
+    for paths in registry.values():
+        unique_parent_paths.update(paths)
+
+    missing_paths = [p for p in unique_parent_paths if not Path(p).exists()]
+    paths_to_remove = set()
+
+    for missing_path in missing_paths:
+        reply = QtWidgets.QMessageBox.question(
+            main_window,
+            "Missing File Detected",
+            f"The saved workspace or job file cannot be found:\n{missing_path}\n\n"
+            "Have you deleted or moved this file?\n\n"
+            "Click 'Yes' if it's gone and you want to clean up its unused data.\n"
+            "Click 'No' to keep its K/V maps safely.",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if reply == QtWidgets.QMessageBox.Yes:
+            paths_to_remove.add(missing_path)
+
+    files_deleted_count = 0
+    registry_modified = False
+    keys_to_delete = []
+
+    for kv_filename, paths in registry.items():
+        original_len = len(paths)
+        registry[kv_filename] = [p for p in paths if p not in paths_to_remove]
+
+        if len(registry[kv_filename]) != original_len:
+            registry_modified = True
+
+        if not registry[kv_filename]:
+            keys_to_delete.append(kv_filename)
+
+    for kv_filename in keys_to_delete:
+        pt_path = kv_data_dir / kv_filename
+        try:
+            if pt_path.exists():
+                pt_path.unlink()
+                print(f"[INFO] Purged unused K/V map: {kv_filename}")
+                files_deleted_count += 1
+        except Exception as e:
+            print(f"[ERROR] Failed to delete {kv_filename}: {e}")
+
+        del registry[kv_filename]
+        registry_modified = True
+
+    unregistered_pt_files = []
+    if kv_data_dir.exists():
+        for pt_file in kv_data_dir.glob("*.pt"):
+            if pt_file.name not in registry:
+                unregistered_pt_files.append(pt_file)
+
+    legacy_files_deleted = 0
+    if unregistered_pt_files:
+        reply = QtWidgets.QMessageBox.question(
+            main_window,
+            "Legacy K/V Maps Detected",
+            f"Found {len(unregistered_pt_files)} old K/V map files that are not tracked in the current registry.\n\n"
+            "Do you want to permanently delete them to free up disk space?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if reply == QtWidgets.QMessageBox.Yes:
+            for pt_file in unregistered_pt_files:
+                try:
+                    pt_file.unlink()
+                    legacy_files_deleted += 1
+                    print(f"[INFO] Purged legacy K/V map: {pt_file.name}")
+                except Exception as e:
+                    print(f"[ERROR] Failed to delete {pt_file.name}: {e}")
+
+    if registry_modified:
+        with _KV_REGISTRY_LOCK:
+            try:
+                with open(registry_path, "w", encoding="utf-8") as f:
+                    json.dump(registry, f, indent=4)
+            except IOError as e:
+                print(f"[ERROR] Failed to write updated KV registry: {e}")
+
+    total_deleted = files_deleted_count + legacy_files_deleted
+    if total_deleted > 0:
+        common_widget_actions.create_and_show_messagebox(
+            main_window,
+            "Storage Purge Complete",
+            f"Successfully purged {total_deleted} unused K/V map(s).",
+            main_window,
+        )
+    elif not missing_paths and not unregistered_pt_files:
+        common_widget_actions.create_and_show_messagebox(
+            main_window,
+            "Storage Purge",
+            "All tracked K/V maps are currently in use. Nothing to purge.",
+            main_window,
         )

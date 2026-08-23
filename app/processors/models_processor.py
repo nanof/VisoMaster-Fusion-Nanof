@@ -438,21 +438,23 @@ class ModelsProcessor(QtCore.QObject):
         MIN_WORKSPACE_SIZE = 1073741824  # 1 GB
         FALLBACK_WORKSPACE_SIZE = 4294967296  # 4 GB
 
+        workspace_size = FALLBACK_WORKSPACE_SIZE
+
         try:
             # Total VRAM for TRT workspace: use a valid physical ordinal (emulation may use logical > 0).
             _phys = 0
             if torch.cuda.is_available() and torch.cuda.device_count() > 0:
                 _ng = int(torch.cuda.device_count())
                 _phys = max(0, min(int(self.gpu_index), _ng - 1))
-            total_vram = torch.cuda.get_device_properties(_phys).total_memory
+                total_vram = torch.cuda.get_device_properties(_phys).total_memory
 
-            # Safely allocate 40% of total VRAM for TensorRT workspace
-            calculated_workspace = int(total_vram * 0.40)
+                # Safely allocate 40% of total VRAM for TensorRT workspace
+                calculated_workspace = int(total_vram * 0.40)
 
-            # Enforce a minimum of 1 GB to avoid compilation failures on very low-end GPUs
-            workspace_size = max(calculated_workspace, MIN_WORKSPACE_SIZE)
-        except Exception:
-            # Fallback to 4GB if PyTorch fails to detect the GPU
+                # Enforce a minimum of 1 GB to avoid compilation failures on very low-end GPUs
+                workspace_size = max(calculated_workspace, MIN_WORKSPACE_SIZE)
+        except Exception as e:
+            print(f"[WARN] Failed to retrieve CUDA properties: {e}")
             workspace_size = FALLBACK_WORKSPACE_SIZE
 
         # Default TensorRT options

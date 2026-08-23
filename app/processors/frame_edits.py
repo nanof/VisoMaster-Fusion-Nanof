@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 import logging
 import os
 
@@ -133,6 +133,9 @@ class FrameEdits:
         # Per-face neutral driver expression reference for Enhancement mode
         # (first-frame exp_d from motion). Same centroid matching as EMA.
         self._recast_driver_exp_ref: dict = {}
+
+        # Cache for Face Shaping GPU to prevent recreating meshgrids
+        self._shaping_cache: dict[str, Any] | None = None
 
     def set_transforms(self, t256_face, interpolation_expression_faceeditor_back):
         """
@@ -1523,3 +1526,174 @@ class FrameEdits:
             img = faceutil.paste_back_adv(out, M_c2o, img, mask_crop)
 
         return img
+
+    @torch.no_grad()
+    def apply_face_shaping_gpu(
+        self, img: torch.Tensor, kps: np.ndarray, parameters: dict
+    ) -> torch.Tensor:
+        """
+        Pure PyTorch implementation of 2D Mesh Deformation for Face Shaping.
+        Uses F.grid_sample to warp the tensor based on morphological coordinate offsets.
+        Runs entirely on the GPU to prevent host-to-device bottlenecks.
+        """
+        if not parameters.get("FaceShapingEnableToggle", False):
+            return img
+
+        device = img.device
+        C, H, W = img.shape
+
+        if self._shaping_cache is None or self._shaping_cache["shape"] != (H, W):
+            y, x = torch.meshgrid(
+                torch.arange(H, device=device, dtype=torch.float32),
+                torch.arange(W, device=device, dtype=torch.float32),
+                indexing="ij",
+            )
+
+            face_center_x = float(W / 2.0)
+            face_center_y = float(H / 2.0)
+
+            x_diff = x - face_center_x
+            y_diff = y - face_center_y
+
+            margin_x = float(W * 0.10)
+            margin_y = float(H * 0.10)
+            x_dist = torch.min(x, W - 1.0 - x) / margin_x
+            y_dist = torch.min(y, H - 1.0 - y) / margin_y
+            edge_mask = torch.clamp(x_dist, 0.0, 1.0) * torch.clamp(y_dist, 0.0, 1.0)
+            edge_mask = edge_mask * edge_mask * (3.0 - 2.0 * edge_mask)
+
+            self._shaping_cache = {
+                "shape": (H, W),
+                "x": x,
+                "y": y,
+                "x_diff": x_diff,
+                "y_diff": y_diff,
+                "edge_mask": edge_mask,
+            }
+
+        static_x = self._shaping_cache["x"]
+        static_y = self._shaping_cache["y"]
+        x_diff = self._shaping_cache["x_diff"]
+        y_diff = self._shaping_cache["y_diff"]
+        edge_mask = self._shaping_cache["edge_mask"]
+
+        map_x = static_x.clone()
+        map_y = static_y.clone()
+
+        eyes_y = float((kps[0, 1] + kps[1, 1]) / 2.0)
+        nose_y = float(kps[2, 1])
+        mouth_y = float((kps[3, 1] + kps[4, 1]) / 2.0)
+
+        eye_dist = float(np.linalg.norm(kps[0] - kps[1]))
+        face_width = eye_dist * 2.5
+        face_height = face_width * 1.3
+
+        eyes_prot_range = face_height * 0.12
+        nose_prot_range = face_height * 0.15
+        mouth_prot_range = face_height * 0.12
+
+        eyes_mask = torch.exp(-((static_y - eyes_y) ** 2) / (2 * eyes_prot_range**2))
+        nose_mask = torch.exp(-((static_y - nose_y) ** 2) / (2 * nose_prot_range**2))
+        mouth_mask = torch.exp(-((static_y - mouth_y) ** 2) / (2 * mouth_prot_range**2))
+
+        features_x_range = face_width * 0.25
+        features_x_mask = torch.exp(-(x_diff**2) / (2 * features_x_range**2))
+        features_protection = (eyes_mask + nose_mask + mouth_mask) * features_x_mask
+
+        deformation_mask = 1.0 - torch.clamp(features_protection, 0.0, 1.0)
+        final_mask = deformation_mask * edge_mask
+
+        val_face_slim = float(parameters.get("FaceShapingFaceSlimSlider", 50))
+        if abs(val_face_slim - 50.0) > 1:
+            slim_power = ((val_face_slim - 50.0) / 50.0) * 0.4
+            vertical_range = face_height * 0.35
+            y_weight = torch.exp(-((static_y - nose_y) ** 2) / (2 * vertical_range**2))
+            optimal_dist = face_width * 0.35
+            x_weight = torch.exp(
+                -((torch.abs(x_diff) - optimal_dist) ** 2)
+                / (2 * (face_width * 0.15) ** 2)
+            )
+            map_x -= x_diff * slim_power * (y_weight * x_weight * final_mask)
+
+        val_chin_slim = float(parameters.get("FaceShapingChinSlimSlider", 50))
+        if abs(val_chin_slim - 50.0) > 1:
+            chin_power = ((val_chin_slim - 50.0) / 50.0) * 0.5
+            cheek_center_y = mouth_y + mouth_prot_range * 0.5
+            vertical_range = face_height * 0.25
+            optimal_dist = face_width * 0.25
+            y_weight = torch.exp(
+                -((static_y - cheek_center_y) ** 2) / (2 * vertical_range**2)
+            )
+            x_weight = torch.exp(
+                -((torch.abs(x_diff) - optimal_dist) ** 2)
+                / (2 * (face_width * 0.12) ** 2)
+            )
+            map_x -= x_diff * chin_power * (y_weight * x_weight * final_mask)
+
+        val_forehead = float(parameters.get("FaceShapingForeheadSlider", 50))
+        if abs(val_forehead - 50.0) > 1:
+            forehead_power = ((val_forehead - 50.0) / 50.0) * 0.4
+            forehead_end = eyes_y - eyes_prot_range
+            y_ratio = (forehead_end - static_y) / max(forehead_end, 1.0)
+            y_gradient = torch.clamp(y_ratio, 0.0, 1.0)
+            y_gradient = y_gradient * y_gradient * (3.0 - 2.0 * y_gradient)
+            x_weight = torch.exp(-(x_diff**2) / (2 * (face_width * 0.45) ** 2))
+            forehead_mask = (
+                (static_y < forehead_end).float() * y_gradient * x_weight * final_mask
+            )
+            max_deform = face_height * 0.2
+            map_y -= torch.clamp(
+                y_diff * forehead_power * forehead_mask, -max_deform, max_deform
+            )
+
+        val_chin_length = float(parameters.get("FaceShapingChinLengthSlider", 50))
+        if abs(val_chin_length - 50.0) > 1:
+            length_power = ((val_chin_length - 50.0) / 50.0) * 0.3
+            chin_start = mouth_y + mouth_prot_range
+            chin_region = (static_y > chin_start).float()
+            y_ratio = (static_y - chin_start) / max(H - chin_start, 1.0)
+            y_gradient = torch.clamp(y_ratio, 0.0, 1.0)
+            y_gradient = y_gradient * y_gradient * (3.0 - 2.0 * y_gradient)
+            x_weight = torch.exp(-(x_diff**2) / (2 * (face_width * 0.4) ** 2))
+            chin_mask = (
+                chin_region * y_gradient * x_weight * final_mask * (1.0 - mouth_mask)
+            )
+            max_deform = face_height * 0.15
+            map_y -= torch.clamp(
+                y_diff * length_power * chin_mask, -max_deform, max_deform
+            )
+
+        val_face_length = float(parameters.get("FaceShapingFaceLengthSlider", 50))
+        if abs(val_face_length - 50.0) > 1:
+            length_power = ((val_face_length - 50.0) / 50.0) * 0.3
+            top_area = (static_y < (eyes_y - eyes_prot_range)).float()
+            bottom_area = (static_y > (mouth_y + mouth_prot_range)).float()
+
+            top_ratio = (eyes_y - eyes_prot_range - static_y) / max(eyes_y, 1.0)
+            top_mask = top_area * torch.clamp(top_ratio, 0.0, 1.0) * final_mask
+
+            bottom_ratio = (static_y - (mouth_y + mouth_prot_range)) / max(
+                H - mouth_y, 1.0
+            )
+            bottom_mask = bottom_area * torch.clamp(bottom_ratio, 0.0, 1.0) * final_mask
+
+            x_weight = torch.exp(-(x_diff**2) / (2 * (face_width * 0.4) ** 2))
+            y_offset = y_diff * length_power * x_weight * (top_mask + bottom_mask)
+            map_y -= torch.clamp(y_offset, -face_height * 0.15, face_height * 0.15)
+
+        grid_x_norm = (map_x / (W - 1)) * 2.0 - 1.0
+        grid_y_norm = (map_y / (H - 1)) * 2.0 - 1.0
+
+        grid = torch.stack((grid_x_norm, grid_y_norm), dim=-1).unsqueeze(0)
+
+        import torch.nn.functional as F
+
+        img_warped = F.grid_sample(
+            img.unsqueeze(0),
+            grid,
+            mode="bilinear",
+            padding_mode="reflection",
+            align_corners=True,
+        ).squeeze(0)
+
+        return img_warped
