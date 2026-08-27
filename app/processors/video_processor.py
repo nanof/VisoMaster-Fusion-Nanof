@@ -369,6 +369,7 @@ class VideoProcessor(QObject):
         )
         # Cached GPEN/restorer NN output for paused preview — blend-only tweaks reuse it.
         self._restorer_infer_cache: dict[str, Any] | None = None
+        self._secondary_swap_preview_cache: dict[str, Any] | None = None
         self._preview_gpu_cleanup_timer = QTimer(self)
         self._preview_gpu_cleanup_timer.setSingleShot(True)
         self._preview_gpu_cleanup_timer.timeout.connect(self._run_preview_gpu_cleanup)
@@ -462,7 +463,9 @@ class VideoProcessor(QObject):
         self.playback_display_start_time = (
             0.0  # Time when frames *actually* started displaying
         )
-        self.playback_frames_displayed: int = 0  # Frames painted in display_next_frame (preview FPS)
+        self.playback_frames_displayed: int = (
+            0  # Frames painted in display_next_frame (preview FPS)
+        )
         self.play_start_time = 0.0  # Used by default style for audio segmenting
         self.play_end_time = 0.0  # Used by default style for audio segmenting
 
@@ -544,9 +547,7 @@ class VideoProcessor(QObject):
         self._feeder_deferred_seek_read: int | None = None
 
         # Consecutive-frame ArcFace cache: key (frame_num, face_idx) — video pool only.
-        self._recognition_cache_by_frame: "OrderedDict[tuple[int, int], dict[str, Any]]" = (
-            OrderedDict()
-        )
+        self._recognition_cache_by_frame: "OrderedDict[tuple[int, int], dict[str, Any]]" = OrderedDict()
         self._recognition_cache_max: int = 256
         self._recognition_cache_lock = threading.Lock()
         # ByteTrack id → last ArcFace row (survives face-index reordering in det arrays).
@@ -562,9 +563,9 @@ class VideoProcessor(QObject):
         self._recognition_track_last_matched_frame: dict[int, int] = {}
         # Phase 7: last wall time each ONNX model key was used (unload idle).
         self._model_last_used_mono: dict[str, float] = {}
-        self.webcam_frames_to_display: queue.Queue[
-            Tuple[numpy.ndarray, Any]
-        ] = queue.Queue()  # (processed BGR frame, pipeline profile or None)
+        self.webcam_frames_to_display: queue.Queue[Tuple[numpy.ndarray, Any]] = (
+            queue.Queue()
+        )  # (processed BGR frame, pipeline profile or None)
 
         self.frames_pipeline_profile: Dict[int, Any] = {}
 
@@ -668,7 +669,10 @@ class VideoProcessor(QObject):
         return self._preview_frame_interpolation_is_neural()
 
     def _preview_any_decouple_display_active(self) -> bool:
-        return self._preview_smooth_decouple_linear_active() or self._preview_neural_decouple_display_active()
+        return (
+            self._preview_smooth_decouple_linear_active()
+            or self._preview_neural_decouple_display_active()
+        )
 
     def _preview_steps_per_frame_base(self) -> int:
         """User setting: preview substeps per processed frame (2–6); unifies former K + refresh multiplier."""
@@ -745,8 +749,8 @@ class VideoProcessor(QObject):
             ).copy()
             if self._smooth_decouple_last_arrival_t is not None:
                 dt = now - self._smooth_decouple_last_arrival_t
-                self._smooth_decouple_ema_dt = 0.85 * self._smooth_decouple_ema_dt + 0.15 * max(
-                    dt, 1.0 / 240.0
+                self._smooth_decouple_ema_dt = (
+                    0.85 * self._smooth_decouple_ema_dt + 0.15 * max(dt, 1.0 / 240.0)
                 )
         self._smooth_decouple_curr = numpy.ascontiguousarray(frame).copy()
         self._smooth_decouple_last_arrival_t = now
@@ -814,9 +818,7 @@ class VideoProcessor(QObject):
                 pixmap = common_widget_actions.get_pixmap_from_frame(
                     self.main_window, blend
                 )
-                graphics_view_actions.update_graphics_view(
-                    self.main_window, pixmap, fn
-                )
+                graphics_view_actions.update_graphics_view(self.main_window, pixmap, fn)
 
     @Slot(object, int, object)
     def _on_neural_rife_async_done(self, out: Any, generation: int, err: Any) -> None:
@@ -860,11 +862,7 @@ class VideoProcessor(QObject):
             return curr
         u = self._neural_decouple_phase_u()
         mid = self._neural_decouple_rife_mid
-        if (
-            mid is None
-            or mid.shape != curr.shape
-            or mid.dtype != curr.dtype
-        ):
+        if mid is None or mid.shape != curr.shape or mid.dtype != curr.dtype:
             mid = cv2.addWeighted(prev, 0.5, curr, 0.5, 0.0)
         if u <= 0.5:
             return self._preview_frame_gen_lerp(prev, mid, 2.0 * u)
@@ -883,8 +881,8 @@ class VideoProcessor(QObject):
             ).copy()
             if self._neural_decouple_last_arrival_t is not None:
                 dt = now - self._neural_decouple_last_arrival_t
-                self._neural_decouple_ema_dt = 0.85 * self._neural_decouple_ema_dt + 0.15 * max(
-                    dt, 1.0 / 240.0
+                self._neural_decouple_ema_dt = (
+                    0.85 * self._neural_decouple_ema_dt + 0.15 * max(dt, 1.0 / 240.0)
                 )
         self._neural_decouple_curr = numpy.ascontiguousarray(frame).copy()
         self._neural_decouple_last_arrival_t = now
@@ -950,7 +948,9 @@ class VideoProcessor(QObject):
                 preview_frame_bgr=blend,
             )
         else:
-            pixmap = common_widget_actions.get_pixmap_from_frame(self.main_window, blend)
+            pixmap = common_widget_actions.get_pixmap_from_frame(
+                self.main_window, blend
+            )
             graphics_view_actions.update_graphics_view(self.main_window, pixmap, fn)
 
     @staticmethod
@@ -991,12 +991,16 @@ class VideoProcessor(QObject):
         """Video + linear interpolation: use shader blend in the main viewer (not webcam/virt cam)."""
         if self.file_type != "video":
             return False
-        if not graphics_view_actions.preview_linear_gpu_display_enabled(self.main_window):
+        if not graphics_view_actions.preview_linear_gpu_display_enabled(
+            self.main_window
+        ):
             return False
         bi = getattr(self.main_window, "_video_preview_blend_gl_item", None)
         if bi is not None and getattr(bi, "_gl_failed", False):
             return False
-        return graphics_view_actions.ensure_video_preview_opengl_viewport(self.main_window)
+        return graphics_view_actions.ensure_video_preview_opengl_viewport(
+            self.main_window
+        )
 
     def _clear_frames_to_display_and_profiles(self) -> None:
         # Explicitly drop array refs so CPython can reclaim RAM sooner than .clear().
@@ -1072,9 +1076,10 @@ class VideoProcessor(QObject):
             self._enhancer_temporal_prev_fn = frame_number_to_display
             return frame
 
-        blended = frame.astype(numpy.float32) * (1.0 - strength) + prev.astype(
-            numpy.float32
-        ) * strength
+        blended = (
+            frame.astype(numpy.float32) * (1.0 - strength)
+            + prev.astype(numpy.float32) * strength
+        )
         out = numpy.clip(blended, 0, 255).astype(frame.dtype)
         self._enhancer_temporal_prev_frame = out.copy()
         self._enhancer_temporal_prev_fn = frame_number_to_display
@@ -1174,7 +1179,9 @@ class VideoProcessor(QObject):
         if use_gl_upscale:
             pixmap = QPixmap()
         else:
-            pixmap = common_widget_actions.get_pixmap_from_frame(self.main_window, frame)
+            pixmap = common_widget_actions.get_pixmap_from_frame(
+                self.main_window, frame
+            )
 
         if self.main_window.loading_new_media:
             graphics_view_actions.update_graphics_view(
@@ -1563,9 +1570,7 @@ class VideoProcessor(QObject):
         try:
             small = cv2.resize(frame_rgb_uint8, (32, 32), interpolation=cv2.INTER_AREA)
             gray = (
-                0.299 * small[:, :, 0]
-                + 0.587 * small[:, :, 1]
-                + 0.114 * small[:, :, 2]
+                0.299 * small[:, :, 0] + 0.587 * small[:, :, 1] + 0.114 * small[:, :, 2]
             ).astype(numpy.float32)
             hist, _ = numpy.histogram(gray.ravel(), bins=16, range=(0.0, 255.0))
             h = hist.astype(numpy.float64)
@@ -1657,9 +1662,7 @@ class VideoProcessor(QObject):
                 if _bbox_iou_xyxy(bbox, prev["bbox"]) >= iou_th:
                     if (
                         numpy.max(
-                            numpy.abs(
-                                kps_5.astype(numpy.float32) - prev["kps_5"]
-                            )
+                            numpy.abs(kps_5.astype(numpy.float32) - prev["kps_5"])
                         )
                         <= kps_th
                     ):
@@ -1676,9 +1679,7 @@ class VideoProcessor(QObject):
                         if _bbox_iou_xyxy(bbox, tr["bbox"]) >= iou_th:
                             if (
                                 numpy.max(
-                                    numpy.abs(
-                                        kps_5.astype(numpy.float32) - tr["kps_5"]
-                                    )
+                                    numpy.abs(kps_5.astype(numpy.float32) - tr["kps_5"])
                                 )
                                 <= kps_th
                             ):
@@ -1826,7 +1827,9 @@ class VideoProcessor(QObject):
                 preserve_input_indices=preserve_input_indices
             )
 
-    def _sequential_rotate_iou(self, box_a: numpy.ndarray, box_b: numpy.ndarray) -> float:
+    def _sequential_rotate_iou(
+        self, box_a: numpy.ndarray, box_b: numpy.ndarray
+    ) -> float:
         return float(
             self.main_window.models_processor.face_detectors._calculate_iou(
                 box_a, box_b
@@ -1965,10 +1968,8 @@ class VideoProcessor(QObject):
         # Only wrap detection in a dedicated CUDA stream when the user enables
         # "Separate CUDA streams". Otherwise torch.cuda.stream(current_stream()) was a
         # no-op that still added per-frame context overhead on the feeder hot path.
-        use_sep = (
-            dict(getattr(self.main_window, "control", {}) or {}).get(
-                "PipelineSeparateCudaStreamsToggle", False
-            )
+        use_sep = dict(getattr(self.main_window, "control", {}) or {}).get(
+            "PipelineSeparateCudaStreamsToggle", False
         )
         if (
             use_sep
@@ -2086,9 +2087,7 @@ class VideoProcessor(QObject):
                 and previous_faces_arg is not None
                 and len(previous_faces_arg) > 0
                 and str(
-                    local_control_for_worker.get(
-                        "DetectorModelSelection", "RetinaFace"
-                    )
+                    local_control_for_worker.get("DetectorModelSelection", "RetinaFace")
                 )
                 == "RetinaFace"
                 and not from_points
@@ -2516,8 +2515,10 @@ class VideoProcessor(QObject):
         # FaceDetectionInterval skip frames can reuse landmarks via FaceDetectors.track_faces
         # when ByteTrack is off (avoids AttributeError / dead detection thread).
         detected_for_state: list[dict] = []
-        if bboxes.shape[0] > 0 and isinstance(kpss_5, numpy.ndarray) and kpss_5.shape[0] == len(
-            bboxes
+        if (
+            bboxes.shape[0] > 0
+            and isinstance(kpss_5, numpy.ndarray)
+            and kpss_5.shape[0] == len(bboxes)
         ):
             for i in range(len(bboxes)):
                 ent: dict = {
@@ -2610,8 +2611,13 @@ class VideoProcessor(QObject):
                 "[WARN] _raw_frame_queue missing; call _rebuild_frame_queue_from_control first."
             )
             return
-        if self._detection_pipeline_thread and self._detection_pipeline_thread.is_alive():
-            print("[WARN] Detection pipeline thread already running; not starting another.")
+        if (
+            self._detection_pipeline_thread
+            and self._detection_pipeline_thread.is_alive()
+        ):
+            print(
+                "[WARN] Detection pipeline thread already running; not starting another."
+            )
             return
         self._detection_pipeline_thread = threading.Thread(
             target=self._detection_pipeline_loop,
@@ -2828,7 +2834,9 @@ class VideoProcessor(QObject):
                 pending_interactive_seek: int | None = None
                 with self.state_lock:
                     if self._interactive_playback_seek_pending is not None:
-                        pending_interactive_seek = self._interactive_playback_seek_pending
+                        pending_interactive_seek = (
+                            self._interactive_playback_seek_pending
+                        )
                         self._interactive_playback_seek_pending = None
                 if pending_interactive_seek is not None:
                     pending_processing_seek = self._timeline_to_processing_frame(
@@ -3011,9 +3019,7 @@ class VideoProcessor(QObject):
                     self.consecutive_read_errors = 0
                     frame_num_to_process = int(self.current_frame_number)
                     marker_timeline_frame, marker_data = (
-                        self._marker_data_for_processing_frame(
-                            frame_num_to_process
-                        )
+                        self._marker_data_for_processing_frame(frame_num_to_process)
                     )
                     local_params_for_worker: FacesParametersTypes
                     local_control_for_worker: ControlTypes
@@ -3031,7 +3037,9 @@ class VideoProcessor(QObject):
                                 widget,
                             ) in self.main_window.parameter_widgets.items():
                                 if widget_name in self.main_window.control:
-                                    self.feeder_control[widget_name] = widget.default_value
+                                    self.feeder_control[widget_name] = (
+                                        widget.default_value
+                                    )
                             if "control" in marker_data and isinstance(
                                 marker_data["control"], dict
                             ):
@@ -3243,7 +3251,8 @@ class VideoProcessor(QObject):
                         "read_frame_ms": (_t_feed_after_read - _t_feed_read0) * 1000.0,
                         "feeder_state_ms": (_t_feed_before_rgb - _t_feed_after_read)
                         * 1000.0,
-                        "rgb_pack_ms": (_t_feed_after_rgb - _t_feed_before_rgb) * 1000.0,
+                        "rgb_pack_ms": (_t_feed_after_rgb - _t_feed_before_rgb)
+                        * 1000.0,
                     }
                 if _bench_same:
                     if self._benchmark_same_frame_rgb_cache is None:
@@ -3596,14 +3605,19 @@ class VideoProcessor(QObject):
         _retry_ms = max(2, min(12, int(self.target_delay_sec * 250)))
 
         # Decoupled smooth: between buffer frames, repaint only (metronome / S).
-        if self._preview_any_decouple_display_active() and self._smooth_decouple_substep > 0:
+        if (
+            self._preview_any_decouple_display_active()
+            and self._smooth_decouple_substep > 0
+        ):
             if self._preview_smooth_decouple_linear_active():
                 if self._smooth_decouple_curr is None:
                     self._smooth_decouple_substep = 0
                 else:
                     self._smooth_decouple_present_tick()
                     S = self._smooth_decouple_steps_per_frame_effective()
-                    self._smooth_decouple_substep = (self._smooth_decouple_substep + 1) % S
+                    self._smooth_decouple_substep = (
+                        self._smooth_decouple_substep + 1
+                    ) % S
                     self.playback_frames_displayed += 1
                     self._arm_display_metronome_after_frame_shown()
                     return
@@ -3832,11 +3846,7 @@ class VideoProcessor(QObject):
         _ui_timeline_fn = frame_number_to_display
         if self._playback_benchmark_same_frame_active:
             _ui_timeline_fn = int(self._benchmark_same_frame_anchor_fn)
-        elif (
-            self._used_ffmpeg_cap
-            and self.fps > 0
-            and self.recording_source_fps > 0
-        ):
+        elif self._used_ffmpeg_cap and self.fps > 0 and self.recording_source_fps > 0:
             src_slider_max = self.main_window.videoSeekSlider.maximum()
             _ui_timeline_fn = min(
                 self.output_to_source_frame(frame_number_to_display),
@@ -3855,9 +3865,7 @@ class VideoProcessor(QObject):
         self.send_frame_to_virtualcam(frame)
 
         # Write to FFmpeg (skip preview-only blend ticks)
-        if (
-            self.is_processing_segments or self.recording
-        ) and not preview_skip_ffmpeg:
+        if (self.is_processing_segments or self.recording) and not preview_skip_ffmpeg:
             if (
                 self.recording_sp
                 and self.recording_sp.stdin
@@ -3929,10 +3937,7 @@ class VideoProcessor(QObject):
             self._neural_decouple_present_tick()
             S = self._smooth_decouple_steps_per_frame_effective()
             self._smooth_decouple_substep = (self._smooth_decouple_substep + 1) % S
-        elif (
-            gpu_blend_for_view is not None
-            and self.file_type == "video"
-        ):
+        elif gpu_blend_for_view is not None and self.file_type == "video":
             pixmap = QPixmap()
             graphics_view_actions.update_graphics_view(
                 self.main_window,
@@ -4337,9 +4342,7 @@ class VideoProcessor(QObject):
         target_height = self._get_target_input_height()
         output_start_frame = actual_start_frame
         if self._used_ffmpeg_cap and self.recording_source_fps > 0 and self.fps > 0:
-            output_start_frame = max(
-                0, self.source_to_output_frame(actual_start_frame)
-            )
+            output_start_frame = max(0, self.source_to_output_frame(actual_start_frame))
 
         if self._used_ffmpeg_cap:
             if not self._start_recording_ffmpeg_input_stream(
@@ -4436,9 +4439,7 @@ class VideoProcessor(QObject):
             self.current_frame_number = actual_start_frame
         self._playback_benchmark_same_frame_active = bool(
             not self.recording
-            and self.main_window.control.get(
-                "VideoPlaybackBenchSameFrameToggle", False
-            )
+            and self.main_window.control.get("VideoPlaybackBenchSameFrameToggle", False)
         )
         self._benchmark_same_frame_anchor_fn = int(actual_start_frame)
         self._benchmark_same_frame_seq = int(actual_start_frame)
@@ -4578,6 +4579,7 @@ class VideoProcessor(QObject):
     def clear_restorer_infer_cache(self) -> None:
         """Drop cached primary-restorer tensors (preview blend fast path)."""
         self._restorer_infer_cache = None
+        self._secondary_swap_preview_cache = None
 
     _SYNC_WORKER_GPU_CACHE_ATTRS = (
         "_gabor_kernels_cache",
@@ -4913,11 +4915,15 @@ class VideoProcessor(QObject):
                 getattr(self, "recording_source_fps", 0.0) or 0.0
             ),
             "fps": float(self.fps or 0.0),
-            "webcam_index": int(self.main_window.control.get("WebcamDeviceSelection", 0)),
+            "webcam_index": int(
+                self.main_window.control.get("WebcamDeviceSelection", 0)
+            ),
             "screen_control": copy.deepcopy(self.main_window.control),
         }
 
-    def _stop_phase1_abort_through_release(self, *, stop_audio_on_main_thread: bool) -> None:
+    def _stop_phase1_abort_through_release(
+        self, *, stop_audio_on_main_thread: bool
+    ) -> None:
         """Flags, timers, optional audio, tracker reset, and release capture (feeder unblocks)."""
         # Do this before joining feeder/detection threads. In particular, MuseTalk
         # workers may be waiting on their batch result; delaying stop_event until
@@ -5638,7 +5644,10 @@ class VideoProcessor(QObject):
             self.tail_pending_stall_start_sec = now_sec
             return True
 
-        if now_sec - self.tail_pending_stall_start_sec >= TAIL_PENDING_STALL_TIMEOUT_SEC:
+        if (
+            now_sec - self.tail_pending_stall_start_sec
+            >= TAIL_PENDING_STALL_TIMEOUT_SEC
+        ):
             self.tail_force_finalize_due_to_stall = True
             self.tail_pending_stall_start_sec = 0.0
             print(
@@ -6170,8 +6179,10 @@ class VideoProcessor(QObject):
                 frame_width = frame_width * 4
 
         # PERF-018: optional record resolution ≠ pipeline output (after enhancer mult)
-        frame_height, frame_width = VideoProcessor.apply_record_output_resize_decouple_to_dims(
-            control, frame_height=frame_height, frame_width=frame_width
+        frame_height, frame_width = (
+            VideoProcessor.apply_record_output_resize_decouple_to_dims(
+                control, frame_height=frame_height, frame_width=frame_width
+            )
         )
 
         # Calculate downscale dimensions
@@ -6830,9 +6841,7 @@ class VideoProcessor(QObject):
         recognition_model = str(
             local_control.get("RecognitionModelSelection", "arcface_128")
         )
-        similarity_type = str(
-            local_control.get("SimilarityTypeSelection", "Auto")
-        )
+        similarity_type = str(local_control.get("SimilarityTypeSelection", "Auto"))
         default_params = dict(self.main_window.default_parameters.data)
         prepared_targets: list[tuple[str, float, numpy.ndarray]] = []
 
@@ -7184,8 +7193,10 @@ class VideoProcessor(QObject):
                         frame_number = next_frame
                         continue
 
-                    seg_preview_h = VideoProcessor._preview_target_height_from_scan_control(
-                        cast(dict, local_control)
+                    seg_preview_h = (
+                        VideoProcessor._preview_target_height_from_scan_control(
+                            cast(dict, local_control)
+                        )
                     )
                     preview_for_read = (
                         seg_preview_h
@@ -7316,9 +7327,7 @@ class VideoProcessor(QObject):
             - audio_files: List of paths to extracted audio files
         """
         audio_files = []
-        src_fps = float(
-            getattr(self, "recording_source_fps", 0.0) or self.fps or 0.0
-        )
+        src_fps = float(getattr(self, "recording_source_fps", 0.0) or self.fps or 0.0)
 
         for idx, (start_frame, end_frame) in enumerate(segments):
             if src_fps > 0:

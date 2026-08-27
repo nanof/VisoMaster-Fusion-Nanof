@@ -30,11 +30,25 @@ from app.ui.widgets.swapper_layout_data import SWAPPER_LAYOUT_DATA  # noqa: E402
 SWAPPER = SWAPPER_LAYOUT_DATA["Swapper"]
 STRENGTH = SWAPPER_LAYOUT_DATA["Swap strength and likeness"]
 
+COMPATIBLE_PRIMARIES = [
+    "Inswapper128",
+    "AlphaFace",
+    "InStyleSwapper256 Version A",
+    "InStyleSwapper256 Version B",
+    "InStyleSwapper256 Version C",
+    "SimSwap512-CrossFace",
+    "HyperSwap-v1",
+    "HyperSwap-v2",
+    "HyperSwap-v3",
+]
+
 SECONDARY_WIDGETS = [
     "SecondarySwapperEnableToggle",
     "SecondarySwapModelSelection",
     "SecondarySwapperResSelection",
+    "SecondarySwapperBlendModeSelection",
     "SecondarySwapperBlendAmountSlider",
+    "SecondarySwapperHyperSwapMixEnableToggle",
 ]
 
 
@@ -45,29 +59,51 @@ def test_secondary_swapper_widgets_exist():
 
 def test_secondary_swapper_defaults_off():
     assert SWAPPER["SecondarySwapperEnableToggle"]["default"] is False
+    assert SWAPPER["SecondarySwapperHyperSwapMixEnableToggle"]["default"] is False
 
 
-def test_secondary_children_gated_on_toggle():
-    for name in (
-        "SecondarySwapModelSelection",
-        "SecondarySwapperResSelection",
-        "SecondarySwapperBlendAmountSlider",
+def test_secondary_hidden_for_incompatible_primary_models():
+    required = SWAPPER["SecondarySwapperEnableToggle"]["requiredSelectionValue"]
+    assert required == COMPATIBLE_PRIMARIES
+    for incompatible in (
+        "DeepFaceLive (DFM)",
+        "SimSwap512",
+        "GhostFace-v1",
+        "CSCS",
     ):
+        assert incompatible not in required
+
+
+def test_secondary_children_gated_on_toggle_and_primary():
+    for name in SECONDARY_WIDGETS:
+        if name == "SecondarySwapperEnableToggle":
+            continue
         entry = SWAPPER[name]
         assert entry.get("parentToggle") == "SecondarySwapperEnableToggle"
         assert entry.get("requiredToggleValue") is True
+        assert entry.get("parentSelection") == "SwapModelSelection"
+        assert entry.get("requiredSelectionValue") == COMPATIBLE_PRIMARIES
 
 
-def test_secondary_model_options_are_compatible_arcface_family():
+def test_secondary_model_options_include_fork_and_hyperswap():
     opts = SWAPPER["SecondarySwapModelSelection"]["options"]
-    assert opts == [
-        "Inswapper128",
-        "AlphaFace",
-        "InStyleSwapper256 Version A",
-        "InStyleSwapper256 Version B",
-        "InStyleSwapper256 Version C",
-    ]
+    for name in (
+        "SimSwap512-CrossFace",
+        "ReHiFace-S",
+        "BlendSwap-256",
+        "UniFace-256",
+        "HyperSwap-v1",
+    ):
+        assert name in opts
+    assert "GhostFace-v1" not in opts
     assert SWAPPER["SecondarySwapModelSelection"]["default"] in opts
+
+
+def test_blend_mode_default_is_identity_detail():
+    entry = SWAPPER["SecondarySwapperBlendModeSelection"]
+    assert entry["default"] == "Identity / Detail"
+    assert "Linear" in entry["options"]
+    assert "Center weighted" in entry["options"]
 
 
 def test_secondary_strength_requires_both_toggles():

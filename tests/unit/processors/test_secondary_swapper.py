@@ -11,22 +11,60 @@ import torch
 from app.processors.workers.frame_worker import FrameWorker
 
 
-COMPAT = FrameWorker._SECONDARY_SWAPPER_COMPATIBLE_MODELS
+ARCFACE = FrameWorker._SECONDARY_SWAPPER_ARCFACE_MODELS
 
 
-def test_compatible_models_are_inswapper_arcface_family():
-    assert COMPAT == frozenset(
-        {
-            "Inswapper128",
-            "AlphaFace",
-            "InStyleSwapper256 Version A",
-            "InStyleSwapper256 Version B",
-            "InStyleSwapper256 Version C",
-        }
+def test_arcface_family_includes_fork_models_but_not_ghost_dfm():
+    for name in (
+        "Inswapper128",
+        "AlphaFace",
+        "SimSwap512-CrossFace",
+        "ReHiFace-S",
+        "BlendSwap-256",
+        "UniFace-256",
+    ):
+        assert name in ARCFACE
+    assert "HyperSwap-v1" not in ARCFACE
+    assert "GhostFace-v1" not in ARCFACE
+    assert "DeepFaceLive (DFM)" not in ARCFACE
+    assert "SimSwap512" not in ARCFACE
+
+
+def test_pair_allowed_arcface_without_hyperswap_toggle():
+    params = {}
+    assert (
+        FrameWorker._secondary_pair_allowed("Inswapper128", "AlphaFace", params) is True
     )
-    assert "HyperSwap-v1" not in COMPAT
-    assert "GhostFace-v1" not in COMPAT
-    assert "DeepFaceLive (DFM)" not in COMPAT
+    assert (
+        FrameWorker._secondary_pair_allowed("GhostFace-v1", "AlphaFace", params)
+        is False
+    )
+
+
+def test_pair_allowed_hyperswap_requires_mix_toggle():
+    off = {"SecondarySwapperHyperSwapMixEnableToggle": False}
+    on = {"SecondarySwapperHyperSwapMixEnableToggle": True}
+    assert (
+        FrameWorker._secondary_pair_allowed("HyperSwap-v1", "Inswapper128", off)
+        is False
+    )
+    assert (
+        FrameWorker._secondary_pair_allowed("Inswapper128", "HyperSwap-v2", off)
+        is False
+    )
+    assert (
+        FrameWorker._secondary_pair_allowed("HyperSwap-v1", "Inswapper128", on) is True
+    )
+
+
+def test_secondary_blend_alpha_clamps_and_skips_zero():
+    assert FrameWorker._secondary_blend_alpha({}) == pytest.approx(0.5)
+    assert FrameWorker._secondary_blend_alpha(
+        {"SecondarySwapperBlendAmountSlider": 0}
+    ) == pytest.approx(0.0)
+    assert FrameWorker._secondary_blend_alpha(
+        {"SecondarySwapperBlendAmountSlider": 150}
+    ) == pytest.approx(1.0)
 
 
 def test_secondary_requested_defaults_off():
@@ -97,12 +135,86 @@ def test_secondary_runtime_params_map_instyle_resolution():
     assert amount == 200.0
 
 
-def test_secondary_blend_lerp_weights_primary_and_secondary():
-    primary = torch.zeros(3, 8, 8)
+def test_preview_cache_key_ignores_blend_amount_and_mode():
+    worker = SimpleNamespace()
+    base = {
+        "SwapModelSelection": "Inswapper128",
+        "SecondarySwapModelSelection": "AlphaFace",
+    }
+    k0 = FrameWorker._secondary_preview_cache_key(worker, base, "Inswapper128")
+    k1 = FrameWorker._secondary_preview_cache_key(
+        worker,
+        {**base, "SecondarySwapperBlendAmountSlider": 10},
+        "Inswapper128",
+    )
+    k2 = FrameWorker._secondary_preview_cache_key(
+        worker,
+        {
+            **base,
+            "SecondarySwapperBlendAmountSlider": 90,
+            "SecondarySwapperBlendModeSelection": "Center weighted",
+        },
+        "Inswapper128",
+    )
+    assert k0 == k1 == k2
+    k3 = FrameWorker._secondary_preview_cache_key(
+        worker,
+        {**base, "SecondarySwapModelSelection": "Inswapper128"},
+        "Inswapper128",
+    )
+    assert k3 != k0
+
+
+def test_center_weighted_mix_prefers_secondary_in_the_interior():
+    primary = torch.zeros(3, 16, 16)
+    secondary = torch.ones(3, 16, 16)
+    out = FrameWorker._mix_center_weighted(primary, secondary, 1.0)
+    assert out[:, 8, 8].mean().item() > out[:, 0, 0].mean().item()
+
+
+def test_linear_mix_at_zero_keeps_primary():
+    class _W:
+        _secondary_blend_alpha = staticmethod(FrameWorker._secondary_blend_alpha)
+        _ensure_swap_crop_chw = staticmethod(FrameWorker._ensure_swap_crop_chw)
+        _swap_crop_to_unit01 = staticmethod(FrameWorker._swap_crop_to_unit01)
+        _swap_crop_from_unit01 = staticmethod(FrameWorker._swap_crop_from_unit01)
+
+    primary = torch.zeros(3, 8, 8, dtype=torch.uint8)
+    secondary = torch.full((3, 8, 8), 200, dtype=torch.uint8)
+    out = FrameWorker._mix_secondary_swap_tensors(
+        _W(),
+        primary,
+        secondary,
+        {
+            "SecondarySwapperBlendAmountSlider": 0,
+            "SecondarySwapperBlendModeSelection": "Linear",
+        },
+    )
+    assert torch.equal(out, primary)
+
+
+def test_linear_mix_preserves_float_0_255_range():
+    """get_swapped_and_prev_face returns float CHW in 0-255, not uint8.
+
+    Clamping the mix to 0-1 left a solid black face crop (the user-visible square).
+    """
+
+    class _W:
+        _secondary_blend_alpha = staticmethod(FrameWorker._secondary_blend_alpha)
+        _ensure_swap_crop_chw = staticmethod(FrameWorker._ensure_swap_crop_chw)
+        _swap_crop_to_unit01 = staticmethod(FrameWorker._swap_crop_to_unit01)
+        _swap_crop_from_unit01 = staticmethod(FrameWorker._swap_crop_from_unit01)
+
+    primary = torch.full((3, 8, 8), 200.0)
     secondary = torch.full((3, 8, 8), 100.0)
-    blended = torch.lerp(primary.float(), secondary.float(), 0.5)
-    assert blended.mean().item() == pytest.approx(50.0)
-    full_sec = torch.lerp(primary.float(), secondary.float(), 1.0)
-    assert full_sec.mean().item() == pytest.approx(100.0)
-    full_pri = torch.lerp(primary.float(), secondary.float(), 0.0)
-    assert full_pri.mean().item() == pytest.approx(0.0)
+    out = FrameWorker._mix_secondary_swap_tensors(
+        _W(),
+        primary,
+        secondary,
+        {
+            "SecondarySwapperBlendAmountSlider": 50,
+            "SecondarySwapperBlendModeSelection": "Linear",
+        },
+    )
+    assert out.dtype == torch.float32
+    assert out.mean().item() == pytest.approx(150.0, abs=0.5)
