@@ -211,6 +211,16 @@ class FrameWorker(threading.Thread):
     BLENDSWAP_MODELS = frozenset({"BlendSwap-256"})
     UNIFACE_MODELS = frozenset({"UniFace-256"})
     REHIFACE_MODELS = frozenset({"ReHiFace-S"})
+    # Dual-swap blend is only valid when both models share Inswapper128ArcFace.
+    _SECONDARY_SWAPPER_COMPATIBLE_MODELS = frozenset(
+        {
+            "Inswapper128",
+            "AlphaFace",
+            "InStyleSwapper256 Version A",
+            "InStyleSwapper256 Version B",
+            "InStyleSwapper256 Version C",
+        }
+    )
 
     # Q-IMP-01: interpolation mode constants for face alignment
     _BICUBIC_INTERP = "bicubic"
@@ -1636,9 +1646,7 @@ class FrameWorker(threading.Thread):
                 if control.get("MuseTalkLandmarkCropToggle", True)
                 else None,
                 "kpss_5": mt_five,
-                "extra_margin": int(
-                    control.get("MuseTalkExtraMarginSlider", 10) or 10
-                ),
+                "extra_margin": int(control.get("MuseTalkExtraMarginSlider", 10) or 10),
                 "face_index": int(
                     face_index
                     if face_index is not None
@@ -1657,9 +1665,7 @@ class FrameWorker(threading.Thread):
             }
             if recording:
                 apply_kwargs["request_timeout_s"] = None
-            use_bboxes = (
-                bboxes if bboxes is not None else self._musetalk_bboxes()
-            )
+            use_bboxes = bboxes if bboxes is not None else self._musetalk_bboxes()
             return engine.apply_frame_bgr(
                 bgr,
                 self.frame_number,
@@ -1695,9 +1701,7 @@ class FrameWorker(threading.Thread):
             w = int(crop_chw_rgb_uint8.shape[-1])
             # Same 2.5% inset the VR landmark path uses as a dummy detector box.
             pad = max(1, int(min(h, w) * 0.025))
-            bbox = np.array(
-                [pad, pad, w - pad, h - pad], dtype=np.float32
-            )
+            bbox = np.array([pad, pad, w - pad, h - pad], dtype=np.float32)
             dense = None
             if kps_all_on_crop is not None and len(kps_all_on_crop) > 0:
                 dense = [np.asarray(kps_all_on_crop)]
@@ -3210,6 +3214,8 @@ class FrameWorker(threading.Thread):
             return None
         if parameters.get("StrengthMode2EnableToggle", False):
             return None
+        if self._secondary_swapper_requested(parameters):
+            return None
         if parameters.get("StrengthEnableToggle", False):
             if ceil(float(parameters.get("StrengthAmountSlider", 100)) / 100.0) != 1:
                 return None
@@ -3264,6 +3270,11 @@ class FrameWorker(threading.Thread):
             float(control.get("DetectorScoreSlider", 0.5)),
             str(parameters.get("SwapModelSelection", "")),
             str(parameters.get("SwapperResSelection", "")),
+            bool(parameters.get("SecondarySwapperEnableToggle", False)),
+            str(parameters.get("SecondarySwapModelSelection", "")),
+            str(parameters.get("SecondarySwapperResSelection", "")),
+            int(parameters.get("SecondarySwapperBlendAmountSlider", 50)),
+            int(parameters.get("SecondaryStrengthAmountSlider", 100)),
         )
 
     @staticmethod
@@ -3908,7 +3919,10 @@ class FrameWorker(threading.Thread):
                 else "bilinear"
             )
             original_faces = self.get_transformed_and_scaled_faces(
-                tform, batch_snap, interp_mode=_interp, only_256=swap_model == "AlphaFace"
+                tform,
+                batch_snap,
+                interp_mode=_interp,
+                only_256=self._alignment_only_256(swap_model, params),
             )
             _sl = None
             if source_latent_cache is not None and s["s_e"] is not None:
@@ -4054,7 +4068,10 @@ class FrameWorker(threading.Thread):
                 else "bilinear"
             )
             original_faces = self.get_transformed_and_scaled_faces(
-                tform, batch_snap, interp_mode=_interp, only_256=swap_model == "AlphaFace"
+                tform,
+                batch_snap,
+                interp_mode=_interp,
+                only_256=self._alignment_only_256(swapper_model, params),
             )
             _sl = None
             if source_latent_cache is not None and s["s_e"] is not None:
@@ -8111,6 +8128,145 @@ class FrameWorker(threading.Thread):
         out = base_blend_alpha * (1.0 - strength * close_k)
         return float(max(0.001, min(1.0, out)))
 
+    @staticmethod
+    def _secondary_swapper_requested(parameters: dict) -> bool:
+        return bool(parameters.get("SecondarySwapperEnableToggle", False))
+
+    @classmethod
+    def _alignment_only_256(cls, swapper_model: str, parameters: dict) -> bool:
+        """Skip 384/128 crops only when every swapper that will run is AlphaFace."""
+        if swapper_model != "AlphaFace":
+            return False
+        if not cls._secondary_swapper_requested(parameters):
+            return True
+        return parameters.get("SecondarySwapModelSelection", "AlphaFace") == "AlphaFace"
+
+    def _secondary_swapper_runtime_parameters(
+        self, parameters: dict, sec_model: str, tform
+    ) -> tuple[dict, bool, float]:
+        """Copy per-face params with secondary model/resolution/strength mapped in."""
+        sec_parameters = copy_mapping_data(parameters)
+        sec_res_choice = str(parameters.get("SecondarySwapperResSelection", "Auto"))
+        sec_parameters["SwapModelSelection"] = sec_model
+        sec_parameters["SwapperResSelection"] = sec_res_choice
+        sec_parameters["AlphaFaceResSelection"] = sec_res_choice
+
+        use_instyle_512 = sec_res_choice == "512"
+        if sec_res_choice == "Auto" and tform is not None:
+            try:
+                use_instyle_512 = float(tform.scale) <= 1.10
+            except (TypeError, AttributeError, ValueError):
+                use_instyle_512 = False
+        sec_parameters["InStyleResAEnableToggle"] = use_instyle_512
+        sec_parameters["InStyleResBEnableToggle"] = use_instyle_512
+        sec_parameters["InStyleResCEnableToggle"] = use_instyle_512
+
+        strength_enabled = bool(parameters.get("StrengthEnableToggle", False))
+        if strength_enabled:
+            sec_amount = float(parameters.get("SecondaryStrengthAmountSlider", 100))
+        else:
+            sec_amount = 100.0
+        sec_parameters["StrengthEnableToggle"] = strength_enabled
+        sec_parameters["StrengthAmountSlider"] = sec_amount
+        return sec_parameters, strength_enabled, sec_amount
+
+    def _blend_secondary_swapper(
+        self,
+        swap: torch.Tensor,
+        original_faces: tuple,
+        original_face_512: torch.Tensor,
+        sec_model: str,
+        dfm_model_name,
+        valid_s_e,
+        valid_t_e,
+        parameters: dict,
+        debug: bool,
+        debug_info: dict[str, str],
+        tform,
+        source_latent_cache: dict | None,
+    ) -> torch.Tensor:
+        """Run a compatible secondary swapper and lerp it onto the primary result."""
+        if sec_model not in self._SECONDARY_SWAPPER_COMPATIBLE_MODELS:
+            if debug:
+                debug_info["Sec_Swapper_Skipped"] = "Incompatible ArcFace Model"
+            return swap
+
+        sec_parameters, strength_enabled, sec_amount = (
+            self._secondary_swapper_runtime_parameters(parameters, sec_model, tform)
+        )
+        sec_input, sec_dfm, sec_dim, sec_latent = (
+            self.get_affined_face_dim_and_swapping_latents(
+                original_faces,
+                sec_model,
+                dfm_model_name,
+                valid_s_e,
+                valid_t_e,
+                sec_parameters,
+                debug,
+                tform,
+                source_latent_out_cache=source_latent_cache,
+                # Do not share Auto-res hysteresis with the primary Inswapper slot.
+                swapper_autores_track_id=-1,
+            )
+        )
+        if sec_input is None:
+            return swap
+
+        sec_itex = ceil(sec_amount / 100.0)
+        if sec_itex == 0:
+            sec_swap = original_face_512.clone()
+        else:
+            sec_output_size = int(128 * sec_dim)
+            sec_output = torch.zeros(
+                (sec_output_size, sec_output_size, 3),
+                dtype=torch.float32,
+                device=self.models_processor.get_effective_torch_device(),
+            )
+            sec_input_hwc = sec_input.permute(1, 2, 0).contiguous().div(255.0)
+            sec_swap, sec_prev_face = self.get_swapped_and_prev_face(
+                sec_output,
+                sec_input_hwc,
+                original_face_512,
+                sec_latent,
+                sec_itex,
+                sec_dim,
+                sec_model,
+                sec_dfm,
+                sec_parameters,
+            )
+            if strength_enabled:
+                sec_alpha = np.mod(sec_amount, 100) * 0.01
+                if sec_alpha == 0:
+                    sec_alpha = 1.0
+                sec_prev_face = (
+                    torch.mul(sec_prev_face, 255.0).clamp(0, 255).permute(2, 0, 1)
+                )
+                if sec_prev_face.shape[-1] != sec_swap.shape[-1]:
+                    sec_prev_face = self._get_cached_resize_bilinear_aa(
+                        int(sec_swap.shape[-2]), int(sec_swap.shape[-1])
+                    )(sec_prev_face)
+                sec_swap = (
+                    torch.lerp(
+                        sec_prev_face.float(), sec_swap.float(), float(sec_alpha)
+                    )
+                    .to(sec_swap.dtype)
+                    .contiguous()
+                )
+
+        if sec_swap.shape[-1] != swap.shape[-1]:
+            sec_swap = self._get_cached_resize_bilinear_aa(
+                int(swap.shape[-2]), int(swap.shape[-1])
+            )(sec_swap)
+
+        blend_alpha = (
+            float(parameters.get("SecondarySwapperBlendAmountSlider", 50)) / 100.0
+        )
+        return (
+            torch.lerp(swap.float(), sec_swap.float(), blend_alpha)
+            .to(swap.dtype)
+            .contiguous()
+        )
+
     def swap_core(
         self,
         img: torch.Tensor,
@@ -8262,7 +8418,7 @@ class FrameWorker(threading.Thread):
             if parameters.get("FaceAlignmentInterpolation", "Bilinear") == "Bicubic"
             else "bilinear"
         )
-        _only_256 = swapper_model == "AlphaFace"
+        _only_256 = self._alignment_only_256(swapper_model, parameters)
         _img_align = img if alignment_img is None else alignment_img
         alphaface_scale_val = 1.0
         original_face_512, original_face_384, original_face_256, original_face_128 = (
@@ -8298,6 +8454,7 @@ class FrameWorker(threading.Thread):
         )
 
         # --- SWAPPING INFERENCE ---
+        _ran_primary_swap = False
         if prefetched_swap_chw_uint8 is not None:
             swap = prefetched_swap_chw_uint8
             if swap.dtype != torch.uint8:
@@ -8314,6 +8471,7 @@ class FrameWorker(threading.Thread):
                 prev_face = prefetched_prev_face_hwc
             else:
                 prev_face = torch.div(swap.float(), 255.0).permute(1, 2, 0)
+            _ran_primary_swap = True
         elif valid_s_e is not None or (
             swapper_model == "DeepFaceLive (DFM)" and dfm_model_name
         ):
@@ -8404,6 +8562,7 @@ class FrameWorker(threading.Thread):
                     parameters,
                     native_mask_out=native_swap_mask,
                 )
+                _ran_primary_swap = True
                 # The run falls back to a mask-less bind if the export/engine rejects it.
                 if not self.models_processor.hyperswap_native_mask_ready():
                     native_swap_mask = None
@@ -8440,6 +8599,32 @@ class FrameWorker(threading.Thread):
 
         if _swap_core_perf is not None:
             _swap_core_perf.mark("sc_swap_strength")
+
+        if self._secondary_swapper_requested(parameters):
+            if (
+                _ran_primary_swap
+                and swapper_model in self._SECONDARY_SWAPPER_COMPATIBLE_MODELS
+            ):
+                swap = self._blend_secondary_swapper(
+                    swap,
+                    original_faces,
+                    original_face_512,
+                    str(parameters.get("SecondarySwapModelSelection", "AlphaFace")),
+                    dfm_model_name,
+                    valid_s_e,
+                    valid_t_e,
+                    parameters,
+                    debug,
+                    debug_info,
+                    tform,
+                    source_latent_cache,
+                )
+            elif (
+                debug and swapper_model not in self._SECONDARY_SWAPPER_COMPATIBLE_MODELS
+            ):
+                debug_info["Sec_Swapper_Skipped"] = "Incompatible ArcFace Model"
+            if _swap_core_perf is not None:
+                _swap_core_perf.mark("sc_secondary_swap")
 
         # --- DYNAMIC MASKS INITIALIZATION ---
         current_swap_h, current_swap_w = swap.shape[1], swap.shape[2]

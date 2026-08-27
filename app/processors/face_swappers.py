@@ -1,6 +1,7 @@
 import os
 import torch
 import threading
+from collections import OrderedDict
 from torchvision.transforms import v2
 from app.processors.utils import faceutil
 from app.processors.models_data import models_dir
@@ -16,7 +17,10 @@ if TYPE_CHECKING:
 class FaceSwappers:
     def __init__(self, models_processor: "ModelsProcessor"):
         self.models_processor = models_processor
-        self.current_swapper_model = None
+        # Dual-swapper pipelines keep up to two ONNX swappers resident so
+        # primary/secondary (or a UI model switch) does not ping-pong VRAM.
+        self._active_swapper_models: OrderedDict[str, bool] = OrderedDict()
+        self._MAX_ACTIVE_SWAPPERS: int = 2
         self.current_arcface_model = None
         # FS-PERF-02: cache input/output names keyed by (model_name, id(session)).
         # The model name is part of the key because CPython reuses id() after a session
@@ -74,8 +78,35 @@ class FaceSwappers:
         # AlphaFace ships its own ArcFace->ID projection matrix; loaded on first use.
         self._alphaface_emap: np.ndarray | None = None
 
+    @property
+    def current_swapper_model(self) -> str | None:
+        """Most recently activated swapper (backward-compatible single-slot view)."""
+        with self.models_processor.model_lock:
+            if self._active_swapper_models:
+                return next(reversed(self._active_swapper_models))
+            return None
+
+    @current_swapper_model.setter
+    def current_swapper_model(self, value: str | None) -> None:
+        with self.models_processor.model_lock:
+            if value is None:
+                return
+            self._active_swapper_models[value] = True
+            self._active_swapper_models.move_to_end(value)
+
+    def _reset_hyperswap_session_flags(self) -> None:
+        self._hyperswap_ort_batch_session_disabled = False
+        self._hyperswap_ort_batch_fail_logged = False
+        self._hyperswap_native_mask_disabled = False
+
+    def _evict_swapper_model(self, model_name: str) -> None:
+        self.models_processor.unload_model(model_name)
+        if str(model_name).startswith("HyperSwap"):
+            self._reset_hyperswap_session_flags()
+
     def unload_models(self):
         with self.models_processor.model_lock:
+            self._active_swapper_models.clear()
             for model_name in (
                 *self.swapper_models,
                 *self._crossface_aux_model_names,
@@ -89,22 +120,26 @@ class FaceSwappers:
                 _unloaded_arc.add(ort_name)
                 self.models_processor.unload_model(ort_name)
         # Allow a fresh HyperSwap/TRT session to retry batch + native mask after unload.
-        self._hyperswap_ort_batch_session_disabled = False
-        self._hyperswap_ort_batch_fail_logged = False
-        self._hyperswap_native_mask_disabled = False
+        self._reset_hyperswap_session_flags()
 
     def _manage_model(self, new_model_name):
-        # FS-RACE-01: protect read-modify-write of current_swapper_model with lock
+        # FS-RACE-01: protect read-modify-write of the active-swapper LRU with lock
         with self.models_processor.model_lock:
-            if (
-                self.current_swapper_model
-                and self.current_swapper_model != new_model_name
-            ):
-                self.models_processor.unload_model(self.current_swapper_model)
-                if str(self.current_swapper_model).startswith("HyperSwap"):
-                    self._hyperswap_ort_batch_session_disabled = False
-                    self._hyperswap_ort_batch_fail_logged = False
-                    self._hyperswap_native_mask_disabled = False
+            # HyperSwap variants share instance-level ORT session flags; keep only one.
+            if str(new_model_name).startswith("HyperSwap"):
+                for name in list(self._active_swapper_models):
+                    if name != new_model_name and str(name).startswith("HyperSwap"):
+                        self._active_swapper_models.pop(name, None)
+                        self._evict_swapper_model(name)
+
+            if new_model_name in self._active_swapper_models:
+                self._active_swapper_models.move_to_end(new_model_name)
+                return
+
+            while len(self._active_swapper_models) >= self._MAX_ACTIVE_SWAPPERS:
+                oldest_model, _ = self._active_swapper_models.popitem(last=False)
+                if oldest_model != new_model_name:
+                    self._evict_swapper_model(oldest_model)
             # FS-BUG-07: current_swapper_model is committed only after load confirmation (see _load_swapper_model)
 
     def _load_swapper_model(self, model_name):
@@ -116,7 +151,8 @@ class FaceSwappers:
         # FS-BUG-07: only commit state after load is confirmed non-None
         if model is not None:
             with self.models_processor.model_lock:
-                self.current_swapper_model = model_name
+                self._active_swapper_models[model_name] = True
+                self._active_swapper_models.move_to_end(model_name)
         return model
 
     def _run_model_with_lazy_build_check(

@@ -102,6 +102,28 @@ def test_restorer_infer_cache_key_changes_with_swapper():
     assert key_a != key_b
 
 
+def test_restorer_infer_cache_key_changes_with_secondary_swapper():
+    base_params = {
+        "FaceRestorerDetTypeSelection": "Original",
+        "FaceFidelityWeightDecimalSlider": 0.9,
+        "FaceRestorerUltraLightOnnxToggle": False,
+        "FaceRestorerUltraLightOnLiveToggle": True,
+        "FaceRestorerUltraLightOnSmallFaceToggle": False,
+        "FaceRestorerUltraLightScaleGeDecimalSlider": 2.0,
+        "FaceRestorerUltraLightPreferFp16Toggle": True,
+        "SwapModelSelection": "Inswapper128",
+        "SwapperResSelection": "128",
+    }
+    control = {"DetectorScoreSlider": 0.5}
+    key_off = FrameWorker._restorer_infer_cache_key(base_params, control, "GPEN-512")
+    key_on = FrameWorker._restorer_infer_cache_key(
+        {**base_params, "SecondarySwapperEnableToggle": True},
+        control,
+        "GPEN-512",
+    )
+    assert key_off != key_on
+
+
 def test_restorer_infer_swap_fingerprint_changes_with_content():
     import torch
 

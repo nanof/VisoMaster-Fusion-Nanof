@@ -288,6 +288,34 @@ def test_hyperswap_session_flags_reset_on_unload_and_model_switch():
     assert "HyperSwapv1" in proc.unloaded
 
 
+def test_active_swapper_lru_keeps_two_non_hyperswap_models():
+    """Primary/secondary dual-swap must not unload the first of two resident models."""
+    from app.processors.face_swappers import FaceSwappers
+    import threading
+
+    class _Proc:
+        def __init__(self):
+            self.model_lock = threading.Lock()
+            self.unloaded = []
+
+        def unload_model(self, name):
+            self.unloaded.append(name)
+
+    proc = _Proc()
+    fs = FaceSwappers(models_processor=proc)  # type: ignore[arg-type]
+    fs.current_swapper_model = "Inswapper128"
+    fs._manage_model("AlphaFace")
+    assert proc.unloaded == []
+
+    fs.current_swapper_model = "AlphaFace"
+    fs._manage_model("Inswapper128")
+    assert proc.unloaded == []
+    assert set(fs._active_swapper_models) == {"Inswapper128", "AlphaFace"}
+
+    fs._manage_model("GhostFacev1")
+    assert proc.unloaded == ["AlphaFace"]
+
+
 def test_prefetch_strength_lerp_needs_original_prev_face():
     """Batched prefetch must lerp against the pre-swap crop, not the swapped result.
 
