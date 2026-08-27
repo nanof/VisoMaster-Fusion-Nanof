@@ -325,11 +325,29 @@ class DFMModelManager:
         return dfm_values[0] if dfm_values else ""
 
 
+def migrate_legacy_swapper_res_auto(parameters: dict) -> None:
+    """Fold the removed Auto toggle into SwapperResSelection.
+
+    SwapperResAutoSelectEnableToggle used to live next to a fixed 128/256/384/512
+    combo. The combo now has an Auto option, but the old key is still honoured in
+    saved workspaces. If we keep reading it, the UI can show 128 while Inswapper
+    actually runs Auto. Promote the toggle into the combo and drop the ghost key.
+    """
+    if "SwapperResAutoSelectEnableToggle" not in parameters:
+        return
+    legacy_on = bool(parameters.pop("SwapperResAutoSelectEnableToggle"))
+    if legacy_on:
+        parameters["SwapperResSelection"] = "Auto"
+
+
 # Datatype used for storing parameter values
 # Major use case for subclassing this is to fallback to a default value, when trying to access value from a non-existing key
 # Helps when saving/importing workspace or parameters from external file after a future update including new Parameter widgets
 class ParametersDict(UserDict):
     def __init__(self, parameters, default_parameters: dict):
+        src = parameters.data if isinstance(parameters, UserDict) else parameters
+        if isinstance(src, dict):
+            migrate_legacy_swapper_res_auto(src)
         super().__init__(parameters)
         self._default_parameters = default_parameters
 

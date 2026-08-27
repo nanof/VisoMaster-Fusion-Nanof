@@ -216,6 +216,18 @@ def test_convert_parameters_dict_to_parameters_dict_passthrough(
     assert result is sample_params_dict
 
 
+def test_convert_dict_migrates_legacy_swapper_res_auto(mock_main_window):
+    loaded = {
+        "SwapperResSelection": "128",
+        "SwapperResAutoSelectEnableToggle": True,
+    }
+    result = convert_parameters_to_supported_type(
+        mock_main_window, loaded, ParametersDict
+    )
+    assert result["SwapperResSelection"] == "Auto"
+    assert "SwapperResAutoSelectEnableToggle" not in result.data
+
+
 # ---------------------------------------------------------------------------
 # Round-trip: ParametersDict → dict → ParametersDict
 # ---------------------------------------------------------------------------

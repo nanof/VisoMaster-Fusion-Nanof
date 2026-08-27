@@ -2116,9 +2116,7 @@ class FrameWorker(threading.Thread):
 
     @staticmethod
     def _swapper_res_auto_enabled(parameters: dict) -> bool:
-        if parameters.get("SwapperResSelection") == "Auto":
-            return True
-        return bool(parameters.get("SwapperResAutoSelectEnableToggle", False))
+        return parameters.get("SwapperResSelection") == "Auto"
 
     def _apply_face_shaping_if_enabled(
         self,

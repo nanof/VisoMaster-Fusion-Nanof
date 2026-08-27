@@ -3,7 +3,11 @@ PD-* tests for app.helpers.miscellaneous.ParametersDict
 """
 
 import pytest
-from app.helpers.miscellaneous import ParametersDict, copy_mapping_data
+from app.helpers.miscellaneous import (
+    ParametersDict,
+    copy_mapping_data,
+    migrate_legacy_swapper_res_auto,
+)
 
 
 @pytest.fixture
@@ -98,3 +102,35 @@ def test_copy_mapping_data_accepts_parameters_dict(defaults):
 def test_copy_mapping_data_rejects_non_mapping():
     assert copy_mapping_data(None) == {}
     assert copy_mapping_data(123) == {}
+
+
+def test_migrate_legacy_swapper_res_auto_promotes_toggle_to_combo():
+    params = {
+        "SwapperResSelection": "128",
+        "SwapperResAutoSelectEnableToggle": True,
+    }
+    migrate_legacy_swapper_res_auto(params)
+    assert params["SwapperResSelection"] == "Auto"
+    assert "SwapperResAutoSelectEnableToggle" not in params
+
+
+def test_migrate_legacy_swapper_res_auto_drops_off_toggle_without_changing_res():
+    params = {
+        "SwapperResSelection": "128",
+        "SwapperResAutoSelectEnableToggle": False,
+    }
+    migrate_legacy_swapper_res_auto(params)
+    assert params["SwapperResSelection"] == "128"
+    assert "SwapperResAutoSelectEnableToggle" not in params
+
+
+def test_parameters_dict_init_migrates_legacy_swapper_res_auto(defaults):
+    pd = ParametersDict(
+        {
+            "SwapperResSelection": "128",
+            "SwapperResAutoSelectEnableToggle": True,
+        },
+        defaults,
+    )
+    assert pd["SwapperResSelection"] == "Auto"
+    assert "SwapperResAutoSelectEnableToggle" not in pd.data

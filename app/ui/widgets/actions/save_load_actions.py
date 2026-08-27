@@ -502,10 +502,15 @@ def convert_parameters_to_supported_type(
 ):
     if convert_type is dict:
         if isinstance(parameters, misc_helpers.ParametersDict):
+            misc_helpers.migrate_legacy_swapper_res_auto(parameters.data)
             return parameters.data
+        if isinstance(parameters, dict):
+            misc_helpers.migrate_legacy_swapper_res_auto(parameters)
+            return parameters
     elif convert_type is misc_helpers.ParametersDict:
         if isinstance(parameters, dict):
             _migrate_legacy_border_blur_parameters(parameters)
+            misc_helpers.migrate_legacy_swapper_res_auto(parameters)
             return misc_helpers.ParametersDict(
                 parameters,
                 cast(misc_helpers.ParametersDict, main_window.default_parameters).data,
