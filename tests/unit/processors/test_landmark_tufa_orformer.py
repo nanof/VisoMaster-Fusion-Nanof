@@ -13,8 +13,10 @@ from app.processors.face_landmark_detectors import FaceLandmarkDetectors
 from app.processors.models_data import (
     fp16_safe_models_list,
     landmark_model_mapping,
+    landmark_point_counts,
     models_list,
 )
+from app.processors.utils import faceutil
 
 IDENTITY_IM = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
 
@@ -38,6 +40,10 @@ def _detectors() -> FaceLandmarkDetectors:
         "orformer98": {
             "model_name": "FaceLandmarkORFormer98",
             "function": inst.detect_face_landmark_orformer98,
+        },
+        "tufa314": {
+            "model_name": "FaceLandmarkTUFA314",
+            "function": inst.detect_face_landmark_tufa314,
         },
     }
     return inst
@@ -67,6 +73,7 @@ def _stub_crop(inst: FaceLandmarkDetectors, calls: list) -> None:
     ("model_name", "filename"),
     [
         ("FaceLandmarkTUFA98", "tufa_vits8_256_98pt.onnx"),
+        ("FaceLandmarkTUFA314", "tufa_vits8_256_314pt.onnx"),
         ("FaceLandmarkORFormer98", "orformer_hgnet_wflw_98pt_256.onnx"),
     ],
 )
@@ -80,7 +87,10 @@ def test_each_model_is_registered_once_with_a_matching_url(model_name, filename)
     assert len(entries[0]["hash"]) == 64
 
 
-@pytest.mark.parametrize("model_name", ["FaceLandmarkTUFA98", "FaceLandmarkORFormer98"])
+@pytest.mark.parametrize(
+    "model_name",
+    ["FaceLandmarkTUFA98", "FaceLandmarkTUFA314", "FaceLandmarkORFormer98"],
+)
 def test_neither_model_is_marked_fp16_safe(model_name):
     """Both are broken under trt_fp16_enable and must never be added to that list.
 
@@ -96,7 +106,10 @@ def test_both_modes_map_to_their_models():
     """landmark_model_mapping is what control_actions uses to load/unload on a
     dropdown change, so a missing entry silently disables the selection."""
     assert landmark_model_mapping["tufa98"] == "FaceLandmarkTUFA98"
+    assert landmark_model_mapping["tufa314"] == "FaceLandmarkTUFA314"
     assert landmark_model_mapping["orformer98"] == "FaceLandmarkORFormer98"
+    assert set(landmark_point_counts) == set(landmark_model_mapping)
+    assert landmark_point_counts["tufa314"] == 314
 
 
 def test_every_mapped_landmark_model_exists_in_models_list():
@@ -144,6 +157,112 @@ def test_tufa_uses_a_1_15_upright_crop_and_ignores_from_points():
     assert calls == [
         {"from_points": False, "target_size": 256, "scale": 1.15, "warp_mode": None}
     ]
+
+
+def test_tufa314_scales_its_normalised_output_to_crop_pixels():
+    inst = _detectors()
+    calls: list = []
+    _stub_crop(inst, calls)
+
+    normalised = np.full((1, 314, 2), 0.25, dtype=np.float32)
+    normalised[0, 154] = (0.5, 0.5)
+    inst._run_onnx_binding = lambda name, inputs, outputs: [normalised]  # type: ignore[method-assign]
+
+    kpss_5, kpss, scores = inst.detect_face_landmark_tufa314(
+        torch.zeros(3, 512, 512), np.array([0, 0, 100, 100]), None
+    )
+
+    assert kpss.shape == (314, 2)
+    np.testing.assert_allclose(kpss[0], (64.0, 64.0), atol=1e-4)
+    np.testing.assert_allclose(kpss[154], (128.0, 128.0), atol=1e-4)
+    np.testing.assert_allclose(kpss_5[2], (128.0, 128.0), atol=1e-4)
+    assert len(scores) == 0
+
+
+def test_tufa314_uses_a_1_15_upright_crop_and_ignores_from_points():
+    inst = _detectors()
+    calls: list = []
+    _stub_crop(inst, calls)
+    inst._run_onnx_binding = lambda *a, **k: [np.zeros((1, 314, 2), dtype=np.float32)]  # type: ignore[method-assign]
+
+    inst.detect_face_landmark_tufa314(
+        torch.zeros(3, 512, 512), np.array([0, 0, 100, 100]), None, from_points=True
+    )
+
+    assert calls == [
+        {"from_points": False, "target_size": 256, "scale": 1.15, "warp_mode": None}
+    ]
+
+
+def test_tufa314_binds_the_314_point_graph_not_the_98_point_one():
+    """A copy-paste of the tufa98 body would still pass every geometric assertion
+    above while quietly running the 98-point weights."""
+    inst = _detectors()
+    calls: list = []
+    _stub_crop(inst, calls)
+    seen: list = []
+
+    def fake_binding(name, inputs, outputs):
+        seen.append((name, sorted(inputs), list(outputs)))
+        return [np.zeros((1, 314, 2), dtype=np.float32)]
+
+    inst._run_onnx_binding = fake_binding  # type: ignore[method-assign]
+    inst.detect_face_landmark_tufa314(
+        torch.zeros(3, 512, 512), np.array([0, 0, 100, 100]), None
+    )
+
+    assert seen == [("FaceLandmarkTUFA314", ["image"], ["landmarks"])]
+
+
+def test_tufa314_five_point_slice_uses_the_shared_tufa_anchors():
+    pts = np.arange(314 * 2, dtype=np.float32).reshape(314, 2)
+
+    landmark_5, _score = faceutil.convert_face_landmark_314_to_5(pts, np.zeros(314))
+
+    np.testing.assert_allclose(landmark_5[0], pts[312])  # eye left (pupil)
+    np.testing.assert_allclose(landmark_5[1], pts[313])  # eye right (pupil)
+    np.testing.assert_allclose(landmark_5[2], pts[154])  # nose tip
+    np.testing.assert_allclose(landmark_5[3], pts[51])  # lip left
+    np.testing.assert_allclose(landmark_5[4], pts[258])  # lip right
+
+
+def test_convert_face_landmark_x_to_5_dispatches_314():
+    pts = np.arange(314 * 2, dtype=np.float32).reshape(314, 2)
+
+    landmark_5, _score = faceutil.convert_face_landmark_x_to_5(
+        pts, pts_score=np.zeros(314)
+    )
+
+    np.testing.assert_allclose(
+        landmark_5, faceutil.convert_face_landmark_314_to_5(pts, np.zeros(314))[0]
+    )
+
+
+def test_parse_pt2_from_pt_x_does_not_fall_into_the_101_point_branch_for_314():
+    pts = np.zeros((314, 2), dtype=np.float32)
+    pts[:] = (0.0, 0.0)
+    pts[faceutil.LANDMARK_314_EYE_LEFT] = (90.0, 100.0)
+    pts[faceutil.LANDMARK_314_EYE_RIGHT] = (170.0, 100.0)
+    pts[faceutil.LANDMARK_314_LIP_LEFT] = (100.0, 170.0)
+    pts[faceutil.LANDMARK_314_LIP_RIGHT] = (160.0, 170.0)
+
+    pt2 = faceutil.parse_pt2_from_pt_x(pts, use_lip=True)
+
+    np.testing.assert_allclose(pt2[0], (130.0, 100.0))  # eye centre
+    np.testing.assert_allclose(pt2[1], (130.0, 170.0))  # lip centre
+
+
+def test_parse_pt2_from_pt314_mean_eyes_uses_the_eye_corners():
+    pts = np.zeros((314, 2), dtype=np.float32)
+    pts[faceutil.LANDMARK_314_EYE_LEFT] = (1000.0, 1000.0)  # pupil, must be ignored
+    pts[faceutil.LANDMARK_314_EYE_RIGHT] = (1000.0, 1000.0)
+    pts[faceutil.LANDMARK_314_EYE_LEFT_CORNERS] = [(70.0, 100.0), (110.0, 100.0)]
+    pts[faceutil.LANDMARK_314_EYE_RIGHT_CORNERS] = [(150.0, 100.0), (190.0, 100.0)]
+
+    pt2 = faceutil.parse_pt2_from_pt314(pts, use_lip=False, use_mean_eyes=True)
+
+    np.testing.assert_allclose(pt2[0], (90.0, 100.0))
+    np.testing.assert_allclose(pt2[1], (170.0, 100.0))
 
 
 # --------------------------------------------------------------------------------

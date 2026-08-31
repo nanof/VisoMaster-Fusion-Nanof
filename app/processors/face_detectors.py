@@ -504,6 +504,17 @@ class FaceDetectors:
             for key in ["img", "score", "from_points"]:
                 landmark_kwargs.pop(key, None)
 
+            # 'hrffa' predicts on a whole-head crop, so it needs DEIMv2-Wholebody49
+            # head boxes. Those belong to the frame, not to a face, so run the head
+            # detector once here instead of once per face.
+            if (
+                landmark_detect_mode == "hrffa"
+                and landmark_kwargs.get("head_bboxes") is None
+            ):
+                landmark_kwargs["head_bboxes"] = (
+                    self.models_processor.run_detect_head_bboxes(img_landmark)
+                )
+
             refined_kpss = []
             for i in range(kpss_5.shape[0]):
                 landmark_kpss_5, landmark_kpss, landmark_scores = (

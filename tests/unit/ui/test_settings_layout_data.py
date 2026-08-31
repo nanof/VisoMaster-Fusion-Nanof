@@ -222,6 +222,10 @@ def test_confirm_before_stopping_recording_toggle_exists_in_video_recording_sett
 def test_landmark_detect_model_includes_tufa_and_orformer():
     entry = SETTINGS_LAYOUT_DATA["Detectors"]["LandmarkDetectModelSelection"]
     assert "tufa98" in entry["options"]
+    assert "tufa314" in entry["options"]
     assert "orformer98" in entry["options"]
+    assert "hrffa" in entry["options"]
     assert landmark_model_mapping["tufa98"] == "FaceLandmarkTUFA98"
+    assert landmark_model_mapping["tufa314"] == "FaceLandmarkTUFA314"
     assert landmark_model_mapping["orformer98"] == "FaceLandmarkORFormer98"
+    assert landmark_model_mapping["hrffa"] == "FaceLandmarkHRFFA"
