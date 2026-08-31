@@ -430,6 +430,8 @@ class VideoProcessor(QObject):
         self.ffmpeg_input_height: int = 0
         self._used_ffmpeg_cap: bool = False
         self._preview_fps_cap_active: bool = False
+        # Sequential FFmpeg pipe used only to downscale during decode (no FPS resample).
+        self._ffmpeg_scale_input_active: bool = False
         self.ffmpeg_input_prefetched_frame: Optional[numpy.ndarray] = None
         self.tail_pending_stall_start_sec: float = 0.0
         self.tail_force_finalize_due_to_stall: bool = False
@@ -1423,6 +1425,43 @@ class VideoProcessor(QObject):
                 f"[WARN] Could not parse global input resolution, defaulting to original size. Error: {e}"
             )
             return None
+
+    @staticmethod
+    def _refresh_feeder_input_resize_cache(
+        control: Mapping[str, Any],
+        *,
+        cached_toggle: object,
+        cached_size: object,
+        cached_height: Optional[int],
+    ) -> tuple[object, object, Optional[int], bool]:
+        """VP-19: reuse parsed height unless toggle *or* size selection changed.
+
+        Returns ``(toggle, size, height, height_changed)``. Previously the feeder
+        only invalidated on the toggle, so changing 1080p→540p during playback
+        kept decoding/processing at the old size.
+        """
+        toggle = bool(control.get("GlobalInputResizeToggle", False))
+        size = control.get("GlobalInputResizeSizeSelection", "720p")
+        if toggle == bool(cached_toggle) and size == cached_size:
+            return cached_toggle, cached_size, cached_height, False
+        new_height = VideoProcessor._preview_target_height_from_scan_control(
+            dict(control)
+        )
+        return toggle, size, new_height, new_height != cached_height
+
+    @staticmethod
+    def _input_downscale_needed_for_source(
+        src_width: int, src_height: int, target_height: Optional[int]
+    ) -> bool:
+        """True when Global Input Resize would emit a smaller frame than the file."""
+        if target_height is None or int(target_height) <= 0:
+            return False
+        if src_width <= 0 or src_height <= 0:
+            return False
+        out_w, out_h = VideoProcessor._scaled_dimensions_for_height(
+            src_width, src_height, int(target_height)
+        )
+        return out_h < src_height or out_w < src_width
 
     @staticmethod
     def _parse_selection_height_lines(size_str: object) -> Optional[int]:
@@ -2812,9 +2851,12 @@ class VideoProcessor(QObject):
         self.manual_dropped_skip_count = 0
         self.read_error_skip_count = 0
 
-        # VP-19: Cache target input height outside the loop; only re-read on detected change.
+        # VP-19: Cache target input height outside the loop; invalidate on toggle *or* size.
         cached_resize_toggle = self.main_window.control.get(
             "GlobalInputResizeToggle", False
+        )
+        cached_resize_size = self.main_window.control.get(
+            "GlobalInputResizeSizeSelection", "720p"
         )
         cached_target_height = self._get_target_input_height()
 
@@ -2829,6 +2871,37 @@ class VideoProcessor(QObject):
                 if self.feeder_parameters is None:
                     time.sleep(0.005)
                     continue
+
+                # VP-19: refresh cached height before seeks so FPS-cap restarts use the new size.
+                prev_cached_height = cached_target_height
+                (
+                    cached_resize_toggle,
+                    cached_resize_size,
+                    cached_target_height,
+                    _,
+                ) = VideoProcessor._refresh_feeder_input_resize_cache(
+                    self.main_window.control,
+                    cached_toggle=cached_resize_toggle,
+                    cached_size=cached_resize_size,
+                    cached_height=cached_target_height,
+                )
+                if cached_target_height != prev_cached_height:
+                    # Same-frame benchmark caches RGB at the old size; drop it so
+                    # the next decode picks up the new target height.
+                    self._benchmark_same_frame_rgb_cache = None
+                    if not is_segment_mode and not self.recording:
+                        if self._preview_fps_cap_active or self._used_ffmpeg_cap:
+                            self._restart_preview_fps_cap_stream(
+                                self.current_frame_number, cached_target_height
+                            )
+                        elif self._input_downscale_needed(cached_target_height):
+                            self._ffmpeg_scale_input_active = True
+                            self._restart_ffmpeg_sequential_input(
+                                self.current_frame_number, cached_target_height
+                            )
+                        elif self._ffmpeg_scale_input_active:
+                            self._stop_recording_ffmpeg_input_stream()
+                            self._ffmpeg_scale_input_active = False
 
                 # 0b. Interactive timeline scrub during playback (no full pipeline teardown).
                 pending_interactive_seek: int | None = None
@@ -2858,12 +2931,12 @@ class VideoProcessor(QObject):
                         self.current_frame_number = pending_processing_seek
                         self.next_frame_to_display = pending_processing_seek
                     self._clear_frame_and_raw_queues()
-                    if self._preview_fps_cap_active:
+                    if self._using_ffmpeg_sequential_input():
                         if not self._restart_preview_fps_cap_stream(
                             pending_processing_seek, cached_target_height
                         ):
                             print(
-                                "[ERROR] Preview FPS-cap stream could not seek; stopping feeder."
+                                "[ERROR] FFmpeg input stream could not seek; stopping feeder."
                             )
                             break
                         seek_before_read = None
@@ -2953,12 +3026,12 @@ class VideoProcessor(QObject):
                                     # starve the UI when catch-up retried without a read (issue: loop
                                     # of seek+clear+continue never reached read_frame/enqueue).
                                     self._clear_frames_to_display_and_profiles()
-                                if self._preview_fps_cap_active:
+                                if self._using_ffmpeg_sequential_input():
                                     if not self._restart_preview_fps_cap_stream(
                                         jump_to, cached_target_height
                                     ):
                                         print(
-                                            "[ERROR] Preview FPS-cap stream could not catch up; "
+                                            "[ERROR] FFmpeg input stream could not catch up; "
                                             "stopping feeder."
                                         )
                                         break
@@ -2987,13 +3060,6 @@ class VideoProcessor(QObject):
                     continue
 
                 # 3. Determine Input Resolution (Global Resize)
-                # VP-19: Use cached value; only re-read when the toggle changes.
-                current_resize_toggle = self.main_window.control.get(
-                    "GlobalInputResizeToggle", False
-                )
-                if current_resize_toggle != cached_resize_toggle:
-                    cached_resize_toggle = current_resize_toggle
-                    cached_target_height = self._get_target_input_height()
                 target_height = cached_target_height
 
                 _perf_stages_feed = (
@@ -4230,6 +4296,12 @@ class VideoProcessor(QObject):
         mode = "recording (default-style)" if self.recording else "playback"
         print(f"[INFO] Starting video {mode} processing setup...")
 
+        self._ffmpeg_scale_input_active = bool(
+            self.file_type == "video"
+            and not self._used_ffmpeg_cap
+            and self._input_downscale_needed(self._get_target_input_height())
+        )
+
         # 3. Set State Flags
         self.processing = True  # General flag ON
         self.is_processing_segments = False
@@ -4338,35 +4410,58 @@ class VideoProcessor(QObject):
         actual_start_frame = self.main_window.videoSeekSlider.value()
         print(f"[INFO] Sync: Seeking directly to source-frame {actual_start_frame}...")
 
-        # 7b–7c. Read the first frame (OpenCV path or FFmpeg FPS-cap path).
+        # 7b–7c. Read the first frame (OpenCV, FFmpeg FPS-cap, or FFmpeg scaled decode).
         target_height = self._get_target_input_height()
         output_start_frame = actual_start_frame
         if self._used_ffmpeg_cap and self.recording_source_fps > 0 and self.fps > 0:
             output_start_frame = max(0, self.source_to_output_frame(actual_start_frame))
 
-        if self._used_ffmpeg_cap:
-            if not self._start_recording_ffmpeg_input_stream(
-                start_frame=output_start_frame,
-                target_fps=float(self.fps),
-                target_height=target_height,
-            ):
-                print("[ERROR] Failed to start FFmpeg FPS-cap input stream.")
-                self.stop_processing()
-                return
-
-            print(
-                "[INFO] Sync: Reading first frame from FFmpeg FPS-cap input stream..."
+        ffmpeg_first_frame_ok = False
+        if self._used_ffmpeg_cap or self._ffmpeg_scale_input_active:
+            resample = bool(self._used_ffmpeg_cap)
+            stream_fps = float(
+                self.fps if resample else (self.recording_source_fps or self.fps)
             )
-            ret, frame_bgr = self._read_frame_from_ffmpeg_input_stream()
-            print(f"[INFO] Sync: Initial FFmpeg stream read complete (Result: {ret}).")
+            start_fn = output_start_frame if resample else actual_start_frame
+            if not self._start_recording_ffmpeg_input_stream(
+                start_frame=start_fn,
+                target_fps=stream_fps,
+                target_height=target_height,
+                resample_fps=resample,
+            ):
+                if resample:
+                    print("[ERROR] Failed to start FFmpeg FPS-cap input stream.")
+                    self.stop_processing()
+                    return
+                print(
+                    "[WARN] FFmpeg scaled decode failed to start; "
+                    "falling back to OpenCV resize."
+                )
+                self._ffmpeg_scale_input_active = False
+            else:
+                print("[INFO] Sync: Reading first frame from FFmpeg input stream...")
+                ret, frame_bgr = self._read_frame_from_ffmpeg_input_stream()
+                print(
+                    f"[INFO] Sync: Initial FFmpeg stream read complete (Result: {ret})."
+                )
+                if ret and frame_bgr is not None:
+                    self.ffmpeg_input_prefetched_frame = frame_bgr.copy()
+                    ffmpeg_first_frame_ok = True
+                elif resample:
+                    print(
+                        "[ERROR] FFmpeg recording input stream produced no first frame."
+                    )
+                    self.stop_processing()
+                    return
+                else:
+                    print(
+                        "[WARN] FFmpeg scaled decode produced no first frame; "
+                        "falling back to OpenCV resize."
+                    )
+                    self._stop_recording_ffmpeg_input_stream()
+                    self._ffmpeg_scale_input_active = False
 
-            if not ret or frame_bgr is None:
-                print("[ERROR] FFmpeg recording input stream produced no first frame.")
-                self.stop_processing()
-                return
-
-            self.ffmpeg_input_prefetched_frame = frame_bgr.copy()
-        else:
+        if not ffmpeg_first_frame_ok:
             print(
                 f"[INFO] Sync: Reading frame {actual_start_frame} using locked helper (Target Height: {target_height})..."
             )
@@ -5162,6 +5257,7 @@ class VideoProcessor(QObject):
         self.playback_display_start_time = 0.0
         self._used_ffmpeg_cap = False
         self._preview_fps_cap_active = False
+        self._ffmpeg_scale_input_active = False
         self.processing_stopped_signal.emit()
 
     def stop_processing(self, block: bool = True, defer_gpu_gc: bool = False) -> bool:
@@ -5379,13 +5475,39 @@ class VideoProcessor(QObject):
 
         return out_width, out_height
 
+    def _capture_source_size(self) -> tuple[int, int]:
+        if not self.media_capture:
+            return 0, 0
+        try:
+            src_w = int(self.media_capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+            src_h = int(self.media_capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        except Exception:
+            return 0, 0
+        return src_w, src_h
+
+    def _input_downscale_needed(self, target_height: Optional[int]) -> bool:
+        src_w, src_h = self._capture_source_size()
+        return VideoProcessor._input_downscale_needed_for_source(
+            src_w, src_h, target_height
+        )
+
+    def _using_ffmpeg_sequential_input(self) -> bool:
+        """Feeder reads from the FFmpeg rawvideo pipe (FPS-cap and/or scaled decode)."""
+        return bool(
+            getattr(self, "_preview_fps_cap_active", False)
+            or getattr(self, "_ffmpeg_scale_input_active", False)
+            or getattr(self, "_used_ffmpeg_cap", False)
+        )
+
     def _start_recording_ffmpeg_input_stream(
         self,
         start_frame: int,
         target_fps: float,
         target_height: Optional[int],
+        *,
+        resample_fps: bool = True,
     ) -> bool:
-        """Start an FFmpeg rawvideo stream for recording or preview FPS-cap mode."""
+        """Start an FFmpeg rawvideo stream for FPS-cap and/or decode-time downscale."""
         if not self.media_path:
             print("[ERROR] Cannot start FFmpeg input stream: media path is missing.")
             return False
@@ -5396,16 +5518,7 @@ class VideoProcessor(QObject):
 
         self._stop_recording_ffmpeg_input_stream()
 
-        src_w = (
-            int(self.media_capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-            if self.media_capture
-            else 0
-        )
-        src_h = (
-            int(self.media_capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            if self.media_capture
-            else 0
-        )
+        src_w, src_h = self._capture_source_size()
 
         if src_w <= 0 or src_h <= 0:
             print(
@@ -5414,16 +5527,21 @@ class VideoProcessor(QObject):
             return False
 
         out_w, out_h = src_w, src_h
-        vf_filters = [f"fps={target_fps:.6f}"]
+        vf_filters: list[str] = []
+        if resample_fps:
+            vf_filters.append(f"fps={target_fps:.6f}")
 
         if target_height and target_height > 0:
             out_w, out_h = self._scaled_dimensions_for_height(
                 src_w, src_h, target_height
             )
             if out_w != src_w or out_h != src_h:
-                vf_filters.append(
-                    f"scale={out_w}:{out_h}:flags=lanczos+accurate_rnd+full_chroma_int"
+                scale_flags = (
+                    "lanczos+accurate_rnd+full_chroma_int"
+                    if resample_fps
+                    else "fast_bilinear"
                 )
+                vf_filters.append(f"scale={out_w}:{out_h}:flags={scale_flags}")
 
         args = [
             "ffmpeg",
@@ -5442,12 +5560,17 @@ class VideoProcessor(QObject):
 
         args.extend(
             [
+                "-noautorotate",
                 "-i",
                 str(self.media_path),
                 "-an",
                 "-sn",
-                "-vf",
-                ",".join(vf_filters),
+            ]
+        )
+        if vf_filters:
+            args.extend(["-vf", ",".join(vf_filters)])
+        args.extend(
+            [
                 "-f",
                 "rawvideo",
                 "-pix_fmt",
@@ -5456,29 +5579,39 @@ class VideoProcessor(QObject):
             ]
         )
 
+        popen_kw: Dict[str, Any] = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.DEVNULL,
+            "bufsize": 10**7,
+        }
+        if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+            popen_kw["creationflags"] = subprocess.CREATE_NO_WINDOW
+
         try:
-            self.ffmpeg_input_sp = subprocess.Popen(
-                args,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                bufsize=10**7,
-            )
+            self.ffmpeg_input_sp = subprocess.Popen(args, **popen_kw)
             self.ffmpeg_input_width = out_w
             self.ffmpeg_input_height = out_h
-            self._used_ffmpeg_cap = True
+            if resample_fps:
+                self._used_ffmpeg_cap = True
             self.ffmpeg_input_prefetched_frame = None
-            stream_kind = "preview" if self._preview_fps_cap_active else "recording"
-            print(
-                f"[INFO] {stream_kind.capitalize()} input stream enabled via FFmpeg: "
-                f"{out_w}x{out_h} @ {target_fps:.3f}fps"
-            )
+            if resample_fps:
+                stream_kind = "preview" if self._preview_fps_cap_active else "recording"
+                print(
+                    f"[INFO] {stream_kind.capitalize()} input stream enabled via FFmpeg: "
+                    f"{out_w}x{out_h} @ {target_fps:.3f}fps"
+                )
+            else:
+                print(
+                    f"[INFO] Scaled input decode via FFmpeg: {src_w}x{src_h} → "
+                    f"{out_w}x{out_h} (start frame {start_frame})"
+                )
             return True
         except FileNotFoundError:
-            print("[ERROR] FFmpeg not found while starting FPS-cap input stream.")
+            print("[ERROR] FFmpeg not found while starting input stream.")
             self.ffmpeg_input_sp = None
             return False
         except Exception as e:
-            print(f"[ERROR] Failed to start FFmpeg FPS-cap input stream: {e}")
+            print(f"[ERROR] Failed to start FFmpeg input stream: {e}")
             self.ffmpeg_input_sp = None
             return False
 
@@ -5511,19 +5644,42 @@ class VideoProcessor(QObject):
         frame = numpy.frombuffer(raw, dtype=numpy.uint8).reshape(
             (self.ffmpeg_input_height, self.ffmpeg_input_width, 3)
         )
-        return True, frame.copy()
+        frame = frame.copy()
+        if self.media_rotation:
+            frame = misc_helpers._apply_frame_rotation(frame, self.media_rotation)
+        return True, frame
+
+    def _restart_ffmpeg_sequential_input(
+        self, processing_frame: int, target_height: Optional[int]
+    ) -> bool:
+        """Rebuild the sequential FFmpeg pipe at ``processing_frame`` (FPS-cap or scale)."""
+        frame = max(0, int(processing_frame))
+        if getattr(self, "_ffmpeg_scale_input_active", False):
+            src_fps = float(self.recording_source_fps or self.fps)
+            if src_fps <= 0:
+                return False
+            return self._start_recording_ffmpeg_input_stream(
+                start_frame=frame,
+                target_fps=src_fps,
+                target_height=target_height,
+                resample_fps=False,
+            )
+        if self._preview_fps_cap_active or self._used_ffmpeg_cap:
+            if self.fps <= 0:
+                return False
+            return self._start_recording_ffmpeg_input_stream(
+                start_frame=frame,
+                target_fps=float(self.fps),
+                target_height=target_height,
+                resample_fps=True,
+            )
+        return False
 
     def _restart_preview_fps_cap_stream(
         self, processing_frame: int, target_height: Optional[int]
     ) -> bool:
-        """Seek a capped preview by rebuilding its sequential FFmpeg pipe."""
-        if not self._preview_fps_cap_active or self.fps <= 0:
-            return False
-        return self._start_recording_ffmpeg_input_stream(
-            start_frame=max(0, int(processing_frame)),
-            target_fps=float(self.fps),
-            target_height=target_height,
-        )
+        """Seek a sequential FFmpeg preview/scale pipe by rebuilding it."""
+        return self._restart_ffmpeg_sequential_input(processing_frame, target_height)
 
     def _stop_recording_ffmpeg_input_stream(self) -> None:
         """Stop and cleanup an FFmpeg FPS-cap input stream process."""

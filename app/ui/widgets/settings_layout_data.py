@@ -200,7 +200,7 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "level": 1,
             "label": "Resize Input Source (Performance/Output)",
             "default": False,
-            "help": "Rescales the input video/image BEFORE processing (downscale for performance or upscale with quality-oriented interpolation). Sets the pipeline output resolution to the selected size.",
+            "help": "Rescales the input video/image BEFORE processing (downscale for performance or upscale with quality-oriented interpolation). For video downscale, FFmpeg scales during decode so native-resolution frames never enter Python. Sets the pipeline output resolution to the selected size.",
         },
         "GlobalInputResizeSizeSelection": {
             "level": 2,
