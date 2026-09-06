@@ -65,7 +65,8 @@ COMMON_LAYOUT_DATA: Any = {
             "requiredToggleValue": True,
             "parentSelection": "FaceRestorerTypeSelection",
             "requiredSelectionValue": "OSDFace",
-            "help": "Adjust the one-step diffusion timestep for OSDFace.",
+            "help": "One-step diffusion timestep. 399 is the paper default. "
+            "Lower keeps more of the swapped face; higher hallucinates more skin and teeth.",
         },
         "OSDFaceLatentStrengthDecimalSlider": {
             "level": 2,
@@ -79,7 +80,8 @@ COMMON_LAYOUT_DATA: Any = {
             "requiredToggleValue": True,
             "parentSelection": "FaceRestorerTypeSelection",
             "requiredSelectionValue": "OSDFace",
-            "help": "Blend between the VAE latent reconstruction and OSDFace restoration.",
+            "help": "How hard OSDFace overwrites identity. 1.00 is full restoration; "
+            "0.75–0.90 keeps more of the swapped face (this is OSDFace's fidelity control).",
         },
         "FaceRestorerBlendSlider": {
             "level": 2,
@@ -142,6 +144,7 @@ COMMON_LAYOUT_DATA: Any = {
             "Improves FPS when restoration dominates; fast mouth/eyes motion may look softer until the next full pass. "
             "Single-frame preview always runs full quality. Disables multi-face ORT batch restore for this session path. "
             "State is keyed per target face (worker parameter bucket) or stable UI object (VR / input-rotate). "
+            "OSDFace always runs every frame (subsample would flicker). "
             "Set VISIOMASTER_DISABLE_RESTORER_SUBSAMPLE=1 to force full inference every frame.",
         },
         "FaceRestorerSubsampleIntervalSlider": {
@@ -193,9 +196,10 @@ COMMON_LAYOUT_DATA: Any = {
             "level": 1,
             "label": "Auto ultra-light GPEN path",
             "default": False,
-            "help": "When ON, temporarily use GPEN-256 Fast (128â†’256) instead of the selected restorer on webcam/screen and/or small target faces (see sub-toggles). "
-            "Same ONNX as GPEN-256 but a 128px bottleneck before the 256 input â€” softer / faster preprocessing; ONNX cost is still 256Ã—256. "
-            "Skip-restorer-on-small-face (if ON) still wins and skips inference entirely. Applies to Restorer 1 and 2 when either slot runs.",
+            "help": "When ON, temporarily use GPEN-256 Fast (128→256) instead of the selected restorer on webcam/screen and/or small target faces (see sub-toggles). "
+            "Same ONNX as GPEN-256 but a 128px bottleneck before the 256 input — softer / faster preprocessing; ONNX cost is still 256×256. "
+            "Skip-restorer-on-small-face (if ON) still wins and skips inference entirely. Applies to Restorer 1 and 2 when either slot runs. "
+            "OSDFace is never replaced.",
         },
         "FaceRestorerUltraLightOnLiveToggle": {
             "level": 2,
@@ -342,7 +346,8 @@ COMMON_LAYOUT_DATA: Any = {
             "requiredToggleValue": True,
             "parentSelection": "FaceRestorerType2Selection",
             "requiredSelectionValue": "OSDFace",
-            "help": "Adjust the one-step diffusion timestep for OSDFace.",
+            "help": "One-step diffusion timestep. 399 is the paper default. "
+            "Lower keeps more of the swapped face; higher hallucinates more skin and teeth.",
         },
         "OSDFaceLatentStrength2DecimalSlider": {
             "level": 2,
@@ -356,7 +361,8 @@ COMMON_LAYOUT_DATA: Any = {
             "requiredToggleValue": True,
             "parentSelection": "FaceRestorerType2Selection",
             "requiredSelectionValue": "OSDFace",
-            "help": "Blend between the VAE latent reconstruction and OSDFace restoration.",
+            "help": "How hard OSDFace overwrites identity. 1.00 is full restoration; "
+            "0.75–0.90 keeps more of the swapped face (this is OSDFace's fidelity control).",
         },
         "FaceRestorerBlend2Slider": {
             "level": 2,

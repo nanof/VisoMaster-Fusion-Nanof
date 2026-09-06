@@ -44,6 +44,60 @@ def test_effective_type_small_face_triggers_fast_fp32():
     )
 
 
+def test_effective_type_osdface_not_replaced_on_live_or_small_face():
+    p = {
+        "FaceRestorerUltraLightOnnxToggle": True,
+        "FaceRestorerUltraLightOnLiveToggle": True,
+        "FaceRestorerUltraLightOnSmallFaceToggle": True,
+        "FaceRestorerUltraLightScaleGeDecimalSlider": "2.0",
+        "FaceRestorerUltraLightPreferFp16Toggle": True,
+    }
+    assert (
+        FrameWorker._face_restorer_effective_type(
+            p, "OSDFace", 3.0, is_live_stream=True
+        )
+        == "OSDFace"
+    )
+
+
+def test_restorer_infer_cache_key_changes_with_osdface_sliders():
+    base_params = {
+        "FaceRestorerDetTypeSelection": "Original",
+        "FaceFidelityWeightDecimalSlider": 0.9,
+        "FaceRestorerUltraLightOnnxToggle": False,
+        "FaceRestorerUltraLightOnLiveToggle": True,
+        "FaceRestorerUltraLightOnSmallFaceToggle": False,
+        "FaceRestorerUltraLightScaleGeDecimalSlider": 2.0,
+        "FaceRestorerUltraLightPreferFp16Toggle": True,
+        "SwapModelSelection": "Inswapper128",
+        "SwapperResSelection": "128",
+        "OSDFaceTimestepSlider": 399,
+        "OSDFaceLatentStrengthDecimalSlider": 1.0,
+        "OSDFaceTimestep2Slider": 399,
+        "OSDFaceLatentStrength2DecimalSlider": 1.0,
+    }
+    control = {"DetectorScoreSlider": 0.5}
+    key = FrameWorker._restorer_infer_cache_key(base_params, control, "OSDFace")
+    key_ts1 = FrameWorker._restorer_infer_cache_key(
+        {**base_params, "OSDFaceTimestepSlider": 450}, control, "OSDFace"
+    )
+    key_ls1 = FrameWorker._restorer_infer_cache_key(
+        {**base_params, "OSDFaceLatentStrengthDecimalSlider": 0.8}, control, "OSDFace"
+    )
+    key_ts2 = FrameWorker._restorer_infer_cache_key(
+        {**base_params, "OSDFaceTimestep2Slider": 350}, control, "OSDFace"
+    )
+    key_ls2 = FrameWorker._restorer_infer_cache_key(
+        {**base_params, "OSDFaceLatentStrength2DecimalSlider": 0.75},
+        control,
+        "OSDFace",
+    )
+    assert key != key_ts1
+    assert key != key_ls1
+    assert key != key_ts2
+    assert key != key_ls2
+
+
 def test_effective_type_manual_fast_unchanged():
     p = {
         "FaceRestorerUltraLightOnnxToggle": True,

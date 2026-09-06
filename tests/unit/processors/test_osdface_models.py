@@ -104,6 +104,10 @@ def test_osdface_is_exposed_as_face_restorer():
     assert '"OSDFaceLatentStrengthDecimalSlider"' in layout_source
     assert '"OSDFaceTimestep2Slider"' in layout_source
     assert '"OSDFaceLatentStrength2DecimalSlider"' in layout_source
+    assert "399 is the paper default" in layout_source
+    assert "OSDFace's fidelity control" in layout_source
+    assert "OSDFace is never replaced" in layout_source
+    assert "OSDFace always runs every frame" in layout_source
     assert "OSDFacePromptEncoder" in MODELS_TOGGLE_MAP
     assert "OSDFacePromptEncoder" in fp16_safe_models_list
     assert "OSDFaceVAEEncoder" in fp16_safe_models_list

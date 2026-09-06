@@ -3287,6 +3287,8 @@ class FrameWorker(threading.Thread):
             bool(parameters.get("SecondarySwapperHyperSwapMixEnableToggle", False)),
             int(parameters.get("OSDFaceTimestepSlider", 399)),
             float(parameters.get("OSDFaceLatentStrengthDecimalSlider", 1.0)),
+            int(parameters.get("OSDFaceTimestep2Slider", 399)),
+            float(parameters.get("OSDFaceLatentStrength2DecimalSlider", 1.0)),
         )
 
     @staticmethod
@@ -3569,6 +3571,8 @@ class FrameWorker(threading.Thread):
             )
 
         if not parameters.get("FaceRestorerSubsampleEnableToggle", False):
+            return _run_nn()
+        if str(_rt1) == "OSDFace":
             return _run_nn()
         if self.is_single_frame:
             return _run_nn()
@@ -7580,6 +7584,8 @@ class FrameWorker(threading.Thread):
         is_live_stream: bool,
     ) -> str:
         """Optionally replace restorer with GPEN-256 Fast* for live/small-face (item 3 path)."""
+        if base_type == "OSDFace":
+            return base_type
         if not parameters.get("FaceRestorerUltraLightOnnxToggle", False):
             return base_type
         if base_type in (
