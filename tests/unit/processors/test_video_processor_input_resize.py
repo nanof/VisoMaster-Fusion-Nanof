@@ -3,6 +3,22 @@
 from app.processors.video_processor import VideoProcessor
 
 
+def test_process_current_frame_returns_none_without_media():
+    from types import SimpleNamespace
+
+    dummy = SimpleNamespace(
+        processing=False,
+        is_processing_segments=False,
+        media_path=None,
+        file_type=None,
+    )
+    assert VideoProcessor.process_current_frame(dummy) is None
+
+    dummy.media_path = False
+    dummy.file_type = "video"
+    assert VideoProcessor.process_current_frame(dummy) is None
+
+
 def test_preview_target_height_none_when_toggle_off():
     assert (
         VideoProcessor._preview_target_height_from_scan_control(

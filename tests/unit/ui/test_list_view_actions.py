@@ -25,6 +25,9 @@ class _DummyLineEdit:
     def setToolTip(self, tooltip):
         self.tooltip = str(tooltip)
 
+    def text(self):
+        return self.value
+
 
 class _DummyListWidget:
     def __init__(self):
@@ -580,3 +583,41 @@ def test_apply_main_window_title_resets_when_no_media_selected():
     list_view_actions.apply_main_window_title_for_selected_media(main_window)
 
     assert titles == ["VisoMaster"]
+
+
+def test_target_media_file_stability_requires_two_same_size_scans(tmp_path):
+    media_path = tmp_path / "clip.mp4"
+    media_path.write_bytes(b"1234")
+    main_window = SimpleNamespace()
+
+    assert (
+        list_view_actions._is_target_media_file_stable(main_window, str(media_path))
+        is False
+    )
+    assert (
+        list_view_actions._is_target_media_file_stable(main_window, str(media_path))
+        is True
+    )
+
+
+def test_existing_target_media_paths_uses_abspath():
+    main_window = SimpleNamespace(
+        target_videos={
+            "a": SimpleNamespace(media_path=r"C:\media\one.mp4"),
+            "b": SimpleNamespace(media_path=None),
+        }
+    )
+    paths = list_view_actions._existing_target_media_paths(main_window)
+    assert any(p.endswith("one.mp4") for p in paths)
+    assert len(paths) == 1
+
+
+def test_auto_load_settings_exist_in_layout():
+    from app.ui.widgets.settings_layout_data import SETTINGS_LAYOUT_DATA
+
+    playback = SETTINGS_LAYOUT_DATA["Video Playback Settings"]
+    assert "AutoLoadTargetFolderToggle" in playback
+    assert "AutoLoadTargetFolderRecursiveToggle" in playback
+    assert playback["AutoLoadTargetFolderRecursiveToggle"]["parentToggle"] == (
+        "AutoLoadTargetFolderToggle"
+    )

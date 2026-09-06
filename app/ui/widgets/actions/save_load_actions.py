@@ -976,6 +976,10 @@ def load_saved_workspace(
             )
             # Also use .get() when setting the line edit text
             main_window.outputFolderLineEdit.setText(output_folder)
+            list_view_actions.set_target_folder_auto_watch(
+                main_window,
+                bool(main_window.control.get("AutoLoadTargetFolderToggle", False)),
+            )
 
             # Recalculate assigned embeddings and K/V maps for all target faces
             for target_face_button in main_window.target_faces.values():

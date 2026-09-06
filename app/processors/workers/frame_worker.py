@@ -922,6 +922,17 @@ class FrameWorker(threading.Thread):
         sharpen_key = f"DenoiserLatentSharpeningDecimalSlider{pass_suffix}"
         sharpen_val = float(control.get(sharpen_key, 0.0))
 
+        coarse_grain_val = (
+            float(control.get("DenoiserCoarseGrainAmountDecimalSlider", 0.85))
+            if control.get("DenoiserCoarseGrainReductionToggle", True)
+            else 0.0
+        )
+        micro_grain_val = (
+            float(control.get("DenoiserMicroGrainStrengthDecimalSlider", 0.15))
+            if control.get("DenoiserMicroGrainToggle", False)
+            else 0.0
+        )
+
         if not kv_map:
             if use_exclusive_path:
                 if control.get("CommandLineDebugEnableToggle", False):
@@ -941,6 +952,8 @@ class FrameWorker(threading.Thread):
             denoiser_cfg_scale=cfg_scale_val,
             latent_sharpening_strength=sharpen_val,
             color_mask=color_mask,
+            coarse_grain_reduction=coarse_grain_val,
+            micro_grain_strength=micro_grain_val,
         )
         return torch.clamp(denoised_image, 0, 255)
 
@@ -8329,7 +8342,20 @@ class FrameWorker(threading.Thread):
         mode = str(parameters.get("SecondarySwapperBlendModeSelection", "Linear"))
         p, p_255 = self._swap_crop_to_unit01(pri)
         s, _s_255 = self._swap_crop_to_unit01(sec)
-        if mode == "Identity / Detail":
+        if parameters.get("SecondaryTextureOnlyEnableToggle", False):
+            pri_255 = p * 255.0
+            sec_255 = s * 255.0
+            mixed_255 = self._blend_frequency_separation(
+                pri_255,
+                sec_255,
+                alpha,
+                radius=int(parameters.get("SecondaryTextureRadiusSlider", 4)),
+                coring_limit=float(
+                    parameters.get("SecondaryTextureCoringDecimalSlider", 14.0)
+                ),
+            )
+            mixed = mixed_255 / 255.0
+        elif mode == "Identity / Detail":
             mixed = self._mix_identity_detail(p, s, alpha)
         elif mode == "Center weighted":
             mixed = self._mix_center_weighted(p, s, alpha)
@@ -8337,6 +8363,84 @@ class FrameWorker(threading.Thread):
             mixed = torch.lerp(p, s, alpha)
         mixed = mixed.clamp(0.0, 1.0)
         return self._swap_crop_from_unit01(mixed, pri, p_255)
+
+    def _blend_frequency_separation(
+        self,
+        primary_face: torch.Tensor,
+        secondary_face: torch.Tensor,
+        alpha: float,
+        radius: int = 4,
+        coring_limit: float = 16.0,
+    ) -> torch.Tensor:
+        """Transfer high-frequency texture from secondary onto primary in CIE-LAB.
+
+        Expects CHW faces in 0..255. Returns the same layout/dtype range as
+        ``primary_face`` (float 0..255).
+        """
+        if alpha <= 0.0:
+            return primary_face
+
+        device = primary_face.device
+        p_f = primary_face.float().clamp(0.0, 255.0) / 255.0
+        s_f = secondary_face.float().clamp(0.0, 255.0) / 255.0
+
+        p_lab = kc.rgb_to_lab(p_f.unsqueeze(0))
+        s_lab = kc.rgb_to_lab(s_f.unsqueeze(0))
+
+        L_p = p_lab[:, 0:1, :, :]
+        L_s = s_lab[:, 0:1, :, :]
+        AB_p = p_lab[:, 1:3, :, :]
+
+        r = max(1, int(radius))
+        k_size = int(r * 2 + 1)
+        sigma_val = float(max(r * 0.5, 0.1))
+
+        L_p_low = v2.functional.gaussian_blur(
+            L_p, kernel_size=[k_size, k_size], sigma=[sigma_val, sigma_val]
+        )
+        L_s_low = v2.functional.gaussian_blur(
+            L_s, kernel_size=[k_size, k_size], sigma=[sigma_val, sigma_val]
+        )
+
+        L_p_high = L_p - L_p_low
+        L_s_high = L_s - L_s_low
+
+        coring_scaled = float(coring_limit) * (100.0 / 255.0)
+        L_s_high_cored = coring_scaled * torch.tanh(
+            L_s_high / max(coring_scaled, 1e-4)
+        )
+
+        low_diff = torch.abs(L_p_low - L_s_low)
+        diff_min = 10.0 * (100.0 / 255.0)
+        diff_span = 20.0 * (100.0 / 255.0)
+        disc_gate = torch.clamp(1.0 - (low_diff - diff_min) / diff_span, 0.0, 1.0)
+
+        sobel_x = self.kernel_sobel_x.to(device)
+        sobel_y = self.kernel_sobel_y.to(device)
+
+        gx_p = F.conv2d(L_p_low / 100.0, sobel_x, padding=1)
+        gy_p = F.conv2d(L_p_low / 100.0, sobel_y, padding=1)
+        grad_p = torch.sqrt(gx_p * gx_p + gy_p * gy_p + 1e-6)
+
+        gx_s = F.conv2d(L_s_low / 100.0, sobel_x, padding=1)
+        gy_s = F.conv2d(L_s_low / 100.0, sobel_y, padding=1)
+        grad_s = torch.sqrt(gx_s * gx_s + gy_s * gy_s + 1e-6)
+
+        macro_edges = torch.maximum(grad_p, grad_s)
+        edge_gate = torch.clamp(1.0 - (macro_edges - 0.10) / 0.20, 0.0, 1.0)
+
+        transfer_mask = disc_gate * edge_gate
+        transfer_mask = v2.functional.gaussian_blur(
+            transfer_mask, kernel_size=[5, 5], sigma=[1.5, 1.5]
+        )
+
+        effective_alpha = float(alpha) * transfer_mask
+        L_high_blended = torch.lerp(L_p_high, L_s_high_cored, effective_alpha)
+        L_final = torch.clamp(L_p_low + L_high_blended, 0.0, 100.0)
+
+        lab_final = torch.cat([L_final, AB_p], dim=1)
+        rgb_final = kc.lab_to_rgb(lab_final).squeeze(0)
+        return torch.clamp(rgb_final * 255.0, 0.0, 255.0).contiguous()
 
     @staticmethod
     def _ensure_swap_crop_chw(tensor: torch.Tensor) -> torch.Tensor:

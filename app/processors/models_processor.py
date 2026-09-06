@@ -74,7 +74,7 @@ from app.processors.models_data import (
     fp16_safe_models_list,
     tensorrt_shape_infer_models,
 )
-from app.helpers.miscellaneous import is_file_exists
+from app.helpers.miscellaneous import is_file_exists, clear_static_grid_cache
 from app.helpers.downloader import download_file
 from app.processors.utils.ref_ldm_kv_embedding import KVExtractor
 
@@ -2556,6 +2556,7 @@ class ModelsProcessor(QtCore.QObject):
 
         # Finally, clear caches
         print("[INFO] Running garbage collection and clearing CUDA cache.")
+        clear_static_grid_cache()
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -3442,17 +3443,22 @@ class ModelsProcessor(QtCore.QObject):
         base_seed: int = 220,
         latent_sharpening_strength: float = 0.0,
         color_mask: torch.Tensor | None = None,
+        coarse_grain_reduction: float = 0.0,
+        micro_grain_strength: float = 0.0,
     ) -> torch.Tensor:
         """
         Runs the Diffusion-based Denoiser/Restorer (ReF-LDM).
         Supports 'Single Step' (Fast) and 'Full Restore' (DDIM) modes.
         Also handles pixel sharpening and histogram matching for color consistency.
+        Features NaN-safe DDIM scheduling and post-VAE hot-pixel neutralization.
         """
         # --- CONFIGURATION ---
         ENABLE_PIXEL_SHARPENING = latent_sharpening_strength > 0.0
         PIXEL_SHARPEN_STRENGTH = latent_sharpening_strength
 
         ENABLE_COLOR_MATCH = True
+        COARSE_GRAIN_LAMBDA = max(0.0, min(1.0, float(coarse_grain_reduction)))
+        MICRO_GRAIN_STRENGTH = max(0.0, min(1.0, float(micro_grain_strength)))
 
         # P2-04: enable debug output via env var: set VISOMASTER_DEBUG_DENOISER=1
         DEBUG_DENOISER = os.environ.get("VISOMASTER_DEBUG_DENOISER", "0") == "1"
@@ -3462,7 +3468,8 @@ class ModelsProcessor(QtCore.QObject):
 
         if DEBUG_DENOISER:
             print(
-                f"\n--- Denoiser Pass Start: Mode='{denoiser_mode}', CFG Scale={denoiser_cfg_scale}, VAE Scale Factor={self.vae_scale_factor} ---"
+                f"\n--- Denoiser Pass Start: Mode='{denoiser_mode}', CFG Scale={denoiser_cfg_scale}, "
+                f"CoarseReduction={COARSE_GRAIN_LAMBDA}, MicroGrain={MICRO_GRAIN_STRENGTH} ---"
             )
             ModelsProcessor.print_tensor_stats(
                 image_cxhxw_uint8, "Initial input image_cxhxw_uint8", DEBUG_DENOISER
@@ -3629,10 +3636,27 @@ class ModelsProcessor(QtCore.QObject):
                 kv_tensor_map=kv_tensor_map_for_this_run,
                 output_unet_tensor=predicted_noise_from_unet,
             )
-            final_denoised_latent_x0_scaled = (
+            predicted_noise_from_unet = torch.nan_to_num(
+                predicted_noise_from_unet, nan=0.0, posinf=3.5, neginf=-3.5
+            )
+            raw_estimated_x0 = (
                 xt_noisy_scaled_8_channel
                 - sqrt_one_minus_alpha_bar_t_torch * predicted_noise_from_unet
             ) / sqrt_alpha_bar_t_torch
+            raw_estimated_x0 = torch.nan_to_num(
+                raw_estimated_x0, nan=0.0, posinf=3.5, neginf=-3.5
+            )
+            if COARSE_GRAIN_LAMBDA > 0.0:
+                latent_delta = raw_estimated_x0 - lq_latent_x0_scaled_for_unet
+                clamped_delta = torch.clamp(latent_delta, -2.5, 2.5)
+                effective_delta = torch.lerp(
+                    latent_delta, clamped_delta, COARSE_GRAIN_LAMBDA
+                )
+                final_denoised_latent_x0_scaled = (
+                    lq_latent_x0_scaled_for_unet + effective_delta
+                )
+            else:
+                final_denoised_latent_x0_scaled = raw_estimated_x0
 
         # --- PROCESS: Full Restore (DDIM) ---
         elif denoiser_mode == "Full Restore (DDIM)":
@@ -3687,6 +3711,18 @@ class ModelsProcessor(QtCore.QObject):
                 dtype=lq_latent_x0_scaled_for_unet.dtype,
                 generator=rng,
             )
+            if COARSE_GRAIN_LAMBDA > 0.0:
+                init_step_idx = int(np.flip(_ddim_raw_ddpm_timesteps_np)[0])
+                init_alpha_val = float(self.alphas_cumprod_np[init_step_idx])
+                init_sqrt_a = float(init_alpha_val) ** 0.5
+                init_sqrt_one_minus_a = (1.0 - init_alpha_val) ** 0.5
+                sdedit_init = (
+                    lq_latent_x0_scaled_for_unet * init_sqrt_a
+                    + current_latent_xt_scaled * init_sqrt_one_minus_a
+                )
+                current_latent_xt_scaled = torch.lerp(
+                    current_latent_xt_scaled, sdedit_init, COARSE_GRAIN_LAMBDA
+                )
             time_range_ddpm_indices = np.flip(_ddim_raw_ddpm_timesteps_np).copy()
             total_steps = len(time_range_ddpm_indices)
 
@@ -3766,6 +3802,7 @@ class ModelsProcessor(QtCore.QObject):
                     )
                     e_t = e_t_uncond + denoiser_cfg_scale * (e_t_cond - e_t_uncond)
 
+                e_t = torch.nan_to_num(e_t, nan=0.0, posinf=3.5, neginf=-3.5)
                 schedule_idx_tensor = torch.tensor(
                     [index_for_schedules], device=self.device, dtype=torch.long
                 )
@@ -3811,7 +3848,19 @@ class ModelsProcessor(QtCore.QObject):
                     + noise_ddim
                 )
 
-            final_denoised_latent_x0_scaled = pred_x0_scaled_current_step
+            if COARSE_GRAIN_LAMBDA > 0.0:
+                latent_delta_ddim = (
+                    pred_x0_scaled_current_step - lq_latent_x0_scaled_for_unet
+                )
+                clamped_delta_ddim = torch.clamp(latent_delta_ddim, -2.2, 2.2)
+                effective_delta_ddim = torch.lerp(
+                    latent_delta_ddim, clamped_delta_ddim, COARSE_GRAIN_LAMBDA
+                )
+                final_denoised_latent_x0_scaled = (
+                    lq_latent_x0_scaled_for_unet + effective_delta_ddim
+                )
+            else:
+                final_denoised_latent_x0_scaled = pred_x0_scaled_current_step
         else:
             print(
                 f"[ERROR] Denoiser: Unknown mode '{denoiser_mode}'. Skipping denoiser pass."
@@ -3833,6 +3882,10 @@ class ModelsProcessor(QtCore.QObject):
         )
         # MP-16: del VAE decoder input latent after use
         del latent_for_vae_decoder
+
+        decoded_image_normalized_bchw = torch.nan_to_num(
+            decoded_image_normalized_bchw, nan=0.0, posinf=1.0, neginf=-1.0
+        )
 
         decoded_image_soft_clamped_bchw = torch.tanh(decoded_image_normalized_bchw)
         # MP-16: del raw decoder output after soft-clamping
@@ -3888,7 +3941,15 @@ class ModelsProcessor(QtCore.QObject):
             blurred = v2.functional.gaussian_blur(
                 image_after_postproc_float_0_1.unsqueeze(0), [5, 5], [1.0, 1.0]
             ).squeeze(0)
-            detail = image_after_postproc_float_0_1 - blurred
+            raw_detail = image_after_postproc_float_0_1 - blurred
+            if COARSE_GRAIN_LAMBDA > 0.0:
+                coring_gate = torch.clamp(
+                    (torch.abs(raw_detail) - 0.015) / 0.035, 0.0, 1.0
+                )
+                gated_detail = raw_detail * coring_gate
+                detail = torch.lerp(raw_detail, gated_detail, COARSE_GRAIN_LAMBDA)
+            else:
+                detail = raw_detail
             image_after_postproc_float_0_1 = (
                 image_after_postproc_float_0_1 + detail * PIXEL_SHARPEN_STRENGTH
             )
@@ -3896,6 +3957,34 @@ class ModelsProcessor(QtCore.QObject):
                 0.0, 1.0
             )
         # --- END IMPROVEMENT A ---
+
+        if MICRO_GRAIN_STRENGTH > 0.0:
+            grain_noise = torch.randn(
+                (1, h_proc, w_proc),
+                device=self.device,
+                dtype=torch.float32,
+                generator=rng,
+            )
+            grain_shaped = v2.functional.gaussian_blur(
+                grain_noise.unsqueeze(0), [3, 3], [0.6, 0.6]
+            ).squeeze(0)
+            luma = image_after_postproc_float_0_1.mean(dim=0, keepdim=True)
+            luma_gate = torch.clamp((luma - 0.08) / 0.25, 0.0, 1.0) * torch.clamp(
+                (0.92 - luma) / 0.25, 0.0, 1.0
+            )
+            grain_delta = grain_shaped * (MICRO_GRAIN_STRENGTH * 0.08) * luma_gate
+            if color_mask is not None:
+                g_mask = color_mask.clone()
+                if g_mask.dim() == 2:
+                    g_mask = g_mask.unsqueeze(0)
+                if g_mask.shape[-2:] != (h_proc, w_proc):
+                    g_mask = v2.functional.resize(
+                        g_mask, [h_proc, w_proc], antialias=True
+                    )
+                grain_delta = grain_delta * g_mask.clamp(0.0, 1.0)
+            image_after_postproc_float_0_1 = (
+                image_after_postproc_float_0_1 + grain_delta
+            ).clamp(0.0, 1.0)
 
         final_image_uint8 = (image_after_postproc_float_0_1 * 255.0).byte()
 

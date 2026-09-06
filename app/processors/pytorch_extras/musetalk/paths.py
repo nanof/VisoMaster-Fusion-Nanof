@@ -32,11 +32,7 @@ _FIX_DEPS = (
 def prepare_transformers_env() -> None:
     """Pin transformers to the torch backend before it is first imported.
 
-    TensorFlow is installed for ``mouth_action_detector``, so transformers would
-    otherwise import it and crash: TF pulls in ``astunparse`` → ``six.moves``,
-    which the PySide6 import hook inspects and trips over
-    ("'_SixMetaPathImporter' object has no attribute '_path'"). Values are only
-    defaults so an explicit user setting still wins.
+    Values are only defaults so an explicit user setting still wins.
     """
     for var, value in (("USE_TORCH", "1"), ("USE_TF", "0"), ("USE_FLAX", "0")):
         os.environ.setdefault(var, value)

@@ -3,6 +3,7 @@ import json
 import os
 import traceback
 from functools import partial
+import gc
 import uuid
 from typing import TYPE_CHECKING, Any, Dict, Mapping
 from app.helpers.recycle_bin import recycle_path
@@ -581,9 +582,18 @@ class TargetMediaCardButton(CardButton):
                 self.media_capture.release()
                 self.media_capture = False
 
+            vp = getattr(main_window, "video_processor", None)
+            if vp is not None:
+                vp._clear_single_frame_preview_caches()
+            if not getattr(main_window, "is_batch_processing", False):
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
         i = self.get_item_position()
-        main_window.targetVideosList.takeItem(i)
-        main_window.target_videos.pop(self.media_id)
+        if i is not None:
+            main_window.targetVideosList.takeItem(i)
+        main_window.target_videos.pop(self.media_id, None)
 
         # If the target media list is empty, show the placeholder text
         if not main_window.target_videos:
@@ -663,6 +673,14 @@ class TargetMediaCardButton(CardButton):
         )
         self.popMenu.addAction(self.clear_all_media_action)
 
+        self.delete_all_to_trash_action = QtGui.QAction(
+            "⚠ Delete all files to recycle bin", self
+        )
+        self.delete_all_to_trash_action.triggered.connect(
+            partial(list_view_actions.delete_all_target_media_to_trash, self.main_window)
+        )
+        self.popMenu.addAction(self.delete_all_to_trash_action)
+
     def on_context_menu(self, point):
         # show context menu
         scan_active = video_control_actions.is_issue_scan_active(self.main_window)
@@ -671,6 +689,13 @@ class TargetMediaCardButton(CardButton):
         self.clear_all_media_action.setEnabled(
             bool(self.main_window.target_videos) and not scan_active
         )
+        has_files = any(
+            not getattr(b, "is_webcam", False)
+            and getattr(b, "media_path", None)
+            and os.path.exists(b.media_path)
+            for b in (self.main_window.target_videos or {}).values()
+        )
+        self.delete_all_to_trash_action.setEnabled(has_files and not scan_active)
         self.popMenu.exec_(self.mapToGlobal(point))
 
 

@@ -1,57 +1,28 @@
-"""Tests for MouthActionDetector TensorFlow import hardening."""
+"""Tests for MouthActionDetector ONNX Runtime path."""
 
 from __future__ import annotations
 
 import builtins
-import types
+import os
+
+import numpy as np
+import pytest
+
+from app.processors.mouth_action_detector import MouthActionDetector, _MODEL_PATH
 
 
-def test_tensorflow_import_guard_restores_feature_imported(monkeypatch):
-    from app.processors import mouth_action_detector as mad
-    import sys
-
-    calls = {"n": 0}
-
-    def _orig(*_a, **_k):
-        calls["n"] += 1
-        return "orig"
-
-    fake_feat = types.ModuleType("shibokensupport.feature")
-    fake_feat.feature_imported = _orig
-    fake_loader = types.ModuleType("shibokensupport.signature.loader")
-    fake_loader.feature_imported = _orig
-    monkeypatch.setitem(
-        sys.modules, "shibokensupport", types.ModuleType("shibokensupport")
-    )
-    monkeypatch.setitem(
-        sys.modules,
-        "shibokensupport.signature",
-        types.ModuleType("shibokensupport.signature"),
-    )
-    monkeypatch.setitem(sys.modules, "shibokensupport.feature", fake_feat)
-    monkeypatch.setitem(sys.modules, "shibokensupport.signature.loader", fake_loader)
-
-    with mad._tensorflow_import_guard():
-        assert fake_feat.feature_imported is not _orig
-        assert fake_loader.feature_imported is not _orig
-        assert fake_feat.feature_imported() is None
-
-    assert fake_feat.feature_imported is _orig
-    assert fake_loader.feature_imported is _orig
-    assert calls["n"] == 0
-    assert fake_feat.feature_imported() == "orig"
+def teardown_function() -> None:
+    MouthActionDetector.unload()
 
 
 def test_get_caches_failed_singleton_without_retry(monkeypatch):
-    """A broken TF import must not be re-attempted on every frame."""
-    from app.processors.mouth_action_detector import MouthActionDetector
-
+    """A broken load must not be re-attempted on every frame."""
     MouthActionDetector._instance = None
     attempts = {"n": 0}
 
     def boom(self):
         attempts["n"] += 1
-        raise AttributeError("_SixMetaPathImporter object has no attribute '_path'")
+        raise AttributeError("onnxruntime boom")
 
     monkeypatch.setattr(MouthActionDetector, "_lazy_load", boom)
 
@@ -62,27 +33,70 @@ def test_get_caches_failed_singleton_without_retry(monkeypatch):
     assert attempts["n"] == 1
     assert a.available is False
     assert a.load_error is not None
-    assert "_SixMetaPathImporter" in a.load_error
+    assert "onnxruntime boom" in a.load_error
 
     MouthActionDetector._instance = None
 
 
-def test_lazy_load_records_generic_import_failure(monkeypatch):
-    from app.processors.mouth_action_detector import MouthActionDetector
+def test_lazy_load_records_onnxruntime_import_failure(monkeypatch):
+    import sys
 
     MouthActionDetector._instance = None
     real_import = builtins.__import__
 
     def fake_import(name, *args, **kwargs):
-        if name == "tensorflow" or name.startswith("tensorflow."):
-            raise AttributeError("_SixMetaPathImporter object has no attribute '_path'")
+        if name == "onnxruntime" or name.startswith("onnxruntime."):
+            raise ImportError("no onnxruntime")
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.delitem(sys.modules, "onnxruntime", raising=False)
 
     det = MouthActionDetector.get()
     assert det.available is False
     assert det.load_error is not None
-    assert "tensorflow import failed" in det.load_error
+    assert "onnxruntime is not installed" in det.load_error
 
     MouthActionDetector._instance = None
+
+
+def test_providers_default_to_cpu(monkeypatch):
+    pytest.importorskip("onnxruntime")
+    monkeypatch.delenv("VISOMASTER_MOUTH_ACTION_PROVIDER", raising=False)
+    assert MouthActionDetector._providers() == ["CPUExecutionProvider"]
+
+
+@pytest.mark.skipif(not os.path.isfile(_MODEL_PATH), reason="model.onnx not present")
+def test_mouth_action_detector_loads_onnx_model(monkeypatch) -> None:
+    monkeypatch.setenv("VISOMASTER_MOUTH_ACTION_PROVIDER", "cpu")
+    detector = MouthActionDetector.get()
+
+    assert detector.available, detector.load_error
+    assert detector._input_name == "image_tensor:0"
+    assert detector._boxes_name == "detected_boxes:0"
+    assert detector._scores_name == "detected_scores:0"
+    assert detector._classes_name == "detected_classes:0"
+
+
+@pytest.mark.skipif(not os.path.isfile(_MODEL_PATH), reason="model.onnx not present")
+def test_mouth_action_detector_score_returns_probability(monkeypatch) -> None:
+    monkeypatch.setenv("VISOMASTER_MOUTH_ACTION_PROVIDER", "cpu")
+    detector = MouthActionDetector.get()
+    frame: np.ndarray = np.zeros((3, 320, 320), dtype=np.uint8)
+
+    score = detector.score(frame)
+
+    assert 0.0 <= score <= 1.0
+
+
+@pytest.mark.skipif(not os.path.isfile(_MODEL_PATH), reason="model.onnx not present")
+def test_mouth_action_detector_unload_clears_singleton(monkeypatch) -> None:
+    monkeypatch.setenv("VISOMASTER_MOUTH_ACTION_PROVIDER", "cpu")
+    first = MouthActionDetector.get()
+    assert first.available
+
+    MouthActionDetector.unload()
+
+    second = MouthActionDetector.get()
+    assert second is not first
+    assert second.available

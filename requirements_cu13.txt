@@ -26,7 +26,6 @@ huggingface-hub==0.30.2
 idna==3.13
 imageio==2.37.3
 jinja2==3.1.6
-keras==3.14.0
 kornia==0.8.2
 kornia-rs==0.1.11
 lazy-loader==0.5
@@ -82,7 +81,6 @@ shiboken6==6.11.0
 six==1.17.0
 soundfile==0.13.1
 sympy==1.14.0
-tensorflow==2.21.0
 tensorrt-cu13==10.16.1.11
 tensorrt-cu13-bindings==10.16.1.11
 tensorrt-cu13-libs==10.16.1.11

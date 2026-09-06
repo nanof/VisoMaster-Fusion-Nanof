@@ -546,6 +546,10 @@ def _load_job_controls_and_state(
         main_window, "OutputMediaFolder", output_folder
     )
     main_window.outputFolderLineEdit.setText(output_folder)
+    list_view_actions.set_target_folder_auto_watch(
+        main_window,
+        bool(main_window.control.get("AutoLoadTargetFolderToggle", False)),
+    )
 
     # Update parameter widgets to default (or first face's)
     common_widget_actions.set_widgets_values_using_face_id_parameters(

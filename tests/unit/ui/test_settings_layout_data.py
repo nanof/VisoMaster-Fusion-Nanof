@@ -229,3 +229,14 @@ def test_landmark_detect_model_includes_tufa_and_orformer():
     assert landmark_model_mapping["tufa314"] == "FaceLandmarkTUFA314"
     assert landmark_model_mapping["orformer98"] == "FaceLandmarkORFormer98"
     assert landmark_model_mapping["hrffa"] == "FaceLandmarkHRFFA"
+
+
+def test_auto_load_target_folder_toggles_exist():
+    playback = SETTINGS_LAYOUT_DATA["Video Playback Settings"]
+    parent = playback["AutoLoadTargetFolderToggle"]
+    child = playback["AutoLoadTargetFolderRecursiveToggle"]
+    assert parent["default"] is False
+    assert child["parentToggle"] == "AutoLoadTargetFolderToggle"
+    assert child["requiredToggleValue"] is True
+    assert callable(parent["exec_function"])
+    assert callable(child["exec_function"])

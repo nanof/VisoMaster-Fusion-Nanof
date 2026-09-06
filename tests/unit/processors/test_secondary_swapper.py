@@ -218,3 +218,35 @@ def test_linear_mix_preserves_float_0_255_range():
     )
     assert out.dtype == torch.float32
     assert out.mean().item() == pytest.approx(150.0, abs=0.5)
+
+
+def test_texture_only_mix_keeps_primary_color_range():
+    worker = SimpleNamespace(
+        kernel_sobel_x=torch.tensor(
+            [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32
+        ).view(1, 1, 3, 3),
+    )
+    worker.kernel_sobel_y = worker.kernel_sobel_x.transpose(2, 3)
+    worker._secondary_blend_alpha = FrameWorker._secondary_blend_alpha
+    worker._ensure_swap_crop_chw = FrameWorker._ensure_swap_crop_chw
+    worker._swap_crop_to_unit01 = FrameWorker._swap_crop_to_unit01
+    worker._swap_crop_from_unit01 = FrameWorker._swap_crop_from_unit01
+    worker._blend_frequency_separation = FrameWorker._blend_frequency_separation.__get__(
+        worker, FrameWorker
+    )
+
+    primary = torch.full((3, 32, 32), 180.0)
+    secondary = torch.full((3, 32, 32), 40.0)
+    out = FrameWorker._mix_secondary_swap_tensors(
+        worker,
+        primary,
+        secondary,
+        {
+            "SecondarySwapperBlendAmountSlider": 50,
+            "SecondaryTextureOnlyEnableToggle": True,
+            "SecondaryTextureRadiusSlider": 4,
+            "SecondaryTextureCoringDecimalSlider": 14.0,
+        },
+    )
+    assert out.shape == primary.shape
+    assert float(out.mean()) == pytest.approx(180.0, abs=8.0)

@@ -4842,6 +4842,9 @@ class VideoProcessor(QObject):
             if not self.stop_processing():
                 print("[WARN] Could not stop active processing cleanly.")
 
+        if not self.media_path or self.file_type is None:
+            return None
+
         # Seed global PyTorch/CUDA RNG from the denoiser seed slider before every
         # single-frame preview. This ensures the seed slider change visibly affects
         # the denoised preview output.

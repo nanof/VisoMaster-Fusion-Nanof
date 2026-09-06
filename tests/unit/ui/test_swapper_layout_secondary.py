@@ -57,7 +57,15 @@ def test_secondary_swapper_widgets_exist():
         assert name in SWAPPER, f"{name} missing from Swapper layout"
 
 
-def test_secondary_swapper_defaults_off():
+def test_secondary_texture_only_widgets_exist():
+    assert "SecondaryTextureOnlyEnableToggle" in SWAPPER
+    assert SWAPPER["SecondaryTextureOnlyEnableToggle"]["default"] is False
+    assert SWAPPER["SecondaryTextureRadiusSlider"]["parentToggle"] == (
+        "SecondarySwapperEnableToggle & SecondaryTextureOnlyEnableToggle"
+    )
+    assert SWAPPER["SecondaryTextureCoringDecimalSlider"]["parentToggle"] == (
+        "SecondarySwapperEnableToggle & SecondaryTextureOnlyEnableToggle"
+    )
     assert SWAPPER["SecondarySwapperEnableToggle"]["default"] is False
     assert SWAPPER["SecondarySwapperHyperSwapMixEnableToggle"]["default"] is False
 

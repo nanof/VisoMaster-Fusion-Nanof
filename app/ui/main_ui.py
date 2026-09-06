@@ -1299,6 +1299,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             # Re-populate and set current selection for dynamic widgets like DenoiserUNetModelSelection
             self._populate_denoiser_unet_models()
             self._populate_reference_kv_tensors()
+            self._restore_target_folder_auto_watch()
+
+    def _restore_target_folder_auto_watch(self) -> None:
+        list_view_actions.set_target_folder_auto_watch(
+            self, bool(self.control.get("AutoLoadTargetFolderToggle", False))
+        )
 
     @QtCore.Slot(bool)
     def _on_faces_panel_toggled(self, checked: bool):
