@@ -1,6 +1,10 @@
 from pathlib import Path
+from unittest.mock import MagicMock
 import hashlib
+import inspect
 import zipfile
+
+import torch
 
 from app.helpers import multipart_zip_downloader
 from app.processors.face_restorers import FaceRestorers
@@ -125,6 +129,31 @@ def test_osdface_is_exposed_as_face_restorer():
     )
     assert "_gfpgan_prefers_torch" in restorers_source
     assert "def run_OSDFace" in restorers_source
+    assert "def _run_osdface_ort" in restorers_source
+    assert "def _osdface_scratch_tensor" in restorers_source
+
+    run_src = inspect.getsource(FaceRestorers.run_OSDFace)
+    assert "copy_outputs_to_cpu" not in run_src
+    assert "_run_model_with_lazy_build_check" not in run_src
+    assert "_run_osdface_ort" in run_src
+    assert "_osdface_scratch_tensor" in run_src
+    assert (
+        "copy_outputs_to_cpu()"
+        not in inspect.getsource(FaceRestorers._run_osdface_ort)
+    )
+
+
+def test_osdface_scratch_tensors_are_reused_until_unload():
+    restorers = FaceRestorers(MagicMock())
+    first = restorers._osdface_scratch_tensor(
+        "decoded", (1, 3, 8, 8), torch.float32, torch.device("cpu")
+    )
+    second = restorers._osdface_scratch_tensor(
+        "decoded", (1, 3, 8, 8), torch.float32, torch.device("cpu")
+    )
+    assert first is second
+    restorers.unload_models()
+    assert restorers._osdface_scratch == {}
 
 
 def test_multipart_zip_helper_reconstructs_and_extracts_model(tmp_path, monkeypatch):

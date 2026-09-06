@@ -91,6 +91,7 @@ class FaceRestorers:
         self._osdface_alphas_cumprod: Optional[list[float]] = None
         self._osdface_timestep: Optional[int] = None
         self._osdface_alpha: Optional[float] = None
+        self._osdface_scratch: Dict[str, torch.Tensor] = {}
 
     def unload_dmdnet(self) -> None:
         with self._custom_init_lock:
@@ -237,6 +238,7 @@ class FaceRestorers:
         self._osdface_timestep = None
         self._osdface_alpha = None
         self._osdface_alphas_cumprod = None
+        self._osdface_scratch.clear()
 
     def _unload_custom_torch_kernels(self) -> None:
         """Release Custom-provider PyTorch restorers (GPEN/GFPGAN/etc.) held outside ORT."""
@@ -1200,6 +1202,47 @@ class FaceRestorers:
         self._osdface_alpha = alpha
         return timestep, alpha
 
+    def _osdface_scratch_tensor(
+        self,
+        key: str,
+        shape: tuple,
+        dtype: torch.dtype,
+        device,
+    ) -> torch.Tensor:
+        t = self._osdface_scratch.get(key)
+        if (
+            t is None
+            or t.device != device
+            or t.dtype != dtype
+            or tuple(t.shape) != tuple(shape)
+        ):
+            t = torch.empty(shape, dtype=dtype, device=device).contiguous()
+            self._osdface_scratch[key] = t
+        return t
+
+    def _run_osdface_ort(self, model_name: str, ort_session, io_binding) -> None:
+        """ORT IOBinding for OSDFace without copying outputs back to CPU.
+
+        Stages already bind GPU tensors; ``copy_outputs_to_cpu`` would add a
+        host round-trip (the VAE decoder alone is a 512² RGB buffer) on every
+        face without changing the bound device buffers.
+        """
+        is_lazy_build = self.models_processor.check_and_clear_pending_build(model_name)
+        if is_lazy_build:
+            self.models_processor.show_build_dialog.emit(
+                "Finalizing TensorRT Build",
+                f"Performing first-run inference for:\n{model_name}\n\nThis may take several minutes.",
+            )
+        try:
+            if self.models_processor.uses_cuda_ep_for_thread():
+                torch.cuda.current_stream().synchronize()
+            elif self.models_processor.device != "cpu":
+                self.models_processor.syncvec.cpu()
+            self.models_processor.run_session_with_iobinding(ort_session, io_binding)
+        finally:
+            if is_lazy_build:
+                self.models_processor.hide_build_dialog.emit()
+
     @torch.no_grad()
     def run_OSDFace(
         self,
@@ -1221,16 +1264,17 @@ class FaceRestorers:
         prompt_session = self._get_model_session("OSDFacePromptEncoder")
         if prompt_session is None:
             return False
-        prompt_embeds = torch.empty(
+        prompt_embeds = self._osdface_scratch_tensor(
+            "prompt_embeds",
             (1, 77, 1024),
-            dtype=mp.get_ort_io_torch_dtype(
+            mp.get_ort_io_torch_dtype(
                 "OSDFacePromptEncoder",
                 "prompt_embeds",
                 is_output=True,
                 session=prompt_session,
             ),
-            device=image.device,
-        ).contiguous()
+            image.device,
+        )
         io_binding_prompt = prompt_session.io_binding()
         prompt_input = mp.bind_ort_io_input(
             io_binding_prompt,
@@ -1246,23 +1290,24 @@ class FaceRestorers:
             prompt_embeds,
             session=prompt_session,
         )
-        self._run_model_with_lazy_build_check(
+        self._run_osdface_ort(
             "OSDFacePromptEncoder", prompt_session, io_binding_prompt
         )
 
         vae_encoder_session = self._get_model_session("OSDFaceVAEEncoder")
         if vae_encoder_session is None:
             return False
-        latent = torch.empty(
+        latent = self._osdface_scratch_tensor(
+            "latent",
             (1, 4, 64, 64),
-            dtype=mp.get_ort_io_torch_dtype(
+            mp.get_ort_io_torch_dtype(
                 "OSDFaceVAEEncoder",
                 "latent",
                 is_output=True,
                 session=vae_encoder_session,
             ),
-            device=image.device,
-        ).contiguous()
+            image.device,
+        )
         io_binding_enc = vae_encoder_session.io_binding()
         image = mp.bind_ort_io_input(
             io_binding_enc,
@@ -1278,26 +1323,29 @@ class FaceRestorers:
             latent,
             session=vae_encoder_session,
         )
-        self._run_model_with_lazy_build_check(
-            "OSDFaceVAEEncoder", vae_encoder_session, io_binding_enc
-        )
+        self._run_osdface_ort("OSDFaceVAEEncoder", vae_encoder_session, io_binding_enc)
 
         unet_session = self._get_model_session("OSDFaceUNet")
         if unet_session is None:
             return False
-        noise_pred = torch.empty(
-            latent.shape,
-            dtype=mp.get_ort_io_torch_dtype(
+        noise_pred = self._osdface_scratch_tensor(
+            "noise_pred",
+            tuple(latent.shape),
+            mp.get_ort_io_torch_dtype(
                 "OSDFaceUNet",
                 "noise_pred",
                 is_output=True,
                 session=unet_session,
             ),
-            device=image.device,
-        ).contiguous()
-        timestep_tensor = torch.tensor(
-            [timestep_idx], dtype=torch.int64, device=image.device
-        ).contiguous()
+            image.device,
+        )
+        timestep_tensor = self._osdface_scratch_tensor(
+            "timestep",
+            (1,),
+            torch.int64,
+            image.device,
+        )
+        timestep_tensor.fill_(int(timestep_idx))
         io_binding_unet = unet_session.io_binding()
         latent = mp.bind_ort_io_input(
             io_binding_unet,
@@ -1327,9 +1375,7 @@ class FaceRestorers:
             noise_pred,
             session=unet_session,
         )
-        self._run_model_with_lazy_build_check(
-            "OSDFaceUNet", unet_session, io_binding_unet
-        )
+        self._run_osdface_ort("OSDFaceUNet", unet_session, io_binding_unet)
 
         sqrt_beta = math.sqrt(max(0.0, 1.0 - alpha_value))
         sqrt_alpha = math.sqrt(max(1e-8, alpha_value))
@@ -1343,16 +1389,17 @@ class FaceRestorers:
         vae_decoder_session = self._get_model_session("OSDFaceVAEDecoder")
         if vae_decoder_session is None:
             return False
-        decoded = torch.empty(
+        decoded = self._osdface_scratch_tensor(
+            "decoded",
             (1, 3, 512, 512),
-            dtype=mp.get_ort_io_torch_dtype(
+            mp.get_ort_io_torch_dtype(
                 "OSDFaceVAEDecoder",
                 "image_0_1",
                 is_output=True,
                 session=vae_decoder_session,
             ),
-            device=image.device,
-        ).contiguous()
+            image.device,
+        )
         io_binding_dec = vae_decoder_session.io_binding()
         x0_latent = mp.bind_ort_io_input(
             io_binding_dec,
@@ -1368,9 +1415,7 @@ class FaceRestorers:
             decoded,
             session=vae_decoder_session,
         )
-        self._run_model_with_lazy_build_check(
-            "OSDFaceVAEDecoder", vae_decoder_session, io_binding_dec
-        )
+        self._run_osdface_ort("OSDFaceVAEDecoder", vae_decoder_session, io_binding_dec)
 
         output.copy_(decoded.float()).mul_(2.0).sub_(1.0)
         return True
