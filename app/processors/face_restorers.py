@@ -1,7 +1,10 @@
 import contextlib
 import gc
+import json
+import math
 import os
 import threading
+from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
 import torch
@@ -28,6 +31,13 @@ class _CodeFormerDirectRunner:
 
 
 class FaceRestorers:
+    osdface_model_names = (
+        "OSDFacePromptEncoder",
+        "OSDFaceVAEEncoder",
+        "OSDFaceUNet",
+        "OSDFaceVAEDecoder",
+    )
+
     def __init__(self, models_processor: "ModelsProcessor"):
         self.models_processor = models_processor
         self.active_model_slot1: Optional[str] = None
@@ -76,7 +86,11 @@ class FaceRestorers:
             "VQFR-v2": "VQFRv2",
             "DMDNet": "DMDNetTorch",
             "DMDNet FP16": "DMDNetTorch",
+            "OSDFace": "OSDFace",
         }
+        self._osdface_alphas_cumprod: Optional[list[float]] = None
+        self._osdface_timestep: Optional[int] = None
+        self._osdface_alpha: Optional[float] = None
 
     def unload_dmdnet(self) -> None:
         with self._custom_init_lock:
@@ -220,6 +234,9 @@ class FaceRestorers:
             self.active_model_slot2 = None
         self.unload_dmdnet()
         self._unload_custom_torch_kernels()
+        self._osdface_timestep = None
+        self._osdface_alpha = None
+        self._osdface_alphas_cumprod = None
 
     def _unload_custom_torch_kernels(self) -> None:
         """Release Custom-provider PyTorch restorers (GPEN/GFPGAN/etc.) held outside ORT."""
@@ -816,6 +833,8 @@ class FaceRestorers:
         target_kps=None,
         slot_id: int = 1,
         dmd_landmarks_68_crop: Optional[np.ndarray] = None,
+        osdface_timestep: int = 399,
+        osdface_latent_strength: float = 1.0,
     ):
         model_name_to_load = self.model_map.get(restorer_type)
         if not model_name_to_load:
@@ -899,6 +918,17 @@ class FaceRestorers:
             temp = v2.functional.resize(temp, [256, 256], antialias=True)
         elif restorer_type in ("GPEN-256", "GPEN-256 FP16 (HF)"):
             temp = v2.functional.resize(temp, [256, 256], antialias=False)
+        elif restorer_type == "OSDFace" and (temp.shape[-2], temp.shape[-1]) != (
+            512,
+            512,
+        ):
+            temp = v2.functional.resize(
+                temp,
+                [512, 512],
+                interpolation=v2.InterpolationMode.BILINEAR,
+                antialias=False,
+            )
+            temp.clamp_(-1.0, 1.0)
 
         temp = torch.unsqueeze(temp, 0).contiguous()
 
@@ -1042,6 +1072,21 @@ class FaceRestorers:
             if not self.run_dmdnet(temp, lm68, outpred, use_half_autocast=_dmd_amp):
                 return swapped_face_upscaled
 
+        elif restorer_type == "OSDFace":
+            outpred = torch.empty(
+                (1, 3, 512, 512),
+                dtype=torch.float32,
+                device=dev,
+            ).contiguous()
+            success = self.run_OSDFace(
+                temp,
+                outpred,
+                timestep_value=osdface_timestep,
+                latent_strength=osdface_latent_strength,
+            )
+            if not success:
+                return swapped_face_upscaled
+
         if outpred is None:
             return swapped_face_upscaled
 
@@ -1084,11 +1129,251 @@ class FaceRestorers:
                 align_corners=True,
             ).squeeze(0)
 
+        elif restorer_type == "OSDFace" and (outpred.shape[-2], outpred.shape[-1]) != (
+            swapped_face_upscaled.shape[-2],
+            swapped_face_upscaled.shape[-1],
+        ):
+            outpred = v2.functional.resize(
+                outpred,
+                [swapped_face_upscaled.shape[-2], swapped_face_upscaled.shape[-1]],
+                interpolation=v2.InterpolationMode.BILINEAR,
+                antialias=True,
+            )
+
         # Blend (Disabled by default as in original code)
         # alpha = float(restorer_blend)/100.0
         # outpred = torch.add(torch.mul(outpred, alpha), torch.mul(swapped_face_upscaled, 1-alpha))
 
         return outpred
+
+    def _ensure_osdface_scheduler_loaded(self) -> Optional[list[float]]:
+        """Loads and caches the static alphas_cumprod schedule to prevent disk I/O during playback."""
+        if self._osdface_alphas_cumprod is not None:
+            return self._osdface_alphas_cumprod
+
+        scheduler_path = self.models_processor.models_path.get("OSDFaceScheduler")
+        if not scheduler_path:
+            if "OSDFaceScheduler" not in self._warned_models:
+                print("[WARN] OSDFace scheduler metadata path is not registered.")
+                self._warned_models.add("OSDFaceScheduler")
+            return None
+
+        sched_file = Path(scheduler_path)
+        if not sched_file.is_file():
+            if "OSDFaceScheduler" not in self._warned_models:
+                print(
+                    f"[WARN] OSDFace scheduler metadata file not found at: {scheduler_path}"
+                )
+                self._warned_models.add("OSDFaceScheduler")
+            return None
+
+        try:
+            scheduler_data = json.loads(sched_file.read_text(encoding="utf-8"))
+            alphas_cumprod = scheduler_data.get("alphas_cumprod")
+            if not isinstance(alphas_cumprod, list) or len(alphas_cumprod) == 0:
+                print(
+                    "[WARN] OSDFace scheduler metadata contains an invalid 'alphas_cumprod' schedule."
+                )
+                return None
+            self._osdface_alphas_cumprod = [float(a) for a in alphas_cumprod]
+            return self._osdface_alphas_cumprod
+        except Exception as exc:
+            print(f"[WARN] Failed to read OSDFace scheduler metadata: {exc}")
+            return None
+
+    def _get_osdface_alpha(self, timestep_value: int) -> Optional[Tuple[int, float]]:
+        """Returns the bounded timestep index and precomputed alpha from memory."""
+        if (
+            self._osdface_timestep is not None
+            and self._osdface_alpha is not None
+            and self._osdface_timestep == timestep_value
+        ):
+            return self._osdface_timestep, self._osdface_alpha
+
+        alphas_cumprod = self._ensure_osdface_scheduler_loaded()
+        if alphas_cumprod is None:
+            return None
+
+        timestep = max(0, min(int(timestep_value), len(alphas_cumprod) - 1))
+        alpha = alphas_cumprod[timestep]
+        self._osdface_timestep = timestep
+        self._osdface_alpha = alpha
+        return timestep, alpha
+
+    @torch.no_grad()
+    def run_OSDFace(
+        self,
+        image: torch.Tensor,
+        output: torch.Tensor,
+        timestep_value: int = 399,
+        latent_strength: float = 1.0,
+    ) -> bool:
+        """One-step diffusion face restoration. Returns False if models/metadata are missing."""
+        scheduler_state = self._get_osdface_alpha(int(timestep_value))
+        if scheduler_state is None:
+            return False
+        timestep_idx, alpha_value = scheduler_state
+        latent_strength_clamped = max(0.0, min(float(latent_strength), 1.0))
+        mp = self.models_processor
+
+        prompt_input = image.mul(0.5).add(0.5).clamp_(0.0, 1.0).contiguous()
+
+        prompt_session = self._get_model_session("OSDFacePromptEncoder")
+        if prompt_session is None:
+            return False
+        prompt_embeds = torch.empty(
+            (1, 77, 1024),
+            dtype=mp.get_ort_io_torch_dtype(
+                "OSDFacePromptEncoder",
+                "prompt_embeds",
+                is_output=True,
+                session=prompt_session,
+            ),
+            device=image.device,
+        ).contiguous()
+        io_binding_prompt = prompt_session.io_binding()
+        prompt_input = mp.bind_ort_io_input(
+            io_binding_prompt,
+            "OSDFacePromptEncoder",
+            "lq_0_1",
+            prompt_input,
+            session=prompt_session,
+        )
+        mp.bind_ort_io_output(
+            io_binding_prompt,
+            "OSDFacePromptEncoder",
+            "prompt_embeds",
+            prompt_embeds,
+            session=prompt_session,
+        )
+        self._run_model_with_lazy_build_check(
+            "OSDFacePromptEncoder", prompt_session, io_binding_prompt
+        )
+
+        vae_encoder_session = self._get_model_session("OSDFaceVAEEncoder")
+        if vae_encoder_session is None:
+            return False
+        latent = torch.empty(
+            (1, 4, 64, 64),
+            dtype=mp.get_ort_io_torch_dtype(
+                "OSDFaceVAEEncoder",
+                "latent",
+                is_output=True,
+                session=vae_encoder_session,
+            ),
+            device=image.device,
+        ).contiguous()
+        io_binding_enc = vae_encoder_session.io_binding()
+        image = mp.bind_ort_io_input(
+            io_binding_enc,
+            "OSDFaceVAEEncoder",
+            "lq_neg1_1",
+            image,
+            session=vae_encoder_session,
+        )
+        mp.bind_ort_io_output(
+            io_binding_enc,
+            "OSDFaceVAEEncoder",
+            "latent",
+            latent,
+            session=vae_encoder_session,
+        )
+        self._run_model_with_lazy_build_check(
+            "OSDFaceVAEEncoder", vae_encoder_session, io_binding_enc
+        )
+
+        unet_session = self._get_model_session("OSDFaceUNet")
+        if unet_session is None:
+            return False
+        noise_pred = torch.empty(
+            latent.shape,
+            dtype=mp.get_ort_io_torch_dtype(
+                "OSDFaceUNet",
+                "noise_pred",
+                is_output=True,
+                session=unet_session,
+            ),
+            device=image.device,
+        ).contiguous()
+        timestep_tensor = torch.tensor(
+            [timestep_idx], dtype=torch.int64, device=image.device
+        ).contiguous()
+        io_binding_unet = unet_session.io_binding()
+        latent = mp.bind_ort_io_input(
+            io_binding_unet,
+            "OSDFaceUNet",
+            "latent",
+            latent,
+            session=unet_session,
+        )
+        timestep_tensor = mp.bind_ort_io_input(
+            io_binding_unet,
+            "OSDFaceUNet",
+            "timestep",
+            timestep_tensor,
+            session=unet_session,
+        )
+        prompt_embeds = mp.bind_ort_io_input(
+            io_binding_unet,
+            "OSDFaceUNet",
+            "prompt_embeds",
+            prompt_embeds,
+            session=unet_session,
+        )
+        mp.bind_ort_io_output(
+            io_binding_unet,
+            "OSDFaceUNet",
+            "noise_pred",
+            noise_pred,
+            session=unet_session,
+        )
+        self._run_model_with_lazy_build_check(
+            "OSDFaceUNet", unet_session, io_binding_unet
+        )
+
+        sqrt_beta = math.sqrt(max(0.0, 1.0 - alpha_value))
+        sqrt_alpha = math.sqrt(max(1e-8, alpha_value))
+        x0_latent = torch.add(latent, noise_pred, alpha=-sqrt_beta).div_(sqrt_alpha)
+
+        if latent_strength_clamped < 1.0:
+            x0_latent = torch.lerp(
+                latent, x0_latent, latent_strength_clamped
+            ).contiguous()
+
+        vae_decoder_session = self._get_model_session("OSDFaceVAEDecoder")
+        if vae_decoder_session is None:
+            return False
+        decoded = torch.empty(
+            (1, 3, 512, 512),
+            dtype=mp.get_ort_io_torch_dtype(
+                "OSDFaceVAEDecoder",
+                "image_0_1",
+                is_output=True,
+                session=vae_decoder_session,
+            ),
+            device=image.device,
+        ).contiguous()
+        io_binding_dec = vae_decoder_session.io_binding()
+        x0_latent = mp.bind_ort_io_input(
+            io_binding_dec,
+            "OSDFaceVAEDecoder",
+            "x0_latent",
+            x0_latent,
+            session=vae_decoder_session,
+        )
+        mp.bind_ort_io_output(
+            io_binding_dec,
+            "OSDFaceVAEDecoder",
+            "image_0_1",
+            decoded,
+            session=vae_decoder_session,
+        )
+        self._run_model_with_lazy_build_check(
+            "OSDFaceVAEDecoder", vae_decoder_session, io_binding_dec
+        )
+
+        output.copy_(decoded.float()).mul_(2.0).sub_(1.0)
+        return True
 
     def run_vae_encoder(
         self, image_input_tensor: torch.Tensor, output_latent_tensor: torch.Tensor

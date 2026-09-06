@@ -25,6 +25,7 @@ for _sub in (
     "musetalk/sd-vae",
     "musetalk/whisper",
     "musetalk/cache",
+    "osdface",
 ):
     os.makedirs(models_dir / _sub, exist_ok=True)
 
@@ -43,6 +44,7 @@ hrffa_repo = (
     "https://github.com/PINTO0309/High-Angle_Robust_Fast_FaceAlignment"
     "/releases/download/weights"
 )
+osdface_repo = "https://github.com/Glat0s/OSDFace-onnx/releases/download/v0.0.1"
 
 arcface_mapping_model_dict = {
     "Inswapper128": "Inswapper128ArcFace",
@@ -96,6 +98,16 @@ landmark_model_mapping = {
     # and is deliberately NOT in this table (it is not a landmark model and must not
     # become the value control_actions loads/unloads for the mode).
     "hrffa": "FaceLandmarkHRFFA",
+}
+
+# Logical restorer name -> constituent ONNX sessions (unload/load as a group).
+compound_models_mapping: dict[str, tuple[str, ...]] = {
+    "OSDFace": (
+        "OSDFacePromptEncoder",
+        "OSDFaceVAEEncoder",
+        "OSDFaceUNet",
+        "OSDFaceVAEDecoder",
+    ),
 }
 
 # Point count per landmark_model_mapping key. The mode string used to double as the
@@ -208,6 +220,8 @@ fp16_safe_models_list = [
     "VQFRv2",
     "RestoreFormerPlusPlus",
     "RestoreFormerFP16",
+    "OSDFacePromptEncoder",
+    "OSDFaceVAEEncoder",
     # --- Recognition ---
     "Inswapper128ArcFace",
     "SimSwapArcFace",
@@ -856,6 +870,59 @@ models_list = [
         "local_path": f"{models_dir}/face_reaging.onnx",
         "hash": "62c62598a71067cf12680c8421230556d08069d172f1dc645be2a5ebe815fb1f",
         "url": "https://github.com/VisoMasterFusion/VisoMaster-Fusion/releases/download/v1.0.0/face_reaging.onnx",
+    },
+    {
+        "model_name": "OSDFacePromptEncoder",
+        "local_path": f"{models_dir}/osdface/prompt_encoder.onnx",
+        "hash": "83187cb142963151ff8abb7454e119e0a7e248e17c03c8deaa9a14bd6ba8f2a9",
+        "url": f"{osdface_repo}/prompt_encoder.onnx",
+    },
+    {
+        "model_name": "OSDFaceVAEEncoder",
+        "local_path": f"{models_dir}/osdface/vae_encoder.onnx",
+        "hash": "95f6d278737a864b02f99e51ac8cd00bdfb6c0b515b6d157470689fe0257dfa7",
+        "url": f"{osdface_repo}/vae_encoder.onnx",
+    },
+    {
+        "model_name": "OSDFaceUNet",
+        "local_path": f"{models_dir}/osdface/unet.onnx",
+        "hash": "b14bdaa36274da7f80f1a628aecbf7a9029239dad6223918432a16430e15c9e4",
+        "url": f"{osdface_repo}/unet.onnx",
+    },
+    {
+        "model_name": "OSDFaceUNetData",
+        "local_path": f"{models_dir}/osdface/unet.onnx.data",
+        "hash": "89a8ed18e13a5254874d567f6fc3607363af0103b249679951f167b6580bcc2c",
+        "multipart_zip": {
+            "member": "unet.onnx.data",
+            "hash": "ced4b8a667a54f92b1ac149f8f5006c7b7eb4770d8301f82aaea34ec281b51cf",
+            "parts": [
+                {
+                    "model_name": "OSDFaceUNetDataZip001",
+                    "local_path": f"{models_dir}/osdface/unet.onnx.data.zip.001",
+                    "hash": "e23d1a35c93ede05d00a78359381b5804368b7951596244a502dd92856e9eea3",
+                    "url": f"{osdface_repo}/unet.onnx.data.zip.001",
+                },
+                {
+                    "model_name": "OSDFaceUNetDataZip002",
+                    "local_path": f"{models_dir}/osdface/unet.onnx.data.zip.002",
+                    "hash": "7a404682246d84ed3d5f0e3ab8b24f062bc3d723c79e701bcec440473fb4b9d1",
+                    "url": f"{osdface_repo}/unet.onnx.data.zip.002",
+                },
+            ],
+        },
+    },
+    {
+        "model_name": "OSDFaceVAEDecoder",
+        "local_path": f"{models_dir}/osdface/vae_decoder.onnx",
+        "hash": "d3ac89733f86e445b3d106e801860455cb5f44f289c12cc4673c0dfccff4e051",
+        "url": f"{osdface_repo}/vae_decoder.onnx",
+    },
+    {
+        "model_name": "OSDFaceScheduler",
+        "local_path": f"{models_dir}/osdface/scheduler.json",
+        "hash": "fa7586cae137df656b274b2fdbfb551e95bc9fe42334354007c2ba13db6fd0c7",
+        "url": f"{osdface_repo}/scheduler.json",
     },
 ]
 

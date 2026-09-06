@@ -3272,6 +3272,8 @@ class FrameWorker(threading.Thread):
             int(parameters.get("SecondaryStrengthAmountSlider", 100)),
             str(parameters.get("SecondarySwapperBlendModeSelection", "Linear")),
             bool(parameters.get("SecondarySwapperHyperSwapMixEnableToggle", False)),
+            int(parameters.get("OSDFaceTimestepSlider", 399)),
+            float(parameters.get("OSDFaceLatentStrengthDecimalSlider", 1.0)),
         )
 
     @staticmethod
@@ -3464,6 +3466,27 @@ class FrameWorker(threading.Thread):
             return id(stable_object)
         return 0
 
+    @staticmethod
+    def _osdface_restorer_kwargs(parameters: dict, slot_id: int = 1) -> dict:
+        if int(slot_id) == 2:
+            ts_key = "OSDFaceTimestep2Slider"
+            ls_key = "OSDFaceLatentStrength2DecimalSlider"
+        else:
+            ts_key = "OSDFaceTimestepSlider"
+            ls_key = "OSDFaceLatentStrengthDecimalSlider"
+        try:
+            ts = int(parameters.get(ts_key, 399) or 399)
+        except (TypeError, ValueError):
+            ts = 399
+        try:
+            ls = float(parameters.get(ls_key, 1.0) or 1.0)
+        except (TypeError, ValueError):
+            ls = 1.0
+        return {
+            "osdface_timestep": ts,
+            "osdface_latent_strength": ls,
+        }
+
     def _apply_facerestorer_maybe_offloaded(
         self,
         swap: torch.Tensor,
@@ -3475,6 +3498,11 @@ class FrameWorker(threading.Thread):
         mp = self.models_processor
 
         def _run(t: torch.Tensor) -> torch.Tensor:
+            kwargs.update(
+                self._osdface_restorer_kwargs(
+                    parameters, kwargs.get("slot_id", 1)
+                )
+            )
             return mp.apply_facerestorer(t, *args, **kwargs)
 
         return _run(swap)

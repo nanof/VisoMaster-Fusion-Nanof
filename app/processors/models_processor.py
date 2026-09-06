@@ -70,6 +70,7 @@ from app.processors.models_data import (
     models_list,
     models_trt_list,
     arcface_mapping_model_dict,
+    compound_models_mapping,
     fp16_safe_models_list,
     tensorrt_shape_infer_models,
 )
@@ -1113,6 +1114,22 @@ class ModelsProcessor(QtCore.QObject):
             )
             self.flush_pending_model_unloads()
 
+        if model_name in compound_models_mapping:
+            compound_sessions = {}
+            all_successful = True
+            for sub_model_name in compound_models_mapping[model_name]:
+                sub_session = self.load_model(
+                    sub_model_name, session_options=session_options
+                )
+                if sub_session is None:
+                    all_successful = False
+                    print(
+                        f"[WARN] Sub-model '{sub_model_name}' of compound "
+                        f"'{model_name}' failed to load."
+                    )
+                compound_sessions[sub_model_name] = sub_session
+            return compound_sessions if all_successful else None
+
         with self.model_lock:
             storage_key = self._ort_session_storage_key(model_name)
             if self.models.get(storage_key):
@@ -1136,6 +1153,11 @@ class ModelsProcessor(QtCore.QObject):
             if not onnx_path:
                 print(
                     f"[ERROR] Model path for '{model_name}' not found in models_data."
+                )
+                return None
+            if not str(onnx_path).lower().endswith(".onnx"):
+                print(
+                    f"[WARN] Skipping ORT load for non-ONNX asset '{model_name}'."
                 )
                 return None
 
@@ -1690,6 +1712,11 @@ class ModelsProcessor(QtCore.QObject):
             if self.main_window.control.get("KeepModelsAliveToggle", False):
                 return  # Skip unloading
 
+        if model_name_to_unload in compound_models_mapping:
+            for sub_name in compound_models_mapping[model_name_to_unload]:
+                self.unload_model(sub_name, force_immediate=force_immediate)
+            return
+
         grace = self._model_unload_grace_seconds()
         immediate = (
             bool(force_immediate)
@@ -2124,7 +2151,14 @@ class ModelsProcessor(QtCore.QObject):
         storage_key = self._ort_session_storage_key(model_name)
         if self.models.get(storage_key):
             return True
-        return self.models_trt.get(storage_key) is not None
+        if self.models_trt.get(storage_key) is not None:
+            return True
+        if model_name in compound_models_mapping:
+            return all(
+                self.is_model_loaded(sub)
+                for sub in compound_models_mapping[model_name]
+            )
+        return False
 
     def get_trt_native_model(self, model_name: str):
         """TensorRT-native runtime object keyed like ONNX sessions (multi-GPU aware)."""
@@ -3233,6 +3267,8 @@ class ModelsProcessor(QtCore.QObject):
         target_kps,
         slot_id: int = 1,
         dmd_landmarks_68_crop: Optional[np.ndarray] = None,
+        osdface_timestep: int = 399,
+        osdface_latent_strength: float = 1.0,
     ):
         return self.face_restorers.apply_facerestorer(
             swapped_face_upscaled,
@@ -3244,6 +3280,8 @@ class ModelsProcessor(QtCore.QObject):
             target_kps,
             slot_id=slot_id,
             dmd_landmarks_68_crop=dmd_landmarks_68_crop,
+            osdface_timestep=osdface_timestep,
+            osdface_latent_strength=osdface_latent_strength,
         )
 
     def try_apply_facerestorer_batched_original_stack(

@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 
 from app.helpers.downloader import download_file
+from app.helpers.multipart_zip_downloader import download_multipart_zip_model
 from app.processors.models_data import (
     models_list,
     musetalk_assets_list,
@@ -51,11 +52,17 @@ def main() -> None:
     skip_musetalk = bool(args.skip_musetalk) or _env_truthy("VISOFUSION_SKIP_MUSETALK")
 
     for model_data in models_list + list(pytorch_assets_list):
+        if model_data.get("multipart_zip"):
+            download_multipart_zip_model(model_data, skip_hash_check=_skip_hash)
+            continue
+        url = model_data.get("url")
+        if not url:
+            continue
         download_file(
             model_data["model_name"],
             model_data["local_path"],
             model_data["hash"],
-            model_data["url"],
+            url,
             skip_hash_check=_skip_hash,
         )
 
