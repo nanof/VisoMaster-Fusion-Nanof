@@ -1,3 +1,4 @@
+import logging
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
@@ -15,6 +16,17 @@ if TYPE_CHECKING:
 
 _VGG_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
 _VGG_STD = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+
+logger = logging.getLogger(__name__)
+
+# Occluder and DFL XSeg can collapse on extreme profiles and zero the swap mask.
+# Bypass only when BOTH an extreme angle and a collapsed face area are present:
+# a low face ratio on a frontal face is also what a real hand/microphone looks like.
+# yaw_deg is degrees away from the camera (5-landmark pseudo-degrees, or YawNet
+# folded by yaw_from_frontal). 0 is frontal and ~90 is profile on both scales.
+# These defaults are a plausible guess, NOT CALIBRATED against real footage.
+_SEG_GUARD_MIN_ABS_YAW = 40.0
+_SEG_GUARD_MIN_FACE_RATIO = 0.30
 
 
 class FaceMasks:
@@ -1404,12 +1416,77 @@ class FaceMasks:
 
     # --- Occluder & XSeg ---
 
-    def apply_occlusion(self, img, amount, parameters=None, original_face_512=None):
+    @staticmethod
+    def _seg_guard_settings(parameters: dict | None) -> tuple[bool, float, float]:
+        """UI overrides, with module defaults when the keys are absent."""
+        p = parameters or {}
+        enabled = bool(p.get("SegGuardEnableToggle", True))
+        min_yaw = float(p.get("SegGuardMinYawSlider", _SEG_GUARD_MIN_ABS_YAW))
+        min_ratio = (
+            float(
+                p.get(
+                    "SegGuardMinFaceRatioSlider",
+                    _SEG_GUARD_MIN_FACE_RATIO * 100.0,
+                )
+            )
+            / 100.0
+        )
+        return enabled, min_yaw, min_ratio
+
+    @staticmethod
+    def _seg_model_degraded(
+        face_mask: torch.Tensor,
+        yaw_deg: float | None,
+        model: str,
+        parameters: dict | None = None,
+    ) -> bool:
+        """
+        True when a segmentation model collapsed on an extreme head angle.
+
+        face_mask must be binarized with 1 = face. yaw_deg None never bypasses.
+        Frontal frames return before the device sync in .item().
+        """
+        enabled, min_yaw, min_ratio = FaceMasks._seg_guard_settings(parameters)
+        if not enabled or min_ratio <= 0.0:
+            return False
+        if yaw_deg is None or abs(yaw_deg) < min_yaw:
+            return False
+
+        face_ratio = face_mask.mean().item()
+        if face_ratio >= min_ratio:
+            return False
+
+        logger.debug(
+            "%s bypassed: face ratio %.3f < %.2f at yaw %.1f deg (min angle %.1f; "
+            "model likely collapsed on profile); applying swap unmasked for this frame.",
+            model,
+            face_ratio,
+            min_ratio,
+            yaw_deg,
+            min_yaw,
+        )
+        return True
+
+    @torch.no_grad()
+    def apply_occlusion(
+        self,
+        img,
+        amount,
+        parameters=None,
+        original_face_512=None,
+        yaw_deg: float | None = None,
+    ):
         """
         Runs the Occluder model to mask out obstacles (hands, microphones, etc.).
         Includes logic to protect the inner mouth (tongue/teeth) from being occluded.
+
+        If the model collapses on an extreme profile it is bypassed and a full clear
+        mask (1.0) is returned. Pass yaw_deg to enable that guard.
         """
-        img = torch.div(img, 255)
+        img = img.to(
+            dtype=torch.float32,
+            device=self.models_processor.get_effective_torch_device(),
+        ).div(255)
         img = torch.unsqueeze(img, 0).contiguous()
 
         model_name = "Occluder"
@@ -1438,8 +1515,12 @@ class FaceMasks:
 
         outpred = torch.squeeze(outpred)
         # Binarize: True(1) = Face, False(0) = Occlusion
-        outpred = outpred > 0
-        outpred = torch.unsqueeze(outpred, 0).type(torch.float32)
+        outpred_binary = (outpred > 0).type(torch.float32)
+
+        if self._seg_model_degraded(outpred_binary, yaw_deg, "Occluder", parameters):
+            return torch.ones_like(outpred_binary).unsqueeze(0)
+
+        outpred = torch.unsqueeze(outpred_binary, 0)
 
         # --- TONGUE PRIORITY LOGIC ---
         # Ensures that objects inside the mouth (tongue, smoke) are not masked out
@@ -1641,7 +1722,13 @@ class FaceMasks:
         mouth: torch.Tensor,
         parameters: dict,
         inner_mouth_mask: torch.Tensor | None = None,
+        yaw_deg: float | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Runs DFL XSeg. Returned masks use 0 = Face and 1 = background/obstacle.
+
+        Pass yaw_deg to enable the profile-collapse bypass.
+        """
         import cv2
 
         # FM-07: use .get() for all parameter accesses to avoid KeyError
@@ -1649,8 +1736,8 @@ class FaceMasks:
         amount_calc = -parameters.get("BackgroundParserTextureSlider", 0)
         exclude_obstacles = parameters.get("XSegExcludeInnerObstaclesToggle", False)
 
-        img = img.type(torch.float32)
-        img = torch.div(img, 255)
+        dev = self.models_processor.get_effective_torch_device()
+        img = img.to(dtype=torch.float32, device=dev).div(255)
         img = torch.unsqueeze(img, 0).contiguous()
         ort_session = self.models_processor.get_onnx_session("XSeg")
         if ort_session is None:
@@ -1674,6 +1761,15 @@ class FaceMasks:
 
         outpred = torch.clamp(outpred, min=0.0, max=1.0)
         outpred[outpred < 0.1] = 0
+
+        if self._seg_model_degraded(
+            (outpred > 0.5).type(torch.float32), yaw_deg, "DFL XSeg", parameters
+        ):
+            bypass = [
+                torch.zeros((1, 256, 256), dtype=torch.float32, device=dev)
+                for _ in range(4)
+            ]
+            return bypass[0], bypass[1], bypass[2], bypass[3]
 
         # Invert: Face becomes 0, Background/Obstacles become 1
         outpred = 1.0 - outpred
@@ -2020,8 +2116,11 @@ class FaceMasks:
         feather_radius=None,
         device=None,
     ):
+        rx = max(int(radius_x), 1)
+        ry = max(int(radius_y), 1)
         if feather_radius is None:
-            feather_radius = max(radius_x, radius_y) // 2
+            feather_radius = max(rx, ry) // 2
+        fr = max(int(feather_radius), 1)
 
         # FM-09: include device in the cache key and create tensors on the correct device
         _device = (
@@ -2044,11 +2143,9 @@ class FaceMasks:
                 self._meshgrid_cache[cache_key] = (y, x)
 
         normalized_distance = torch.sqrt(
-            ((x - center[0]) / radius_x) ** 2 + ((y - center[1]) / radius_y) ** 2
+            ((x - center[0]) / rx) ** 2 + ((y - center[1]) / ry) ** 2
         )
-        mask = torch.clamp(
-            (1 - normalized_distance) * (radius_x / feather_radius), 0, 1
-        )
+        mask = torch.clamp((1 - normalized_distance) * (rx / fr), 0, 1)
         return mask
 
     def restore_mouth(

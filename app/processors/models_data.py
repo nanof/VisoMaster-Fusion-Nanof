@@ -44,6 +44,9 @@ hrffa_repo = (
     "https://github.com/PINTO0309/High-Angle_Robust_Fast_FaceAlignment"
     "/releases/download/weights"
 )
+# YawNet, by the same author, linked upstream for the same reason as hrffa_repo.
+# MIT, and trained on a synthetic set, so there is no teacher-licence question.
+yawnet_repo = "https://github.com/PINTO0309/YawNet/releases/download/resources"
 osdface_repo = "https://github.com/Glat0s/OSDFace-onnx/releases/download/v0.0.1"
 
 arcface_mapping_model_dict = {
@@ -142,6 +145,9 @@ landmark_point_counts = {
 # fails silently for TUFA) and DEIMv2 is a DETR-style decoder (the shape whose fp16
 # build killed ORFormer). Both are cheap enough in fp32 that guessing is not worth the
 # risk of a silent ~70 px error. Measure before adding either.
+# YawNet is absent on the same unmeasured grounds: it is a tiny CNN, but its output is
+# a unit biternion whose ANGLE is the product, so a small fp16 drift in (cos, sin) is a
+# silently wrong pose rather than a visible artefact. It costs ~0.3 ms in fp32.
 
 # Restauradores (nombre en la UI) → ajustes globales (main_window.control) que deben cumplirse.
 # Se aplican al elegir el tipo o al activar el restorer si ya estaba seleccionado.
@@ -499,6 +505,24 @@ models_list = [
         ),
         "hash": "f24d8fa18583c75ce8d802e3d983af9d13a07fdc294267968a206dc79df85d36",
         "url": (f"{hrffa_repo}/deimv2_hgnetv2_n_wholebody49_boxes_only_webgpu.onnx"),
+    },
+    {
+        # YawNet — full-circle (360 deg) head-yaw regression. The 5-landmark
+        # faceutil.calc_face_yaw_pitch saturates near +-90 and reads a rear view as
+        # roughly frontal; this model can tell a profile from a head facing away.
+        # Like HRFFA it wants a whole-head crop and shares DEIMv2Wholebody49Head.
+        # 128 px kappa student. Input "images": RGB float32 NCHW 1x3x128x128,
+        # center05 ((x/255 - 0.5) / 0.5), squashed to the square (no letterbox).
+        # Outputs: "cos_sin" (1, 2) and "kappa" (1).
+        # Angle: deg = (degrees(atan2(sin, cos)) + 360) % 360; then mirror
+        # deg = (360 - deg) % 360. 0 = facing camera, 90 = subject's right,
+        # 180 = facing away, 270 = left. NOT fp16-safe (see the note above).
+        "model_name": "YawNet",
+        "local_path": (
+            f"{models_dir}/yawnet_distill_128_unified_v6u_kappa_1x3x128x128.onnx"
+        ),
+        "hash": "08e5ecf68e6688fac5fba1de997f283fbd71cd3fdd2794261dc57e2de55314f8",
+        "url": (f"{yawnet_repo}/yawnet_distill_128_unified_v6u_kappa_1x3x128x128.onnx"),
     },
     {
         "model_name": "FaceBlendShapes",

@@ -1,3 +1,4 @@
+import logging
 import threading
 from itertools import product as product
 from typing import TYPE_CHECKING, List, Dict, Optional
@@ -11,6 +12,8 @@ if TYPE_CHECKING:
     from app.processors.models_processor import ModelsProcessor
 from app.processors.models_data import models_dir
 from app.processors.utils import faceutil
+
+logger = logging.getLogger(__name__)
 
 
 class FaceLandmarkDetectors:
@@ -28,7 +31,8 @@ class FaceLandmarkDetectors:
         """
         MODEL_203_NAME = "FaceLandmark203"  # Essential model
 
-        models_to_unload = list(self.active_landmark_models)
+        with self._cache_lock:
+            models_to_unload = list(self.active_landmark_models)
 
         for model_name in models_to_unload:
             if keep_essential and model_name == MODEL_203_NAME:
@@ -36,13 +40,10 @@ class FaceLandmarkDetectors:
                 continue
 
             self.models_processor.unload_model(model_name)
-            # Also remove it from the active_landmark_models set
-            if model_name in self.active_landmark_models:
-                self.active_landmark_models.remove(model_name)
-
-        # If keep_essential is False, active_landmark_models has already been fully
-        # emptied by the per-model remove() calls in the loop above; no extra
-        # .clear() is needed here.
+            # Also remove it from the active_landmark_models set.
+            # Never hold _cache_lock while calling the model manager.
+            with self._cache_lock:
+                self.active_landmark_models.discard(model_name)
 
     def __init__(self, models_processor: "ModelsProcessor"):
         """
@@ -145,7 +146,8 @@ class FaceLandmarkDetectors:
         if not loaded_model_instance:
             loaded_model_instance = self.models_processor.load_model(model_name)
             if loaded_model_instance:
-                self.active_landmark_models.add(model_name)
+                with self._cache_lock:
+                    self.active_landmark_models.add(model_name)
 
         # If model still not loaded (e.g., failed to load), print a warning and return empty
         if not loaded_model_instance:
@@ -705,7 +707,8 @@ class FaceLandmarkDetectors:
                 )
                 return [], [], []  # Fail fast
             else:
-                self.active_landmark_models.add("FaceBlendShapes")
+                with self._cache_lock:
+                    self.active_landmark_models.add("FaceBlendShapes")
 
         aimg, _, IM = self._prepare_crop(
             img,
@@ -896,7 +899,8 @@ class FaceLandmarkDetectors:
         # unload ("Smart Unload" during playback) drops the name from
         # active_landmark_models while the session is still resident, and it has to go
         # back in or unload_models() will never free it.
-        self.active_landmark_models.add(model_name)
+        with self._cache_lock:
+            self.active_landmark_models.add(model_name)
 
         session = self.models_processor.models.get(model_name)
         if session is None:
@@ -922,7 +926,12 @@ class FaceLandmarkDetectors:
         )
         # RGB in [0, 1]; this graph applies no mean/std of its own.
         det_img = (
-            torch.div(det_img.to(dtype=torch.float32), 255.0).unsqueeze(0).contiguous()
+            torch.div(
+                det_img.to(dtype=torch.float32, device=self.models_processor.device),
+                255.0,
+            )
+            .unsqueeze(0)
+            .contiguous()
         )
 
         feed: Dict[str, torch.Tensor] = {inp.name: det_img}
@@ -1019,6 +1028,116 @@ class FaceLandmarkDetectors:
         cx, cy = (fx1 + fx2) / 2.0, (fy1 + fy2) / 2.0 - 0.08 * h
         half = 0.5 * 1.5 * max(w, h)
         return np.array([cx - half, cy - half, cx + half, cy + half], dtype=np.float32)
+
+    # Full-circle head yaw. Unlike faceutil.calc_face_yaw_pitch (a 5-landmark
+    # nose-offset ratio that saturates near +-90 deg), this distinguishes a profile
+    # from a head facing away and reports its own confidence.
+    #
+    # Returned angles: 0 = facing camera, 90 = subject's right, 180 = facing away,
+    # 270 = left. Callers that want "how far from frontal" should use yaw_from_frontal().
+    #
+    # kappa's neutral prior is about 2.0, not a confidence floor. The default gate is
+    # off so a guessed threshold does not reject ordinary readings. The occluder/XSeg
+    # bypass also requires a collapsed mask, so a spurious yaw alone cannot trigger it.
+    YAWNET_MIN_KAPPA = 0.0
+
+    @staticmethod
+    def yaw_from_frontal(orientation_deg: float) -> float:
+        """Fold a 0..360 ring angle onto 0..180 degrees away from the camera."""
+        d = abs(float(orientation_deg)) % 360.0
+        return 360.0 - d if d > 180.0 else d
+
+    def estimate_head_yaw_yawnet(
+        self,
+        img: torch.Tensor,
+        bbox: np.ndarray,
+        head_bboxes: np.ndarray | list | None = None,
+        min_kappa: float | None = None,
+    ) -> tuple[float, float] | None:
+        """
+        Full-circle head yaw for one face, via YawNet.
+
+        img is the whole frame (3, H, W); bbox is that face's box in frame pixels.
+        head_bboxes are the frame's DEIMv2 head boxes when the caller already has
+        them. None means "no opinion": callers must keep their previous behaviour.
+        """
+        model_name = "YawNet"
+
+        if not self.models_processor.models.get(model_name):
+            if not self.models_processor.load_model(model_name):
+                print(
+                    f"[ERROR] Failed to load '{model_name}'. Head-yaw estimation is "
+                    "disabled; run download_models.py if the file is missing."
+                )
+                return None
+
+        with self._cache_lock:
+            self.active_landmark_models.add(model_name)
+
+        session = self.models_processor.models.get(model_name)
+        if session is None:
+            return None
+
+        if head_bboxes is None:
+            head_bboxes = self.detect_head_bboxes_wholebody49(img)
+        head_bbox = self._head_bbox_for_face(head_bboxes, bbox)
+
+        inp = session.get_inputs()[0]
+        shape = inp.shape
+        size = shape[2] if isinstance(shape[2], int) else 128
+
+        img_h, img_w = int(img.shape[1]), int(img.shape[2])
+        x1 = int(np.floor(np.clip(head_bbox[0], 0, img_w - 1)))
+        y1 = int(np.floor(np.clip(head_bbox[1], 0, img_h - 1)))
+        x2 = int(np.ceil(np.clip(head_bbox[2], 0, img_w)))
+        y2 = int(np.ceil(np.clip(head_bbox[3], 0, img_h)))
+        if x2 - x1 < 2 or y2 - y1 < 2:
+            return None
+
+        crop = img[:, y1:y2, x1:x2]
+        crop = v2.functional.resize(
+            crop,
+            [size, size],
+            interpolation=v2.InterpolationMode.BILINEAR,
+            antialias=True,
+        )
+        # Allocate before the in-place normalize so the source frame is not mutated.
+        crop = (
+            crop.to(dtype=torch.float32, device=self.models_processor.device)
+            .div(255.0)
+            .sub_(0.5)
+            .div_(0.5)
+        )
+        crop = crop.unsqueeze(0).contiguous()
+
+        net_outs = self._run_onnx_binding(
+            model_name, {inp.name: crop}, ["cos_sin", "kappa"]
+        )
+        if not net_outs or len(net_outs) < 2:
+            return None
+
+        cos_sin = np.asarray(net_outs[0], dtype=np.float32).reshape(-1)
+        kappa = float(np.asarray(net_outs[1], dtype=np.float32).reshape(-1)[0])
+        if cos_sin.size < 2:
+            return None
+        if not np.isfinite(cos_sin[:2]).all() or not np.isfinite(kappa):
+            return None
+
+        deg = (np.degrees(np.arctan2(cos_sin[1], cos_sin[0])) + 360.0) % 360.0
+        deg = (360.0 - deg) % 360.0
+
+        threshold = self.YAWNET_MIN_KAPPA if min_kappa is None else float(min_kappa)
+        logger.debug(
+            "YawNet: %.1f deg (kappa %.3f, min %.3f)%s",
+            deg,
+            kappa,
+            threshold,
+            " -> rejected" if threshold > 0.0 and kappa < threshold else "",
+        )
+        if threshold > 0.0 and kappa < threshold:
+            return None
+
+        return float(deg), kappa
 
     def detect_face_landmark_hrffa(
         self, img, bbox, det_kpss, from_points=False, **kwargs

@@ -35,6 +35,7 @@ from app.helpers.miscellaneous import (
     find_best_target_match,
     get_scaling_transforms,
     draw_bounding_boxes_on_detected_faces,
+    draw_head_yaw_ring_on_faces,
     paint_landmarks_on_image,
     is_detected_face_eligible_for_matching,
     keypoints_adjustments,
@@ -3686,6 +3687,7 @@ class FrameWorker(threading.Thread):
                         uniface_source_rgb256=s.get("uniface_src256"),
                         gather_pre_primary_restorer_tails=gather_tails,
                         face_restorer_param_bucket_id=s.get("face_restorer_bucket_id"),
+                        yawnet_deg=s.get("yawnet_deg"),
                     )
                 except _GatherPrePrimaryRestorer:
                     continue
@@ -3751,6 +3753,7 @@ class FrameWorker(threading.Thread):
                     blendswap_source_rgb112=s.get("blendswap_src112"),
                     uniface_source_rgb256=s.get("uniface_src256"),
                     face_restorer_param_bucket_id=s.get("face_restorer_bucket_id"),
+                    yawnet_deg=s.get("yawnet_deg"),
                 )
             )
             if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -3795,6 +3798,7 @@ class FrameWorker(threading.Thread):
                         uniface_source_rgb256=s0.get("uniface_src256"),
                         swapper_autores_track_id=int(s0.get("swap_tid", -1)),
                         face_restorer_param_bucket_id=s0.get("face_restorer_bucket_id"),
+                        yawnet_deg=s0.get("yawnet_deg"),
                     )
                 )
                 if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -3846,6 +3850,7 @@ class FrameWorker(threading.Thread):
                         uniface_source_rgb256=sp.get("uniface_src256"),
                         swapper_autores_track_id=int(sp.get("swap_tid", -1)),
                         face_restorer_param_bucket_id=sp.get("face_restorer_bucket_id"),
+                        yawnet_deg=sp.get("yawnet_deg"),
                     )
                 )
                 if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -3885,6 +3890,7 @@ class FrameWorker(threading.Thread):
                             face_restorer_param_bucket_id=sp.get(
                                 "face_restorer_bucket_id"
                             ),
+                            yawnet_deg=sp.get("yawnet_deg"),
                         )
                     )
                     if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -3936,6 +3942,7 @@ class FrameWorker(threading.Thread):
                         blendswap_source_rgb112=sp.get("blendswap_src112"),
                         uniface_source_rgb256=sp.get("uniface_src256"),
                         face_restorer_param_bucket_id=sp.get("face_restorer_bucket_id"),
+                        yawnet_deg=sp.get("yawnet_deg"),
                     )
                 )
                 if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -4084,6 +4091,7 @@ class FrameWorker(threading.Thread):
                         blendswap_source_rgb112=sp.get("blendswap_src112"),
                         uniface_source_rgb256=sp.get("uniface_src256"),
                         face_restorer_param_bucket_id=sp.get("face_restorer_bucket_id"),
+                        yawnet_deg=sp.get("yawnet_deg"),
                     )
                 )
                 if edit_button_is_checked_global and self._face_makeup_sliders_on(
@@ -4851,6 +4859,7 @@ class FrameWorker(threading.Thread):
                 swap_button_is_checked_global or edit_button_is_checked_global
             ),
         )
+        self._annotate_yawnet_degrees(img, det_faces_data_for_display, control)
 
         if _sequential_match_active and _checked_inputs_ordered:
             _need_rr_apply = self.precomputed_rr_input_indices is None
@@ -5045,6 +5054,7 @@ class FrameWorker(threading.Thread):
                                 face_restorer_param_bucket_id=self._face_restorer_param_bucket_id(
                                     face_id_str=face_id_str
                                 ),
+                                yawnet_deg=best_fface.get("yawnet_deg"),
                             )
                             if edit_button_is_checked_global and any(
                                 params[f]
@@ -5216,6 +5226,7 @@ class FrameWorker(threading.Thread):
                                         face_restorer_param_bucket_id=self._face_restorer_param_bucket_id(
                                             stable_object=in_btn
                                         ),
+                                        yawnet_deg=fface.get("yawnet_deg"),
                                     )
                                 )
                                 if edit_button_is_checked_global and any(
@@ -5403,6 +5414,7 @@ class FrameWorker(threading.Thread):
                                     "face_restorer_bucket_id": self._face_restorer_param_bucket_id(
                                         target_face=best_target
                                     ),
+                                    "yawnet_deg": fface.get("yawnet_deg"),
                                 }
                             )
                             continue
@@ -5438,6 +5450,7 @@ class FrameWorker(threading.Thread):
                                     face_restorer_param_bucket_id=self._face_restorer_param_bucket_id(
                                         target_face=best_target
                                     ),
+                                    yawnet_deg=fface.get("yawnet_deg"),
                                 )
                             )
                             if edit_button_is_checked_global and any(
@@ -5526,6 +5539,16 @@ class FrameWorker(threading.Thread):
                 temp_permuted = processed_tensor_rgb_uint8.permute(1, 2, 0)
                 temp_permuted = paint_landmarks_on_image(temp_permuted, landmarks_data)
                 processed_tensor_rgb_uint8 = temp_permuted.permute(2, 0, 1)
+
+        if (
+            control.get("ShowYawNetRingToggle", False)
+            and control.get("YawNetEnableToggle", False)
+            and control.get("LandmarkDetectToggle", True)
+            and det_faces_data_for_display
+        ):
+            processed_tensor_rgb_uint8 = draw_head_yaw_ring_on_faces(
+                processed_tensor_rgb_uint8, det_faces_data_for_display
+            )
 
         compare_mode_active = self.is_view_face_mask or self.is_view_face_compare
         if compare_mode_active and det_faces_data_for_display:
@@ -8670,6 +8693,35 @@ class FrameWorker(threading.Thread):
         )
         return mixed, native_swap_mask
 
+    def _annotate_yawnet_degrees(
+        self,
+        img: torch.Tensor,
+        faces: list,
+        control: dict,
+    ) -> None:
+        """Store a full-circle YawNet angle on each face, in the working frame."""
+        if not faces:
+            return
+        if not control.get("LandmarkDetectToggle", True):
+            return
+        if not control.get("YawNetEnableToggle", False):
+            return
+        try:
+            min_kappa = float(control.get("YawNetMinKappaDecimalSlider", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            min_kappa = 0.0
+        head_bboxes = self.models_processor.run_detect_head_bboxes(img)
+        estimator = self.models_processor.face_landmark_detectors
+        for fface in faces:
+            bbox = fface.get("bbox")
+            if bbox is None:
+                continue
+            result = estimator.estimate_head_yaw_yawnet(
+                img, bbox, head_bboxes, min_kappa=min_kappa
+            )
+            if result is not None:
+                fface["yawnet_deg"] = result[0]
+
     def swap_core(
         self,
         img: torch.Tensor,
@@ -8683,6 +8735,7 @@ class FrameWorker(threading.Thread):
         dfm_model_name: str | None = None,
         is_perspective_crop: bool = False,
         kv_map: Dict | None = None,
+        yawnet_deg: float | None = None,
         source_latent_cache: dict | None = None,
         alignment_img: torch.Tensor | None = None,
         prefetched_swap_chw_uint8: torch.Tensor | None = None,
@@ -9053,6 +9106,16 @@ class FrameWorker(threading.Thread):
         current_swap_h, current_swap_w = swap.shape[1], swap.shape[2]
 
         yaw_deg, pitch_deg = faceutil.calc_face_yaw_pitch(kps_5)
+        # Profile safeguard only. yaw_deg itself still feeds the side mask, whose
+        # slider is calibrated in 5-landmark pseudo-degrees.
+        if yawnet_deg is not None:
+            guard_yaw_deg = (
+                self.models_processor.face_landmark_detectors.yaw_from_frontal(
+                    yawnet_deg
+                )
+            )
+        else:
+            guard_yaw_deg = abs(float(yaw_deg))
         if parameters.get("ProfileAngleMaskEnableToggle", False):
             _sm_key = (
                 round(float(yaw_deg), 2),
@@ -9292,6 +9355,7 @@ class FrameWorker(threading.Thread):
                     parameters["OccluderSizeSlider"],
                     parameters=parameters,
                     original_face_512=swap_restorecalc,
+                    yaw_deg=guard_yaw_deg,
                 )
                 if mask.shape[-1] != swap_mask.shape[-1]:
                     mask = self._get_cached_resize_bilinear_aa(
@@ -9530,6 +9594,7 @@ class FrameWorker(threading.Thread):
                     mouth_256 if mouth_256 is not None else 0,
                     parameters,
                     inner_mouth_mask=inner_mouth_protection_256,
+                    yaw_deg=guard_yaw_deg,
                 )
 
                 if img_mask_256.shape[-1] != swap_mask.shape[-1]:

@@ -3297,12 +3297,22 @@ class ModelsProcessor(QtCore.QObject):
             fidelity_weight,
         )
 
-    def apply_occlusion(self, img, amount):
-        return self.face_masks.apply_occlusion(img, amount)
+    def apply_occlusion(
+        self, img, amount, parameters=None, original_face_512=None, yaw_deg=None
+    ):
+        return self.face_masks.apply_occlusion(
+            img,
+            amount,
+            parameters=parameters,
+            original_face_512=original_face_512,
+            yaw_deg=yaw_deg,
+        )
 
-    def apply_dfl_xseg(self, img, amount, mouth, parameters, inner_mouth_mask):
+    def apply_dfl_xseg(
+        self, img, amount, mouth, parameters, inner_mouth_mask, yaw_deg=None
+    ):
         return self.face_masks.apply_dfl_xseg(
-            img, amount, mouth, parameters, inner_mouth_mask
+            img, amount, mouth, parameters, inner_mouth_mask, yaw_deg=yaw_deg
         )
 
     def process_masks_and_masks(
