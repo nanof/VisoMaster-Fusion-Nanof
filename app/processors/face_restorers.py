@@ -17,6 +17,26 @@ if TYPE_CHECKING:
     from app.processors.models_processor import ModelsProcessor
 
 
+RESTORER_MODEL_MAP = {
+    "GFPGAN-v1.4": "GFPGANv1.4",
+    "GFPGAN-1024": "GFPGAN1024",
+    "CodeFormer": "CodeFormer",
+    "GPEN-256": "GPENBFR256",
+    "GPEN-256 FP16 (HF)": "GPENBFR256FP16",
+    "GPEN-256 Fast (128→256)": "GPENBFR256",
+    "GPEN-256 Fast FP16 (128→256)": "GPENBFR256FP16",
+    "GPEN-512": "GPENBFR512",
+    "GPEN-1024": "GPENBFR1024",
+    "GPEN-2048": "GPENBFR2048",
+    "RestoreFormer++": "RestoreFormerPlusPlus",
+    "RestoreFormer": "RestoreFormerFP16",
+    "VQFR-v2": "VQFRv2",
+    "DMDNet": "DMDNetTorch",
+    "DMDNet FP16": "DMDNetTorch",
+    "OSDFace": "OSDFace",
+}
+
+
 class _CodeFormerDirectRunner:
     """Runs CodeFormerTorch without CUDA graph (same interface as CUDAGraphRunner)."""
 
@@ -70,24 +90,9 @@ class FaceRestorers:
         self._dmdnet_lock = threading.Lock()
         self._restorer_ort_batch_session_disabled = False
         self._restorer_ort_batch_fail_logged = False
-        self.model_map = {
-            "GFPGAN-v1.4": "GFPGANv1.4",
-            "GFPGAN-1024": "GFPGAN1024",
-            "CodeFormer": "CodeFormer",
-            "GPEN-256": "GPENBFR256",
-            "GPEN-256 FP16 (HF)": "GPENBFR256FP16",
-            "GPEN-256 Fast (128→256)": "GPENBFR256",
-            "GPEN-256 Fast FP16 (128→256)": "GPENBFR256FP16",
-            "GPEN-512": "GPENBFR512",
-            "GPEN-1024": "GPENBFR1024",
-            "GPEN-2048": "GPENBFR2048",
-            "RestoreFormer++": "RestoreFormerPlusPlus",
-            "RestoreFormer": "RestoreFormerFP16",
-            "VQFR-v2": "VQFRv2",
-            "DMDNet": "DMDNetTorch",
-            "DMDNet FP16": "DMDNetTorch",
-            "OSDFace": "OSDFace",
-        }
+        self.model_map = dict(RESTORER_MODEL_MAP)
+        self._active_extra_slots: dict[int, str] = {}
+        self._slot_lock = threading.Lock()
         self._osdface_alphas_cumprod: Optional[list[float]] = None
         self._osdface_timestep: Optional[int] = None
         self._osdface_alpha: Optional[float] = None
@@ -225,6 +230,62 @@ class FaceRestorers:
             print(f"[ERROR] DMDNet forward failed: {e}")
             return False
 
+    def is_model_used_by_extra_slots(self, model_name: str) -> bool:
+        """True when the detailer (or another auxiliary slot) still needs this model."""
+        canonical = self.model_map.get(model_name, model_name)
+        window = getattr(self.models_processor, "main_window", None)
+        control = getattr(window, "control", None) or {}
+        if control.get("FaceDetailerEnableToggle", False) and self.model_map.get(
+            control.get("FaceDetailerRestorerTypeSelection", "GPEN-1024"),
+            control.get("FaceDetailerRestorerTypeSelection", "GPEN-1024"),
+        ) == canonical:
+            return True
+        with self._slot_lock:
+            return any(
+                self.model_map.get(active, active) == canonical
+                for active in self._active_extra_slots.values()
+            )
+
+    def _set_active_model(self, slot_id: int, restorer_type: str | None) -> None:
+        """Record which restorer a slot owns, and release it when nothing else uses it."""
+        stored = (
+            None
+            if restorer_type is None
+            else self.model_map.get(restorer_type, restorer_type)
+        )
+        with self._slot_lock:
+            if slot_id == 1:
+                previous = self.active_model_slot1
+                self.active_model_slot1 = stored
+            elif slot_id == 2:
+                previous = self.active_model_slot2
+                self.active_model_slot2 = stored
+            else:
+                previous = self._active_extra_slots.pop(slot_id, None)
+                if stored is not None:
+                    self._active_extra_slots[slot_id] = stored
+            active = [self.active_model_slot1, self.active_model_slot2]
+            active.extend(self._active_extra_slots.values())
+            previous_model = (
+                self.model_map.get(previous, previous) if previous else None
+            )
+            still_used = any(
+                (self.model_map.get(name, name) if name else None) == previous_model
+                for name in active
+            )
+
+        if (
+            previous_model
+            and not still_used
+            and not self.models_processor.is_model_active_in_ui(previous_model)
+        ):
+            self.models_processor.unload_model(previous_model)
+
+    def release_extra_slot(self, slot_id: int) -> None:
+        if slot_id < 3:
+            raise ValueError("Only auxiliary restorer slots can be released here")
+        self._set_active_model(slot_id, None)
+
     def unload_models(self):
         """Unloads the restorer models held in both slots and resets state."""
         if self.active_model_slot1:
@@ -233,6 +294,11 @@ class FaceRestorers:
         if self.active_model_slot2:
             self.models_processor.unload_model(self.active_model_slot2)
             self.active_model_slot2 = None
+        with self._slot_lock:
+            extra = list(self._active_extra_slots.values())
+            self._active_extra_slots.clear()
+        for model_name in extra:
+            self.models_processor.unload_model(self.model_map.get(model_name, model_name))
         self.unload_dmdnet()
         self._unload_custom_torch_kernels()
         self._osdface_timestep = None
@@ -842,6 +908,9 @@ class FaceRestorers:
         if not model_name_to_load:
             return swapped_face_upscaled
 
+        # Slot 3 belongs to the detailer; never evict a model owned by another slot.
+        self._set_active_model(slot_id, restorer_type)
+
         if (
             restorer_type in ("DMDNet", "DMDNet FP16")
             and self.models_processor.device != "cuda"
@@ -946,7 +1015,8 @@ class FaceRestorers:
                 dtype=self._gfpgan_output_dtype(is_1024=False),
                 device=dev,
             ).contiguous()
-            self.run_GFPGAN(temp, outpred)
+            if self.run_GFPGAN(temp, outpred) is False:
+                return swapped_face_upscaled
 
         elif restorer_type == "GFPGAN-1024":
             outpred = torch.empty(
@@ -954,7 +1024,8 @@ class FaceRestorers:
                 dtype=self._gfpgan_output_dtype(is_1024=True),
                 device=dev,
             ).contiguous()
-            self.run_GFPGAN1024(temp, outpred)
+            if self.run_GFPGAN1024(temp, outpred) is False:
+                return swapped_face_upscaled
 
         elif restorer_type == "CodeFormer":
             outpred = torch.empty(
@@ -962,7 +1033,8 @@ class FaceRestorers:
                 dtype=self._ort_output_dtype("CodeFormer", "y"),
                 device=dev,
             ).contiguous()
-            self.run_codeformer(temp, outpred, fidelity_weight)
+            if self.run_codeformer(temp, outpred, fidelity_weight) is False:
+                return swapped_face_upscaled
 
         elif restorer_type == "GPEN-256":
             outpred = torch.empty(
@@ -970,7 +1042,8 @@ class FaceRestorers:
                 dtype=self._ort_output_dtype("GPENBFR256", "output"),
                 device=dev,
             ).contiguous()
-            self.run_GPEN_256(temp, outpred)
+            if self.run_GPEN_256(temp, outpred) is False:
+                return swapped_face_upscaled
 
         elif restorer_type == "GPEN-256 FP16 (HF)":
             outpred = torch.empty(
@@ -978,9 +1051,13 @@ class FaceRestorers:
                 dtype=self._ort_output_dtype("GPENBFR256FP16", "output"),
                 device=dev,
             ).contiguous()
-            self.run_GPEN_256(
-                temp, outpred, model_name="GPENBFR256FP16", gpen_variant="fp16hf"
-            )
+            if (
+                self.run_GPEN_256(
+                    temp, outpred, model_name="GPENBFR256FP16", gpen_variant="fp16hf"
+                )
+                is False
+            ):
+                return swapped_face_upscaled
 
         elif restorer_type == "GPEN-256 Fast (128→256)":
             outpred = torch.empty(
@@ -988,7 +1065,8 @@ class FaceRestorers:
                 dtype=self._ort_output_dtype("GPENBFR256", "output"),
                 device=dev,
             ).contiguous()
-            self.run_GPEN_256(temp, outpred)
+            if self.run_GPEN_256(temp, outpred) is False:
+                return swapped_face_upscaled
 
         elif restorer_type == "GPEN-256 Fast FP16 (128→256)":
             outpred = torch.empty(
@@ -996,9 +1074,13 @@ class FaceRestorers:
                 dtype=self._ort_output_dtype("GPENBFR256FP16", "output"),
                 device=dev,
             ).contiguous()
-            self.run_GPEN_256(
-                temp, outpred, model_name="GPENBFR256FP16", gpen_variant="fp16hf"
-            )
+            if (
+                self.run_GPEN_256(
+                    temp, outpred, model_name="GPENBFR256FP16", gpen_variant="fp16hf"
+                )
+                is False
+            ):
+                return swapped_face_upscaled
 
         elif restorer_type == "GPEN-512":
             outpred = torch.empty(
@@ -1006,7 +1088,8 @@ class FaceRestorers:
                 dtype=self._ort_output_dtype("GPENBFR512", "output"),
                 device=dev,
             ).contiguous()
-            self.run_GPEN_512(temp, outpred)
+            if self.run_GPEN_512(temp, outpred) is False:
+                return swapped_face_upscaled
 
         elif restorer_type == "GPEN-1024":
             temp = v2.functional.resize(temp, [1024, 1024], antialias=False)
@@ -1015,7 +1098,8 @@ class FaceRestorers:
                 dtype=self._ort_output_dtype("GPENBFR1024", "output"),
                 device=dev,
             ).contiguous()
-            self.run_GPEN_1024(temp, outpred)
+            if self.run_GPEN_1024(temp, outpred) is False:
+                return swapped_face_upscaled
 
         elif restorer_type == "GPEN-2048":
             temp = v2.functional.resize(temp, [2048, 2048], antialias=False)
@@ -1024,7 +1108,8 @@ class FaceRestorers:
                 dtype=self._ort_output_dtype("GPENBFR2048", "output"),
                 device=dev,
             ).contiguous()
-            self.run_GPEN_2048(temp, outpred)
+            if self.run_GPEN_2048(temp, outpred) is False:
+                return swapped_face_upscaled
 
         elif restorer_type == "RestoreFormer++":
             outpred = torch.empty(
@@ -1032,7 +1117,8 @@ class FaceRestorers:
                 dtype=self._ort_output_dtype("RestoreFormerPlusPlus", "2359"),
                 device=dev,
             ).contiguous()
-            self.run_RestoreFormerPlusPlus(temp, outpred)
+            if self.run_RestoreFormerPlusPlus(temp, outpred) is False:
+                return swapped_face_upscaled
 
         elif restorer_type == "RestoreFormer":
             outpred = torch.empty(
@@ -1040,7 +1126,8 @@ class FaceRestorers:
                 dtype=self._ort_output_dtype("RestoreFormerFP16", "output"),
                 device=dev,
             ).contiguous()
-            self.run_RestoreFormer(temp, outpred)
+            if self.run_RestoreFormer(temp, outpred) is False:
+                return swapped_face_upscaled
 
         elif restorer_type == "VQFR-v2":
             outpred = torch.empty(
@@ -1048,7 +1135,8 @@ class FaceRestorers:
                 dtype=self._ort_output_dtype("VQFRv2", "main_dec"),
                 device=dev,
             ).contiguous()
-            self.run_VQFR_v2(temp, outpred, fidelity_weight)
+            if self.run_VQFR_v2(temp, outpred, fidelity_weight) is False:
+                return swapped_face_upscaled
 
         elif restorer_type in ("DMDNet", "DMDNet FP16"):
             outpred = torch.empty(
@@ -1745,7 +1833,8 @@ class FaceRestorers:
                     dtype=self._ort_output_dtype(mn, "output"),
                     device=dev,
                 ).contiguous()
-                self.run_GFPGAN(temp, outpred)
+                if self.run_GFPGAN(temp, outpred) is False:
+                    return None
                 out = outpred.float().clamp_(-1.0, 1.0).add_(1.0).mul_(127.5)
             else:
                 mn = "CodeFormer"
@@ -1776,13 +1865,13 @@ class FaceRestorers:
     def run_GFPGAN(self, image, output):
         if self._gfpgan_prefers_torch():
             if self._run_gfpgan_custom(image, output, is_1024=False):
-                return
+                return True
 
         model_name = "GFPGANv1.4"
 
         ort_session = self._get_model_session(model_name)
         if not ort_session:
-            return  # Silently skip if model failed to load
+            return False
 
         io_binding = ort_session.io_binding()
         image = self.models_processor.bind_ort_io_input(
@@ -1802,17 +1891,18 @@ class FaceRestorers:
 
         # Run the model with lazy build handling
         self._run_model_with_lazy_build_check(model_name, ort_session, io_binding)
+        return True
 
     def run_GFPGAN1024(self, image, output):
         if self._gfpgan_prefers_torch():
             if self._run_gfpgan_custom(image, output, is_1024=True):
-                return
+                return True
 
         model_name = "GFPGAN1024"
 
         ort_session = self._get_model_session(model_name)
         if not ort_session:
-            return  # Silently skip
+            return False
 
         io_binding = ort_session.io_binding()
         image = self.models_processor.bind_ort_io_input(
@@ -1843,11 +1933,11 @@ class FaceRestorers:
     ):
         if self._prefer_custom_gpen():
             if self._run_gpen_custom(256, image, output, variant=gpen_variant):
-                return
+                return True
 
         ort_session = self._get_model_session(model_name)
         if not ort_session:
-            return  # Silently skip
+            return False
 
         io_binding = ort_session.io_binding()
         td_out = self.models_processor.get_ort_io_torch_dtype(
@@ -1882,17 +1972,18 @@ class FaceRestorers:
         self._run_model_with_lazy_build_check(model_name, ort_session, io_binding)
         if out_bind is not output:
             output.copy_(out_bind.to(dtype=output.dtype))
+        return True
 
     def run_GPEN_512(self, image, output):
         model_name = "GPENBFR512"
 
         if self._prefer_custom_gpen():
             if self._run_gpen_custom(512, image, output, variant="std"):
-                return
+                return True
 
         ort_session = self._get_model_session(model_name)
         if not ort_session:
-            return  # Silently skip
+            return False
 
         io_binding = ort_session.io_binding()
         image = self.models_processor.bind_ort_io_input(
@@ -1918,11 +2009,11 @@ class FaceRestorers:
 
         if self._prefer_custom_gpen():
             if self._run_gpen_custom(1024, image, output, variant="std"):
-                return
+                return True
 
         ort_session = self._get_model_session(model_name)
         if not ort_session:
-            return  # Silently skip
+            return False
 
         io_binding = ort_session.io_binding()
         image = self.models_processor.bind_ort_io_input(
@@ -1948,11 +2039,11 @@ class FaceRestorers:
 
         if self._prefer_custom_gpen():
             if self._run_gpen_custom(2048, image, output, variant="std"):
-                return
+                return True
 
         ort_session = self._get_model_session(model_name)
         if not ort_session:
-            return  # Silently skip
+            return False
 
         io_binding = ort_session.io_binding()
         image = self.models_processor.bind_ort_io_input(
@@ -2000,12 +2091,12 @@ class FaceRestorers:
                                 self._codeformer_runner_w = w
                             result = model(image, fidelity_weight=w)
                 output.copy_(result)
-                return
+                return True
 
         model_name = "CodeFormer"
         ort_session = self._get_model_session(model_name)
         if not ort_session:
-            return  # Silently skip
+            return False
 
         io_binding = ort_session.io_binding()
         image = self.models_processor.bind_ort_io_input(
@@ -2032,7 +2123,7 @@ class FaceRestorers:
         model_name = "VQFRv2"
         ort_session = self._get_model_session(model_name)
         if not ort_session:
-            return  # Silently skip
+            return False
 
         # FR-ROBUST-05: replace assert with an explicit ValueError so it is never silenced by -O flag
         if not (0.0 <= fidelity_ratio_value <= 1.0):
@@ -2077,7 +2168,7 @@ class FaceRestorers:
         model_name = "RestoreFormerFP16"
         ort_session = self._get_model_session(model_name)
         if not ort_session:
-            return
+            return False
         td_in = self.models_processor.get_ort_io_torch_dtype(
             model_name,
             "input",
@@ -2113,12 +2204,13 @@ class FaceRestorers:
         )
         self._run_model_with_lazy_build_check(model_name, ort_session, io_binding)
         output_fp32_nchw.copy_(out16.float())
+        return True
 
     def run_RestoreFormerPlusPlus(self, image, output):
         model_name = "RestoreFormerPlusPlus"
         ort_session = self._get_model_session(model_name)
         if not ort_session:
-            return  # Silently skip
+            return False
 
         io_binding = ort_session.io_binding()
         image = self.models_processor.bind_ort_io_input(

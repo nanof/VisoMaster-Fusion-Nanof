@@ -5518,6 +5518,20 @@ class FrameWorker(threading.Thread):
 
         processed_tensor_rgb_uint8 = img
 
+        # Face Detailer: magnify-and-restore small faces on the finished frame,
+        # before debug overlays. Mask and compare views keep the raw swap output.
+        if (
+            control.get("FaceDetailerEnableToggle", False)
+            and not self.is_view_face_mask
+            and not self.is_view_face_compare
+        ):
+            try:
+                processed_tensor_rgb_uint8 = self.models_processor.face_detailer.apply(
+                    processed_tensor_rgb_uint8, control
+                )
+            except Exception as e:  # noqa: BLE001 - optional post-pass must not drop a frame
+                print(f"[ERROR] Face detailer pass failed: {e}")
+
         # --- Overlays ---
         if control["ShowAllDetectedFacesBBoxToggle"] and det_faces_data_for_display:
             processed_tensor_rgb_uint8 = draw_bounding_boxes_on_detected_faces(

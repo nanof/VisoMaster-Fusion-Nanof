@@ -61,6 +61,7 @@ from app.processors.face_masks import FaceMasks
 from app.processors.face_mattings import FaceMattings
 from app.processors.face_attributes import FaceAttributes
 from app.processors.face_restorers import FaceRestorers
+from app.processors.face_detailer import FaceDetailer
 from app.processors.face_swappers import FaceSwappers
 from app.processors.frame_enhancers import FrameEnhancers
 from app.processors.face_editors import FaceEditors
@@ -525,6 +526,7 @@ class ModelsProcessor(QtCore.QObject):
         self.face_mattings = FaceMattings(self)
         self.face_attributes = FaceAttributes(self)
         self.face_restorers = FaceRestorers(self)
+        self.face_detailer = FaceDetailer(self)
         self.face_swappers = FaceSwappers(self)
         self.frame_enhancers = FrameEnhancers(self)
         self.face_editors = FaceEditors(self)
@@ -2769,14 +2771,35 @@ class ModelsProcessor(QtCore.QObject):
             print(f"[WARN] MuseTalk unload failed: {e}")
         self.musetalk_engine = None
 
+    def purge_unused_restorers(self) -> None:
+        """Unload restorer sessions no face, slot, or the detailer still requests."""
+        from app.processors.face_restorers import RESTORER_MODEL_MAP
+        from app.processors.models_data import compound_models_mapping
+
+        names = set(RESTORER_MODEL_MAP.values())
+        names.update(compound_models_mapping)
+        for canonical_name in names:
+            if canonical_name in compound_models_mapping:
+                loaded = any(
+                    self.models.get(sub) is not None
+                    for sub in compound_models_mapping[canonical_name]
+                )
+            else:
+                loaded = self.models.get(canonical_name) is not None
+            if loaded and not self.is_model_active_in_ui(canonical_name):
+                self.unload_model(canonical_name, force_immediate=True)
+
     def is_model_active_in_ui(
         self, model_name: str | tuple[str, ...] | list[str]
     ) -> bool:
         """Whether any mapped UI toggle still requests this model.
 
-        Models absent from MODELS_TOGGLE_MAP stay loaded: detectors and swappers
-        have no toggle of their own. Restorer slots are not resolved here.
+        Restorer names are matched against the selected combo, including the
+        Face Detailer. Other models use MODELS_TOGGLE_MAP. Models absent from
+        that map stay loaded: detectors and swappers have no toggle of their own.
         """
+        from app.processors.face_restorers import RESTORER_MODEL_MAP
+        from app.processors.models_data import compound_models_mapping
         from app.ui.widgets.models_toggle_data import MODELS_TOGGLE_MAP
 
         if isinstance(model_name, (tuple, list, set, frozenset)):
@@ -2801,6 +2824,59 @@ class ModelsProcessor(QtCore.QObject):
             if isinstance(val, str):
                 return val.lower() in ("true", "1", "yes", "on")
             return bool(val)
+
+        canonical = None
+        if model_name in compound_models_mapping:
+            canonical = model_name
+        else:
+            for parent, subs in compound_models_mapping.items():
+                if model_name in subs:
+                    canonical = parent
+                    break
+        if canonical is None:
+            if model_name in RESTORER_MODEL_MAP:
+                canonical = RESTORER_MODEL_MAP[model_name]
+            elif model_name in set(RESTORER_MODEL_MAP.values()):
+                canonical = model_name
+
+        if canonical is not None:
+
+            def _selection_matches(selection: Any) -> bool:
+                if not isinstance(selection, str):
+                    return False
+                mapped = RESTORER_MODEL_MAP.get(selection, selection)
+                return mapped == canonical or selection == canonical
+
+            def _dict_requests(data: Any) -> bool:
+                if not hasattr(data, "get"):
+                    return False
+                checks = (
+                    (
+                        "FaceDetailerEnableToggle",
+                        "FaceDetailerRestorerTypeSelection",
+                        "GPEN-1024",
+                    ),
+                    ("FaceRestorerEnableToggle", "FaceRestorerTypeSelection", None),
+                    ("FaceRestorerEnable2Toggle", "FaceRestorerType2Selection", None),
+                )
+                for toggle, selection_key, default_selection in checks:
+                    if not _is_truthy(data.get(toggle, False)):
+                        continue
+                    selection = data.get(selection_key, default_selection)
+                    if _selection_matches(selection):
+                        return True
+                return False
+
+            sources = [ctrl, default_params, params]
+            if hasattr(params, "values"):
+                sources.extend(params.values())
+            for source in sources:
+                data = source
+                if hasattr(source, "data") and isinstance(source.data, dict):
+                    data = source.data
+                if _dict_requests(data):
+                    return True
+            return False
 
         toggles = MODELS_TOGGLE_MAP.get(model_name)
         if not toggles:
