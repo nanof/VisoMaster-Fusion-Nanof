@@ -166,7 +166,20 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.parameter_widgets: ParametersWidgetTypes = {}
         self._control_widget_mirrors: dict[str, list] = {}
         self._parameter_widget_mirrors: dict[str, list] = {}
-        self.parameter_section_states: dict[str, bool] = {}
+        # First-run defaults only. A saved workspace's section states, loaded
+        # later, replace these. Swapper and Masks stay open; the rest of Face
+        # Swap starts collapsed, including Hair Matting.
+        self.parameter_section_states: dict[str, bool] = {
+            "swapper:swapper": True,
+            "swapper:masks": True,
+            "swapper:swap_strength_and_likeness": False,
+            "swapper:hair_matting_modnet": False,
+            "swapper:original_face_parsers": False,
+            "swapper:textures_and_colors": False,
+            "swapper:face_landmarks_correction": False,
+            "swapper:blend_adjustments": False,
+            "swapper:face_re_aging": False,
+        }
         self.parameter_sections: dict[str, widget_components.CollapsibleSection] = {}
 
         # UNet related
