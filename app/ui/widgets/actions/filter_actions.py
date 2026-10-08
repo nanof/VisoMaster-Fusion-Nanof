@@ -21,7 +21,12 @@ def _get_target_video_filter_checked(
 
 
 def filter_target_videos(main_window: "MainWindow", *args):
-    main_window.target_videos_filter_worker.stop_thread()
+    if getattr(main_window, "_closing", False):
+        return
+    worker = getattr(main_window, "target_videos_filter_worker", None)
+    if worker is None or getattr(worker, "_retired", False):
+        return
+    worker.stop_thread()
 
     # Capture all Qt widget data in the main thread before starting the worker
     search_text = main_window.targetVideosSearchBox.text().lower()
@@ -72,7 +77,6 @@ def filter_target_videos(main_window: "MainWindow", *args):
                 (i, item_widget.media_path, item_widget.file_type, width, height)
             )
 
-    worker = main_window.target_videos_filter_worker
     worker.search_text = search_text
     worker.include_file_types = include_file_types
     worker.min_image_size = (min_width, min_height)
@@ -81,7 +85,12 @@ def filter_target_videos(main_window: "MainWindow", *args):
 
 
 def filter_input_faces(main_window: "MainWindow", *args):
-    main_window.input_faces_filter_worker.stop_thread()
+    if getattr(main_window, "_closing", False):
+        return
+    worker = getattr(main_window, "input_faces_filter_worker", None)
+    if worker is None or getattr(worker, "_retired", False):
+        return
+    worker.stop_thread()
 
     # Capture all Qt widget data in the main thread before starting the worker
     search_text = main_window.inputFacesSearchBox.text().lower()
@@ -117,22 +126,55 @@ def filter_input_faces_favorites(main_window: "MainWindow", *args):
     worker.start()
 
 
+def ensure_embedding_filter_worker(main_window: "MainWindow"):
+    """Recreate the embeddings filter after a tab switch retires the previous one."""
+    from app.ui.widgets import ui_workers
+
+    worker = getattr(main_window, "merged_embeddings_filter_worker", None)
+    if worker is not None and not getattr(worker, "_retired", False):
+        return worker
+    worker = ui_workers.FilterWorker(
+        main_window=main_window, search_text="", filter_list="merged_embeddings"
+    )
+    main_window.merged_embeddings_filter_worker = worker
+    return worker
+
+
+def _list_widget_alive(filter_list_widget) -> bool:
+    if filter_list_widget is None or filter_list_widget is False:
+        return False
+    try:
+        filter_list_widget.isVisible()
+    except RuntimeError:
+        return False
+    return True
+
+
 def filter_merged_embeddings(main_window: "MainWindow", *args):
-    main_window.merged_embeddings_filter_worker.stop_thread()
+    if getattr(main_window, "_closing", False):
+        return
+    ensure_embedding_filter_worker(main_window)
+    worker = getattr(main_window, "merged_embeddings_filter_worker", None)
+    if worker is None or getattr(worker, "_retired", False):
+        return
+    worker.stop_thread()
 
     # Capture all Qt widget data in the main thread before starting the worker
-    search_text = main_window.inputEmbeddingsSearchBox.text().lower()
+    search_box = getattr(main_window, "inputEmbeddingsSearchBox", None)
+    search_text = search_box.text().lower() if search_box is not None else ""
 
     items_snapshot = []
-    for i in range(main_window.inputEmbeddingsList.count()):
-        item = main_window.inputEmbeddingsList.item(i)
-        item_widget = main_window.inputEmbeddingsList.itemWidget(item)
-        if item_widget is not None:
-            items_snapshot.append((i, item_widget.embedding_name))
+    embeddings_list = getattr(main_window, "inputEmbeddingsList", None)
+    if embeddings_list is not None:
+        for i in range(embeddings_list.count()):
+            item = embeddings_list.item(i)
+            item_widget = embeddings_list.itemWidget(item)
+            if item_widget is not None:
+                items_snapshot.append((i, item_widget.embedding_name))
 
-    worker = main_window.merged_embeddings_filter_worker
     worker.search_text = search_text
     worker.items_snapshot = items_snapshot
+    worker.filter_list_widget = embeddings_list
     worker.start()
 
 
@@ -141,13 +183,22 @@ def update_filtered_list(
     filter_list_widget: QtWidgets.QListWidget,
     visible_indices: list,
     snapshot_size: int = 0,
+    is_current=None,
 ):
+    if not _list_widget_alive(filter_list_widget) or (
+        is_current is not None and not is_current()
+    ):
+        return
     # Defer hide/show work to the next event loop tick so pending paint events can
     # complete naturally without pumping the queue inside this function.
     sequence = getattr(filter_list_widget, "_pending_filter_sequence", 0) + 1
     filter_list_widget._pending_filter_sequence = sequence
 
     def apply_update():
+        if not _list_widget_alive(filter_list_widget) or (
+            is_current is not None and not is_current()
+        ):
+            return
         if getattr(filter_list_widget, "_pending_filter_sequence", None) != sequence:
             return
 

@@ -1283,6 +1283,9 @@ class TargetFaceCardButton(CardButton):
         i = self.get_item_position()
         if i is not None:
             main_window.targetFacesList.takeItem(i)
+        card_actions._remember_removed_face_embeddings(
+            main_window, getattr(self, "embedding_store", None)
+        )
         main_window.target_faces.pop(self.face_id, None)
         from app.ui.widgets.actions import list_view_actions
 

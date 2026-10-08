@@ -391,6 +391,7 @@ def open_embeddings_from_file(main_window: "MainWindow"):
     main_window.loaded_embedding_filename = (
         embedding_filename or main_window.loaded_embedding_filename
     )
+    list_view_actions.sync_active_embedding_tab_filename(main_window)
 
 
 def save_embeddings_to_file(main_window: "MainWindow", save_as=False):
@@ -475,6 +476,7 @@ def save_embeddings_to_file(main_window: "MainWindow", save_as=False):
             )
 
         main_window.loaded_embedding_filename = embedding_filename
+        list_view_actions.sync_active_embedding_tab_filename(main_window)
 
 
 # This method is used to convert the data type of Parameters Dict
@@ -657,7 +659,7 @@ def load_saved_workspace(
             main_window.target_videos = {}
             card_actions.clear_input_faces(main_window)
             card_actions.clear_target_faces(main_window)
-            card_actions.clear_merged_embeddings(main_window)
+            list_view_actions.reset_embedding_tabs(main_window)
 
             # Load control (settings)
             purge_removed_settings_controls(main_window.control)
@@ -855,7 +857,7 @@ def load_saved_workspace(
                 )
 
                 # Set assigned embeddinng buttons
-                embed_buttons = main_window.merged_embeddings
+                embed_buttons = list_view_actions.get_all_merged_embeddings(main_window)
                 assigned_merged_embeddings: list = target_face_data[
                     "assigned_merged_embeddings"
                 ]
@@ -968,6 +970,9 @@ def load_saved_workspace(
             main_window.loaded_embedding_filename = data.get(
                 "loaded_embedding_filename", ""
             )
+            list_view_actions.restore_embedding_tabs_state(
+                main_window, data.get("embedding_tabs_state") or {}
+            )
             common_widget_actions.set_control_widgets_values(main_window)
             # Set output folder using .get() with a default empty string
             output_folder = control.get("OutputMediaFolder", "")
@@ -1048,8 +1053,10 @@ def load_saved_workspace(
                     for (
                         embedding_id
                     ) in first_face_button.assigned_merged_embeddings.keys():
-                        assigned_embed_btn = main_window.merged_embeddings.get(
-                            embedding_id
+                        assigned_embed_btn = (
+                            list_view_actions.get_all_merged_embeddings(
+                                main_window
+                            ).get(embedding_id)
                         )
                         if assigned_embed_btn:
                             assigned_embed_btn.setChecked(True)
@@ -1423,7 +1430,9 @@ def save_current_workspace(
         }
 
     # --- Serialize Embeddings ---
-    for embedding_id, embedding_button in main_window.merged_embeddings.items():
+    for embedding_id, embedding_button in list_view_actions.get_all_merged_embeddings(
+        main_window
+    ).items():
         kv_map_path = None
         if getattr(embedding_button, "kv_map", None) is not None:
             try:
@@ -1510,6 +1519,7 @@ def save_current_workspace(
         "last_target_media_folder_path": main_window.last_target_media_folder_path,
         "last_input_media_folder_path": main_window.last_input_media_folder_path,
         "loaded_embedding_filename": main_window.loaded_embedding_filename,
+        "embedding_tabs_state": list_view_actions.get_embedding_tabs_state(main_window),
         "current_widget_parameters": current_params_to_save,  # Use the safely prepared dict
         "tab_state": tab_state,  # Add the tab state to the saved data
         "window_state_data": window_state_data,
@@ -1625,7 +1635,7 @@ def save_current_job(main_window: "MainWindow"):
 
     # --- Serialize Embeddings for Job ---
     embeddings_data = {}
-    for eid, emb in main_window.merged_embeddings.items():
+    for eid, emb in list_view_actions.get_all_merged_embeddings(main_window).items():
         kv_map_path = None
         if getattr(emb, "kv_map", None) is not None:
             try:

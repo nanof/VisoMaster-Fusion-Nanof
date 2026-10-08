@@ -99,6 +99,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.merged_embeddings_filter_worker = ui_workers.FilterWorker(
             main_window=self, search_text="", filter_list="merged_embeddings"
         )
+        self._removed_target_face_embeddings = []
+        self._embedding_filter_sequence = 0
+        self._closing = False
         self.video_processor = VideoProcessor(self)
         self.models_processor = ModelsProcessor(self)
         # Connect the signals from the worker thread to our new slots
@@ -524,7 +527,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         )
         # self.buttonMediaStop.clicked.connect(partial(self.video_processor.stop_processing))
         self.findTargetFacesButton.clicked.connect(
-            partial(card_actions.find_target_faces, self)
+            partial(card_actions.find_target_faces, self, clear_removed_faces=True)
         )
         self.clearTargetFacesButton.clicked.connect(
             partial(card_actions.clear_target_faces, self)
@@ -1266,6 +1269,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
     def closeEvent(self, event):
         print("[INFO] MainWindow: closeEvent called.")
 
+        list_view_actions.stop_filter_workers(self)
         self.video_processor.stop_processing()
         # Keep the cards alive: the workspace is serialized from these dicts below.
         list_view_actions.clear_stop_loading_input_media(self, clear_list=False)
@@ -1995,8 +1999,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         self.targetFacesList.setMinimumHeight(_FACES_PANEL_ROW_HEIGHT)
         self.targetFacesList.setMaximumHeight(_FACES_PANEL_ROW_HEIGHT)
-        self.inputEmbeddingsList.setMinimumHeight(_FACES_PANEL_ROW_HEIGHT)
-        self.inputEmbeddingsList.setMaximumHeight(_FACES_PANEL_ROW_HEIGHT)
+        embedding_panel = (
+            getattr(self, "embeddingTabsContainer", None) or self.inputEmbeddingsList
+        )
+        embedding_panel.setMinimumHeight(_FACES_PANEL_ROW_HEIGHT)
+        embedding_panel.setMaximumHeight(_FACES_PANEL_ROW_HEIGHT)
+        if embedding_panel is not self.inputEmbeddingsList:
+            self.inputEmbeddingsList.setMinimumHeight(0)
+            self.inputEmbeddingsList.setMaximumHeight(16777215)
 
         margins = self.controlButtonsLayout.contentsMargins()
         spacing_total = self.controlButtonsLayout.spacing() * (len(buttons) - 1)
@@ -2117,17 +2127,24 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         # The Embeddings list belongs to the same panel. Left behind in the hidden
         # group box, a checked embedding keeps blending into the swap with no way
         # to see or uncheck it.
-        self._rightFacesFacesHolder.addWidget(self.inputEmbeddingsList)
-        self.inputEmbeddingsList.setMinimumHeight(_FACE_STRIP_EMBED_HEIGHT)
-        self.inputEmbeddingsList.setMaximumHeight(_FACE_STRIP_EMBED_HEIGHT)
-        self._rightFacesStrip.setMaximumHeight(
-            _FACE_STRIP_MAX_HEIGHT + _FACE_STRIP_EMBED_HEIGHT
+        embedding_panel = (
+            getattr(self, "embeddingTabsContainer", None) or self.inputEmbeddingsList
         )
+        embed_height = _FACE_STRIP_EMBED_HEIGHT
+        if embedding_panel is not self.inputEmbeddingsList:
+            embed_height += 26
+        self._rightFacesFacesHolder.addWidget(embedding_panel)
+        embedding_panel.setMinimumHeight(embed_height)
+        embedding_panel.setMaximumHeight(embed_height)
+        self._rightFacesStrip.setMaximumHeight(_FACE_STRIP_MAX_HEIGHT + embed_height)
 
     def _restore_faces_strip_to_panel(self):
         """Restores widgets to their original left panel seamlessly."""
         self.gridLayout_2.addWidget(self.targetFacesList, 1, 1, 1, 1)
-        self.gridLayout_2.addWidget(self.inputEmbeddingsList, 1, 2, 1, 1)
+        embedding_panel = (
+            getattr(self, "embeddingTabsContainer", None) or self.inputEmbeddingsList
+        )
+        self.gridLayout_2.addWidget(embedding_panel, 1, 2, 1, 1)
 
         btns = [
             self.findTargetFacesButton,

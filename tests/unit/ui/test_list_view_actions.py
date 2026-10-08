@@ -314,9 +314,9 @@ def test_clear_all_target_media_confirm_clears_state(monkeypatch):
     assert list_view_actions.clear_all_target_media(main_window) is True
     assert main_window.target_videos == {}
     assert main_window.selected_video_button is None
-    assert main_window.targetVideosPathLineEdit.value == ""
-    assert main_window.targetVideosPathLineEdit.tooltip == ""
-    assert main_window.last_target_media_folder_path == ""
+    assert main_window.targetVideosPathLineEdit.value == "E:/media"
+    assert main_window.targetVideosPathLineEdit.tooltip == "E:/media"
+    assert main_window.last_target_media_folder_path == "E:/media"
     assert placeholder_signal.calls == [(main_window.targetVideosList, False)]
     assert button_a.removed == 1
     assert button_b.removed == 1

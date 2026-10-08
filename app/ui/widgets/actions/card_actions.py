@@ -19,6 +19,36 @@ if TYPE_CHECKING:
 
 # Must match Detectors → Recognition Model default in settings_layout_data.py
 _DEFAULT_RECOGNITION_MODEL = "Inswapper128ArcFace"
+# Same 0–100 scale as SimilarityThresholdSlider's default. A discarded face
+# stays hidden until the user presses Find Faces.
+_REMOVED_FACE_MATCH_SCORE = 60.0
+
+
+def _remember_removed_face_embeddings(main_window: "MainWindow", embedding_store) -> None:
+    removed = getattr(main_window, "_removed_target_face_embeddings", None)
+    if not isinstance(removed, list):
+        removed = []
+        main_window._removed_target_face_embeddings = removed
+    for embedding in (embedding_store or {}).values():
+        if embedding is None:
+            continue
+        try:
+            removed.append(numpy.array(embedding, copy=True))
+        except (TypeError, ValueError):
+            continue
+
+
+def _matches_removed_face(models_processor, embedding, removed) -> bool:
+    for old in removed or []:
+        try:
+            if (
+                models_processor.findCosineDistance(old, embedding)
+                >= _REMOVED_FACE_MATCH_SCORE
+            ):
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
 
 
 def clear_target_faces(main_window: "MainWindow", refresh_frame=True):
@@ -134,6 +164,7 @@ def clear_merged_embeddings(main_window: "MainWindow"):
     ):
         return
 
+    list_view_actions.stop_embedding_filter_worker(main_window)
     main_window.inputEmbeddingsList.clear()
 
     for embed_button in list(main_window.merged_embeddings.values()):
@@ -144,6 +175,16 @@ def clear_merged_embeddings(main_window: "MainWindow"):
         embed_button.deleteLater()
 
     main_window.merged_embeddings.clear()
+    states = getattr(main_window, "embedding_tab_states", None)
+    tabs = getattr(main_window, "embeddingTabs", None)
+    if states and tabs is not None:
+        idx = tabs.currentIndex()
+        if 0 <= idx < len(states):
+            states[idx]["embeddings"] = main_window.merged_embeddings
+            states[idx]["filename"] = ""
+            states[idx]["list_widget"] = main_window.inputEmbeddingsList
+    main_window.loaded_embedding_filename = ""
+    list_view_actions.update_active_embedding_tab_title(main_window)
 
     for target_face in main_window.target_faces.values():
         target_face.assigned_merged_embeddings = {}
@@ -173,7 +214,7 @@ def uncheck_all_input_faces(main_window: "MainWindow"):
 
 
 def uncheck_all_merged_embeddings(main_window: "MainWindow"):
-    for _, embed_button in main_window.merged_embeddings.items():
+    for embed_button in list_view_actions.get_all_merged_embeddings(main_window).values():
         embed_button.setChecked(False)
 
     # Force Garbage Collection for dangling merged tensors
@@ -183,8 +224,11 @@ def uncheck_all_merged_embeddings(main_window: "MainWindow"):
         torch.cuda.empty_cache()
 
 
-def find_target_faces(main_window: "MainWindow"):
+def find_target_faces(main_window: "MainWindow", clear_removed_faces: bool = False):
     from app.ui.widgets.actions import video_control_actions
+
+    if clear_removed_faces:
+        main_window._removed_target_face_embeddings = []
 
     if video_control_actions.block_if_issue_scan_active(main_window, "find faces"):
         return
@@ -275,6 +319,12 @@ def find_target_faces(main_window: "MainWindow"):
                         ) >= float(threshhold):
                             found = True
                             break
+                    if not found and _matches_removed_face(
+                        main_window.models_processor,
+                        face[1],
+                        getattr(main_window, "_removed_target_face_embeddings", []),
+                    ):
+                        found = True
 
                     if not found:
                         # ArcFace crop is float RGB HWC in ~0–255; QImage needs uint8 BGR.
