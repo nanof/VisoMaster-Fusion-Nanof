@@ -536,6 +536,14 @@ def handle_denoiser_state_change(
     # Frame refresh is handled by common_actions.update_control after this function returns.
 
 
+def handle_hair_matting_state_change(main_window, new_value, control_name):
+    """Release MODNet and FaceParser only when no face still requests them."""
+    if not new_value:
+        for name in ("MODNet", "FaceParser"):
+            if not main_window.models_processor.is_model_active_in_ui(name):
+                main_window.models_processor.unload_model(name)
+
+
 def handle_face_mask_state_change(
     main_window: "MainWindow", new_value: bool, control_name: str
 ):
@@ -551,8 +559,9 @@ def handle_face_mask_state_change(
             else:
                 mp.load_model("FaceParser")
         else:
-            mp.unload_model("FaceParser")
             mp.unload_model("FaceParsingBiSeNet18")
+            if not mp.is_model_active_in_ui("FaceParser"):
+                mp.unload_model("FaceParser")
         return
 
     model_map = {

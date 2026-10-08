@@ -58,6 +58,7 @@ except ModuleNotFoundError:
 from app.processors.face_detectors import FaceDetectors
 from app.processors.face_landmark_detectors import FaceLandmarkDetectors
 from app.processors.face_masks import FaceMasks
+from app.processors.face_mattings import FaceMattings
 from app.processors.face_attributes import FaceAttributes
 from app.processors.face_restorers import FaceRestorers
 from app.processors.face_swappers import FaceSwappers
@@ -521,6 +522,7 @@ class ModelsProcessor(QtCore.QObject):
         self.face_detectors = FaceDetectors(self)
         self.face_landmark_detectors = FaceLandmarkDetectors(self)
         self.face_masks = FaceMasks(self)
+        self.face_mattings = FaceMattings(self)
         self.face_attributes = FaceAttributes(self)
         self.face_restorers = FaceRestorers(self)
         self.face_swappers = FaceSwappers(self)
@@ -2286,6 +2288,7 @@ class ModelsProcessor(QtCore.QObject):
         try:
             self.face_detectors.unload_models()
             self.face_masks.unload_models()
+            self.face_mattings.unload_models()
             self.face_attributes.unload_models()
             self.face_swappers.unload_models()
             self.face_landmark_detectors.unload_models()
@@ -2532,6 +2535,7 @@ class ModelsProcessor(QtCore.QObject):
             self.face_detectors.unload_models()
             self.face_landmark_detectors.unload_models()
             self.face_masks.unload_models()
+            self.face_mattings.unload_models()
             self.face_attributes.unload_models()
             self.face_restorers.unload_models()
             self.face_swappers.unload_models()
@@ -2765,10 +2769,68 @@ class ModelsProcessor(QtCore.QObject):
             print(f"[WARN] MuseTalk unload failed: {e}")
         self.musetalk_engine = None
 
+    def is_model_active_in_ui(
+        self, model_name: str | tuple[str, ...] | list[str]
+    ) -> bool:
+        """Whether any mapped UI toggle still requests this model.
+
+        Models absent from MODELS_TOGGLE_MAP stay loaded: detectors and swappers
+        have no toggle of their own. Restorer slots are not resolved here.
+        """
+        from app.ui.widgets.models_toggle_data import MODELS_TOGGLE_MAP
+
+        if isinstance(model_name, (tuple, list, set, frozenset)):
+            return any(self.is_model_active_in_ui(m) for m in model_name)
+
+        default_params: Dict[str, Any] = {}
+        if hasattr(self.main_window, "default_parameters"):
+            dp = getattr(self.main_window, "default_parameters")
+            if hasattr(dp, "data") and isinstance(dp.data, dict):
+                default_params = dict(dp.data)
+            elif isinstance(dp, dict):
+                default_params = dict(dp)
+
+        try:
+            params = dict(getattr(self.main_window, "parameters", {}))
+            ctrl = dict(getattr(self.main_window, "control", {}))
+        except Exception:
+            params = getattr(self.main_window, "parameters", {})
+            ctrl = getattr(self.main_window, "control", {})
+
+        def _is_truthy(val: Any) -> bool:
+            if isinstance(val, str):
+                return val.lower() in ("true", "1", "yes", "on")
+            return bool(val)
+
+        toggles = MODELS_TOGGLE_MAP.get(model_name)
+        if not toggles:
+            return True
+
+        def _sources():
+            yield ctrl
+            yield params
+            yield default_params
+            if hasattr(params, "values"):
+                yield from params.values()
+
+        for toggle in toggles:
+            target_key = toggle.key
+            for source in _sources():
+                data = source
+                if hasattr(source, "data") and isinstance(source.data, dict):
+                    data = source.data
+                if hasattr(data, "get") and _is_truthy(data.get(target_key, False)):
+                    return True
+        return False
+
     def unload_face_mask_models(self):
         """Unloads all loaded face mask models under the model lock."""
         with self.model_lock:
             self.face_masks.unload_models()
+
+    def unload_face_matting_models(self) -> None:
+        """Unloads MODNet tracked by the hair-matting pass."""
+        self.face_mattings.unload_models()
 
     def unload_frame_enhancer_models(self):
         """Unloads all loaded frame enhancer models under the model lock."""

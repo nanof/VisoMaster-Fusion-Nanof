@@ -745,6 +745,14 @@ models_list = [
         "url": f"{assets_repo}/v0.1.0/faceparser_resnet34.onnx",
     },
     {
+        # Trimap-free portrait matting used by the Hair Matting mask stage.
+        # NOT fp16-safe: unmeasured; keep it out of fp16_safe_models_list.
+        "model_name": "MODNet",
+        "local_path": f"{models_dir}/modnet_photographic_portrait_matting.onnx",
+        "hash": "07c308cf0fc7e6e8b2065a12ed7fc07e1de8febb7dc7839d7b7f15dd66584df9",
+        "url": "https://huggingface.co/gradio/Modnet/resolve/main/modnet.onnx",
+    },
+    {
         "model_name": "FaceParsingBiSeNet18",
         "local_path": f"{models_dir}/parsing/face_parsing_bisenet18.onnx",
         "hash": "0d9bd318e46987c3bdbfacae9e2c0f461cae1c6ac6ea6d43bbe541a91727e33f",

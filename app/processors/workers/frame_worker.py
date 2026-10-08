@@ -10574,6 +10574,17 @@ class FrameWorker(threading.Thread):
                 swap = t512_mask(swap)
                 swap_mask = t512_mask(swap_mask)
 
+            # Hair Matting (MODNet): keep the target's own hair out from under the
+            # swapped face (or just soften the hairline band), right before the
+            # composite multiply so every downstream blend sees the adjusted mask.
+            if parameters.get("HairMattingEnableToggle", False):
+                try:
+                    swap_mask = self.models_processor.face_mattings.apply_hair_matting(
+                        swap_mask, original_face_512, parameters
+                    )
+                except Exception as e:
+                    print(f"[WARN] Hair matting skipped: {e}")
+
             # Un-premultiplied face (same space as swap) for optional Poisson edge blend at paste.
             swap_opaque = swap.clone()
 
