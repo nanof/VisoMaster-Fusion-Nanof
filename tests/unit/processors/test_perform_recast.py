@@ -335,6 +335,28 @@ class TestComposeDrivenKeypoints:
         )
         assert torch.allclose(x_d, info["x_s"], atol=1e-5)
 
+    def test_relative_brow_weight_matches_structural_when_unset(self):
+        recast = _make_recast()
+        info = recast.build_source_info(_torch_motion(4))
+        exp_d = _torch_motion(7)["exp"]
+        structural = 0.35
+        unset = recast.compose_driven_keypoints(
+            info,
+            exp_d,
+            mode=MODE_RELATIVE,
+            factor=1.0,
+            structural_blend=structural,
+        )
+        explicit = recast.compose_driven_keypoints(
+            info,
+            exp_d,
+            mode=MODE_RELATIVE,
+            factor=1.0,
+            structural_blend=structural,
+            brows_driving_weight=structural,
+        )
+        assert torch.allclose(unset, explicit, atol=1e-5)
+
     def test_relative_mode_returns_correct_shape(self):
         recast = _make_recast()
         info = recast.build_source_info(_torch_motion(4))

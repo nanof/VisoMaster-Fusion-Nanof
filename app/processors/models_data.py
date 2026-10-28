@@ -26,6 +26,10 @@ for _sub in (
     "musetalk/whisper",
     "musetalk/cache",
     "osdface",
+    "flashvsr",
+    "seedvr2",
+    "hypir",
+    "pmrf",
 ):
     os.makedirs(models_dir / _sub, exist_ok=True)
 

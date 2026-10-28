@@ -1124,8 +1124,12 @@ class TargetFaceCardButton(CardButton):
                 if len(all_kv_maps) == 1:
                     self.assigned_kv_map = all_kv_maps[0]
                 else:
+                    average_kv_maps = bool(
+                        main_window.control.get("AverageKVToggle", True)
+                    )
+                    merge_mode = "Averaging" if average_kv_maps else "Concatenating"
                     print(
-                        f"[INFO] Merging K/V maps across {len(all_kv_maps)} prioritized sources..."
+                        f"[INFO] {merge_mode} K/V maps across {len(all_kv_maps)} prioritized sources..."
                     )
                     merged_kv_map = {}
                     first_map = all_kv_maps[0]
@@ -1139,8 +1143,11 @@ class TargetFaceCardButton(CardButton):
                                     tensors_to_merge.append(m[layer_key][kv_key])
 
                             if tensors_to_merge:
-                                stacked = torch.stack(tensors_to_merge, dim=0)
-                                merged_tensor = torch.mean(stacked, dim=0)
+                                if average_kv_maps:
+                                    stacked = torch.stack(tensors_to_merge, dim=0)
+                                    merged_tensor = torch.mean(stacked, dim=0)
+                                else:
+                                    merged_tensor = torch.cat(tensors_to_merge, dim=-1)
                                 merged_kv_map[layer_key][kv_key] = merged_tensor
 
                     self.assigned_kv_map = merged_kv_map

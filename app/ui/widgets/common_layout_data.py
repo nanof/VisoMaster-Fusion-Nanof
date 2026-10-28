@@ -558,6 +558,22 @@ COMMON_LAYOUT_DATA: Any = {
             "face's own expression is kept outside the selected region. Index groups: "
             "eyes = keypoints 31-38, lips/jaw = keypoints 44-46.",
         },
+        "RecastBrowsDrivingWeightDecimalSlider": {
+            "level": 4,
+            "label": "Brows Driving Weight",
+            "min_value": "0.0",
+            "max_value": "2.0",
+            "default": "0.50",
+            "step": 0.05,
+            "decimals": 2,
+            "parentToggle": "FaceExpressionEnableBothToggle",
+            "requiredToggleValue": True,
+            "parentSelection": "RecastModeSelection",
+            "requiredSelectionValue": "Relative",
+            "help": "Relative mode only. How strongly the driver moves the brows. "
+            "0.50 matches Structural Flexibility, so the previous result is unchanged "
+            "until this slider moves.",
+        },
         "RecastEyeDrivingWeightDecimalSlider": {
             "level": 4,
             "label": "Eye Driving Weight",

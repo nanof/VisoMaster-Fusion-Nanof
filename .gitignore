@@ -36,6 +36,10 @@ model_assets/liveportrait_onnx/*.trt
 model_assets/osdface/*.data
 model_assets/osdface/*.zip*
 model_assets/musetalk/
+model_assets/flashvsr/
+model_assets/seedvr2/
+model_assets/hypir/
+model_assets/pmrf/
 model_assets/reference_kv_data/
 model_assets/torch_compile_cache
 output/

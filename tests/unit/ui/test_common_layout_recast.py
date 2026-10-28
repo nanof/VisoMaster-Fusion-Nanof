@@ -107,6 +107,14 @@ def test_recast_crop_scale_defaults_to_safe_framing():
     )
 
 
+def test_recast_brow_weight_is_relative_only_and_matches_structural_default():
+    entry = FACE_EXPR["RecastBrowsDrivingWeightDecimalSlider"]
+    structural = FACE_EXPR["RecastRelativeStructuralBlendDecimalSlider"]
+    assert float(entry["default"]) == float(structural["default"]) == 0.50
+    assert entry["parentSelection"] == "RecastModeSelection"
+    assert entry["requiredSelectionValue"] == "Relative"
+
+
 def test_recast_blend_weight_defaults_match_upstream():
     eye = FACE_EXPR["RecastEyeDrivingWeightDecimalSlider"]
     lip = FACE_EXPR["RecastLipDrivingWeightDecimalSlider"]

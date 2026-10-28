@@ -534,6 +534,8 @@ class ModelsProcessor(QtCore.QObject):
         self.perform_recast = PerformRecast(self)
         # Optional MuseTalk lip-sync (pytorch_extras). Created lazily; never loaded at init.
         self.musetalk_engine = None
+        # Last-stage FlashVSR / SeedVR2 upscaler. Created lazily; never loaded at init.
+        self.pipeline_upscaler_engine = None
 
         # Initialize Mask Latent
         self.lp_mask_crop_latent = faceutil.create_faded_inner_mask(
@@ -2546,6 +2548,7 @@ class ModelsProcessor(QtCore.QObject):
             self.face_editors.unload_models()
             self.perform_recast.unload_models()
             self.unload_musetalk()
+            self.unload_pipeline_upscaler()
 
             # Unload any remaining models in the main dictionaries
             self.delete_models()
@@ -2770,6 +2773,49 @@ class ModelsProcessor(QtCore.QObject):
         except Exception as e:
             print(f"[WARN] MuseTalk unload failed: {e}")
         self.musetalk_engine = None
+
+    def ensure_pipeline_upscaler_loaded(self, model_type: str | None = None) -> bool:
+        """Lazy-load FlashVSR / SeedVR2 last-stage upscaler. Returns False on failure."""
+        try:
+            from app.processors.pytorch_extras.pipeline_upscaler import (
+                PipelineUpscalerEngine,
+                pipeline_upscaler_type,
+            )
+
+            control = getattr(self.main_window, "control", None) or {}
+            kind = model_type or pipeline_upscaler_type(control)
+            if self.pipeline_upscaler_engine is None:
+                self.pipeline_upscaler_engine = PipelineUpscalerEngine()
+                self.pipeline_upscaler_engine.gpu_capture_lock = (
+                    self.cuda_graph_capture_lock
+                )
+            if (
+                self.pipeline_upscaler_engine.is_loaded
+                and getattr(self.pipeline_upscaler_engine, "_loaded_type", None) == kind
+            ):
+                return True
+            device = "cuda" if str(self.device).startswith("cuda") else "cpu"
+            return bool(self.pipeline_upscaler_engine.load(kind, device=device))
+        except Exception as e:
+            from app.processors.pytorch_extras.pipeline_upscaler.paths import (
+                format_load_error,
+            )
+
+            print(
+                f"[WARN] ensure_pipeline_upscaler_loaded failed: {format_load_error(e)}"
+            )
+            return False
+
+    def unload_pipeline_upscaler(self) -> None:
+        """Unload last-stage upscaler weights if present (no-op when never loaded)."""
+        engine = getattr(self, "pipeline_upscaler_engine", None)
+        if engine is None:
+            return
+        try:
+            engine.unload()
+        except Exception as e:
+            print(f"[WARN] Pipeline upscaler unload failed: {e}")
+        self.pipeline_upscaler_engine = None
 
     def purge_unused_restorers(self) -> None:
         """Unload restorer sessions no face, slot, or the detailer still requests."""
@@ -3593,6 +3639,7 @@ class ModelsProcessor(QtCore.QObject):
         color_mask: torch.Tensor | None = None,
         coarse_grain_reduction: float = 0.0,
         micro_grain_strength: float = 0.0,
+        enable_color_match: bool = True,
     ) -> torch.Tensor:
         """
         Runs the Diffusion-based Denoiser/Restorer (ReF-LDM).
@@ -3604,7 +3651,7 @@ class ModelsProcessor(QtCore.QObject):
         ENABLE_PIXEL_SHARPENING = latent_sharpening_strength > 0.0
         PIXEL_SHARPEN_STRENGTH = latent_sharpening_strength
 
-        ENABLE_COLOR_MATCH = True
+        ENABLE_COLOR_MATCH = bool(enable_color_match)
         COARSE_GRAIN_LAMBDA = max(0.0, min(1.0, float(coarse_grain_reduction)))
         MICRO_GRAIN_STRENGTH = max(0.0, min(1.0, float(micro_grain_strength)))
 

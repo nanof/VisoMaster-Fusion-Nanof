@@ -1,6 +1,7 @@
 import logging
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
+import cv2
 import torch
 import threading
 import numpy as np
@@ -1024,8 +1025,12 @@ class FaceMasks:
         blurred_swap_norm = blurred_swap / 255.0
         dark_cavity = torch.pow(blurred_swap_norm, cavity_gamma) * 255.0
 
-        # 3. Composite the overlay
-        overlay = overlay * content_mask_blurred + dark_cavity * (
+        # 3. Composite the overlay. Blend 0 keeps the artificial cavity exactly.
+        cavity_blend = float(
+            parameters.get("MouthOriginalCavityBlendingDecimalSlider", 0.0)
+        )
+        cavity_background = dark_cavity * (1.0 - cavity_blend) + overlay * cavity_blend
+        cavity_layer = overlay * content_mask_blurred + cavity_background * (
             1.0 - content_mask_blurred
         )
 
@@ -1057,7 +1062,117 @@ class FaceMasks:
         # 4. Multiply the final mask by this soft limit to gently but rapidly fade out any excess blur
         final_mask = blurred_mask * soft_limit
 
+        tongue_alpha = None
+        if parameters.get("RestoreTongueToggle", False):
+            tongue_alpha = self._aligned_tongue_alpha(
+                labels_orig,
+                labels_swap,
+                inner_swap,
+                y_s_full,
+                x_s_full,
+                affine_kwargs,
+                parameters,
+            )
+
+        if tongue_alpha is not None:
+            overlay = overlay * tongue_alpha + cavity_layer * (1.0 - tongue_alpha)
+            final_mask = torch.maximum(final_mask, tongue_alpha)
+        else:
+            overlay = cavity_layer
+
         return overlay, final_mask
+
+    def _aligned_tongue_alpha(
+        self,
+        labels_orig: torch.Tensor,
+        labels_swap: torch.Tensor,
+        inner_swap: torch.Tensor,
+        y_s_full: torch.Tensor,
+        x_s_full: torch.Tensor,
+        affine_kwargs: dict,
+        parameters: dict,
+    ) -> torch.Tensor | None:
+        """Alpha of an original-mouth tongue that spills below the swapped mouth."""
+        candidate_orig = ((labels_orig == 11) | (labels_orig == 13)).float()
+        candidate_orig_transformed = v2.functional.affine(
+            candidate_orig.unsqueeze(0),
+            interpolation=v2.InterpolationMode.NEAREST,
+            **affine_kwargs,
+        ).squeeze(0)
+
+        y_inner_s, _ = torch.where(inner_swap)
+        cavity_s_h = (
+            (y_inner_s.max() - y_inner_s.min()).float() if len(y_inner_s) > 0 else 0.0
+        )
+        if (
+            len(y_s_full) == 0
+            or candidate_orig_transformed.sum() == 0
+            or cavity_s_h <= 4.0
+        ):
+            return None
+
+        y_swap_bottom = y_s_full.max().float()
+        mouth_s_w = (x_s_full.max() - x_s_full.min()).float() + 1e-5
+        mouth_s_h = (y_s_full.max() - y_s_full.min()).float() + 1e-5
+
+        y_coords = torch.arange(
+            candidate_orig_transformed.shape[0],
+            device=candidate_orig_transformed.device,
+        ).view(-1, 1)
+        spill_zone_mask = (y_coords > (y_swap_bottom + 2.0)).float()
+        raw_spill = candidate_orig_transformed * spill_zone_mask
+        y_spill, x_spill = torch.where(raw_spill > 0.5)
+        if len(y_spill) <= 10 or (y_spill.max() - y_spill.min()).float() <= 4.0:
+            return None
+
+        spill_w = (x_spill.max() - x_spill.min()).float()
+        spill_depth = (y_spill.max() - y_spill.min()).float()
+        spill_w_ratio = spill_w / mouth_s_w
+        spill_depth_ratio = spill_depth / mouth_s_h
+        is_localized = spill_w_ratio < 0.70
+        is_deep = spill_depth_ratio > 0.12
+        is_massive = spill_depth_ratio > 0.22
+        if not (is_deep and (is_localized or is_massive)):
+            return None
+
+        padding = int(mouth_s_w * 0.10)
+        x_min = max(0, int(x_spill.min().item()) - padding)
+        x_max = min(
+            int(candidate_orig_transformed.shape[1]),
+            int(x_spill.max().item()) + padding,
+        )
+        horizontal_mask = torch.zeros_like(candidate_orig_transformed)
+        horizontal_mask[:, x_min:x_max] = 1.0
+        tongue_base = candidate_orig_transformed * horizontal_mask
+
+        upper_lip_swap = (labels_swap == 12).float()
+        shield = self._dilate_binary(upper_lip_swap, 3, mode="pool")
+        raw_tongue = tongue_base * (1.0 - shield)
+        raw_tongue = self._dilate_binary(raw_tongue, -2, mode="pool")
+
+        tongue_np = (raw_tongue.detach().cpu().numpy() * 255).astype(np.uint8)
+        contours, _ = cv2.findContours(
+            tongue_np, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        if len(contours) > 0:
+            cv2.drawContours(tongue_np, contours, -1, 255, thickness=cv2.FILLED)
+        tongue_device = raw_tongue.device
+        raw_tongue = (
+            torch.from_numpy(tongue_np).to(
+                device=tongue_device, dtype=torch.float32
+            )
+            / 255.0
+        )
+
+        blend_val = float(parameters.get("TongueBlurDecimalSlider", 0.40))
+        if blend_val > 1.0:
+            blend_val = blend_val / 100.0
+        blur_k = max(3, min(35, int(blend_val * 50) | 1))
+        return v2.functional.gaussian_blur(
+            raw_tongue.unsqueeze(0),
+            kernel_size=blur_k,
+            sigma=blur_k / 3.0,
+        ).squeeze(0)
 
     def get_mouth_overlay(self, swap_img, original_img, parameters):
         """

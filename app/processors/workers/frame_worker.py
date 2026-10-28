@@ -933,6 +933,7 @@ class FrameWorker(threading.Thread):
             if control.get("DenoiserMicroGrainToggle", False)
             else 0.0
         )
+        enable_color_match = bool(control.get("DenoiserColorCorrectionToggle", True))
 
         if not kv_map:
             if use_exclusive_path:
@@ -955,6 +956,7 @@ class FrameWorker(threading.Thread):
             color_mask=color_mask,
             coarse_grain_reduction=coarse_grain_val,
             micro_grain_strength=micro_grain_val,
+            enable_color_match=enable_color_match,
         )
         return torch.clamp(denoised_image, 0, 255)
 
@@ -1594,7 +1596,31 @@ class FrameWorker(threading.Thread):
             final_bgr = self._musetalk_apply_bgr(
                 final_bgr, control, hybrid_after=hybrid_after
             )
+        if control.get("PipelineUpscalerEnableToggle") and not compare_mode_active:
+            if stop_event.is_set():
+                return final_bgr
+            final_bgr = self._pipeline_upscaler_apply_bgr(final_bgr, control)
         return final_bgr
+
+    def _pipeline_upscaler_apply_bgr(self, bgr: np.ndarray, control: dict) -> np.ndarray:
+        """Last-stage FlashVSR / SeedVR2. Never raises; returns ``bgr`` unchanged on failure."""
+        try:
+            engine = getattr(self.models_processor, "pipeline_upscaler_engine", None)
+            if engine is None or not getattr(engine, "is_loaded", False):
+                if not getattr(self, "_pipeline_upscaler_gone_logged", False):
+                    print(
+                        "[WARN] Pipeline upscaler is enabled but the engine is not loaded. "
+                        "Toggle it off and on again (weights download on first use)."
+                    )
+                    self._pipeline_upscaler_gone_logged = True
+                return bgr
+            self._pipeline_upscaler_gone_logged = False
+            return engine.apply_bgr(bgr, control, frame_number=self.frame_number)
+        except Exception as e:
+            if not getattr(self, "_pipeline_upscaler_err_logged", False):
+                print(f"[WARN] Pipeline upscaler frame hook failed: {e}")
+                self._pipeline_upscaler_err_logged = True
+            return bgr
 
     def _musetalk_apply_bgr(
         self,
@@ -2131,13 +2157,52 @@ class FrameWorker(threading.Thread):
     def _swapper_res_auto_enabled(parameters: dict) -> bool:
         return parameters.get("SwapperResSelection") == "Auto"
 
+    def _pre_swap_shaping_requested(self, parameters: dict) -> bool:
+        return bool(
+            parameters.get("FaceShapingEnableToggle", False)
+            and parameters.get("FaceShapingPreSwapToggle", False)
+            and self.local_control_state_from_feeder.get("edit_enabled", True)
+        )
+
+    def _shape_original_faces_before_swap(
+        self,
+        original_faces: tuple,
+        tform,
+        kps_5: np.ndarray,
+        parameters: dict,
+        only_256: bool,
+    ) -> tuple[tuple, bool]:
+        """Deform the aligned target crops before the swapper sees them.
+
+        Returns the (possibly unchanged) resolution tuple and whether shaping ran.
+        When it runs, callers must drop precomputed 203-point crop landmarks so
+        expression models re-detect on the deformed contour.
+        """
+        if not self._pre_swap_shaping_requested(parameters):
+            return original_faces, False
+        face_512 = original_faces[0]
+        m_ref = np.asarray(tform.params, dtype=np.float32)[0:2]
+        ones = np.ones((np.asarray(kps_5).shape[0], 1), dtype=np.float32)
+        kps_ref = np.hstack([np.asarray(kps_5, dtype=np.float32), ones]) @ m_ref.T
+        shaped = self.frame_edits.apply_face_shaping_gpu(face_512, kps_ref, parameters)
+        assert self.t256 is not None
+        face_256 = self.t256(shaped)
+        if only_256:
+            return (shaped, shaped, face_256, face_256), True
+        assert self.t384 is not None and self.t128 is not None
+        return (shaped, self.t384(shaped), face_256, self.t128(face_256)), True
+
     def _apply_face_shaping_if_enabled(
         self,
         swap: torch.Tensor,
         kps_ref: np.ndarray,
         parameters: dict,
         stage: str,
+        *,
+        pre_swap_applied: bool = False,
     ) -> torch.Tensor:
+        if pre_swap_applied:
+            return swap
         if (
             parameters.get("FaceShapingEnableToggle", False)
             and self.local_control_state_from_feeder.get("edit_enabled", True)
@@ -3967,11 +4032,15 @@ class FrameWorker(threading.Thread):
                 if params.get("FaceAlignmentInterpolation", "Bilinear") == "Bicubic"
                 else "bilinear"
             )
+            _only_256 = self._alignment_only_256(swap_model, params)
             original_faces = self.get_transformed_and_scaled_faces(
                 tform,
                 batch_snap,
                 interp_mode=_interp,
-                only_256=self._alignment_only_256(swap_model, params),
+                only_256=_only_256,
+            )
+            original_faces, _ = self._shape_original_faces_before_swap(
+                original_faces, tform, s["kps_5"], params, _only_256
             )
             _sl = None
             if source_latent_cache is not None and s["s_e"] is not None:
@@ -4117,11 +4186,15 @@ class FrameWorker(threading.Thread):
                 if params.get("FaceAlignmentInterpolation", "Bilinear") == "Bicubic"
                 else "bilinear"
             )
+            _only_256 = self._alignment_only_256(swapper_model, params)
             original_faces = self.get_transformed_and_scaled_faces(
                 tform,
                 batch_snap,
                 interp_mode=_interp,
-                only_256=self._alignment_only_256(swapper_model, params),
+                only_256=_only_256,
+            )
+            original_faces, _ = self._shape_original_faces_before_swap(
+                original_faces, tform, s["kps_5"], params, _only_256
             )
             _sl = None
             if source_latent_cache is not None and s["s_e"] is not None:
@@ -8896,6 +8969,26 @@ class FrameWorker(threading.Thread):
                 tform, _img_align, interp_mode=_face_interp, only_256=_only_256
             )
         )
+        (
+            original_face_512,
+            original_face_384,
+            original_face_256,
+            original_face_128,
+        ), _pre_swap_shaped = self._shape_original_faces_before_swap(
+            (
+                original_face_512,
+                original_face_384,
+                original_face_256,
+                original_face_128,
+            ),
+            tform,
+            kps_5,
+            parameters,
+            _only_256,
+        )
+        if _pre_swap_shaped:
+            # Landmarks projected from the unshaped frame no longer match the crop.
+            kps_all_crop = None
         original_faces = (
             original_face_512,
             original_face_384,
@@ -9270,7 +9363,7 @@ class FrameWorker(threading.Thread):
             )
 
         swap = self._apply_face_shaping_if_enabled(
-            swap, kps_ref, parameters, "Beginning"
+            swap, kps_ref, parameters, "Beginning", pre_swap_applied=_pre_swap_shaped
         )
 
         # First Denoiser pass - Before Restorers
@@ -9796,7 +9889,11 @@ class FrameWorker(threading.Thread):
                     swap_mask = swap_mask_noFP
 
             swap = self._apply_face_shaping_if_enabled(
-                swap, kps_ref, parameters, "After First Restorer"
+                swap,
+                kps_ref,
+                parameters,
+                "After First Restorer",
+                pre_swap_applied=_pre_swap_shaped,
             )
 
             # Second Denoiser pass - After First Restorer
@@ -9914,7 +10011,11 @@ class FrameWorker(threading.Thread):
                     swap_mask = swap_mask_noFP
 
             swap = self._apply_face_shaping_if_enabled(
-                swap, kps_ref, parameters, "After Second Restorer"
+                swap,
+                kps_ref,
+                parameters,
+                "After Second Restorer",
+                pre_swap_applied=_pre_swap_shaped,
             )
 
             # --- AUTO COLOR (Mask 512) ---
@@ -10279,7 +10380,11 @@ class FrameWorker(threading.Thread):
                     swap_mask = swap_mask_noFP
 
             swap = self._apply_face_shaping_if_enabled(
-                swap, kps_ref, parameters, "After Texture Transfer"
+                swap,
+                kps_ref,
+                parameters,
+                "After Texture Transfer",
+                pre_swap_applied=_pre_swap_shaped,
             )
 
             # --- COLOR CORRECTIONS ---
@@ -10475,6 +10580,35 @@ class FrameWorker(threading.Thread):
                 kernel_size = 2 * final_blur_strength + 1
                 sigma = final_blur_strength * 0.1
                 swap = self._get_cached_gaussian_blur(kernel_size, sigma)(swap)
+
+            if (
+                parameters.get("FinalBorderBlendEnableToggle", False)
+                and int(parameters.get("FinalBorderBlendAmountSlider", 0)) > 0
+            ):
+                border_blur_strength = int(parameters["FinalBorderBlendAmountSlider"])
+                kernel_size = int(2 * border_blur_strength + 1)
+                padding = border_blur_strength
+                sigma = float(max(border_blur_strength * 0.2, 1e-6))
+                blurred_swap = v2.functional.gaussian_blur(
+                    swap, kernel_size=[kernel_size, kernel_size], sigma=[sigma, sigma]
+                )
+                dilation = F.max_pool2d(
+                    swap_mask, kernel_size=kernel_size, stride=1, padding=padding
+                )
+                erosion = -F.max_pool2d(
+                    -swap_mask, kernel_size=kernel_size, stride=1, padding=padding
+                )
+                raw_border_band = dilation - erosion
+                smooth_border_mask = v2.functional.gaussian_blur(
+                    raw_border_band,
+                    kernel_size=[kernel_size, kernel_size],
+                    sigma=[sigma, sigma],
+                ).clamp_(0.0, 1.0)
+                swap = (
+                    torch.lerp(swap.float(), blurred_swap.float(), smooth_border_mask)
+                    .to(swap.dtype)
+                    .contiguous()
+                )
 
             # Artefacts: Jpeg
             if parameters["JPEGCompressionEnableToggle"]:

@@ -13,6 +13,22 @@ DENOISER_LAYOUT_DATA: Any = {
             "exec_function": control_actions.handle_denoiser_state_change,
             "exec_function_args": ["UseReferenceExclusivePathToggle"],
         },
+        "AverageKVToggle": {
+            "level": 1,
+            "widget_type": "ToggleButton",
+            "label": "Average K/V",
+            "control_name": "AverageKVToggle",
+            "default": True,
+            "help": "Uses an average of K/V maps or the full concatenated K/V maps.",
+        },
+        "DenoiserColorCorrectionToggle": {
+            "level": 1,
+            "widget_type": "ToggleButton",
+            "label": "Color Correction",
+            "control_name": "DenoiserColorCorrectionToggle",
+            "default": True,
+            "help": "Enable color correction for the denoiser.",
+        },
         "DenoiserBaseSeedSlider": {
             "level": 1,
             "widget_type": "ParameterSlider",

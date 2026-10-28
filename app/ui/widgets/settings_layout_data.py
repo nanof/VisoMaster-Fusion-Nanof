@@ -692,6 +692,12 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "default": False,
             "help": "Save processed output next to the current target media instead of the global output folder.",
         },
+        "PreserveOutputDirectoryStructureToggle": {
+            "level": 1,
+            "label": "Preserve Source Directory Structure",
+            "default": False,
+            "help": "When loading targets from a folder recursively, mirror each target's parent subfolder path inside the output folder.",
+        },
         "ClusterOutputBySourceToggle": {
             "level": 1,
             "label": "Cluster Output by Source Name",
@@ -750,6 +756,12 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "label": "Playback Loop",
             "default": False,
             "help": "Auto start over when video playing to the end.(Not work for recording)",
+        },
+        "VideoPlaybackSegmentsToggle": {
+            "level": 1,
+            "label": "Plays Active Segments Only",
+            "default": False,
+            "help": "Only plays the active segments of the video, skipping inactive parts.",
         },
         "TheatreModeUsesFullscreenToggle": {
             "level": 1,
@@ -966,6 +978,12 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "decimals": 2,
             "help": "Set the audio starting delay to adjust for latency.",
         },
+        "AccurateAudioVideoSyncToggle": {
+            "level": 1,
+            "label": "Accurate Audio-Video Sync",
+            "default": False,
+            "help": "Start live preview audio and video from the preceding video keyframe. This improves audio/video sync after seeking, but playback can begin before the requested frame. Recording always starts at the requested frame.",
+        },
         "VideoPlaybackAudioSyncPreviewToggle": {
             "level": 1,
             "label": "Sync preview to live audio",
@@ -1022,6 +1040,12 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "parentToggle": "VideoPlaybackAudioSyncPreviewToggle",
             "requiredToggleValue": True,
             "help": "Minimum time between catch-up seeks. Higher reduces seek thrashing; lower reacts faster.",
+        },
+        "SliderMouseWheelControlToggle": {
+            "level": 1,
+            "label": "Enable Mouse Wheel on Parameter Controls",
+            "default": False,
+            "help": "When enabled, the mouse wheel adjusts parameter sliders and dropdowns on hover.\nWhen disabled, the mouse wheel scrolls the parameter panel instead.\nHold Ctrl to temporarily adjust a hovered slider or dropdown while this is disabled.",
         },
         "SortEmbeddingsAZToggle": {
             "level": 1,
@@ -1177,6 +1201,16 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "parentToggle": "FFMpegOptionsToggle",
             "requiredToggleValue": True,
             "help": "LIBx265 presets, Ultrafast = faster but lower quality → Veryslow = slower but better quality. Default = Slow.",
+        },
+        "FFAutoMatchSourceQualityToggle": {
+            "level": 2,
+            "label": "Auto-set quality from source",
+            "default": False,
+            "parentToggle": "FFMpegOptionsToggle",
+            "requiredToggleValue": True,
+            "help": "Estimate source complexity with ffprobe and automatically set Quality from the source metrics for more consistent visual quality across mixed encodes. When enabled, the manual Quality slider is overridden; when disabled, manual Quality is used.",
+            "exec_function": control_actions.handle_ff_auto_quality_toggle,
+            "exec_function_args": [],
         },
         "FFQualitySlider": {
             "level": 2,
@@ -1730,6 +1764,82 @@ SETTINGS_LAYOUT_DATA: Any = {  # noqa: F811
             "parentToggle": "FrameEnhancerEnableToggle",
             "requiredToggleValue": True,
             "help": "Reduces frame-to-frame flicker from per-frame upscalers by blending with the previous displayed frame (ordered playback). Resets on seeks, buffer flushes, non-sequential frames, or large scene changes. 0 = off.",
+        },
+    },
+    "Pipeline Upscaler": {
+        "PipelineUpscalerEnableToggle": {
+            "level": 1,
+            "label": "Enable pipeline upscaler (last stage)",
+            "default": False,
+            "help": (
+                "Run a last-stage enhancer after the full face pipeline (swap, restore, "
+                "frame enhancer, MuseTalk). HYPIR is one-step restoration (best for play). "
+                "PMRF is slower tiled 2× export. FlashVSR Tiny streams one LQ canvas "
+                "(not 4K tiles). SeedVR2 is heavier. First enable downloads several GB "
+                "from Hugging Face. Use Number of Threads = 1. On 16 GB GPUs the first "
+                "frame can take a while. If CUDA runs out of memory, playback continues "
+                "with a bicubic resize. Disable the ONNX Frame Enhancer unless you want "
+                "stacked upscaling."
+            ),
+            "exec_function": control_actions.handle_pipeline_upscaler_toggle_change,
+            "exec_function_args": ["PipelineUpscalerEnableToggle"],
+        },
+        "PipelineUpscalerTypeSelection": {
+            "level": 2,
+            "label": "Upscaler model",
+            "options": [
+                "HYPIR SD2",
+                "PMRF 2x",
+                "FlashVSR Tiny",
+                "FlashVSR Full",
+                "SeedVR2 3B",
+                "SeedVR2 7B",
+            ],
+            "default": "HYPIR SD2",
+            "parentToggle": "PipelineUpscalerEnableToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "HYPIR SD2: one-step SD2.1+LoRA restoration (play/preview; 1× keeps "
+                "resolution). PMRF 2x: tiled face/restoration then resize (export). "
+                "FlashVSR Tiny: streaming LQ VSR, one canvas ≤640×768 then resize. "
+                "FlashVSR Full: same DiT plus Wan VAE. SeedVR2 3B/7B: one-step "
+                "restoration (3B fp8 is lighter; 7B fp16 needs much more VRAM)."
+            ),
+            "exec_function": control_actions.handle_pipeline_upscaler_type_change,
+            "exec_function_args": ["PipelineUpscalerTypeSelection"],
+        },
+        "PipelineUpscalerScaleSelection": {
+            "level": 2,
+            "label": "Output scale",
+            "options": ["1x", "2x", "4x"],
+            "default": "1x",
+            "parentToggle": "PipelineUpscalerEnableToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "Spatial multiplier of the finished frame. 1× restores in place (HYPIR). "
+                "2× is the PMRF export path. FlashVSR is trained for 4× but still "
+                "infers at a small streaming canvas and then resizes. SeedVR2 uses this "
+                "as target shortest-edge = input shortest-edge × scale."
+            ),
+        },
+        "PipelineUpscalerColorFixToggle": {
+            "level": 2,
+            "label": "Color fix",
+            "default": True,
+            "parentToggle": "PipelineUpscalerEnableToggle",
+            "requiredToggleValue": True,
+            "help": "Match output color to the pre-upscale frame (wavelet / LAB). Recommended on.",
+        },
+        "PipelineUpscalerTiledVaeToggle": {
+            "level": 2,
+            "label": "Tiled VAE (lower VRAM, SeedVR2)",
+            "default": True,
+            "parentToggle": "PipelineUpscalerEnableToggle",
+            "requiredToggleValue": True,
+            "help": (
+                "SeedVR2: tile VAE encode/decode. PMRF always tiles at 512. FlashVSR "
+                "runs a single streaming canvas (not a 4K tile grid)."
+            ),
         },
     },
     "Webcam and Virtualcam Settings": {

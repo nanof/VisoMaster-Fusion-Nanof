@@ -157,6 +157,11 @@ _FEEDER_PLAYBACK_LIVE_CONTROL_KEYS = frozenset(
         "MuseTalkMouthWidthSlider",
         "MuseTalkMouthHeightSlider",
         "MuseTalkMouthCentreSlider",
+        "PipelineUpscalerEnableToggle",
+        "PipelineUpscalerTypeSelection",
+        "PipelineUpscalerScaleSelection",
+        "PipelineUpscalerColorFixToggle",
+        "PipelineUpscalerTiledVaeToggle",
     }
 )
 
@@ -482,6 +487,13 @@ class VideoProcessor(QObject):
         self._audio_sync_fps_file: float = 0.0
         self._audio_sync_rate: float = 1.0
         self._audio_sync_last_seek_monotonic: float = 0.0
+        # Optional preview origin: ffplay and the feeder share a keyframe timestamp.
+        self.live_sound_seek_time: float | None = None
+        # Preview-only playback of job marker pairs. Separate from export segments.
+        self.is_playing_segments: bool = False
+        self._playback_segments: list[tuple[int, int]] = []
+        self._playback_segment_index: int = 0
+        self._playback_segment_end: int | None = None
 
         # Playback benchmark: one decoded frame, pipeline repeated (preview only; no recording).
         self._playback_benchmark_same_frame_active: bool = False
@@ -2964,6 +2976,31 @@ class VideoProcessor(QObject):
                         )
                         break
                 else:  # Standard mode
+                    if (
+                        self.is_playing_segments
+                        and not self.recording
+                        and self._playback_segment_end is not None
+                        and self.current_frame_number > self._playback_segment_end
+                    ):
+                        next_start = self._advance_playback_segment()
+                        if next_start is None:
+                            break
+                        print(
+                            f"[INFO] Feeder: playback segment "
+                            f"{self._playback_segment_index + 1}/"
+                            f"{len(self._playback_segments)} "
+                            f"starts at frame {next_start}."
+                        )
+                        seek_result = self._seek_feeder_read_to(
+                            next_start, cached_target_height
+                        )
+                        if seek_result == "stop":
+                            print(
+                                "[ERROR] FFmpeg input stream could not jump to the "
+                                "next playback segment; stopping feeder."
+                            )
+                            break
+                        seek_before_read = seek_result
                     if self.current_frame_number > self.max_frame_number:
                         break  # End of video
 
@@ -3527,6 +3564,136 @@ class VideoProcessor(QObject):
         max_step = max(1, min(90, max_step))
         interval = max(0.01, min(0.30, interval))
         return min_lag, slices, max_step, interval
+
+    def resolve_live_preview_start(
+        self, requested_frame: int, source_fps: float
+    ) -> tuple[int, float]:
+        """Return the preceding video keyframe used as the preview origin."""
+        requested_frame = max(0, int(requested_frame))
+        if not self.media_path or source_fps <= 0:
+            return requested_frame, requested_frame / max(source_fps, 1.0)
+
+        requested_time = requested_frame / float(source_fps)
+        args = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-read_intervals",
+            f"{requested_time:.6f}%+0.25",
+            "-select_streams",
+            "v:0",
+            "-skip_frame",
+            "nokey",
+            "-show_entries",
+            "frame=best_effort_timestamp_time",
+            "-of",
+            "csv=p=0",
+            self.media_path,
+        ]
+        try:
+            result = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip() or "ffprobe failed")
+
+            keyframe_times: list[float] = []
+            for line in result.stdout.splitlines():
+                try:
+                    timestamp = float(line.split(",", 1)[0].strip())
+                except ValueError:
+                    continue
+                if 0 <= timestamp <= requested_time + (1.0 / source_fps):
+                    keyframe_times.append(timestamp)
+            if not keyframe_times:
+                raise RuntimeError("no preceding video keyframe returned")
+
+            keyframe_time = max(keyframe_times)
+            keyframe_frame = min(
+                requested_frame,
+                max(0, int(round(keyframe_time * source_fps))),
+            )
+            print(
+                "[INFO] Live preview keyframe alignment: "
+                f"requested frame {requested_frame} ({requested_time:.3f}s) -> "
+                f"frame {keyframe_frame} ({keyframe_time:.3f}s)."
+            )
+            return keyframe_frame, keyframe_time
+        except Exception as e:
+            print(
+                "[WARN] Could not resolve a live-preview keyframe; "
+                f"using requested frame {requested_frame}: {e}"
+            )
+            return requested_frame, requested_time
+
+    def _valid_playback_marker_pairs(self) -> list[tuple[int, int]]:
+        raw = getattr(self.main_window, "job_marker_pairs", None) or []
+        pairs: list[tuple[int, int]] = []
+        for pair in raw:
+            if not pair or len(pair) < 2 or pair[1] is None:
+                continue
+            start_f, end_f = int(pair[0]), int(pair[1])
+            if start_f < end_f:
+                pairs.append((start_f, end_f))
+        pairs.sort()
+        return pairs
+
+    def _snap_playback_segment_start(self, frame: int) -> int | None:
+        """Fit ``frame`` into a marker pair. Returns None when there is nothing to play."""
+        pairs = self._valid_playback_marker_pairs()
+        if not pairs:
+            self.is_playing_segments = False
+            self._playback_segments = []
+            self._playback_segment_end = None
+            return None
+        self._playback_segments = pairs
+        self.is_playing_segments = True
+        frame = int(frame)
+        for index, (start_f, end_f) in enumerate(pairs):
+            if frame < start_f or start_f <= frame < end_f:
+                if frame < start_f:
+                    frame = start_f
+                self._playback_segment_index = index
+                self._playback_segment_end = end_f
+                return frame
+        self._playback_segment_index = 0
+        self._playback_segment_end = pairs[0][1]
+        return pairs[0][0]
+
+    def _advance_playback_segment(self) -> int | None:
+        pairs = self._playback_segments
+        if not pairs:
+            return None
+        self._playback_segment_index = (self._playback_segment_index + 1) % len(pairs)
+        start_f, end_f = pairs[self._playback_segment_index]
+        self._playback_segment_end = end_f
+        return start_f
+
+    def _seek_feeder_read_to(
+        self, processing_frame: int, target_height: int
+    ) -> int | None | str:
+        """Move the feeder read cursor.
+
+        Returns the OpenCV seek frame, None when FFmpeg already restarted, or
+        the string "stop" when that restart failed.
+        """
+        with self.state_lock:
+            self.current_frame_number = int(processing_frame)
+            self.next_frame_to_display = int(processing_frame)
+            self._clear_frames_to_display_and_profiles()
+        self._clear_frame_and_raw_queues()
+        self._clear_sequential_detection_feed_state()
+        if self._using_ffmpeg_sequential_input():
+            if not self._restart_preview_fps_cap_stream(
+                int(processing_frame), target_height
+            ):
+                return "stop"
+            return None
+        return int(processing_frame)
 
     def _timeline_frame_from_ui(self) -> int:
         """Playback timeline index from the seek slider (clamped). Used to keep audio/ffplay aligned after seek/stop/play."""
@@ -4408,6 +4575,40 @@ class VideoProcessor(QObject):
 
         # 7a. Get the target frame (slider is in SOURCE-frame space)
         actual_start_frame = self.main_window.videoSeekSlider.value()
+        self.live_sound_seek_time = None
+        self.is_playing_segments = False
+        self._playback_segments = []
+        self._playback_segment_end = None
+        if not self.recording and self.main_window.control.get(
+            "VideoPlaybackSegmentsToggle", False
+        ):
+            snapped = self._snap_playback_segment_start(int(actual_start_frame))
+            if snapped is not None:
+                actual_start_frame = snapped
+                print(
+                    "[INFO] Sync: Segment playback active. "
+                    f"Snapping to frame {actual_start_frame} "
+                    f"(segment {self._playback_segment_index + 1}/"
+                    f"{len(self._playback_segments)})."
+                )
+        if (
+            not self.recording
+            and self.main_window.liveSoundButton.isChecked()
+            and self.main_window.control.get("AccurateAudioVideoSyncToggle", False)
+        ):
+            src_fps = float(self.recording_source_fps or self.fps or 0.0)
+            if src_fps <= 0:
+                src_fps = 30.0
+            key_frame, key_time = self.resolve_live_preview_start(
+                int(actual_start_frame), src_fps
+            )
+            if self.is_playing_segments and self._playback_segments:
+                seg_start = self._playback_segments[self._playback_segment_index][0]
+                if key_frame < seg_start:
+                    key_frame = int(actual_start_frame)
+                    key_time = key_frame / src_fps
+            actual_start_frame = key_frame
+            self.live_sound_seek_time = key_time
         print(f"[INFO] Sync: Seeking directly to source-frame {actual_start_frame}...")
 
         # 7b–7c. Read the first frame (OpenCV, FFmpeg FPS-cap, or FFmpeg scaled decode).
@@ -5322,6 +5523,8 @@ class VideoProcessor(QObject):
 
         self.processing = False
         self.is_processing_segments = False
+        self.is_playing_segments = False
+        self.live_sound_seek_time = None
         self.recording = False
         self.tail_pending_stall_start_sec = 0.0
         self.tail_force_finalize_due_to_stall = False
@@ -6336,6 +6539,14 @@ class VideoProcessor(QObject):
             ):
                 frame_height = frame_height * 4
                 frame_width = frame_width * 4
+
+        from app.processors.pytorch_extras.pipeline_upscaler.scale import (
+            pipeline_upscaler_output_dims,
+        )
+
+        frame_height, frame_width = pipeline_upscaler_output_dims(
+            control, frame_height=frame_height, frame_width=frame_width
+        )
 
         # PERF-018: optional record resolution ≠ pipeline output (after enhancer mult)
         frame_height, frame_width = (
@@ -9383,7 +9594,10 @@ class VideoProcessor(QObject):
             cap_fps_f = 0.0
         if cap_fps_f <= 0:
             cap_fps_f = float(self.fps) if self.fps > 0 else 30.0
-        seek_time = anchor_fn / cap_fps_f
+        if self.live_sound_seek_time is not None and not self.recording:
+            seek_time = float(self.live_sound_seek_time)
+        else:
+            seek_time = anchor_fn / cap_fps_f
 
         # Adjust audio speed if custom FPS is used
         fpsdiv = 1.0

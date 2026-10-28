@@ -105,6 +105,7 @@ PIPELINE_STAGE_LABELS: Dict[str, str] = {
     "std_undo_resize": "Worker: undo working resize",
     "std_overlays_compare": "Worker: compare / mask preview",
     "frame_enhancer": "Worker: global frame enhancer",
+    "pipeline_upscaler": "Worker: last-stage pipeline upscaler",
     "d2h_numpy": "Worker: result GPU→CPU (numpy)",
     "pass_through": "Passthrough",
     "feeder_subtotal": "Sum Feeder (ms)",

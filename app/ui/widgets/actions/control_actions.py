@@ -184,6 +184,7 @@ def change_execution_provider(main_window: "MainWindow", new_provider):
     main_window.models_processor.switch_providers_priority(new_provider)
     main_window.models_processor.clear_gpu_memory()
     reload_musetalk_if_enabled(main_window)
+    reload_pipeline_upscaler_if_enabled(main_window)
     main_window.models_processor.face_detectors.clear_declared_input_side_cache()
     detector_internal_size_ui.sync_detector_internal_size_combo(main_window)
     common_widget_actions.update_gpu_memory_progressbar(main_window)
@@ -219,6 +220,7 @@ def change_gpu_index(main_window: "MainWindow", new_gpu_index):
     )
     main_window.models_processor.clear_gpu_memory()
     reload_musetalk_if_enabled(main_window)
+    reload_pipeline_upscaler_if_enabled(main_window)
     main_window.models_processor.face_detectors.clear_declared_input_side_cache()
     detector_internal_size_ui.sync_detector_internal_size_combo(main_window)
     common_widget_actions.update_gpu_memory_progressbar(main_window)
@@ -2169,6 +2171,27 @@ def _prepare_musetalk_audio(
     engine.prepare_audio(media_path, fps, is_video_container=True)
 
 
+def handle_ff_auto_quality_toggle(main_window: "MainWindow", new_value: bool) -> None:
+    """Disable manual FFQualitySlider while auto source-quality matching is enabled."""
+    quality_widget = main_window.parameter_widgets.get("FFQualitySlider")
+    if quality_widget is None:
+        return
+
+    manual_enabled = not bool(new_value)
+    quality_widget.setEnabled(manual_enabled)
+    if hasattr(quality_widget, "row_widget") and quality_widget.row_widget:
+        quality_widget.row_widget.setEnabled(manual_enabled)
+    if hasattr(quality_widget, "label_widget") and quality_widget.label_widget:
+        quality_widget.label_widget.setEnabled(manual_enabled)
+    if (
+        hasattr(quality_widget, "reset_default_button")
+        and quality_widget.reset_default_button
+    ):
+        quality_widget.reset_default_button.setEnabled(manual_enabled)
+    if hasattr(quality_widget, "line_edit") and quality_widget.line_edit:
+        quality_widget.line_edit.setEnabled(manual_enabled)
+
+
 def handle_sort_embeddings_az_toggle(
     main_window: "MainWindow", new_value: bool, *args
 ) -> None:
@@ -2328,3 +2351,102 @@ def handle_auto_load_target_folder_recursive_toggle(
         )
     )
     list_view_actions.set_target_folder_auto_watch(main_window, auto_enabled)
+
+
+def _pipeline_upscaler_last_error(main_window: "MainWindow") -> str:
+    engine = getattr(main_window.models_processor, "pipeline_upscaler_engine", None)
+    detail = getattr(engine, "_last_error", None) if engine is not None else None
+    if detail:
+        return str(detail)
+    return (
+        "Pipeline upscaler could not load. Check the console for missing "
+        "Python packages or Hugging Face download errors."
+    )
+
+
+def _warn_pipeline_upscaler_load_failed(
+    main_window: "MainWindow", *, title: str = "Pipeline Upscaler"
+) -> None:
+    message = _pipeline_upscaler_last_error(main_window)
+    print(f"[WARN] {message}")
+    try:
+        if isinstance(main_window, QtWidgets.QWidget):
+            QtWidgets.QMessageBox.warning(main_window, title, message)
+    except Exception:
+        pass
+
+
+def handle_pipeline_upscaler_toggle_change(
+    main_window: "MainWindow", new_value: Any = None, *_, **__
+) -> None:
+    """Load/unload the last-stage upscaler when the pipeline toggle changes."""
+    try:
+        enabled = (
+            bool(main_window.control.get("PipelineUpscalerEnableToggle", False))
+            if new_value is None
+            else bool(new_value)
+        )
+        mp = main_window.models_processor
+        if enabled:
+            from app.processors.pytorch_extras.pipeline_upscaler.scale import (
+                pipeline_upscaler_type,
+            )
+
+            kind = pipeline_upscaler_type(main_window.control)
+            # update_control runs this *before* storing the new type when the
+            # combo changes; the toggle path still reads the stored type.
+            try:
+                n_threads = int(main_window.control.get("nThreadsSlider", 1) or 1)
+            except (TypeError, ValueError):
+                n_threads = 1
+            if n_threads > 1:
+                print(
+                    "[WARN] Pipeline upscaler: set Number of Threads to 1 for "
+                    "stable temporal behaviour (workers otherwise finish out of order)."
+                )
+            if not mp.ensure_pipeline_upscaler_loaded(kind):
+                _warn_pipeline_upscaler_load_failed(main_window)
+                return
+        else:
+            mp.unload_pipeline_upscaler()
+    except Exception as e:
+        print(f"[WARN] Pipeline upscaler toggle handler failed: {e}")
+
+
+def handle_pipeline_upscaler_type_change(
+    main_window: "MainWindow", new_value: Any = None, *_, **__
+) -> None:
+    """Reload weights when the last-stage upscaler model selection changes."""
+    try:
+        enabled = bool(main_window.control.get("PipelineUpscalerEnableToggle", False))
+        if not enabled:
+            return
+        kind = (
+            str(new_value)
+            if new_value is not None
+            else str(
+                main_window.control.get("PipelineUpscalerTypeSelection", "HYPIR SD2")
+            )
+        )
+        mp = main_window.models_processor
+        mp.unload_pipeline_upscaler()
+        if not mp.ensure_pipeline_upscaler_loaded(kind):
+            _warn_pipeline_upscaler_load_failed(main_window)
+    except Exception as e:
+        print(f"[WARN] Pipeline upscaler type handler failed: {e}")
+
+
+def reload_pipeline_upscaler_if_enabled(main_window: "MainWindow") -> None:
+    """Reload last-stage upscaler after a VRAM flush. No-op when the toggle is off."""
+    try:
+        if not bool(main_window.control.get("PipelineUpscalerEnableToggle", False)):
+            return
+        print("[INFO] Pipeline upscaler: reloading after VRAM flush...")
+        if not main_window.models_processor.ensure_pipeline_upscaler_loaded():
+            print(
+                "[WARN] Pipeline upscaler could not be reloaded. "
+                f"{_pipeline_upscaler_last_error(main_window)}"
+            )
+    except Exception as e:
+        print(f"[WARN] Pipeline upscaler reload failed: {e}")
+

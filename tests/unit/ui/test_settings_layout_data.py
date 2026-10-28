@@ -240,3 +240,48 @@ def test_auto_load_target_folder_toggles_exist():
     assert child["requiredToggleValue"] is True
     assert callable(parent["exec_function"])
     assert callable(child["exec_function"])
+
+
+def test_develop_leftover_settings_exist():
+    output = SETTINGS_LAYOUT_DATA["Output Settings"]
+    preserve = output["PreserveOutputDirectoryStructureToggle"]
+    assert preserve["default"] is False
+    assert list(output).index("PreserveOutputDirectoryStructureToggle") < list(
+        output
+    ).index("ClusterOutputBySourceToggle")
+
+    playback = SETTINGS_LAYOUT_DATA["Video Playback Settings"]
+    wheel = playback["SliderMouseWheelControlToggle"]
+    assert wheel["default"] is False
+    segments = playback["VideoPlaybackSegmentsToggle"]
+    assert segments["default"] is False
+
+    recording = SETTINGS_LAYOUT_DATA["Video Recording Settings"]
+    auto_q = recording["FFAutoMatchSourceQualityToggle"]
+    assert auto_q["default"] is False
+    assert auto_q["parentToggle"] == "FFMpegOptionsToggle"
+    assert callable(auto_q["exec_function"])
+
+
+def test_pipeline_upscaler_settings_exist():
+    section = SETTINGS_LAYOUT_DATA["Pipeline Upscaler"]
+    toggle = section["PipelineUpscalerEnableToggle"]
+    model = section["PipelineUpscalerTypeSelection"]
+    scale = section["PipelineUpscalerScaleSelection"]
+    assert toggle["default"] is False
+    assert model["default"] == "HYPIR SD2"
+    assert model["default"] in model["options"]
+    assert "HYPIR SD2" in model["options"]
+    assert "PMRF 2x" in model["options"]
+    assert "SeedVR2 3B" in model["options"]
+    assert "FlashVSR Full" in model["options"]
+    assert scale["default"] == "1x"
+    assert "1x" in scale["options"]
+    from app.processors.pytorch_extras.pipeline_upscaler.scale import (
+        PIPELINE_UPSCALER_TYPES,
+    )
+
+    assert tuple(model["options"]) == PIPELINE_UPSCALER_TYPES
+    assert scale["parentToggle"] == "PipelineUpscalerEnableToggle"
+    assert callable(toggle["exec_function"])
+    assert callable(model["exec_function"])

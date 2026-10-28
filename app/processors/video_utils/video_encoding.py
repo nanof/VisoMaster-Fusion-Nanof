@@ -234,10 +234,20 @@ class FFmpegEncoder:
                 "BSRGan-x4",
                 "UltraSharp-x4",
                 "UltraMix-x4",
+                "SPAN-4x",
+                "SPAN-F-4x",
                 "RealEsr-General-x4v3",
             ):
                 frame_height *= 4
                 frame_width *= 4
+
+        from app.processors.pytorch_extras.pipeline_upscaler.scale import (
+            pipeline_upscaler_output_dims,
+        )
+
+        frame_height, frame_width = pipeline_upscaler_output_dims(
+            control, frame_height=frame_height, frame_width=frame_width
+        )
 
         frame_height_down = frame_height
         frame_width_down = frame_width

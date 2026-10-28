@@ -1009,6 +1009,9 @@ class FrameEdits:
             lip_weight = float(
                 parameters.get("RecastLipDrivingWeightDecimalSlider", 0.8)
             )
+            brows_weight = parameters.get("RecastBrowsDrivingWeightDecimalSlider", None)
+            if brows_weight is not None:
+                brows_weight = float(brows_weight)
             smooth_on = parameters.get("RecastExpressionSmoothToggle", False)
             smooth_strength = float(
                 parameters.get("RecastSmoothStrengthDecimalSlider", 0.5)
@@ -1144,6 +1147,7 @@ class FrameEdits:
                 lip_driving_weight=lip_weight,
                 exp_ref=compose_exp_ref,
                 structural_blend=structural_blend,
+                brows_driving_weight=brows_weight,
             )
             out = recast.warp_decode(f_s, source_info["x_s"], x_d_i)
             out = torch.squeeze(out)

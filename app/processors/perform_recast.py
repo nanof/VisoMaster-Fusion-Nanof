@@ -423,6 +423,9 @@ class PerformRecast:
     # "Replacement" modulation. Used here for optional region gating.
     EYE_INDICES = list(range(31, 39))  # 31..38 (eye channels)
     MOUTH_INDICES = list(range(44, 47))  # 44..46 (jaw / lip-contour channels)
+    # Brow channels that Relative mode used to fold into the structural blend.
+    # These do not overlap EYE_INDICES or MOUTH_INDICES.
+    BROWS_INDICES = [15, 16, 17, 18, 19, 21, 22, 23, 24, 25]
 
     def compose_driven_keypoints(
         self,
@@ -435,6 +438,7 @@ class PerformRecast:
         lip_driving_weight: float = 0.8,
         exp_ref: torch.Tensor | None = None,
         structural_blend: float = 0.50,
+        brows_driving_weight: float | None = None,
     ) -> torch.Tensor:
         """Build the driven keypoints ``x_d_i`` fed to the warping module.
 
@@ -541,8 +545,17 @@ class PerformRecast:
 
             new_exp[:, eye_idx, :] = exp_s[:, eye_idx, :] + (eye_delta * ew * factor)
 
-            # --- 3. STRUCTURAL BLEND (All remaining indices) ---
-            struct_idx = [i for i in range(49) if i not in (mouth_idx + eye_idx)]
+            # --- 3. STRUCTURAL BLEND (remaining indices, brows split out) ---
+            # Missing brow weight follows structural_blend so older sessions,
+            # and the 0.50 default, keep the previous Relative result.
+            brow_idx = self.BROWS_INDICES
+            brow_weight = (
+                float(structural_blend)
+                if brows_driving_weight is None
+                else float(brows_driving_weight)
+            )
+            occupied = set(mouth_idx + eye_idx + brow_idx)
+            struct_idx = [i for i in range(49) if i not in occupied]
 
             s_head_center = exp_s.mean(dim=1, keepdim=True)
             d_head_center = exp_d.mean(dim=1, keepdim=True)
@@ -558,6 +571,12 @@ class PerformRecast:
             blended_struct[..., 2] = exp_s[:, struct_idx, 2]
 
             new_exp[:, struct_idx, :] = blended_struct
+
+            aligned_d_brow = exp_d[:, brow_idx, :] + pos_offset_struct
+            brow_delta = aligned_d_brow - exp_s[:, brow_idx, :]
+            blended_brow = exp_s[:, brow_idx, :] + (brow_delta * brow_weight)
+            blended_brow[..., 2] = exp_s[:, brow_idx, 2]
+            new_exp[:, brow_idx, :] = blended_brow
 
         elif mode == MODE_ENHANCEMENT:
             # ENHANCEMENT = keep the swapped face's own expression and ADD the
