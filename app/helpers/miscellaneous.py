@@ -727,7 +727,89 @@ class MediaMetadata:
         return int(self.width) * int(self.height)
 
 
+# Opening every video with OpenCV just for its properties dominates workspace load
+# time with many target videos, so video probes are persisted across sessions.
+_MEDIA_METADATA_CACHE_PATH = os.path.join(
+    os.getcwd(), ".thumbnails", "media_metadata_cache.json"
+)
+_media_metadata_cache: Optional[Dict[str, list]] = None
+_media_metadata_cache_dirty = False
+_media_metadata_cache_lock = threading.Lock()
+
+
+def _media_metadata_cache_key(media_file_path) -> Optional[str]:
+    try:
+        st = os.stat(media_file_path)
+    except OSError:
+        return None
+    return f"{os.path.abspath(str(media_file_path))}|{st.st_size}|{st.st_mtime_ns}"
+
+
+def _get_media_metadata_cache() -> Dict[str, list]:
+    global _media_metadata_cache
+    if _media_metadata_cache is None:
+        try:
+            with open(_MEDIA_METADATA_CACHE_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            _media_metadata_cache = data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            _media_metadata_cache = {}
+    return _media_metadata_cache
+
+
+def flush_media_metadata_cache() -> None:
+    """Persist newly probed video metadata (no-op when nothing changed)."""
+    global _media_metadata_cache_dirty
+    with _media_metadata_cache_lock:
+        if not _media_metadata_cache_dirty or _media_metadata_cache is None:
+            return
+        try:
+            os.makedirs(os.path.dirname(_MEDIA_METADATA_CACHE_PATH), exist_ok=True)
+            tmp_path = _MEDIA_METADATA_CACHE_PATH + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(_media_metadata_cache, f)
+            os.replace(tmp_path, _MEDIA_METADATA_CACHE_PATH)
+            _media_metadata_cache_dirty = False
+        except OSError as e:
+            print(f"[WARN] Could not save media metadata cache: {e}")
+
+
 def probe_media_metadata(media_file_path, file_type) -> Optional[MediaMetadata]:
+    global _media_metadata_cache_dirty
+    if file_type == "video":
+        cache_key = _media_metadata_cache_key(media_file_path)
+        if cache_key is not None:
+            with _media_metadata_cache_lock:
+                cached = _get_media_metadata_cache().get(cache_key)
+            if isinstance(cached, list) and len(cached) == 5:
+                try:
+                    return MediaMetadata(
+                        width=int(cached[0]),
+                        height=int(cached[1]),
+                        total_frames=int(cached[2]),
+                        frame_rate=float(cached[3]),
+                        bitrate_kbits=float(cached[4]),
+                    )
+                except (TypeError, ValueError):
+                    pass
+        metadata = _probe_media_metadata_uncached(media_file_path, file_type)
+        if metadata is not None and cache_key is not None:
+            with _media_metadata_cache_lock:
+                _get_media_metadata_cache()[cache_key] = [
+                    metadata.width,
+                    metadata.height,
+                    metadata.total_frames,
+                    metadata.frame_rate,
+                    metadata.bitrate_kbits,
+                ]
+                _media_metadata_cache_dirty = True
+        return metadata
+    return _probe_media_metadata_uncached(media_file_path, file_type)
+
+
+def _probe_media_metadata_uncached(
+    media_file_path, file_type
+) -> Optional[MediaMetadata]:
     """Read dimensions/length of a media file without decoding its pixels.
 
     Images are read header-only via PIL and videos through OpenCV properties.

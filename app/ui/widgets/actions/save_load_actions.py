@@ -22,6 +22,7 @@ from app.ui.widgets.actions import control_actions
 from app.ui.widgets.actions import layout_actions
 from app.ui.widgets.actions import filter_actions
 from app.ui.widgets import ui_workers
+from app.ui import startup_splash
 from app.helpers import qt_lifecycle
 from app.helpers.typing_helper import ParametersTypes, MarkerTypes
 import app.helpers.miscellaneous as misc_helpers
@@ -675,6 +676,9 @@ def load_saved_workspace(
                 target_medias_files_list.append(media_data["media_path"])
                 target_media_ids.append(media_data["media_id"])
 
+            startup_splash.set_status(
+                f"Loading {len(target_medias_files_list)} target media…"
+            )
             main_window.video_loader_worker = ui_workers.TargetMediaLoaderWorker(
                 main_window=main_window,
                 folder_name=False,
@@ -714,6 +718,7 @@ def load_saved_workspace(
             for face_id, input_face_data in data.get("input_faces_data", {}).items():
                 input_media_paths.append(input_face_data["media_path"])
                 input_face_ids.append(face_id)
+            startup_splash.set_status(f"Loading {len(input_media_paths)} input faces…")
             main_window.input_faces_loader_worker = ui_workers.InputFacesLoaderWorker(
                 main_window=main_window,
                 folder_name=False,

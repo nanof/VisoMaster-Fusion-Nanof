@@ -11,6 +11,7 @@ from PySide6 import QtCore
 import torch
 
 from app.ui.core.main_window import Ui_MainWindow
+from app.ui import startup_splash
 import app.ui.widgets.actions.common_actions as common_widget_actions
 from app.ui.widgets.actions import card_actions
 from app.ui.widgets.actions import layout_actions
@@ -1034,12 +1035,17 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
     def __init__(self):
         super(MainWindow, self).__init__()
+        startup_splash.set_status("Creating main window…", 0.5)
         self.setupUi(self)
         self._base_window_title = self.windowTitle()
+        startup_splash.set_status("Initializing processors…", 0.6)
         self.initialize_variables()
         self._apply_runtime_window_title()
+        startup_splash.set_status("Building interface…", 0.7)
         self.initialize_widgets()
+        startup_splash.set_status("Restoring workspace…", 0.85)
         self.load_last_workspace()
+        startup_splash.set_status("Ready", 1.0)
 
     @QtCore.Slot(list)
     def handle_unload_request(self, model_names: list):
@@ -1310,6 +1316,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             if auto_load_workspace_toggle:
                 save_load_actions.load_saved_workspace(self, str(last_workspace_path))
             else:
+                startup_splash.close()
                 load_dialog = widget_components.LoadLastWorkspaceDialog(self)
                 load_dialog.exec_()
 

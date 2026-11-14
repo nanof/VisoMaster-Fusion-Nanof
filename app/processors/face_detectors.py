@@ -292,6 +292,27 @@ class FaceDetectors:
         c = self._declared_input_side_cache
         if model_name in c:
             return c[model_name]
+        # Read the declared shape from the ONNX file: building an ORT/TRT session
+        # on the GUI thread just to inspect inputs costs seconds at startup.
+        onnx_path = self.models_processor.models_path.get(model_name)
+        if onnx_path and os.path.isfile(onnx_path):
+            try:
+                import onnx
+
+                graph = onnx.load(onnx_path, load_external_data=False).graph
+                init_names = {x.name for x in graph.initializer}
+                graph_inputs = [i for i in graph.input if i.name not in init_names]
+                side = None
+                if graph_inputs:
+                    dims = graph_inputs[0].type.tensor_type.shape.dim
+                    if len(dims) >= 4:
+                        h, w = dims[2].dim_value, dims[3].dim_value
+                        if h > 0 and h == w:
+                            side = int(h)
+                c[model_name] = side
+                return side
+            except Exception:
+                pass
         ort_session = self.models_processor.load_model(model_name)
         if not ort_session:
             c[model_name] = None

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Dict, Mapping
 from app.helpers.recycle_bin import recycle_path
 import subprocess
 import sys
+import threading
 
 from PySide6 import QtWidgets, QtGui, QtCore
 from PySide6.QtWidgets import QPushButton
@@ -375,8 +376,14 @@ class TargetMediaCardButton(CardButton):
         if self.file_type == "video":
             # Get video rotation metadata before loading
             rotation_angle = get_video_rotation(self.media_path)
-            # Check for Variable Frame Rate (VFR) and warn the user
-            misc_helpers.check_and_warn_vfr(self.media_path)
+            # Check for Variable Frame Rate (VFR) and warn the user. Console-only
+            # warning, so the ffprobe run (~1 s) must not block media selection.
+            threading.Thread(
+                target=misc_helpers.check_and_warn_vfr,
+                args=(self.media_path,),
+                daemon=True,
+                name="vfr-check",
+            ).start()
             main_window.video_processor.media_rotation = rotation_angle
             media_capture = cv2.VideoCapture(self.media_path)
             # Explicitly enable OpenCV's auto-rotation to let it handle metadata natively

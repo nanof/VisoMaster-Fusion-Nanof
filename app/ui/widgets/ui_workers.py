@@ -67,6 +67,7 @@ class TargetMediaLoaderWorker(qtc.QThread):
             self.load_videos_and_images_from_files_list(self.files_list)
         if self.webcam_mode:
             self.load_webcams()
+        misc_helpers.flush_media_metadata_cache()
         self.finished.emit()
 
     def _iter_sorted_recursive_media_files(self, folder_name: str):

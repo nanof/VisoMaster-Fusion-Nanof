@@ -358,67 +358,50 @@ def on_keep_controls_active_toggle(main_window: "MainWindow", enabled: bool) -> 
     layout_actions.enable_all_parameters_and_control_widget(main_window)
 
 
-def change_theme(main_window: "MainWindow", new_theme):
-    def get_style_data(filename, theme="dark", custom_colors=None):
-        custom_colors = custom_colors or {"primary": "#4090a3"}
-        styles_dir = Path(__file__).resolve().parent.parent.parent / "styles"
-        with open(styles_dir / filename, "r") as f:  # pylint: disable=unspecified-encoding
-            _style = f.read()
-            _style = (
-                qdarktheme.load_stylesheet(theme=theme, custom_colors=custom_colors)
-                + "\n"
-                + _style
-            )
-        return _style
+# theme name -> (qss file, qdarktheme base theme, primary color override)
+_THEME_STYLES: dict[str, tuple[str, str, str | None]] = {
+    "Glass Studio": ("glass_studio.qss", "dark", "#d0bcff"),
+    "Dark": ("dark_styles.qss", "dark", None),
+    "Light": ("light_styles.qss", "light", None),
+    "Dark-Blue": ("dark_blue.qss", "dark", None),
+    "True-Dark": ("true_dark.qss", "dark", None),
+    "OLED-Black": ("oled_black.qss", "dark", None),
+    "Windows11-Dark": ("windows11_dark.qss", "dark", "#4cc2ff"),
+    "Solarized-Dark": ("solarized_dark.qss", "dark", None),
+    "Solarized-Light": ("solarized_light.qss", "light", None),
+    "Dracula": ("dracula.qss", "dark", None),
+    "Nord": ("nord.qss", "dark", None),
+    "Gruvbox": ("gruvbox.qss", "dark", None),
+    "Monokai": ("monokai.qss", "dark", None),
+}
 
+
+def build_theme_stylesheet(theme_name: str) -> str:
+    """Full application stylesheet for a ``ThemeSelection`` value ("" if unknown)."""
+    entry = _THEME_STYLES.get(theme_name)
+    if entry is None:
+        return ""
+    filename, base_theme, primary = entry
+    styles_dir = Path(__file__).resolve().parent.parent.parent / "styles"
+    with open(styles_dir / filename, "r") as f:  # pylint: disable=unspecified-encoding
+        _style = f.read()
+    return (
+        qdarktheme.load_stylesheet(
+            theme=base_theme, custom_colors={"primary": primary or "#4090a3"}
+        )
+        + "\n"
+        + _style
+    )
+
+
+def change_theme(main_window: "MainWindow", new_theme):
     app = QtWidgets.QApplication.instance()
 
-    _style = ""
-    if new_theme == "Glass Studio":
-        _style = get_style_data(
-            "glass_studio.qss",
-            "dark",
-            {"primary": "#d0bcff"},
-        )
-    elif new_theme == "Dark":
-        _style = get_style_data(
-            "dark_styles.qss",
-            "dark",
-        )
-    elif new_theme == "Light":
-        _style = get_style_data(
-            "light_styles.qss",
-            "light",
-        )
-    elif new_theme == "Dark-Blue":
-        _style = get_style_data(
-            "dark_blue.qss",
-            "dark",
-        )
-    elif new_theme == "True-Dark":
-        _style = get_style_data("true_dark.qss", "dark")
-    elif new_theme == "OLED-Black":
-        _style = get_style_data("oled_black.qss", "dark")
-    elif new_theme == "Windows11-Dark":
-        _style = get_style_data(
-            "windows11_dark.qss",
-            "dark",
-            {"primary": "#4cc2ff"},
-        )
-    elif new_theme == "Solarized-Dark":
-        _style = get_style_data("solarized_dark.qss", "dark")
-    elif new_theme == "Solarized-Light":
-        _style = get_style_data("solarized_light.qss", "light")
-    elif new_theme == "Dracula":
-        _style = get_style_data("dracula.qss", "dark")
-    elif new_theme == "Nord":
-        _style = get_style_data("nord.qss", "dark")
-    elif new_theme == "Gruvbox":
-        _style = get_style_data("gruvbox.qss", "dark")
-    elif new_theme == "Monokai":
-        _style = get_style_data("monokai.qss", "dark")
-
-    app.setStyleSheet(_style)
+    _style = build_theme_stylesheet(new_theme)
+    # Re-applying an identical stylesheet still repolishes every widget (seconds
+    # with the full UI built), e.g. when main.py pre-applied the saved theme.
+    if app.styleSheet() != _style:
+        app.setStyleSheet(_style)
     main_window._vram_high_style_active = None
     common_widget_actions.update_gpu_memory_progressbar(main_window)
     main_window.update()
